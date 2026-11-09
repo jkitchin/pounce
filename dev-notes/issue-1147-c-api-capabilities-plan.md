@@ -39,7 +39,7 @@ Unblocked by the Julia side's answer on gh#1147 (comment 6739730460). Branch
 `c-api-bound-updates`. The decisions in §6.2 go to the PR for confirmation
 (§6.6); implementation proceeds on them meanwhile.
 
-- [ ] **S2-I1** Pair lookup on the handle: `DeclaredPairs` (list + var→pair / row→pair maps) replaces `complementarity: Vec`; `complements_used` records the MOI table row and the caller's row bounds. `AddPounceComplementarityPair` and `AddPounceComplementsConstraint` become O(1) per call instead of O(n+m+P). No surface change, no behaviour change.
+- [x] **S2-I1** Pair lookup on the handle: `DeclaredPairs` (list + var→pair / row→pair maps) replaces `complementarity: Vec`; `complements_used` records the MOI table row and the caller's row bounds. `AddPounceComplementarityPair` and `AddPounceComplementsConstraint` become O(1) per call instead of O(P). No surface change; one behaviour change (§9, S2-I1).
 - [ ] **S2-I2** `SetPounceBounds` / `GetPounceBounds` and the `POUNCE_BOUNDS_*` codes; every refusal code and every branch of the pair rule (§6.2 D3) tested, each refusal checked to leave the handle unchanged.
 - [ ] **S2-I3** Parity and scale: update-then-solve equals fresh-`Create`-then-solve (NLP, MPCC native pair, MOI Complements pair; exact and L-BFGS); explicit warm re-solve after an update; complexity guard (k-entry update cost independent of n, m and P).
 - [ ] **S2-I4** `pounce.h`, README, `docs/src/c-api.md`, `docs/src/complementarity.md`, CHANGELOG, `examples/bounds_update.c`; §8 ABI checklist extended; export guard green; PR with §6.6 for confirmation.
@@ -1067,9 +1067,15 @@ int GetPounceBounds(IpoptProblem p,
   are found through var→pair and row→pair maps kept on the handle (S2-I1),
   each re-classified with one `classify_pair`; the staged working set is
   re-checked at touched indices only; staging is a hash map of the k new
-  values. `validate_pairs` is **not** called (it allocates `n + m` flags).
-  The same fix makes Stage 1's per-pair `Add*` calls O(1): they were
-  O(n + m + P) each, so P single-pair declarations cost O(P·(n+m)).
+  values. `validate_pairs` is **not** called (it allocates `n + m` flags
+  and walks every pair).
+  The same fix makes Stage 1's per-pair `Add*` calls O(1): each cloned and
+  re-validated the whole stored set (and `AddPounceComplementsConstraint`
+  also scanned it for duplicates), O(P) per call, so P single-pair
+  declarations cost O(P²). Measured in a debug build (S2-I1): 4.0 → 25 µs
+  per call from P = 1 000 to 20 000 before, flat at ~0.07 µs after. The
+  `n + m` flags cost nothing visible: `vec![false; n]` is a lazily zeroed
+  allocation.
 
 Codes:
 
@@ -3272,6 +3278,31 @@ Gate:
   clippy::correctness -D clippy::suspicious`: exit 0, no warning in a file
   this round touched.
 - `cargo fmt --check`: clean.
+
+### S2-I1 — indexed pair records (commit that ticks S2-I1)
+
+- `src/bounds.rs` (new): `DeclaredPairs` and `ComplementsLedger`, each a list
+  plus var→entry / row→entry maps, mutated only through their methods;
+  `ComplementsRow` moved here; `ComplementsUse` records the table row and
+  the row bounds the edit replaced (the user layer of §6.2 D2).
+- `SetPounceComplementarityPairs` still validates the batch with
+  `validate_pairs` (one O(n + m + P) call per batch) and then rebuilds the
+  maps. `AddPounceComplementarityPair` and the `Complements` helper go
+  through `append_pair`: range, variable, row, shape — `validate_pairs`'s
+  per-pair checks in its order — against the maps.
+- **Behaviour change, deliberate:** the one-pair calls no longer re-validate
+  the *stored* set. Two unit tests planted an invalid stored pair (by
+  writing `x_u` directly) and expected `POUNCE_CC_ERR_INTERNAL` /
+  `POUNCE_COMPLEMENTS_ERR_INTERNAL`; both said they guarded against "a
+  future in-place bound update" skipping its re-check. That update is
+  S2-I2, and it re-classifies every pair it touches, so the invariant is
+  kept where it can break instead of re-proved on every declaration. The
+  tests are replaced by `pair_maps_follow_every_declaration_path` and
+  `complements_records_the_table_row_and_the_callers_row_bounds`. The
+  lowering still runs `validate_pairs` at solve time.
+- `tests/bounds_scale.rs`: per-call cost at P = 1 000 vs 20 000, limit 2.5.
+  Against `origin/main`'s sources: ratios 6.4 and 7.3, both tests fail.
+  With the change: 0.9–1.0 over five runs.
 
 ### Facts recorded while planning (2ac0ad9)
 

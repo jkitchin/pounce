@@ -92,12 +92,12 @@ pub unsafe extern "C" fn IpoptCreateSolver(prob_handle: *mut IpoptProblem) -> Ip
         if prob.is_null() {
             return std::ptr::null_mut();
         }
-        if !(*prob).complementarity.is_empty() {
+        if !(&*prob).complementarity.is_empty() {
             if pounce_algorithm::second_opinion::narration_is_wanted((*prob).app.options()) {
                 eprintln!(
                     "pounce: IpoptCreateSolver: a session cannot hold a problem with \
                      complementarity pairs ({} declared); solve it with IpoptSolve.",
-                    (*prob).complementarity.len()
+                    (&*prob).complementarity.len()
                 );
             }
             return std::ptr::null_mut();

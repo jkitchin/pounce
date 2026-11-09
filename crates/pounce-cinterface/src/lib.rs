@@ -31,12 +31,14 @@
 #![allow(unsafe_op_in_unsafe_fn, dead_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod bounds;
 pub mod fortran;
 pub mod qp;
 pub mod solver;
 
 pub use qp::*;
 
+use bounds::{ComplementsLedger, ComplementsRow, ComplementsUse, DeclaredPairs};
 use pounce_algorithm::application::{
     IpoptApplication, default_backend_factory, feral_config_from_options, ma57_config_from_options,
 };
@@ -264,14 +266,14 @@ pub struct IpoptProblemInfo {
     /// the problem's index style, in declaration order. Every stored set
     /// passed [`pounce_nlp::mpcc::validate_pairs`] against this handle's
     /// bounds when it was declared. Empty — the default — means no pairs.
-    pub(crate) complementarity: Vec<ComplementarityPair>,
+    pub(crate) complementarity: DeclaredPairs,
     /// Every `(row, var)`, 0-based, that [`AddPounceComplementsConstraint`]
     /// accepted on this handle, whether or not it declared a pair. The
     /// helper refuses a row or variable already in here (or in
     /// `complementarity`), so one `F` or one `x` cannot be in two MOI
     /// `Complements` constraints. Never cleared: the bound edits it records
     /// are not undone either.
-    pub(crate) complements_used: Vec<ComplementarityPair>,
+    pub(crate) complements_used: ComplementsLedger,
 }
 
 /// User-provided NLP scaling stored on the problem until
@@ -487,8 +489,8 @@ pub unsafe extern "C" fn CreateIpoptProblem(
             intermediate_cb: None,
             user_scaling: None,
             nonlinear_vars: None,
-            complementarity: Vec::new(),
-            complements_used: Vec::new(),
+            complementarity: DeclaredPairs::default(),
+            complements_used: ComplementsLedger::default(),
             last_solve: None,
             pending_working_set: None,
         });
@@ -921,7 +923,7 @@ pub unsafe extern "C" fn IpoptSolve(
                 let result = pounce_restoration::mpcc_driver::solve_mpcc(
                     &mut info.app,
                     bridge_for_solve,
-                    info.complementarity.clone(),
+                    info.complementarity.to_vec(),
                     &mut |line| {
                         if narrate {
                             eprintln!("{line}");
@@ -2139,25 +2141,26 @@ fn zero_based(p: Index, offset: Index, len: Index) -> usize {
     }
 }
 
-/// Validate `new` (pairs in the problem's index style) against the
-/// handle's bounds and the pairs already declared — or alone, when
-/// `replace` — and store the result only if every pair passes. On refusal
-/// the declared set is untouched and the error names the refused pair's
-/// position **in `new`** and the reason — or `None` for the position when
-/// the refused pair is one already stored, which no caller's input caused.
-fn declare_pairs(
+/// Replace the declared pairs with `new` (pairs in the problem's index
+/// style), validated as a whole and on their own by
+/// [`validate_pairs`] — the classifier the solve's lowering runs — and
+/// stored only if every pair passes. On refusal the declared set is
+/// untouched and the error names the refused pair's position in `new`.
+///
+/// O(n + m + P): `validate_pairs` allocates a flag per variable and row.
+/// Fine once per batch; the one-pair path is [`append_pair`].
+fn replace_pairs(
     info: &mut IpoptProblemInfo,
     new: &[(Index, Index)],
-    replace: bool,
-) -> Result<(), (Option<usize>, PairErrorKind)> {
+) -> Result<(), (usize, PairErrorKind)> {
     let offset = if info.index_style == 1 { 1 } else { 0 };
-    let base: &[ComplementarityPair] = if replace { &[] } else { &info.complementarity };
-    let mut candidate = Vec::with_capacity(base.len() + new.len());
-    candidate.extend_from_slice(base);
-    candidate.extend(new.iter().map(|&(row, var)| ComplementarityPair {
-        row: zero_based(row, offset, info.m),
-        var: zero_based(var, offset, info.n),
-    }));
+    let candidate: Vec<ComplementarityPair> = new
+        .iter()
+        .map(|&(row, var)| ComplementarityPair {
+            row: zero_based(row, offset, info.m),
+            var: zero_based(var, offset, info.n),
+        })
+        .collect();
     match validate_pairs(
         info.n as usize,
         info.m as usize,
@@ -2168,17 +2171,39 @@ fn declare_pairs(
         &candidate,
     ) {
         Ok(_) => {
-            info.complementarity = candidate;
+            info.complementarity.replace(candidate);
             Ok(())
         }
-        // `base` passed this validator when it was stored, against bounds
-        // no public call changes under a declared pair, so the refused pair
-        // is normally one of `new`. If a stored pair is the one refused (the
-        // state an in-place bound update that skipped the re-check would
-        // leave), say so with `None` rather than remap its index onto the
-        // caller's first new pair.
-        Err(e) => Err((e.pair.checked_sub(base.len()), e.kind)),
+        Err(e) => Err((e.pair, e.kind)),
     }
+}
+
+/// Append one pair `(row, var)`, in the problem's index style, to the
+/// declared set, after the checks [`validate_pairs`] runs on a pair, in its
+/// order: range, variable not in a pair, row not in a pair, a shape
+/// [`classify_pair`] accepts. O(1) expected (gh#1147 Stage 2): the stored
+/// pairs are not re-validated, because every stored pair passed when it was
+/// stored and every change to the bounds re-classifies the pairs it touches
+/// ([`bounds`]), and the new pair's variable and row are in no stored pair.
+fn append_pair(info: &mut IpoptProblemInfo, row: Index, var: Index) -> Result<(), PairErrorKind> {
+    let offset = if info.index_style == 1 { 1 } else { 0 };
+    let r = zero_based(row, offset, info.m);
+    let v = zero_based(var, offset, info.n);
+    if r == usize::MAX || v == usize::MAX {
+        return Err(PairErrorKind::OutOfRange);
+    }
+    if info.complementarity.of_var(v).is_some() {
+        return Err(PairErrorKind::VarAlreadyPaired);
+    }
+    if info.complementarity.of_row(r).is_some() {
+        return Err(PairErrorKind::RowAlreadyPaired);
+    }
+    if classify_pair(info.x_l[v], info.x_u[v], info.g_l[r], info.g_u[r]).is_none() {
+        return Err(PairErrorKind::UnsupportedShape);
+    }
+    info.complementarity
+        .push(ComplementarityPair { row: r, var: v });
+    Ok(())
 }
 
 /// Declare one complementarity pair: constraint row `row` with variable
@@ -2209,11 +2234,9 @@ pub unsafe extern "C" fn AddPounceComplementarityPair(
         if ipopt_problem.is_null() {
             return POUNCE_CC_ERR_NULL;
         }
-        match declare_pairs(&mut *ipopt_problem, &[(row, var)], false) {
+        match append_pair(&mut *ipopt_problem, row, var) {
             Ok(()) => POUNCE_CC_OK,
-            Err((Some(_), kind)) => pair_error_code(&kind),
-            // A stored pair no longer validates: not the caller's pair.
-            Err((None, _)) => POUNCE_CC_ERR_INTERNAL,
+            Err(kind) => pair_error_code(&kind),
         }
     })
 }
@@ -2265,15 +2288,12 @@ pub unsafe extern "C" fn SetPounceComplementarityPairs(
             let v = std::slice::from_raw_parts(vars, n_pairs as usize);
             r.iter().copied().zip(v.iter().copied()).collect()
         };
-        match declare_pairs(&mut *ipopt_problem, &new, true) {
+        match replace_pairs(&mut *ipopt_problem, &new) {
             Ok(()) => POUNCE_CC_OK,
-            Err((Some(k), kind)) => {
+            Err((k, kind)) => {
                 report(k as Index);
                 pair_error_code(&kind)
             }
-            // Unreachable: `replace` validates `new` alone, so every
-            // refused pair is one of the caller's.
-            Err((None, _)) => POUNCE_CC_ERR_INTERNAL,
         }
     })
 }
@@ -2306,7 +2326,7 @@ pub unsafe extern "C" fn GetPounceComplementarityPairCount(ipopt_problem: IpoptP
         if ipopt_problem.is_null() {
             return -1;
         }
-        (*ipopt_problem).complementarity.len() as Index
+        (&*ipopt_problem).complementarity.len() as Index
     })
 }
 
@@ -2389,18 +2409,6 @@ pub const POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS: c_int = -6;
 /// boundary. Nothing was changed.
 pub const POUNCE_COMPLEMENTS_ERR_INTERNAL: c_int = -7;
 
-/// Which row of the MOI `Complements` table a variable with bounds
-/// `[xl, xu]` takes, read with the same `±1e19` convention as the pair
-/// classifier; `None` for NaN or crossed bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ComplementsRow {
-    Mixed,
-    Lower,
-    Upper,
-    RowFixed,
-    VarFixed,
-}
-
 fn complements_row(xl: Number, xu: Number) -> Option<ComplementsRow> {
     if xl.is_nan() || xu.is_nan() {
         return None;
@@ -2462,11 +2470,10 @@ fn add_complements(info: &mut IpoptProblemInfo, row: Index, var: Index) -> c_int
     if !(gl <= NLP_LOWER_BOUND_INF && gu >= NLP_UPPER_BOUND_INF) {
         return POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE;
     }
-    let used = || info.complementarity.iter().chain(&info.complements_used);
-    if used().any(|p| p.var == v) {
+    if info.complementarity.of_var(v).is_some() || info.complements_used.of_var(v).is_some() {
         return POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED;
     }
-    if used().any(|p| p.row == r) {
+    if info.complementarity.of_row(r).is_some() || info.complements_used.of_row(r).is_some() {
         return POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED;
     }
     let Some(table_row) = complements_row(info.x_l[v], info.x_u[v]) else {
@@ -2478,26 +2485,26 @@ fn add_complements(info: &mut IpoptProblemInfo, row: Index, var: Index) -> c_int
             || table_row.shape_matches(classify_pair(info.x_l[v], info.x_u[v], new_gl, new_gu)),
         "MOI table row {table_row:?} edits to a bound pair that is not its native shape"
     );
-    // Tentative edit, then validate the declared pairs (and the new one)
-    // against the edited bounds through the same path every declaration
-    // takes. The edited row is in no declared pair, so this passes by
-    // construction; if it does not, the handle was already inconsistent,
-    // and it is restored rather than left half-edited.
+    // Tentative edit, then declare the pair (if any) through the path every
+    // one-pair declaration takes. The row and the variable are in no pair,
+    // so only the shape check can refuse, and the table row's edit makes
+    // that shape native by construction; if it does refuse, the row is
+    // restored rather than left half-edited.
     info.g_l[r] = new_gl;
     info.g_u[r] = new_gu;
-    let new: &[(Index, Index)] = if declares { &[(row, var)] } else { &[] };
-    match declare_pairs(info, new, false) {
-        Ok(()) => {
-            info.complements_used
-                .push(ComplementarityPair { row: r, var: v });
-            table_row.code()
-        }
-        Err(_) => {
-            info.g_l[r] = gl;
-            info.g_u[r] = gu;
-            POUNCE_COMPLEMENTS_ERR_INTERNAL
-        }
+    if declares && append_pair(info, row, var).is_err() {
+        info.g_l[r] = gl;
+        info.g_u[r] = gu;
+        return POUNCE_COMPLEMENTS_ERR_INTERNAL;
     }
+    info.complements_used.push(ComplementsUse {
+        row: r,
+        var: v,
+        table: table_row,
+        user_gl: gl,
+        user_gu: gu,
+    });
+    table_row.code()
 }
 
 /// Declare MOI's `[F, x] ∈ Complements` for constraint row `row` (`F`) and
@@ -5513,76 +5520,139 @@ mod tests {
         p
     }
 
-    #[test]
-    fn complements_refuses_on_a_handle_whose_declared_pairs_no_longer_validate() {
-        // error-path: AddPounceComplementsConstraint
-        // Carry-over from S1-I4: a declared pair is only known to pass
-        // validation against the bounds it was declared with. No public
-        // call edits a paired row or variable today, so plant the state a
-        // future in-place bound update could produce: var 0 in a mixed pair,
-        // then its box collapsed to a point (fixed var + free row is no
-        // native shape). The helper's re-validation must refuse with a
-        // status and change nothing, rather than store an edit beside an
-        // invalid set.
-        let p = create_two_by_two([0.0, -2e19], [2.0, 2e19]);
-        unsafe {
+    /// Every (row, var) of the declared set and of the Complements ledger is
+    /// found by the maps, and nothing else is.
+    fn assert_maps_match(p: IpoptProblem) {
+        let i = unsafe { &*p };
+        for (k, q) in i.complementarity.iter().enumerate() {
+            assert_eq!(i.complementarity.of_var(q.var), Some(k));
+            assert_eq!(i.complementarity.of_row(q.row), Some(k));
+        }
+        for (k, u) in i.complements_used.iter().enumerate() {
+            assert_eq!(i.complements_used.of_var(u.var), Some(k));
+            assert_eq!(i.complements_used.of_row(u.row), Some(k));
+        }
+        for j in 0..i.n.max(i.m) as usize {
             assert_eq!(
-                AddPounceComplementsConstraint(p, 0, 0),
+                i.complementarity.of_var(j).is_some(),
+                i.complementarity.iter().any(|q| q.var == j)
+            );
+            assert_eq!(
+                i.complementarity.of_row(j).is_some(),
+                i.complementarity.iter().any(|q| q.row == j)
+            );
+            assert_eq!(
+                i.complements_used.of_var(j).is_some(),
+                i.complements_used.iter().any(|u| u.var == j)
+            );
+            assert_eq!(
+                i.complements_used.of_row(j).is_some(),
+                i.complements_used.iter().any(|u| u.row == j)
+            );
+        }
+    }
+
+    #[test]
+    fn pair_maps_follow_every_declaration_path() {
+        // error-path: AddPounceComplementarityPair
+        // gh#1147 Stage 2 (S2-I1): the one-pair declarations find duplicates
+        // through var/row maps instead of re-validating the stored set, so
+        // the maps must follow Add, Set (accepted and refused), Clear and
+        // the Complements helper, and a refused call must leave them as
+        // they were.
+        let p = create_two_by_two([0.0, 0.0], [2.0, 2.0]);
+        unsafe {
+            assert_eq!(AddPounceComplementarityPair(p, 0, 0), POUNCE_CC_OK);
+            assert_maps_match(p);
+            assert_eq!(
+                AddPounceComplementarityPair(p, 1, 0),
+                POUNCE_CC_ERR_VAR_ALREADY
+            );
+            assert_eq!(
+                AddPounceComplementarityPair(p, 0, 1),
+                POUNCE_CC_ERR_ROW_ALREADY
+            );
+            assert_maps_match(p);
+            let (rows, vars) = ([1, 0], [0, 1]);
+            assert_eq!(
+                SetPounceComplementarityPairs(
+                    p,
+                    2,
+                    rows.as_ptr(),
+                    vars.as_ptr(),
+                    std::ptr::null_mut()
+                ),
+                POUNCE_CC_OK
+            );
+            assert_maps_match(p);
+            assert_eq!((*p).complementarity.of_var(0), Some(0));
+            assert_eq!((*p).complementarity.of_row(1), Some(0));
+            let (rows, vars) = ([0, 0], [0, 1]);
+            assert_eq!(
+                SetPounceComplementarityPairs(
+                    p,
+                    2,
+                    rows.as_ptr(),
+                    vars.as_ptr(),
+                    std::ptr::null_mut()
+                ),
+                POUNCE_CC_ERR_ROW_ALREADY
+            );
+            assert_eq!((*p).complementarity.of_row(1), Some(0));
+            assert_maps_match(p);
+            assert_eq!(ClearPounceComplementarityPairs(p), TRUE);
+            assert_maps_match(p);
+            assert_eq!((&*p).complementarity.of_var(0), None);
+            assert_eq!(
+                AddPounceComplementsConstraint(p, 1, 1),
                 POUNCE_COMPLEMENTS_PAIR_MIXED
             );
-            (&mut (*p).x_u)[0] = 0.0;
-            let snapshot = |p: IpoptProblem| {
-                let i = &*p;
-                (
-                    i.g_l.clone(),
-                    i.g_u.clone(),
-                    i.complementarity.clone(),
-                    i.complements_used.clone(),
-                )
-            };
-            let before = snapshot(p);
-            // Row 1 / var 1 (free var): would fix row 1 to F = 0.
+            assert_maps_match(p);
             assert_eq!(
-                AddPounceComplementsConstraint(p, 1, 1),
-                POUNCE_COMPLEMENTS_ERR_INTERNAL
+                AddPounceComplementsConstraint(p, 0, 1),
+                POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED
             );
-            assert_eq!(before, snapshot(p));
-            // Restored, the same call goes through.
-            (&mut (*p).x_u)[0] = 2.0;
-            assert_eq!(
-                AddPounceComplementsConstraint(p, 1, 1),
-                POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR
-            );
-            let i = &*p;
-            assert_eq!((i.g_l[1], i.g_u[1]), (0.0, 0.0));
+            assert_maps_match(p);
             FreeIpoptProblem(p);
         }
     }
 
     #[test]
-    fn add_pair_does_not_blame_the_new_pair_for_a_stored_one_that_no_longer_validates() {
-        // error-path: AddPounceComplementarityPair
-        // PR #1154 review: `declare_pairs` used to remap the refused pair's
-        // position with `saturating_sub(base.len())`, so a stored pair gone
-        // invalid was reported as the caller's new pair (index 0) with the
-        // stored pair's reason. Plant that state (var 0's box collapsed under
-        // its mixed pair, as in the test above) and declare a pair that is
-        // valid on its own: the answer is an internal error, and the stored
-        // set is unchanged.
-        let p = create_two_by_two([0.0, 0.0], [2.0, 2.0]);
+    fn complements_records_the_table_row_and_the_callers_row_bounds() {
+        // gh#1147 Stage 2 (S2-I1): the ledger keeps what the edit replaced,
+        // which is the user layer SetPounceBounds / GetPounceBounds serve.
+        let p = create_two_by_two([0.0, -2e19], [2e19, 2e19]);
         unsafe {
-            assert_eq!(AddPounceComplementarityPair(p, 0, 0), POUNCE_CC_OK);
-            (&mut (*p).x_u)[0] = 0.0;
-            let before = (*p).complementarity.clone();
             assert_eq!(
-                AddPounceComplementarityPair(p, 1, 1),
-                POUNCE_CC_ERR_INTERNAL
+                AddPounceComplementsConstraint(p, 0, 0),
+                POUNCE_COMPLEMENTS_PAIR_LOWER
             );
-            assert_eq!((*p).complementarity, before);
-            // Restored, the same pair goes through: it was never the problem.
-            (&mut (*p).x_u)[0] = 2.0;
-            assert_eq!(AddPounceComplementarityPair(p, 1, 1), POUNCE_CC_OK);
-            assert_eq!(GetPounceComplementarityPairCount(p), 2);
+            assert_eq!(
+                AddPounceComplementsConstraint(p, 1, 1),
+                POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR
+            );
+            let i = &*p;
+            assert_eq!(
+                i.complements_used[..],
+                [
+                    ComplementsUse {
+                        row: 0,
+                        var: 0,
+                        table: ComplementsRow::Lower,
+                        user_gl: -2e19,
+                        user_gu: 2e19
+                    },
+                    ComplementsUse {
+                        row: 1,
+                        var: 1,
+                        table: ComplementsRow::RowFixed,
+                        user_gl: -2e19,
+                        user_gu: 2e19
+                    },
+                ]
+            );
+            assert_eq!((i.g_l[0], i.g_u[0]), (0.0, 2e19));
+            assert_eq!((i.g_l[1], i.g_u[1]), (0.0, 0.0));
             FreeIpoptProblem(p);
         }
     }
