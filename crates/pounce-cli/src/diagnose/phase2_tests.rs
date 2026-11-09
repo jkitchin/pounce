@@ -565,3 +565,146 @@ fn objective_hessian_inertia() {
     assert_eq!(f.evidence["positive"], 1);
     assert_eq!(f.evidence["negative"], 1);
 }
+
+// ----------------------------------------------- sparse rank (feral inertia)
+
+fn with_opts(p: &NlProblem, inputs: &Inputs, opts: DiagnoseOptions) -> Report {
+    diagnose_problem(p, inputs, "t".into(), &opts).unwrap()
+}
+
+#[test]
+fn numerical_rank_falls_back_to_feral_when_too_large_for_dense() {
+    // Duplicate equalities, with the dense limit forced to zero.
+    let dup = build(M {
+        obj: c(0.0),
+        cons: vec![
+            add(v(0), v(1)),
+            v(2),
+            add(mul(c(2.0), v(0)), mul(c(2.0), v(1))),
+        ],
+        g_l: vec![1.0, 0.0, 2.0],
+        g_u: vec![1.0, 0.0, 2.0],
+        x_l: vec![-INF; 3],
+        x_u: vec![INF; 3],
+    });
+    let tiny = DiagnoseOptions {
+        max_dense_entries: 0,
+        ..DiagnoseOptions::default()
+    };
+    let r = with_opts(&dup, &Inputs::default(), tiny.clone());
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "equality_rank_deficient_unlocalized")
+        .expect("feral count");
+    assert_eq!(f.evidence["deficiency"], 1);
+    assert_eq!(
+        r.sections["numerical_rank"]["method"],
+        "inertia of [[I, Jᵀ], [J, 0]] (feral)"
+    );
+    // Full rank under the fallback reports nothing.
+    let ok = build(M {
+        obj: c(0.0),
+        cons: vec![add(v(0), v(1)), sub(v(0), v(1))],
+        g_l: vec![1.0, 0.0],
+        g_u: vec![1.0, 0.0],
+        x_l: vec![-INF; 2],
+        x_u: vec![INF; 2],
+    });
+    let r = with_opts(&ok, &Inputs::default(), tiny);
+    assert!(
+        !has(&r, "equality_rank_deficient_unlocalized"),
+        "{:?}",
+        codes(&r)
+    );
+    assert!(
+        r.checks
+            .iter()
+            .any(|k| k.name == "numerical_rank" && matches!(k.status, report::CheckStatus::Ran))
+    );
+}
+
+#[test]
+fn licq_falls_back_to_feral_when_too_large_for_dense() {
+    let p = build(M {
+        obj: add(v(0), v(1)),
+        cons: vec![add(v(0), v(1)), add(mul(c(2.0), v(0)), mul(c(2.0), v(1)))],
+        g_l: vec![1.0, 2.0],
+        g_u: vec![INF, INF],
+        x_l: vec![-INF; 2],
+        x_u: vec![INF; 2],
+    });
+    let inputs = Inputs {
+        point: Some(("sol".into(), vec![0.5, 0.5])),
+        multipliers: Some(vec![-0.5, -0.25]),
+        bound_multipliers: None,
+        is_solution: true,
+        extra_points: Vec::new(),
+    };
+    let r = with_opts(
+        &p,
+        &inputs,
+        DiagnoseOptions {
+            max_dense_entries: 0,
+            ..DiagnoseOptions::default()
+        },
+    );
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "licq_fails")
+        .expect("licq via feral");
+    assert_eq!(f.evidence["method"], "feral inertia");
+}
+
+#[test]
+fn feral_and_svd_disagree_in_both_directions() {
+    // Rows that differ in the ninth digit: the SVD keeps them independent,
+    // the factorization's pivot test does not.
+    let near = build(M {
+        obj: c(0.0),
+        cons: vec![add(v(0), v(1)), add(v(0), mul(c(1.0 + 1e-9), v(1)))],
+        g_l: vec![1.0, 1.0],
+        g_u: vec![1.0, 1.0],
+        x_l: vec![-INF; 2],
+        x_u: vec![INF; 2],
+    });
+    let r = diagnose_problem(
+        &near,
+        &Inputs::default(),
+        "t".into(),
+        &DiagnoseOptions::default(),
+    )
+    .unwrap();
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "rank_backend_disagreement")
+        .expect("disagree");
+    assert_eq!(f.evidence["svd_deficiency"], 0);
+    assert_eq!(f.evidence["feral_inertia_deficiency"], 1);
+    // A tiny independent row: the unscaled SVD calls it dependent, the
+    // scaled factorization does not.
+    let tiny = build(M {
+        obj: c(0.0),
+        cons: vec![add(v(0), v(1)), mul(c(1e-20), sub(v(0), v(1)))],
+        g_l: vec![1.0, 0.0],
+        g_u: vec![1.0, 0.0],
+        x_l: vec![-INF; 2],
+        x_u: vec![INF; 2],
+    });
+    let r = diagnose_problem(
+        &tiny,
+        &Inputs::default(),
+        "t".into(),
+        &DiagnoseOptions::default(),
+    )
+    .unwrap();
+    let f = r
+        .findings
+        .iter()
+        .find(|f| f.code == "rank_backend_disagreement")
+        .expect("disagree");
+    assert_eq!(f.evidence["svd_deficiency"], 1);
+    assert_eq!(f.evidence["feral_inertia_deficiency"], 0);
+}

@@ -48,7 +48,12 @@ changes.
     - The reduced Hessian's second-order condition.
   - *Phase 2, at any point:*
     - Rank robustness under a tolerance sweep, row/column equilibration,
-      a column-pivoted QR, and other points (`--extra-point`).
+      a second rank method, and other points (`--extra-point`). The second
+      method is the inertia of `[[I, Jᵀ], [J, 0]]` under pounce's sparse
+      LDLᵀ (feral), whose zero count is the rank deficiency.
+    - That inertia count is also the fallback for `numerical_rank` and
+      `licq` when a block is too large for the dense SVD: a count without
+      localization, instead of "unavailable".
     - Hessian inertia.
     - Seeded, replayable Jensen counterexamples to the curvature each
       function's bounds need for a convex problem.

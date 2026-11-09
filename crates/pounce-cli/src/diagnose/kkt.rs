@@ -35,7 +35,7 @@
 //! stated tolerances.
 
 use super::report::{Basis, Confidence, Finding, Report, Severity, fmt_num, num};
-use super::structure::{Dense, fixed_mask, list, minimal_dependent_sets};
+use super::structure::{Dense, feral_rank, fixed_mask, list, minimal_dependent_sets, sparse_block};
 use super::{DiagnoseOptions, PointEval, cname, lo_eff, up_eff, vname};
 use crate::nl_reader::NlProblem;
 use faer::Mat;
@@ -637,8 +637,45 @@ fn licq(
         .collect();
     let n_free = (0..prob.n).filter(|&j| !fixed[j]).count();
     if let Some(why) = too_big(rows.len(), free_cols.len(), opts) {
-        report.unavailable("licq", why);
-        return None;
+        // Too large for the dense SVD: count the rank from feral's inertia
+        // instead. Bound columns are removed, as in the dense path, so the
+        // count is over the active rows alone.
+        let Some(ent) = sparse_block(pt, prob.m, &rows, Some(&signs), &free_cols, prob.n) else {
+            report.unavailable(
+                "licq",
+                format!("the Jacobian is not finite at {}", pt.label),
+            );
+            return None;
+        };
+        let rank = match feral_rank(rows.len(), free_cols.len(), &ent) {
+            Ok(r) => r,
+            Err(e) => {
+                report.unavailable(
+                    "licq",
+                    format!("{why}; and the sparse inertia count failed: {e}"),
+                );
+                return None;
+            }
+        };
+        let deficiency = rows.len() - rank;
+        report.sections.insert(
+            "licq",
+            json!({"point": pt.label, "active_rows": rows.len(), "active_bounds": bound_cols.len(),
+                "rank_of_active_rows_off_bound_columns": rank, "deficiency": deficiency,
+                "method": "inertia of [[I, Jᵀ], [J, 0]] (feral)", "dense_svd_skipped": why}),
+        );
+        let mut sink = report.ran("licq");
+        if deficiency > 0 {
+            sink.push(
+                Finding::new("licq", "licq_fails", Severity::Warning, Basis::Numerical, Confidence::Medium,
+                    format!("At {}, the {} active constraint rows are rank deficient by {deficiency} (with the {} active bounds removed), by the inertia of [[I, Jᵀ], [J, 0]]: LICQ fails. The block is too large for the dense search that names the dependent constraints.",
+                        pt.label, rows.len(), bound_cols.len()))
+                .why("The multipliers of the dependent constraints are not unique and the KKT system is singular.")
+                .next("Raise --max-dense-entries / --max-dense-dim to localize the dependent constraints and bound how far the multipliers can move.")
+                .evidence(json!({"point": pt.label, "deficiency": deficiency, "method": "feral inertia"})),
+            );
+        }
+        return Some(deficiency == 0);
     }
     let d = dense_rows(pt, &rows, &signs, &free_cols, prob.m);
     let s = d.singular_values().unwrap_or_default();

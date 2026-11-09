@@ -915,6 +915,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "faer",
+ "feral",
  "nix",
  "pounce-algorithm",
  "pounce-cinterface",

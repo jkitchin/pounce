@@ -11,9 +11,13 @@
 //! * **scaling** — the rank after row and then column equilibration (each
 //!   row, then each column, divided by its largest magnitude). A loss that
 //!   appears or disappears under rescaling is about units, not structure.
-//! * **algorithm** — the rank from a column-pivoted QR, independent of the
-//!   SVD, at the same relative threshold. (A dense QR: the issue asked for
-//!   sparse QR, which needs a `faer` feature this workspace does not enable.)
+//! * **algorithm** — the rank from the inertia of `[[I, Jᵀ], [J, 0]]` as
+//!   pounce's sparse LDLᵀ (feral) factors it ([`feral_rank`]): an algorithm
+//!   independent of the SVD that decides "zero" by a pivot test on a scaled
+//!   matrix, not by a singular-value threshold. It is scale-insensitive and
+//!   coarser than the SVD, so a disagreement says which way the rank is
+//!   fragile. (faer's sparse QR is not rank-revealing — it orders columns for
+//!   fill, not for rank — so it cannot serve here.)
 //! * **points** — the rank at every point available: the main point, the
 //!   model's start, the `--sol` point and each `--extra-point`. A loss present
 //!   at every point is likely a property of the formulation; one present at
@@ -22,7 +26,7 @@
 //! Rank loss that survives all four is reported as robust.
 
 use super::report::{Basis, Confidence, Finding, Report, Severity, fmt_num, num};
-use super::structure::{Dense, default_rel_tol, dense_jacobian_rows, equality_rows};
+use super::structure::{Dense, default_rel_tol, dense_jacobian_rows, equality_rows, feral_rank};
 use super::{DiagnoseOptions, PointEval};
 use crate::nl_reader::NlProblem;
 use faer::Mat;
@@ -63,15 +67,19 @@ fn sorted_sv(m: &Mat<Number>) -> Option<Vec<Number>> {
     Some(s)
 }
 
-/// Rank from a column-pivoted QR: diagonal entries of `R` above `rel` times
-/// the largest one.
-fn qr_rank(m: &Mat<Number>, rel: Number) -> usize {
-    let qr = m.col_piv_qr();
-    let r = qr.R();
-    let k = r.nrows().min(r.ncols());
-    let diag: Vec<Number> = (0..k).map(|i| r[(i, i)].abs()).collect();
-    let dmax = diag.iter().copied().fold(0.0, Number::max);
-    diag.iter().filter(|&&v| v > dmax * rel).count()
+/// The nonzeros of `d` as block triplets, for [`feral_rank`].
+fn entries(d: &Dense) -> Vec<(usize, usize, Number)> {
+    let n = d.ncols();
+    let mut out = Vec::new();
+    for i in 0..d.rows.len() {
+        for j in 0..d.cols.len() {
+            let v = d.a[i * n + j];
+            if v != 0.0 {
+                out.push((i, j, v));
+            }
+        }
+    }
+    out
 }
 
 /// `rank_robustness`. `others` are the further points to compare against.
@@ -123,7 +131,8 @@ pub fn check_robustness(
     let def_scaled = m - rank_at(&s_eq, rel);
 
     // Algorithm.
-    let def_qr = m - qr_rank(&d.full(), rel);
+    let feral = feral_rank(m, d.cols.len(), &entries(&d));
+    let def_feral = feral.as_ref().ok().map(|r| m - r);
 
     // Points.
     let mut per_point: Vec<(String, Option<usize>, String)> =
@@ -147,7 +156,8 @@ pub fn check_robustness(
             "tolerance_sweep": sweep.iter().map(|(t, dd)| json!({"relative_threshold": t, "deficiency": dd})).collect::<Vec<_>>(),
             "sigma_min_over_sigma_max": num(ratio_min),
             "deficiency_after_equilibration": def_scaled,
-            "deficiency_column_pivoted_qr": def_qr,
+            "deficiency_feral_inertia": def_feral,
+            "feral_error": feral.as_ref().err(),
             "points": per_point.iter().map(|(l, dd, why)| json!({"point": l, "deficiency": dd, "note": why})).collect::<Vec<_>>(),
         }),
     );
@@ -184,13 +194,22 @@ pub fn check_robustness(
             .next("Rescale the model's rows and variables to comparable units, then re-check."),
         );
     }
-    if def_qr != def0 {
+    if let Some(df) = def_feral
+        && df != def0
+    {
         fragile.push("algorithm");
         sink.push(
             Finding::new("rank_robustness", "rank_backend_disagreement", Severity::Info, Basis::Numerical, Confidence::Medium,
-                format!("At {}, the SVD finds a rank deficiency of {def0} and a column-pivoted QR finds {def_qr}, at the same relative threshold.", main.label))
-            .why("Rank-revealing QR and SVD agree on well-separated singular values; disagreement means the gap at the threshold is small.")
-            .next("Treat the rank as uncertain; compare the tolerance sweep."),
+                format!("At {}, the SVD finds a rank deficiency of {def0} and the inertia of [[I, Jᵀ], [J, 0]] under pounce's sparse factorization finds {df}.", main.label))
+            .why(if df > def0 {
+                "The factorization treats some rows as dependent that the SVD threshold keeps: they are nearly dependent — close enough to trouble the solver's linear algebra even if not exactly so."
+            } else if def_scaled < def0 {
+                "The factorization works on a scaled matrix and finds rows independent that the unscaled SVD calls dependent, and the equilibrated SVD agrees with it: the SVD's loss comes from rows or columns of very different magnitude."
+            } else {
+                "The SVD finds the loss both unscaled and equilibrated, so the factorization's pivot test has most likely missed a dependency; trust the SVD here."
+            })
+            .next("Compare the tolerance sweep and the equilibrated deficiency in sections.rank_robustness.")
+            .evidence(json!({"svd_deficiency": def0, "feral_inertia_deficiency": df})),
         );
     }
     let evaluated: Vec<&(String, Option<usize>, String)> =
@@ -223,7 +242,7 @@ pub fn check_robustness(
     let verdict = if def0 == 0 && fragile.is_empty() {
         "full rank, robust".to_string()
     } else if fragile.is_empty() {
-        format!("rank deficiency {def0}, robust to tolerance, scaling and algorithm")
+        format!("rank deficiency {def0}, robust to tolerance, scaling and a second algorithm")
     } else {
         format!("rank result sensitive to: {}", fragile.join(", "))
     };

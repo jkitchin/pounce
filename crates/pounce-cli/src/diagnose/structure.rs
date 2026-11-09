@@ -173,6 +173,163 @@ impl Dense {
     }
 }
 
+/// Why a dense block could not be built.
+#[derive(Debug, Clone)]
+pub(crate) enum DenseError {
+    /// Larger than the dense limits: the sparse inertia count still works.
+    TooLarge(String),
+    /// Non-finite entries: no rank method applies.
+    NonFinite(String),
+}
+
+impl std::fmt::Display for DenseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DenseError::TooLarge(s) | DenseError::NonFinite(s) => f.write_str(s),
+        }
+    }
+}
+
+/// The sparse block of Jacobian rows `rows` (each scaled by `signs`, or 1)
+/// over the columns `cols`, as 0-based `(row, col, value)` triplets in
+/// block coordinates. Entries with a non-finite value make it `None`.
+pub(crate) fn sparse_block(
+    pt: &PointEval,
+    m_total: usize,
+    rows: &[usize],
+    signs: Option<&[Number]>,
+    cols: &[usize],
+    n_total: usize,
+) -> Option<Vec<(usize, usize, Number)>> {
+    let mut row_pos = vec![usize::MAX; m_total];
+    for (p, &r) in rows.iter().enumerate() {
+        row_pos[r] = p;
+    }
+    let mut col_pos = vec![usize::MAX; n_total];
+    for (p, &c) in cols.iter().enumerate() {
+        col_pos[c] = p;
+    }
+    let mut out = Vec::new();
+    for (k, &r) in pt.jac_irow.iter().enumerate() {
+        let c = pt.jac_jcol[k];
+        if r >= m_total || c >= n_total || row_pos[r] == usize::MAX || col_pos[c] == usize::MAX {
+            continue;
+        }
+        let v = pt.jac_val[k] * signs.map(|s| s[row_pos[r]]).unwrap_or(1.0);
+        if !v.is_finite() {
+            return None;
+        }
+        if v != 0.0 {
+            out.push((row_pos[r], col_pos[c], v));
+        }
+    }
+    Some(out)
+}
+
+/// Pivots at or below this, on feral's scaled `[[I, Jᵀ], [J, 0]]`, count as
+/// zero in [`feral_rank`].
+pub(crate) const FERAL_ZERO_TOL: Number = 1e-10;
+
+/// Rank of a sparse `m × n` matrix `J`, read from the inertia of
+/// `K = [[I, Jᵀ], [J, 0]]` as factored by feral (pounce's own sparse
+/// symmetric-indefinite solver, at its default settings). The inertia of
+/// `K` is `(n, rank J, m − rank J)` exactly, so the negative count is the
+/// rank and the zero count the deficiency — the same inertia the
+/// interior-point method checks on its KKT matrix every iteration.
+///
+/// What counts as zero is feral's pivot decision on the scaled matrix, not
+/// a singular-value threshold. It is therefore insensitive to row scaling
+/// (a tiny but independent row is not dependent), and coarser than the SVD
+/// (rows that differ in the ninth digit count as dependent): "dependent
+/// enough to trouble the solver", which is why it is a second opinion and
+/// not a replacement. It gives a count only, no localization. Measured on
+/// the 134-model fixture corpus at each solve's solution, it agrees with the
+/// SVD on 127; it can also miss a dependency the SVD finds (1 model), and
+/// it declines (an `Err`) when it cannot resolve some pivots' signs (3).
+pub(crate) fn feral_rank(
+    m: usize,
+    n: usize,
+    entries: &[(usize, usize, Number)],
+) -> Result<usize, String> {
+    if m == 0 {
+        return Ok(0);
+    }
+    if n == 0 {
+        return Ok(0);
+    }
+    let cap = n + entries.len() + m;
+    let (mut r, mut c, mut v) = (
+        Vec::with_capacity(cap),
+        Vec::with_capacity(cap),
+        Vec::with_capacity(cap),
+    );
+    for k in 0..n {
+        r.push(k);
+        c.push(k);
+        v.push(1.0);
+    }
+    for &(i, j, a) in entries {
+        r.push(n + i);
+        c.push(j);
+        v.push(a);
+    }
+    // Keep the (2,2) diagonal in the pattern so every row is present.
+    for i in 0..m {
+        r.push(n + i);
+        c.push(n + i);
+        v.push(0.0);
+    }
+    let k =
+        feral::CscMatrix::from_triplets(n + m, &r, &c, &v).map_err(|e| format!("feral: {e}"))?;
+    // Count pivots at or below `FERAL_ZERO_TOL` (on feral's scaled matrix)
+    // as zero instead of by their round-off sign: with the default
+    // `zero_tol = ε` a dependency's pivot of ~1e-14 is counted positive or
+    // negative at random and the inertia identity breaks.
+    let zero_tol = FERAL_ZERO_TOL;
+    let mut np = feral::NumericParams::default();
+    np.bk.zero_tol = zero_tol;
+    np.bk.zero_tol_2x2 = zero_tol * zero_tol;
+    np.bk.null_pivot_tol = zero_tol;
+    np.bk.null_pivot_tol_2x2 = zero_tol * zero_tol;
+    np.bk.on_zero_pivot = feral::ZeroPivotAction::ForceAccept;
+    // Cascade-break floors tiny pivots to ±floor, which leaves their sign
+    // (and so the inertia) undetermined; a rank count needs them counted.
+    np.cascade_break_ratio = None;
+    np.cascade_break_eps = None;
+    // Static pivoting floors them too.
+    np.static_pivot_threshold = None;
+    np.bk.static_pivot_floor = 0.0;
+    let mut solver = feral::Solver::with_params(np, Default::default());
+    match solver.factor(&k, None) {
+        feral::FactorStatus::Success | feral::FactorStatus::WrongInertia { .. } => {}
+        other => {
+            return Err(format!(
+                "feral could not factor [[I, Jᵀ], [J, 0]]: {other:?}"
+            ));
+        }
+    }
+    let inertia = solver.inertia().ok_or("feral reported no inertia")?;
+    // `n_tiny` also counts the pivots accepted as zero, which are exactly
+    // the ones we want; only floored pivots beyond those were counted by a
+    // round-off sign.
+    if let Some(u) = solver
+        .last_factor_stats()
+        .map(|st| st.inertia_uncertain().saturating_sub(inertia.zero))
+        && u > 0
+    {
+        return Err(format!(
+            "feral could not resolve the sign of {u} pivot(s), so its inertia is not a rank"
+        ));
+    }
+    if inertia.positive != n || inertia.negative + inertia.zero != m {
+        return Err(format!(
+            "feral's inertia ({}, {}, {}) is inconsistent with a {m} × {n} block",
+            inertia.positive, inertia.negative, inertia.zero
+        ));
+    }
+    Ok(inertia.negative)
+}
+
 /// The dense block of Jacobian rows `rows` at `pt`, over the columns of
 /// non-fixed variables those rows touch. `Err` carries why it could not be
 /// built (non-finite entries, or larger than the dense limits).
@@ -181,7 +338,7 @@ pub(crate) fn dense_jacobian_rows(
     pt: &PointEval,
     rows: &[usize],
     opts: &DiagnoseOptions,
-) -> Result<Dense, String> {
+) -> Result<Dense, DenseError> {
     let fixed = fixed_mask(prob);
     let mut row_pos = vec![usize::MAX; prob.m];
     for (p, &r) in rows.iter().enumerate() {
@@ -196,11 +353,21 @@ pub(crate) fn dense_jacobian_rows(
         }
     }
     let (m, n) = (rows.len(), col_pos.len());
+    // Non-finite entries rule out every rank method; check them first.
+    for (k, &r) in pt.jac_irow.iter().enumerate() {
+        let c = pt.jac_jcol[k];
+        if r < prob.m && row_pos[r] != usize::MAX && !fixed[c] && !pt.jac_val[k].is_finite() {
+            return Err(DenseError::NonFinite(format!(
+                "the Jacobian has non-finite entries at {} (see nonfinite_localization)",
+                pt.label
+            )));
+        }
+    }
     if m.saturating_mul(n.max(1)) > opts.max_dense_entries || m.min(n) > opts.max_dense_dim {
-        return Err(format!(
+        return Err(DenseError::TooLarge(format!(
             "the block is {m} × {n}, larger than the dense-SVD limit (--max-dense-entries {}, --max-dense-dim {})",
             opts.max_dense_entries, opts.max_dense_dim
-        ));
+        )));
     }
     let mut cols: Vec<usize> = vec![0; n];
     for (&c, &p) in &col_pos {
@@ -214,12 +381,6 @@ pub(crate) fn dense_jacobian_rows(
             continue;
         }
         a[row_pos[r] * ncols + col_pos[&c]] += pt.jac_val[k];
-    }
-    if a.iter().any(|v| !v.is_finite()) {
-        return Err(format!(
-            "the Jacobian has non-finite entries at {} (see nonfinite_localization)",
-            pt.label
-        ));
     }
     Ok(Dense {
         rows: rows.to_vec(),
@@ -400,6 +561,10 @@ pub fn check_numerical(
     }
     let d = match dense_jacobian_rows(prob, pt, &eq, opts) {
         Ok(d) => d,
+        Err(DenseError::TooLarge(why)) => {
+            sparse_numerical_rank(prob, pt, &eq, structural, &why, report);
+            return;
+        }
         Err(e) => {
             report.unavailable("numerical_rank", format!("equality Jacobian: {e}"));
             return;
@@ -520,10 +685,114 @@ pub fn check_numerical(
     }
 }
 
+/// `numerical_rank` for an equality Jacobian too large for the dense SVD:
+/// the rank from feral's inertia, without localization.
+fn sparse_numerical_rank(
+    prob: &NlProblem,
+    pt: &PointEval,
+    eq: &[usize],
+    structural: Option<usize>,
+    why_dense: &str,
+    report: &mut Report,
+) {
+    let fixed = fixed_mask(prob);
+    let cols: Vec<usize> = (0..prob.n).filter(|&j| !fixed[j]).collect();
+    let Some(entries) = sparse_block(pt, prob.m, eq, None, &cols, prob.n) else {
+        report.unavailable(
+            "numerical_rank",
+            format!("the Jacobian has non-finite entries at {}", pt.label),
+        );
+        return;
+    };
+    let rank = match feral_rank(eq.len(), cols.len(), &entries) {
+        Ok(r) => r,
+        Err(e) => {
+            report.unavailable(
+                "numerical_rank",
+                format!("{why_dense}; and the sparse inertia count failed: {e}"),
+            );
+            return;
+        }
+    };
+    let m = eq.len();
+    let deficiency = m - rank;
+    report.sections.insert(
+        "numerical_rank",
+        json!({"point": pt.label, "equality_rows": m, "columns": cols.len(), "rank": rank,
+            "deficiency": deficiency, "method": "inertia of [[I, Jᵀ], [J, 0]] (feral)",
+            "dense_svd_skipped": why_dense, "structural_rank": structural}),
+    );
+    let mut sink = report.ran("numerical_rank");
+    if deficiency > 0 {
+        let value_note = match structural {
+            Some(sr) if rank < sr => format!(
+                " The structural rank is {sr}, so a deficiency of {} comes from the values, not the sparsity pattern.",
+                sr - rank
+            ),
+            _ => String::new(),
+        };
+        sink.push(
+            Finding::new("numerical_rank", "equality_rank_deficient_unlocalized", Severity::Warning,
+                Basis::Numerical, Confidence::Medium,
+                format!("At {}, the equality Jacobian ({m} × {}) has rank {rank}, a deficiency of {deficiency}, by the inertia of [[I, Jᵀ], [J, 0]].{value_note} The block is too large for the dense search that names the dependent rows.", pt.label, cols.len()))
+            .why("LICQ fails at this point: the solver needs dual regularization and the multipliers are not unique.")
+            .next("Raise --max-dense-entries / --max-dense-dim to localize the dependent rows, or look for duplicated balance equations.")
+            .evidence(json!({"point": pt.label, "rank": rank, "deficiency": deficiency, "method": "feral inertia", "dense_svd_skipped": why_dense})),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::nl_reader::{BinOp, Expr, NlProblemParts};
+
+    fn dense_entries(rows: &[&[Number]]) -> Vec<(usize, usize, Number)> {
+        let mut out = Vec::new();
+        for (i, r) in rows.iter().enumerate() {
+            for (j, &a) in r.iter().enumerate() {
+                if a != 0.0 {
+                    out.push((i, j, a));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn feral_inertia_gives_the_rank() {
+        let cases: [(&[&[Number]], usize, usize); 6] = [
+            (&[&[1.0, 1.0], &[1.0, -1.0]], 2, 2),
+            (
+                &[&[1.0, 1.0, 0.0], &[0.0, 0.0, 1.0], &[2.0, 2.0, 0.0]],
+                3,
+                2,
+            ),
+            (
+                &[
+                    &[1.0, 1.0, 0.0, 0.0],
+                    &[0.0, 1.0, 1.0, 0.0],
+                    &[1.0, 0.0, -1.0, 0.0],
+                    &[0.0, 0.0, 0.0, 1.0],
+                ],
+                4,
+                3,
+            ),
+            (&[&[2.0, 2.0], &[1.0, 1.0]], 2, 1),
+            (&[&[1.0], &[3.0], &[2.0]], 1, 1),
+            // A tiny but independent row: feral scales, so it is not dependent.
+            (&[&[1.0, 1.0], &[1e-20, -1e-20]], 2, 2),
+        ];
+        for (rows, n, want) in cases {
+            assert_eq!(
+                feral_rank(rows.len(), n, &dense_entries(rows)).unwrap(),
+                want,
+                "{rows:?}"
+            );
+        }
+        assert_eq!(feral_rank(0, 3, &[]).unwrap(), 0);
+        assert_eq!(feral_rank(2, 0, &[]).unwrap(), 0);
+    }
 
     fn v(j: usize) -> Expr {
         Expr::Var(j)

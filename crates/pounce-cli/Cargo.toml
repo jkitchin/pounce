@@ -54,6 +54,10 @@ pounce-convex.workspace = true
 # Dense SVD for `pounce diagnose`'s numerical rank and minimal
 # dependent-row search (gh#1160).
 faer.workspace = true
+# Sparse rank from the inertia of [[I, Jᵀ], [J, 0]] — the rank count
+# `pounce diagnose` falls back to when a block is too large for the dense
+# SVD, and its second rank opinion (gh#1160).
+feral.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing.workspace = true

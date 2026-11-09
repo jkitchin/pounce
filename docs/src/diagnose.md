@@ -33,7 +33,7 @@ at one point.
 | `structural_rank` | structural | equality rows that cannot be matched to distinct free variables (Dulmage–Mendelsohn over-determined block) |
 | `numerical_rank` | numerical | the rank of the equality Jacobian at the point, and the **smallest sets of dependent equations** |
 | `jacobian_scaling` | numerical | spread of the Jacobian's row and column scales at the point |
-| `rank_robustness` | numerical | whether the rank result survives another tolerance, row/column equilibration, a column-pivoted QR, and other points |
+| `rank_robustness` | numerical | whether the rank result survives another tolerance, row/column equilibration, a second rank method (pounce's sparse factorization), and other points |
 | `kkt_audit` | numerical, needs `--sol` | stationarity, multiplier signs, complementarity, weakly and nearly active constraints |
 | `licq` | numerical, needs `--sol` | dependent active constraints, and how far their multipliers can move |
 | `mfcq` | numerical, needs `--sol` | whether some direction keeps the equalities and strictly improves every active inequality; a cancelling witness when none does |
@@ -125,8 +125,12 @@ at this point, not from the sparsity pattern, and may disappear elsewhere.
 
 The singular-value threshold defaults to `max(m, n)·ε·σ_max`, the
 LAPACK/NumPy convention, on the **unscaled** Jacobian; change it with
-`--rank-tol`. Because the SVD is dense it is skipped (and the check reported
-as not run) above `--max-dense-entries` / `--max-dense-dim`.
+`--rank-tol`. Above `--max-dense-entries` / `--max-dense-dim` the dense SVD
+is skipped. `numerical_rank` and `licq` then count the rank from the
+inertia of `[[I, Jᵀ], [J, 0]]` under pounce's sparse factorization (see
+below). That gives a count (`equality_rank_deficient_unlocalized`, or
+`licq_fails` without the dependent constraints named), at medium
+confidence, with no dependent sets.
 
 ## At a solution (`--sol`)
 
@@ -190,10 +194,24 @@ Jacobian's rank deficiency:
   `rank_tolerance_sensitive`.
 - **Scaling:** row-then-column equilibration. If the deficiency changes,
   the finding is `rank_scaling_sensitive`.
-- **Algorithm:** a column-pivoted QR at the same relative threshold. If it
-  disagrees with the SVD, the finding is `rank_backend_disagreement`. (The
-  QR is dense: a sparse QR needs a `faer` feature this workspace does not
-  enable.)
+- **Algorithm:** the rank from pounce's own sparse LDLᵀ factorization
+  (feral). Factoring `K = [[I, Jᵀ], [J, 0]]` gives inertia
+  `(n, rank J, m − rank J)`, so the zero count is the rank deficiency.
+  This is the inertia the interior-point method checks on its KKT matrix.
+  Feral decides "zero" by a pivot test on a scaled matrix, not by a
+  singular-value threshold, so it is insensitive to row scaling and coarser
+  than the SVD. If it disagrees with the SVD, the finding is
+  `rank_backend_disagreement`, and its text says which direction:
+  - nearly dependent rows (feral finds more);
+  - a scaling artifact (feral finds fewer, and so does the equilibrated
+    SVD);
+  - a dependency feral's pivot test missed (feral finds fewer, but the
+    equilibrated SVD agrees with the unscaled one, so trust the SVD).
+
+  On the 134-model fixture corpus, at each solve's solution, it agrees
+  with the SVD on 127 models. It declines to give a count (the check says
+  so) when it cannot resolve some pivots' signs. (faer's sparse QR cannot
+  serve here: it orders columns to limit fill, not to reveal rank.)
 - **Points:** the main point, the model's start (when the main point is
   another one) and each `--extra-point`. A loss at every point is
   `rank_loss_persistent`, a loss at only some of them is
