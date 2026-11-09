@@ -10,6 +10,12 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Julia L-BFGS nonlinear-variable hints.** Pounce.jl forwards complete
+  structural Hessian support to the native subset API, keeping purely linear
+  variables outside the approximation. Unknown evaluator/oracle structure and
+  missing optional native symbols retain the previous behavior; an explicit
+  `num_linear_variables` option overrides automatic detection. Low-level
+  one-based set/clear bindings are also available.
 - **Pounce.jl accepts native POUNCE 0.17.** The existing NLP bindings and
   diagnostics retain support for 0.15.x and 0.16.x. Julia CI checks the
   current native source and both older release lines; new complementarity

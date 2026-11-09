@@ -66,6 +66,30 @@ Pass native options through `set_optimizer_attribute`; for example,
 Enable `warm_start_init_point="yes"` after supplying primal/dual starts.
 JuMP/MOI dual signs are converted by the wrapper, including maximization.
 
+## L-BFGS nonlinear-variable hints
+
+For `hessian_approximation="limited-memory"`, the wrapper automatically declares
+the variables appearing in either coordinate of the complete structural
+Hessian pattern. It combines quadratic terms, nonlinear evaluators, and vector
+nonlinear oracles with their indices mapped to model columns. Purely linear
+variables then remain outside the L-BFGS approximation. Numerical zeros at a
+particular point do not establish linearity.
+
+If any evaluator/oracle lacks Hessian structure, or the native library lacks
+the optional entry points, the wrapper keeps the previous behavior. Setting
+`num_linear_variables` explicitly overrides automatic detection; `0` requests
+the original full approximation space. Exact and finite-difference solves do
+not receive automatic hints. Structural changes rebuild the declaration;
+parameter and bound updates retain the structural pattern.
+
+For low-level problems, `Pounce.supports_nonlinear_variable_hints()` checks native
+support. `Pounce.IpoptSetNonlinearVariables(prob, [2, 5])` declares distinct,
+one-based columns; an empty vector declares a structurally zero Hessian.
+`Pounce.IpoptClearNonlinearVariables(prob)` restores native defaults. Direct
+declarations take precedence over `num_linear_variables` and may also guide
+native finite-difference sparsity. Only omit identically zero Hessian
+rows/columns, and set or clear declarations between solves.
+
 ## Comparing with Ipopt
 
 Pounce and Ipopt.jl can coexist in one Julia process. Construct otherwise
