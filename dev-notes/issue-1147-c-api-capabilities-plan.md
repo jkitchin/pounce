@@ -41,8 +41,8 @@ Unblocked by the Julia side's answer on gh#1147 (comment 6739730460). Branch
 
 - [x] **S2-I1** Pair lookup on the handle: `DeclaredPairs` (list + var→pair / row→pair maps) replaces `complementarity: Vec`; `complements_used` records the MOI table row and the caller's row bounds. `AddPounceComplementarityPair` and `AddPounceComplementsConstraint` become O(1) per call instead of O(P). No surface change; one behaviour change (§9, S2-I1).
 - [x] **S2-I2** `SetPounceBounds` / `GetPounceBounds` and the `POUNCE_BOUNDS_*` codes; every refusal code and every branch of the pair rule (§6.2 D3) tested, each refusal checked to leave the handle unchanged.
-- [ ] **S2-I3** Parity and scale: update-then-solve equals fresh-`Create`-then-solve (NLP, MPCC native pair, MOI Complements pair; exact and L-BFGS); explicit warm re-solve after an update; complexity guard (k-entry update cost independent of n, m and P).
-- [ ] **S2-I4** `pounce.h`, README, `docs/src/c-api.md`, `docs/src/complementarity.md`, CHANGELOG, `examples/bounds_update.c`; §8 ABI checklist extended; export guard green; PR with §6.6 for confirmation.
+- [x] **S2-I3** Parity and scale: update-then-solve equals fresh-`Create`-then-solve (NLP, MPCC native pair, MOI Complements pair; exact and L-BFGS); explicit warm re-solve after an update; complexity guard (k-entry update cost independent of n, m and P).
+- [x] **S2-I4** `pounce.h`, README, `docs/src/c-api.md`, `docs/src/complementarity.md`, CHANGELOG, `examples/bounds_update.c`; §8 ABI checklist extended; export guard green; PR with §6.6 for confirmation.
 
 ### Stage 3 — matrix-form convex/conic entry
 
@@ -1682,6 +1682,40 @@ Decisions made in S3-I1/S3-I2/S3-I3, to confirm:
 - [x] **`PounceQpResiduals` / `PounceQpCertificate` could not grow**:
       resolved by `struct_size`, as §8.5's item; layouts now 72/8 (padding 4
       at 4) and 32/8 (no padding), see §9.
+
+### 8.8 Stage 2 — in-place bound updates (filled in by S2-I4)
+
+Base for "added" is the surface of §8.1–8.7; nothing there changed (no
+prototype, struct or `#define` value). No new struct.
+
+Two functions (`src/bounds.rs`, `#[unsafe(no_mangle)] pub unsafe extern
+"C"`, bodies through `ffi_guard`; `bad_index` is written `-1` before the
+guard):
+
+- [ ] `int SetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx, const ipnumber *x_L, const ipnumber *x_U, ipindex ng, const ipindex *g_idx, const ipnumber *g_L, const ipnumber *g_U, ipindex *bad_index)`
+- [ ] `int GetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx, ipnumber *x_L, ipnumber *x_U, ipindex ng, const ipindex *g_idx, ipnumber *g_L, ipnumber *g_U, int view, ipindex *bad_index)`
+
+Fourteen `#define`s (held both ways by
+`header_bounds_codes_match_the_implementation` in `tests/header_abi.rs`):
+
+- [ ] `POUNCE_BOUNDS_OK 0`, `_ERR_NULL -1`, `_ERR_COUNT -2`,
+      `_ERR_OUT_OF_RANGE -3`, `_ERR_DUPLICATE -4`, `_ERR_NAN -5`,
+      `_ERR_PAIR_CHANGED -6`, `_ERR_COMPLEMENTS_CLASS -7`,
+      `_ERR_COMPLEMENTS_ROW -8`, `_ERR_WORKING_SET -9`, `_ERR_VIEW -10`,
+      `_ERR_INTERNAL -11`.
+- [ ] `POUNCE_BOUNDS_VIEW_USER 0`, `POUNCE_BOUNDS_VIEW_EFFECTIVE 1`.
+
+Behaviour of existing functions:
+
+- [ ] `AddPounceComplementarityPair` / `AddPounceComplementsConstraint` no
+      longer re-validate the stored pairs (S2-I1, §9). Same codes, same
+      order, on every input a public call can produce; the difference is
+      reachable only by writing the handle's fields from Rust.
+- [ ] `AddPounceComplementsConstraint`'s edits gain a user view; the
+      effective bounds every existing function sees are unchanged.
+
+Pounce.jl: the version gate needs widening for these symbols, after this
+review, as for 0.16 (§8.6).
 
 ## 9. Per-iteration log
 
@@ -3331,6 +3365,57 @@ Gate:
   (unpaired bound gained — the accepted branch — and paired side moved).
 - One test expectation was wrong as first written (a row's batch position
   counted from 2 with one variable entry); fixed in the test.
+
+### S2-I3 — solve parity and scale (commit that ticks S2-I3)
+
+- `tests/bounds_update_solve.rs`: update-then-solve equals
+  create-with-those-bounds-then-solve, the whole `Outcome` compared with
+  `==` (status, x, objective, iterations, all three multiplier arrays), on
+  QpecSmall as a plain NLP, with native pairs and with MOI `Complements`
+  declarations, each on the exact and the L-BFGS leg. Each update moves the
+  answer (x to its new upper bound 0.75, asserted), so equality is not two
+  copies of the original solve. A sparse, reordered update equals the dense
+  one. An explicit warm re-solve (`warm_start_init_point=yes`, previous x
+  and multipliers) reaches the cold answer. The previous solve's iteration
+  count and complementarity record survive an update.
+- `tests/bounds_scale.rs`: `bound_updates_cost_o1_per_entry`, ratio 0.4–0.9
+  over three runs.
+- Mutation checks, both caught: the commit writing the user row bounds into
+  the effective rows of a `Complements` row (the solve leg fails with
+  `Invalid_Problem_Definition`; `bounds_update.rs` fails too); a setter
+  calling `validate_pairs` on every call (scale ratio 6.0 against 2.5).
+- **Observed, not caused here, not fixed (needs a decision):** after a
+  driver solve, `mult_g` does not hold the original model's row
+  multipliers, while `mult_x_U` does. Fresh handles, no setter involved.
+  MOI `Complements` QpecSmall with x in `[0.25, 0.75]` solves to
+  `x = (0.75, 0.875, 0.125)`, objective `0.09375` (correct: `1.5(1-x)^2` at
+  `x = 0.75`), both pairs non-degenerate (`y > 0`, `g = 0`). Stationarity
+  in Ipopt's convention (`∇f + Jᵀλ - z_L + z_U = 0`) gives `λ = (0.125,
+  -0.125)` from the `y` rows, and then `z_U[x] = 0.5 + 0.125 + 0.125 = 0.75`
+  — exactly the reported `mult_x_U`. The reported `mult_g` is
+  `[-2.17e7, -1.82e7]`. With native pairs (row 1 at `g >= -0.2`):
+  `λ = (0.125, -0.025)`, `z_U = 0.65` as reported, `mult_g = [-81.0, -4.24]`.
+  The CLI and Python share the driver; whether they report the same values
+  was not checked. Changing what the driver reports is outside Stage 2
+  (loop rule 7: driver behaviour).
+
+### S2-I4 — example, docs, CHANGELOG, §8.8 (same commit as S2-I3)
+
+- `examples/bounds_update.c`: QpecSmall with both pairs declared the MOI
+  way, the two views printed, two refusals (`-7` at entry 1, `-8` at entry
+  0), then x's box shrunk in place and re-solved to `(3/4, 7/8, 1/8)`,
+  objective `3/32`. Registered in `c_examples_build_and_run.rs`.
+- CHANGELOG `[Unreleased]`: the setter/getter, and the O(1) declarations.
+- §8.8 ABI checklist for the human.
+- Gate: `cargo test -p pounce-cinterface --no-fail-fast` (29 binaries ok);
+  `cinterface_mpcc_parity` 16/16; clippy CI flags clean on the new files;
+  `cargo fmt --check`; `make c-api-examples`; `make ask-check` OK.
+  **`make book` not run:** `mdbook` is not installed on this machine; the
+  docs job on CI builds it.
+- Process note: one gate run counted 4 ok binaries instead of 28 because
+  `examples/bounds_update.c` appeared mid-run without its
+  `EXPECTED_STDOUT` entry and `cargo test` stops at the first failing
+  binary. Gates since use `--no-fail-fast`.
 
 ### Facts recorded while planning (2ac0ad9)
 

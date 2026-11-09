@@ -97,6 +97,26 @@ changes.
     an SOCP, an infeasibility certificate and three refusals, and the book's
     `docs/src/c-api.md` documents the cone layouts, every option, status and
     error code.
+- **In-place bound updates through the C API (gh#1147 Stage 2).**
+  `SetPounceBounds` changes variable and constraint bounds on an existing
+  handle, keeping its options, scaling, nonlinear-variables hint, declared
+  pairs and `Complements` declarations, so a frontend no longer frees and
+  recreates the problem (and replays that state) to change a bound. Sparse
+  (index arrays in the problem's index style; a NULL index array with the
+  full count is dense), all or nothing, and at a cost independent of `n`,
+  `m` and the number of pairs. An update is refused with a
+  `POUNCE_BOUNDS_ERR_*` code, changing nothing, if it would change what a
+  declared pair pairs (its paired variable bound and row side), move a
+  `Complements` variable to another row of the MOI table, give a
+  `Complements` row a finite bound, or contradict a staged SQP working set.
+  `GetPounceBounds` reads the caller's bounds or the solve's (with the
+  `Complements` row edits). It reuses no solver state; warm starts stay
+  explicit through `IpoptSolve`'s buffers. Additions only.
+- **`AddPounceComplementarityPair` and `AddPounceComplementsConstraint` cost
+  O(1) per call.** Each re-validated every declared pair, so declaring P pairs
+  one at a time cost O(P²) (4 → 25 µs per call from 1 000 to 20 000 pairs in
+  a debug build). A pair stored on the handle is no longer re-checked by the
+  next declaration; the bound update re-checks the pairs it touches.
 - **The C examples are built and run by `cargo test`.** Every
   `crates/pounce-cinterface/examples/*.c` is compiled with
   `-std=c99 -Wall -Wextra -Werror -pedantic` against `pounce.h` and run;

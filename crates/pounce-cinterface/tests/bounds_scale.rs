@@ -160,3 +160,39 @@ fn moi_complements_declarations_cost_o1_per_call() {
         }
     });
 }
+
+#[test]
+fn bound_updates_cost_o1_per_entry() {
+    // gh#1147 Stage 2 (plan §6.2 D1): an update touching a paired variable
+    // and its row re-classifies that pair only. A setter that re-validated
+    // the declared set, or allocated per variable or row, would grow with
+    // n = m = P here. Each call is one variable and one row; half of them
+    // touch a declared pair.
+    assert_flat("SetPounceBounds", 1000, false, |p, k| {
+        for j in (0..k as Index).step_by(2) {
+            assert_eq!(
+                unsafe { AddPounceComplementarityPair(p, j, j) },
+                POUNCE_CC_OK
+            );
+        }
+        for j in 0..k as Index {
+            let (xi, xl, xu) = ([j], [0.0], [2.0]);
+            let (gi, gl, gu) = ([j], [-0.5], [INF]);
+            let code = unsafe {
+                SetPounceBounds(
+                    p,
+                    1,
+                    xi.as_ptr(),
+                    xl.as_ptr(),
+                    xu.as_ptr(),
+                    1,
+                    gi.as_ptr(),
+                    gl.as_ptr(),
+                    gu.as_ptr(),
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(code, POUNCE_BOUNDS_OK);
+        }
+    });
+}
