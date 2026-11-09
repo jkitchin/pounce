@@ -110,10 +110,7 @@ fn build(
         match kind {
             Kind::Nlp => {}
             Kind::NativePairs => {
-                assert_eq!(
-                    unsafe { AddPounceComplementarityPair(p, r, v) },
-                    POUNCE_CC_OK
-                )
+                assert_eq!(unsafe { AddPounceComplementarityPair(p, r, v) }, POUNCE_OK)
             }
             Kind::Complements => {
                 assert_eq!(
@@ -163,7 +160,7 @@ fn update_dense(
             &mut bad,
         )
     };
-    assert_eq!((code, bad), (POUNCE_BOUNDS_OK, -1));
+    assert_eq!((code, bad), (POUNCE_OK, -1));
 }
 
 #[test]
@@ -222,7 +219,7 @@ fn a_sparse_update_equals_the_dense_one() {
                 ptr::null_mut(),
             )
         };
-        assert_eq!(code, POUNCE_BOUNDS_OK);
+        assert_eq!(code, POUNCE_OK);
         assert_eq!(solve_from(p, START, None), want, "{kind:?}");
         unsafe { FreeIpoptProblem(p) };
     }

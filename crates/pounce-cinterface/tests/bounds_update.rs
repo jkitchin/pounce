@@ -86,7 +86,7 @@ fn get(p: IpoptProblem, view: i32) -> Dense {
             &mut bad,
         )
     };
-    assert_eq!((code, bad), (POUNCE_BOUNDS_OK, -1));
+    assert_eq!((code, bad), (POUNCE_OK, -1));
     d
 }
 
@@ -119,10 +119,7 @@ fn free(p: IpoptProblem) {
 
 fn with_pairs(p: IpoptProblem, pairs: &[(Index, Index)]) -> IpoptProblem {
     for &(r, v) in pairs {
-        assert_eq!(
-            unsafe { AddPounceComplementarityPair(p, r, v) },
-            POUNCE_CC_OK
-        );
+        assert_eq!(unsafe { AddPounceComplementarityPair(p, r, v) }, POUNCE_OK);
     }
     p
 }
@@ -134,7 +131,7 @@ fn sparse_update_writes_only_the_named_entries() {
     let p = create_qpec(0);
     assert_eq!(
         set(p, &[(2, -1.0, 4.0)], &[(1, -3.0, 3.0)]),
-        (POUNCE_BOUNDS_OK, -1)
+        (POUNCE_OK, -1)
     );
     let d = get(p, POUNCE_BOUNDS_VIEW_USER);
     assert_eq!(d.x_l, vec![X_L[0], X_L[1], -1.0]);
@@ -165,7 +162,7 @@ fn null_index_array_with_full_count_is_dense() {
             ptr::null_mut(),
         )
     };
-    assert_eq!(code, POUNCE_BOUNDS_OK);
+    assert_eq!(code, POUNCE_OK);
     let d = get(p, POUNCE_BOUNDS_VIEW_USER);
     assert_eq!((d.x_l, d.x_u), (xl.to_vec(), xu.to_vec()));
     assert_eq!((d.g_l, d.g_u), (G_L.to_vec(), G_U.to_vec()));
@@ -192,7 +189,7 @@ fn null_value_array_leaves_that_side_unchanged() {
             ptr::null_mut(),
         )
     };
-    assert_eq!(code, POUNCE_BOUNDS_OK);
+    assert_eq!(code, POUNCE_OK);
     let d = get(p, POUNCE_BOUNDS_VIEW_USER);
     assert_eq!((d.x_l[0], d.x_u[0]), (X_L[0], 7.0));
     free(p);
@@ -201,9 +198,9 @@ fn null_value_array_leaves_that_side_unchanged() {
 #[test]
 fn fortran_style_indices_are_one_based() {
     let p = create_qpec(1);
-    assert_eq!(set(p, &[(3, -1.0, 1.0)], &[]), (POUNCE_BOUNDS_OK, -1));
+    assert_eq!(set(p, &[(3, -1.0, 1.0)], &[]), (POUNCE_OK, -1));
     assert_eq!(get(p, POUNCE_BOUNDS_VIEW_USER).x_l[2], -1.0);
-    refused(p, &[(0, 0.0, 1.0)], &[], POUNCE_BOUNDS_ERR_OUT_OF_RANGE, 0);
+    refused(p, &[(0, 0.0, 1.0)], &[], POUNCE_ERR_OUT_OF_RANGE, 0);
     free(p);
 }
 
@@ -212,7 +209,7 @@ fn crossed_bounds_are_left_to_the_solve() {
     // D4: like CreateIpoptProblem, the setter does not refuse l > u on a
     // variable in no pair; the solve reports it.
     let p = create_qpec(0);
-    assert_eq!(set(p, &[(2, 3.0, 1.0)], &[]), (POUNCE_BOUNDS_OK, -1));
+    assert_eq!(set(p, &[(2, 3.0, 1.0)], &[]), (POUNCE_OK, -1));
     free(p);
 }
 
@@ -238,7 +235,7 @@ fn null_handle_is_refused() {
             &mut bad,
         )
     };
-    assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_NULL, -1));
+    assert_eq!((code, bad), (POUNCE_ERR_NULL, -1));
     let mut bad = -42;
     let code = unsafe {
         GetPounceBounds(
@@ -256,7 +253,7 @@ fn null_handle_is_refused() {
             &mut bad,
         )
     };
-    assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_NULL, -1));
+    assert_eq!((code, bad), (POUNCE_ERR_NULL, -1));
 }
 
 #[test]
@@ -281,7 +278,7 @@ fn bad_counts_are_refused() {
                 ptr::null_mut(),
             )
         };
-        assert_eq!(code, POUNCE_BOUNDS_ERR_COUNT, "nx={nx} ng={ng}");
+        assert_eq!(code, POUNCE_ERR_COUNT, "nx={nx} ng={ng}");
     }
     assert_eq!(snapshot(p), before);
     free(p);
@@ -312,7 +309,7 @@ fn an_unknown_flag_is_refused_first() {
                 &mut bad,
             )
         };
-        assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_FLAGS, -1), "set {flags:#x}");
+        assert_eq!((code, bad), (POUNCE_ERR_FLAGS, -1), "set {flags:#x}");
         let mut out = [-7.0; 1];
         let code = unsafe {
             GetPounceBounds(
@@ -330,7 +327,7 @@ fn an_unknown_flag_is_refused_first() {
                 &mut bad,
             )
         };
-        assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_FLAGS, -1), "get {flags:#x}");
+        assert_eq!((code, bad), (POUNCE_ERR_FLAGS, -1), "get {flags:#x}");
         assert_eq!(out, [-7.0]);
     }
     assert_eq!(snapshot(p), before);
@@ -365,11 +362,7 @@ fn a_count_above_the_side_is_refused_before_reading() {
                 &mut bad,
             )
         };
-        assert_eq!(
-            (code, bad),
-            (POUNCE_BOUNDS_ERR_COUNT, -1),
-            "nx={nx} ng={ng}"
-        );
+        assert_eq!((code, bad), (POUNCE_ERR_COUNT, -1), "nx={nx} ng={ng}");
     }
     assert_eq!(snapshot(p), before);
     free(p);
@@ -382,7 +375,7 @@ fn out_of_range_is_refused_at_its_batch_position() {
         p,
         &[(0, 0.0, 1.0), (3, 0.0, 1.0)],
         &[],
-        POUNCE_BOUNDS_ERR_OUT_OF_RANGE,
+        POUNCE_ERR_OUT_OF_RANGE,
         1,
     );
     // Rows are numbered after the variables in the batch.
@@ -390,7 +383,7 @@ fn out_of_range_is_refused_at_its_batch_position() {
         p,
         &[(0, 0.0, 1.0)],
         &[(1, 0.0, 1.0), (-1, 0.0, 1.0)],
-        POUNCE_BOUNDS_ERR_OUT_OF_RANGE,
+        POUNCE_ERR_OUT_OF_RANGE,
         2,
     );
     free(p);
@@ -403,14 +396,11 @@ fn duplicate_index_is_refused_at_its_second_occurrence() {
         p,
         &[(2, 0.0, 1.0), (0, 0.0, 1.0), (2, 0.0, 3.0)],
         &[],
-        POUNCE_BOUNDS_ERR_DUPLICATE,
+        POUNCE_ERR_DUPLICATE,
         2,
     );
     // The same index on the two sides is two different things.
-    assert_eq!(
-        set(p, &[(1, 0.0, 9.0)], &[(1, -1.0, 1.0)]),
-        (POUNCE_BOUNDS_OK, -1)
-    );
+    assert_eq!(set(p, &[(1, 0.0, 9.0)], &[(1, -1.0, 1.0)]), (POUNCE_OK, -1));
     free(p);
 }
 
@@ -421,7 +411,7 @@ fn nan_is_refused() {
         p,
         &[(2, 0.0, 1.0)],
         &[(0, 0.0, Number::NAN)],
-        POUNCE_BOUNDS_ERR_NAN,
+        POUNCE_ERR_NAN,
         1,
     );
     free(p);
@@ -449,7 +439,7 @@ fn getter_refusals_write_nothing() {
             &mut bad,
         )
     };
-    assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_OUT_OF_RANGE, 1));
+    assert_eq!((code, bad), (POUNCE_ERR_OUT_OF_RANGE, 1));
     assert_eq!(out, [-7.0; 2]);
     let code = unsafe {
         GetPounceBounds(
@@ -467,7 +457,7 @@ fn getter_refusals_write_nothing() {
             &mut bad,
         )
     };
-    assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_VIEW, -1));
+    assert_eq!((code, bad), (POUNCE_ERR_ARGUMENT, -1));
     let code = unsafe {
         GetPounceBounds(
             p,
@@ -484,7 +474,7 @@ fn getter_refusals_write_nothing() {
             &mut bad,
         )
     };
-    assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_COUNT, -1));
+    assert_eq!((code, bad), (POUNCE_ERR_COUNT, -1));
     assert_eq!(out, [-7.0; 2]);
     free(p);
 }
@@ -497,10 +487,7 @@ fn getter_refusals_write_nothing() {
 #[test]
 fn paired_bound_values_may_move() {
     let p = with_pairs(create_qpec(0), &qpec::PAIRS);
-    assert_eq!(
-        set(p, &[(1, 0.5, INF)], &[(0, 0.25, INF)]),
-        (POUNCE_BOUNDS_OK, -1)
-    );
+    assert_eq!(set(p, &[(1, 0.5, INF)], &[(0, 0.25, INF)]), (POUNCE_OK, -1));
     free(p);
 }
 
@@ -509,9 +496,9 @@ fn gaining_the_unpaired_bound_keeps_the_identity() {
     // y1 >= 0 ⟂ g0 >= 0, then y1 <= 5: OneSided -> OneSidedPlusBound, the
     // row's lower side still pairs the variable's lower bound. Accepted.
     let p = with_pairs(create_qpec(0), &qpec::PAIRS);
-    assert_eq!(set(p, &[(1, 0.0, 5.0)], &[]), (POUNCE_BOUNDS_OK, -1));
+    assert_eq!(set(p, &[(1, 0.0, 5.0)], &[]), (POUNCE_OK, -1));
     // And losing it again.
-    assert_eq!(set(p, &[(1, 0.0, INF)], &[]), (POUNCE_BOUNDS_OK, -1));
+    assert_eq!(set(p, &[(1, 0.0, INF)], &[]), (POUNCE_OK, -1));
     free(p);
 }
 
@@ -529,7 +516,7 @@ fn gaining_an_upper_bound_that_flips_the_orientation_is_refused() {
         p,
         &[(2, 0.0, 1.0), (1, 0.0, 5.0)],
         &[],
-        POUNCE_BOUNDS_ERR_PAIR_CHANGED,
+        POUNCE_ERR_PAIR_CHANGED,
         1,
     );
     free(p);
@@ -539,15 +526,15 @@ fn gaining_an_upper_bound_that_flips_the_orientation_is_refused() {
 fn moving_the_paired_side_to_the_other_bound_is_refused() {
     // y1 >= 0 becomes y1 <= 3: still OneSided, other orientation.
     let p = with_pairs(create_qpec(0), &qpec::PAIRS);
-    refused(p, &[(1, -INF, 3.0)], &[], POUNCE_BOUNDS_ERR_PAIR_CHANGED, 0);
+    refused(p, &[(1, -INF, 3.0)], &[], POUNCE_ERR_PAIR_CHANGED, 0);
     free(p);
 }
 
 #[test]
 fn losing_the_paired_side_is_refused() {
     let p = with_pairs(create_qpec(0), &qpec::PAIRS);
-    refused(p, &[(1, -INF, INF)], &[], POUNCE_BOUNDS_ERR_PAIR_CHANGED, 0);
-    refused(p, &[], &[(0, -INF, INF)], POUNCE_BOUNDS_ERR_PAIR_CHANGED, 0);
+    refused(p, &[(1, -INF, INF)], &[], POUNCE_ERR_PAIR_CHANGED, 0);
+    refused(p, &[], &[(0, -INF, INF)], POUNCE_ERR_PAIR_CHANGED, 0);
     free(p);
 }
 
@@ -558,7 +545,7 @@ fn a_one_sided_row_gaining_a_second_side_is_refused() {
         p,
         &[(0, 0.0, 1.0)],
         &[(1, 0.0, 4.0)],
-        POUNCE_BOUNDS_ERR_PAIR_CHANGED,
+        POUNCE_ERR_PAIR_CHANGED,
         1,
     );
     free(p);
@@ -574,15 +561,15 @@ fn mixed() -> IpoptProblem {
 #[test]
 fn a_mixed_box_may_move() {
     let p = mixed();
-    assert_eq!(set(p, &[(0, -1.0, 3.0)], &[]), (POUNCE_BOUNDS_OK, -1));
+    assert_eq!(set(p, &[(0, -1.0, 3.0)], &[]), (POUNCE_OK, -1));
     free(p);
 }
 
 #[test]
 fn a_mixed_variable_collapsing_or_opening_is_refused() {
     let p = mixed();
-    refused(p, &[(0, 1.0, 1.0)], &[], POUNCE_BOUNDS_ERR_PAIR_CHANGED, 0);
-    refused(p, &[(0, 0.0, INF)], &[], POUNCE_BOUNDS_ERR_PAIR_CHANGED, 0);
+    refused(p, &[(0, 1.0, 1.0)], &[], POUNCE_ERR_PAIR_CHANGED, 0);
+    refused(p, &[(0, 0.0, INF)], &[], POUNCE_ERR_PAIR_CHANGED, 0);
     free(p);
 }
 
@@ -591,7 +578,7 @@ fn a_mixed_row_gaining_a_side_is_refused() {
     // A free row with a boxed variable gaining g >= 0 classifies as
     // OneSidedPlusBound: a different pair. Refused.
     let p = mixed();
-    refused(p, &[], &[(1, 0.0, INF)], POUNCE_BOUNDS_ERR_PAIR_CHANGED, 0);
+    refused(p, &[], &[(1, 0.0, INF)], POUNCE_ERR_PAIR_CHANGED, 0);
     free(p);
 }
 
@@ -651,12 +638,12 @@ fn every_table_row_accepts_a_same_class_update_and_refuses_a_class_change() {
             p,
             &[(0, 0.0, 1.0), (1, change.0, change.1)],
             &[],
-            POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS,
+            POUNCE_ERR_COMPLEMENTS_CLASS,
             1,
         );
         assert_eq!(
             set(p, &[(1, same.0, same.1)], &[]),
-            (POUNCE_BOUNDS_OK, -1),
+            (POUNCE_OK, -1),
             "start {start:?} -> {same:?}"
         );
         // The row edit is the table row's, unchanged by a same-class move.
@@ -679,12 +666,12 @@ fn a_complements_row_takes_free_user_bounds_only() {
         p,
         &[],
         &[(1, -1.0, 1.0), (0, 0.0, INF)],
-        POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW,
+        POUNCE_ERR_ROW_NOT_FREE,
         1,
     );
     // Another spelling of "free" is accepted, round-trips in the user view,
     // and the edit is re-derived from it.
-    assert_eq!(set(p, &[], &[(0, -1e20, 1e30)]), (POUNCE_BOUNDS_OK, -1));
+    assert_eq!(set(p, &[], &[(0, -1e20, 1e30)]), (POUNCE_OK, -1));
     let user = get(p, POUNCE_BOUNDS_VIEW_USER);
     let eff = get(p, POUNCE_BOUNDS_VIEW_EFFECTIVE);
     assert_eq!((user.g_l[0], user.g_u[0]), (-1e20, 1e30));
@@ -698,13 +685,7 @@ fn the_class_rule_outlives_a_clear() {
     // the rule does too.
     let (p, _) = complements(0.0, INF);
     assert_eq!(unsafe { ClearPounceComplementarityPairs(p) }, 1);
-    refused(
-        p,
-        &[(1, 0.0, 5.0)],
-        &[],
-        POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS,
-        0,
-    );
+    refused(p, &[(1, 0.0, 5.0)], &[], POUNCE_ERR_COMPLEMENTS_CLASS, 0);
     free(p);
 }
 
@@ -720,21 +701,18 @@ fn a_staged_working_set_the_update_would_contradict_refuses_it() {
         unsafe { IpoptSetWarmStartWorkingSet(p, bounds.as_ptr(), cons.as_ptr()) },
         1
     );
-    refused(p, &[(0, 0.0, INF)], &[], POUNCE_BOUNDS_ERR_WORKING_SET, 0);
+    refused(p, &[(0, 0.0, INF)], &[], POUNCE_ERR_WORKING_SET, 0);
     refused(
         p,
         &[(0, 0.0, 3.0)],
         &[(0, -INF, INF)],
-        POUNCE_BOUNDS_ERR_WORKING_SET,
+        POUNCE_ERR_WORKING_SET,
         1,
     );
     // Moving the bound it sits on keeps the claim true.
-    assert_eq!(
-        set(p, &[(0, 0.0, 3.0)], &[(0, 1.0, INF)]),
-        (POUNCE_BOUNDS_OK, -1)
-    );
+    assert_eq!(set(p, &[(0, 0.0, 3.0)], &[(0, 1.0, INF)]), (POUNCE_OK, -1));
     // Once cleared, nothing is checked.
     assert_eq!(unsafe { IpoptClearWarmStartWorkingSet(p) }, 1);
-    assert_eq!(set(p, &[(0, 0.0, INF)], &[]), (POUNCE_BOUNDS_OK, -1));
+    assert_eq!(set(p, &[(0, 0.0, INF)], &[]), (POUNCE_OK, -1));
     free(p);
 }

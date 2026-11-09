@@ -32,11 +32,13 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod bounds;
+pub mod errors;
 pub mod fortran;
 pub mod qp;
 pub mod solver;
 
 pub use bounds::*;
+pub use errors::*;
 pub use qp::*;
 
 use bounds::{ComplementsLedger, ComplementsRow, ComplementsUse, DeclaredPairs};
@@ -2105,36 +2107,12 @@ pub unsafe extern "C" fn IpoptClearNonlinearVariables(ipopt_problem: IpoptProble
 // Declared complementarity pairs (gh#1147)
 // ---------------------------------------------------------------------------
 
-/// The declaration succeeded.
-pub const POUNCE_CC_OK: c_int = 0;
-/// NULL handle, or a NULL `rows`/`vars` array with `n_pairs > 0`.
-pub const POUNCE_CC_ERR_NULL: c_int = -1;
-/// A row or variable index outside `[0, m)` / `[0, n)`, read in the
-/// problem's index style.
-pub const POUNCE_CC_ERR_OUT_OF_RANGE: c_int = -2;
-/// The variable is already in a pair (declared earlier or earlier in the
-/// same batch).
-pub const POUNCE_CC_ERR_VAR_ALREADY: c_int = -3;
-/// The row is already in a pair (declared earlier or earlier in the same
-/// batch).
-pub const POUNCE_CC_ERR_ROW_ALREADY: c_int = -4;
-/// The pair's bounds are none of the lowered shapes: one-sided, one-sided
-/// plus a plain bound, or mixed.
-pub const POUNCE_CC_ERR_SHAPE: c_int = -5;
-/// `n_pairs < 0`.
-pub const POUNCE_CC_ERR_COUNT: c_int = -6;
-/// A Rust panic inside the library, caught at the boundary, or (from
-/// `AddPounceComplementarityPair`) a pair already stored on the handle that
-/// no longer validates. Not expected; it exists so neither has to be
-/// reported as a diagnosis of the caller's input.
-pub const POUNCE_CC_ERR_INTERNAL: c_int = -7;
-
 fn pair_error_code(kind: &PairErrorKind) -> c_int {
     match kind {
-        PairErrorKind::OutOfRange => POUNCE_CC_ERR_OUT_OF_RANGE,
-        PairErrorKind::VarAlreadyPaired => POUNCE_CC_ERR_VAR_ALREADY,
-        PairErrorKind::RowAlreadyPaired => POUNCE_CC_ERR_ROW_ALREADY,
-        PairErrorKind::UnsupportedShape => POUNCE_CC_ERR_SHAPE,
+        PairErrorKind::OutOfRange => POUNCE_ERR_OUT_OF_RANGE,
+        PairErrorKind::VarAlreadyPaired => POUNCE_ERR_VAR_ALREADY_PAIRED,
+        PairErrorKind::RowAlreadyPaired => POUNCE_ERR_ROW_ALREADY_PAIRED,
+        PairErrorKind::UnsupportedShape => POUNCE_ERR_SHAPE,
     }
 }
 
@@ -2225,7 +2203,7 @@ fn append_pair(info: &mut IpoptProblemInfo, row: Index, var: Index) -> Result<()
 /// [`AddPounceComplementsConstraint`] may have edited them — and the pairs
 /// already declared.
 ///
-/// Returns [`POUNCE_CC_OK`] or a negative `POUNCE_CC_ERR_*` code; a refused
+/// Returns [`POUNCE_OK`] or a negative `POUNCE_ERR_*` code; a refused
 /// pair leaves the declared set unchanged. Pairs persist on the handle
 /// until [`SetPounceComplementarityPairs`] replaces them or
 /// [`ClearPounceComplementarityPairs`] drops them.
@@ -2239,12 +2217,12 @@ pub unsafe extern "C" fn AddPounceComplementarityPair(
     row: Index,
     var: Index,
 ) -> c_int {
-    ffi_guard(POUNCE_CC_ERR_INTERNAL, || unsafe {
+    ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
         if ipopt_problem.is_null() {
-            return POUNCE_CC_ERR_NULL;
+            return POUNCE_ERR_NULL;
         }
         match append_pair(&mut *ipopt_problem, row, var) {
-            Ok(()) => POUNCE_CC_OK,
+            Ok(()) => POUNCE_OK,
             Err(kind) => pair_error_code(&kind),
         }
     })
@@ -2259,7 +2237,7 @@ pub unsafe extern "C" fn AddPounceComplementarityPair(
 /// `bad_index`, when non-NULL, receives the position in the batch of the
 /// first refused pair (for a duplicate, the second occurrence), or `-1`
 /// on success and on the errors that concern no single pair
-/// ([`POUNCE_CC_ERR_NULL`], [`POUNCE_CC_ERR_COUNT`]).
+/// ([`POUNCE_ERR_NULL`], [`POUNCE_ERR_COUNT`]).
 ///
 /// # Safety
 ///
@@ -2274,7 +2252,7 @@ pub unsafe extern "C" fn SetPounceComplementarityPairs(
     vars: *const Index,
     bad_index: *mut Index,
 ) -> c_int {
-    ffi_guard(POUNCE_CC_ERR_INTERNAL, || unsafe {
+    ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
         let report = |k: Index| {
             if !bad_index.is_null() {
                 *bad_index = k;
@@ -2282,13 +2260,13 @@ pub unsafe extern "C" fn SetPounceComplementarityPairs(
         };
         report(-1);
         if ipopt_problem.is_null() {
-            return POUNCE_CC_ERR_NULL;
+            return POUNCE_ERR_NULL;
         }
         if n_pairs < 0 {
-            return POUNCE_CC_ERR_COUNT;
+            return POUNCE_ERR_COUNT;
         }
         if n_pairs > 0 && (rows.is_null() || vars.is_null()) {
-            return POUNCE_CC_ERR_NULL;
+            return POUNCE_ERR_NULL;
         }
         let new: Vec<(Index, Index)> = if n_pairs == 0 {
             Vec::new()
@@ -2298,7 +2276,7 @@ pub unsafe extern "C" fn SetPounceComplementarityPairs(
             r.iter().copied().zip(v.iter().copied()).collect()
         };
         match replace_pairs(&mut *ipopt_problem, &new) {
-            Ok(()) => POUNCE_CC_OK,
+            Ok(()) => POUNCE_OK,
             Err((k, kind)) => {
                 report(k as Index);
                 pair_error_code(&kind)
@@ -2395,28 +2373,6 @@ pub const POUNCE_COMPLEMENTS_PAIR_UPPER: c_int = 2;
 pub const POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR: c_int = 3;
 /// `x` fixed (`l == u`): nothing changed, `F` stays free; no pair.
 pub const POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR: c_int = 4;
-/// NULL handle.
-pub const POUNCE_COMPLEMENTS_ERR_NULL: c_int = -1;
-/// Row or variable outside `[0, m)` / `[0, n)`, read in the problem's
-/// index style.
-pub const POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE: c_int = -2;
-/// The variable is in a declared pair or in an earlier accepted
-/// [`AddPounceComplementsConstraint`] call.
-pub const POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED: c_int = -3;
-/// The row is in a declared pair or in an earlier accepted
-/// [`AddPounceComplementsConstraint`] call.
-pub const POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED: c_int = -4;
-/// The row has a finite bound (`g_L > -1e19` or `g_U < 1e19`), including
-/// one an earlier call of this helper set: MOI's `F` is a free function.
-/// Declare such a row with [`AddPounceComplementarityPair`].
-pub const POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE: c_int = -5;
-/// The variable's bounds are NaN or crossed (`l > u`, both finite): no row
-/// of the MOI table applies.
-pub const POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS: c_int = -6;
-/// The handle's state is inconsistent (a declared pair no longer passes
-/// validation against its bounds), or a Rust panic was caught at the
-/// boundary. Nothing was changed.
-pub const POUNCE_COMPLEMENTS_ERR_INTERNAL: c_int = -7;
 
 pub(crate) fn complements_row(xl: Number, xu: Number) -> Option<ComplementsRow> {
     if xl.is_nan() || xu.is_nan() {
@@ -2473,20 +2429,20 @@ fn add_complements(info: &mut IpoptProblemInfo, row: Index, var: Index) -> c_int
         zero_based(var, offset, info.n),
     );
     if r == usize::MAX || v == usize::MAX {
-        return POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE;
+        return POUNCE_ERR_OUT_OF_RANGE;
     }
     let (gl, gu) = (info.g_l[r], info.g_u[r]);
     if !(gl <= NLP_LOWER_BOUND_INF && gu >= NLP_UPPER_BOUND_INF) {
-        return POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE;
+        return POUNCE_ERR_ROW_NOT_FREE;
     }
     if info.complementarity.of_var(v).is_some() || info.complements_used.of_var(v).is_some() {
-        return POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED;
+        return POUNCE_ERR_VAR_ALREADY_PAIRED;
     }
     if info.complementarity.of_row(r).is_some() || info.complements_used.of_row(r).is_some() {
-        return POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED;
+        return POUNCE_ERR_ROW_ALREADY_PAIRED;
     }
     let Some(table_row) = complements_row(info.x_l[v], info.x_u[v]) else {
-        return POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS;
+        return POUNCE_ERR_VAR_BOUNDS;
     };
     let (new_gl, new_gu, declares) = table_row.row_bounds(gl, gu);
     debug_assert!(
@@ -2504,7 +2460,7 @@ fn add_complements(info: &mut IpoptProblemInfo, row: Index, var: Index) -> c_int
     if declares && append_pair(info, row, var).is_err() {
         info.g_l[r] = gl;
         info.g_u[r] = gu;
-        return POUNCE_COMPLEMENTS_ERR_INTERNAL;
+        return POUNCE_ERR_INTERNAL;
     }
     info.complements_used.push(ComplementsUse {
         row: r,
@@ -2533,7 +2489,7 @@ fn add_complements(info: &mut IpoptProblemInfo, row: Index, var: Index) -> c_int
 /// | free               | `g_L = g_U = 0`     | none (`F = 0`)  | [`POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR`] |
 /// | `l == u`           | none (`F` free)     | none            | [`POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR`] |
 ///
-/// The row must be free (else [`POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE`]:
+/// The row must be free (else [`POUNCE_ERR_ROW_NOT_FREE`]:
 /// use [`AddPounceComplementarityPair`] for a row that already has a
 /// side). Checks, in order: NULL handle, range, row free, variable then
 /// row not already used (by a declared pair or by an earlier accepted call
@@ -2551,9 +2507,9 @@ pub unsafe extern "C" fn AddPounceComplementsConstraint(
     row: Index,
     var: Index,
 ) -> c_int {
-    ffi_guard(POUNCE_COMPLEMENTS_ERR_INTERNAL, || unsafe {
+    ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
         if ipopt_problem.is_null() {
-            return POUNCE_COMPLEMENTS_ERR_NULL;
+            return POUNCE_ERR_NULL;
         }
         add_complements(&mut *ipopt_problem, row, var)
     })
@@ -5572,15 +5528,15 @@ mod tests {
         // they were.
         let p = create_two_by_two([0.0, 0.0], [2.0, 2.0]);
         unsafe {
-            assert_eq!(AddPounceComplementarityPair(p, 0, 0), POUNCE_CC_OK);
+            assert_eq!(AddPounceComplementarityPair(p, 0, 0), POUNCE_OK);
             assert_maps_match(p);
             assert_eq!(
                 AddPounceComplementarityPair(p, 1, 0),
-                POUNCE_CC_ERR_VAR_ALREADY
+                POUNCE_ERR_VAR_ALREADY_PAIRED
             );
             assert_eq!(
                 AddPounceComplementarityPair(p, 0, 1),
-                POUNCE_CC_ERR_ROW_ALREADY
+                POUNCE_ERR_ROW_ALREADY_PAIRED
             );
             assert_maps_match(p);
             let (rows, vars) = ([1, 0], [0, 1]);
@@ -5592,7 +5548,7 @@ mod tests {
                     vars.as_ptr(),
                     std::ptr::null_mut()
                 ),
-                POUNCE_CC_OK
+                POUNCE_OK
             );
             assert_maps_match(p);
             assert_eq!((*p).complementarity.of_var(0), Some(0));
@@ -5606,7 +5562,7 @@ mod tests {
                     vars.as_ptr(),
                     std::ptr::null_mut()
                 ),
-                POUNCE_CC_ERR_ROW_ALREADY
+                POUNCE_ERR_ROW_ALREADY_PAIRED
             );
             assert_eq!((*p).complementarity.of_row(1), Some(0));
             assert_maps_match(p);
@@ -5620,7 +5576,7 @@ mod tests {
             assert_maps_match(p);
             assert_eq!(
                 AddPounceComplementsConstraint(p, 0, 1),
-                POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED
+                POUNCE_ERR_VAR_ALREADY_PAIRED
             );
             assert_maps_match(p);
             FreeIpoptProblem(p);

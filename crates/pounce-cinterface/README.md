@@ -49,7 +49,7 @@ be run; set `POUNCE_C_EXAMPLES_SKIP=1` to skip it knowingly.
 - `examples/qp_socp.c` — the matrix-form `PounceQp*` entry: a convex QP
   (solution, multipliers, residuals, report engine `cvx-qp`), an SOCP (report
   engine `cvx-qcqp`), a primal-infeasible LP and its Farkas certificate, and
-  three refusal codes (`POUNCE_QP_ERR_INDEFINITE`, `_CONES`, `_ARGUMENT`).
+  three refusal codes (`POUNCE_ERR_INDEFINITE`, `_CONES`, `_ARGUMENT`).
 
 ## Surface
 
@@ -83,12 +83,17 @@ POUNCE extensions:
   (works with a NULL handle).
 - `IpoptSetNonlinearVariables` / `IpoptClearNonlinearVariables` — restrict
   the limited-memory Hessian to the variables that enter nonlinearly.
+- One error namespace for every extension below: a refusal is a negative
+  `POUNCE_ERR_*` whose value means the same thing whichever function
+  returns it (generic codes -1..-19, then a block of 20 per function
+  family), success is `POUNCE_OK`, and `PounceErrorString(code)` returns
+  the shared message (a static string; `"unknown error code"` otherwise).
 - Declared complementarity pairs (gh#1147): `AddPounceComplementarityPair`,
   `SetPounceComplementarityPairs` (replace, all or nothing),
   `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`,
   `GetPounceComplementarityPairs`. Indices in the problem's index style;
   each declaration is validated at once by the classifier the lowering runs
-  and refused with a `POUNCE_CC_ERR_*` code (`POUNCE_CC_ERR_INTERNAL` is an
+  and refused with a `POUNCE_ERR_*` code (`POUNCE_ERR_INTERNAL` is an
   internal error, not a diagnosis). With pairs declared,
   `IpoptSolve` solves through the complementarity driver (as the CLI and
   Python do; the `complementarity_*` options apply); `IpoptCreateSolver`
@@ -100,7 +105,7 @@ POUNCE extensions:
   bounds** — `F >= 0` for `x >= l`, `F <= 0` for `x <= u`, `F = 0` for a free
   `x`, nothing for a boxed (mixed pair) or fixed (no pair) `x`. The row must
   be free — a row that already has a side, even one agreeing with MOI's
-  sign, is `POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE` and is a native
+  sign, is `POUNCE_ERR_ROW_NOT_FREE` and is a native
   declaration; the `POUNCE_COMPLEMENTS_*` return code says which row of the
   table applied, or why the call was refused (nothing changes then). The
   edits, and the record of which rows and variables the helper has used,
@@ -111,7 +116,7 @@ POUNCE extensions:
   problem's index style; a NULL index array with the full count is dense)
   and all or nothing, at a cost independent of `n`, `m` and the number of
   pairs. It keeps options, scaling, the nonlinear-variables hint, declared
-  pairs and `Complements` declarations, and refuses (`POUNCE_BOUNDS_ERR_*`,
+  pairs and `Complements` declarations, and refuses (`POUNCE_ERR_*`,
   changing nothing) an update that would change what a declared pair pairs,
   move a `Complements` variable to another row of the MOI table, give a
   `Complements` row a finite bound, or contradict a staged working set.
@@ -157,7 +162,7 @@ POUNCE extensions:
   `PounceQpSetEqualities`, `PounceQpSetInequalities`, `PounceQpSetBounds`,
   `PounceQpAddCone` (`POUNCE_CONE_*`: nonneg, SOC, exp, power, PSD);
   options `PounceQpSetNumOption`, `PounceQpSetStrOption`; `PounceQpSolve`
-  (a `POUNCE_QP_STATUS_*`, or a negative `POUNCE_QP_ERR_*` before any
+  (a `POUNCE_QP_STATUS_*`, or a negative `POUNCE_ERR_*` before any
   engine runs); getters `PounceQpGetSolution`, `PounceQpGetResiduals`
   (`#[repr(C)]`, extensible `PounceQpResiduals`), `PounceQpGetCertificate`
   (`PounceQpCertificate`, likewise); and `PounceQpWriteSolveReport`. It runs
@@ -168,7 +173,7 @@ POUNCE extensions:
   1-based by the handle's index style, `P` lower triangle, a PSD cone's rows
   in `svec` order (lower triangle by columns, off-diagonals `×√2`). With a
   cone, `method=active-set`, `tau`, `tau_max`, the `qp_*` switches and any
-  `hessian_inertia` but `auto` are refused (`POUNCE_QP_ERR_OPTIONS`), and the report's `solution.engine` is
+  `hessian_inertia` but `auto` are refused (`POUNCE_ERR_OPTIONS`), and the report's `solution.engine` is
   `cvx-qcqp` for every cone kind. The IPM's PSD screen comes from
   `pounce_convex::certify_psd_lower_triangle` at the CLI's band, not
   Python's numpy check, so it can refuse a borderline `P` that Python

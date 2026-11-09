@@ -368,10 +368,10 @@ fn indefinite_p_is_refused_under_the_ipm_only() {
         qp
     };
     let qp = make();
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_INDEFINITE);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_INDEFINITE);
     let qp = make();
     assert_eq!(str_opt(&qp, "hessian_inertia", "indefinite"), 1);
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_INDEFINITE);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_INDEFINITE);
 
     let qp = make();
     assert_eq!(str_opt(&qp, "method", "active-set"), 1);
@@ -398,15 +398,15 @@ fn indefinite_p_is_refused_under_the_ipm_only() {
 #[test]
 fn solve_refusals_discard_the_previous_result() {
     assert!(unsafe { PounceCreateQp(0, 0, 0, 0) }.is_null());
-    assert_eq!(unsafe { PounceQpSolve(null_mut()) }, POUNCE_QP_ERR_NULL);
+    assert_eq!(unsafe { PounceQpSolve(null_mut()) }, POUNCE_ERR_NULL);
 
     // No objective.
     let qp = create(1, 0, 0, 0);
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_INCOMPLETE);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_INCOMPLETE);
     // Declared rows never set.
     let qp = create(1, 1, 0, 0);
     assert_eq!(objective(&qp, &[], &[1.0]), 1);
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_INCOMPLETE);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_INCOMPLETE);
 
     // Cones covering 2 of 3 rows; then PSD mixed with exp.
     let qp = soc();
@@ -415,7 +415,7 @@ fn solve_refusals_discard_the_previous_result() {
         unsafe { PounceQpAddCone(qp.0, POUNCE_CONE_NONNEG, 2, 0.0) },
         1
     );
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_CONES);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_CONES);
     // ... and the earlier result is gone.
     let mut r = PounceQpResiduals {
         struct_size: size_of::<PounceQpResiduals>() as Index,
@@ -428,20 +428,20 @@ fn solve_refusals_discard_the_previous_result() {
     assert_eq!(inequalities(&qp, &[], &[0.0; 4]), 1);
     assert_eq!(unsafe { PounceQpAddCone(qp.0, POUNCE_CONE_PSD, 1, 0.0) }, 0);
     assert_eq!(unsafe { PounceQpAddCone(qp.0, POUNCE_CONE_EXP, 3, 0.0) }, 1);
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_CONES);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_CONES);
 
     // Options: an IPM-only switch on the active-set engine; a QP-only option
     // with cones.
     let qp = lp();
     assert_eq!(str_opt(&qp, "method", "active-set"), 1);
     assert_eq!(str_opt(&qp, "qp_hsde", "yes"), 1);
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_OPTIONS);
     let qp = soc();
     assert_eq!(num_opt(&qp, "tau", 0.9), 1);
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_OPTIONS);
     let qp = soc();
     assert_eq!(str_opt(&qp, "method", "active-set"), 1);
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_OPTIONS);
 }
 
 // error-path: PounceQpSetObjective
@@ -499,7 +499,7 @@ fn builders_refuse_bad_input_and_change_nothing() {
         0
     );
     // Nothing was set, so the handle is still incomplete.
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_INCOMPLETE);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_INCOMPLETE);
 
     // On a 1-based handle, index 0 is out of range.
     let qp = create(1, 0, 0, 1);
@@ -512,7 +512,7 @@ fn builders_refuse_bad_input_and_change_nothing() {
 fn add_cone_refuses_bad_kinds_dims_and_exponents() {
     assert_eq!(
         unsafe { PounceQpAddCone(null_mut(), POUNCE_CONE_SOC, 3, 0.0) },
-        POUNCE_QP_ERR_NULL
+        POUNCE_ERR_NULL
     );
     let qp = create(1, 0, 3, 0);
     for (kind, dim, alpha) in [
@@ -528,7 +528,7 @@ fn add_cone_refuses_bad_kinds_dims_and_exponents() {
     ] {
         assert_eq!(
             unsafe { PounceQpAddCone(qp.0, kind, dim, alpha) },
-            POUNCE_QP_ERR_ARGUMENT,
+            POUNCE_ERR_ARGUMENT,
             "kind {kind} dim {dim} alpha {alpha}"
         );
     }
@@ -644,7 +644,7 @@ fn getters_answer_false_without_a_result() {
     check(qp.0); // before any solve
     assert_eq!(str_opt(&qp, "method", "active-set"), 1);
     assert_eq!(str_opt(&qp, "qp_crossover", "yes"), 1);
-    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(unsafe { PounceQpSolve(qp.0) }, POUNCE_ERR_OPTIONS);
     check(qp.0); // after a refused solve
 
     // After a solve: NULL outputs are skipped by GetSolution, refused by the
@@ -756,7 +756,7 @@ fn every_builder_discards_the_previous_result() {
     );
     assert_eq!(
         unsafe { PounceQpAddCone(qp.0, POUNCE_CONE_SOC, 0, 0.0) },
-        POUNCE_QP_ERR_ARGUMENT
+        POUNCE_ERR_ARGUMENT
     );
     check_lp(&qp);
 }

@@ -20,9 +20,9 @@
  *   3. A primal-infeasible LP (x <= -1 with x >= 0): status
  *      POUNCE_QP_STATUS_PRIMAL_INFEASIBLE and a Farkas certificate.
  *   4. Refusals, each a negative code before any engine runs: an indefinite
- *      P under method=ipm (POUNCE_QP_ERR_INDEFINITE), cones that do not
- *      partition the G rows (POUNCE_QP_ERR_CONES), a power-cone exponent
- *      outside (0, 1) (POUNCE_QP_ERR_ARGUMENT); and the getters return FALSE
+ *      P under method=ipm (POUNCE_ERR_INDEFINITE), cones that do not
+ *      partition the G rows (POUNCE_ERR_CONES), a power-cone exponent
+ *      outside (0, 1) (POUNCE_ERR_ARGUMENT); and the getters return FALSE
  *      after a refused solve.
  *
  * Build and run every example in this directory with the strict flags the
@@ -224,8 +224,8 @@ static int refusals(void)
     if (!PounceQpSetObjective(qp, 2, p_row, p_col, p_val, c)
         || !PounceQpSetInequalities(qp, 2, g_row, g_col, g_val, h))
         return fail(qp, "a builder refused valid input");
-    if ((rc = PounceQpSolve(qp)) != POUNCE_QP_ERR_INDEFINITE)
-        return fail(qp, "indefinite P not refused with POUNCE_QP_ERR_INDEFINITE");
+    if ((rc = PounceQpSolve(qp)) != POUNCE_ERR_INDEFINITE)
+        return fail(qp, "indefinite P not refused with POUNCE_ERR_INDEFINITE");
     if (PounceQpGetSolution(qp, x, NULL, NULL, NULL, NULL, NULL, NULL))
         return fail(qp, "solution reported after a refused solve");
     printf("refused: indefinite P under method=ipm (%d)\n", rc);
@@ -241,13 +241,13 @@ static int refusals(void)
         return fail(qp, "method=ipm refused");
     if (PounceQpAddCone(qp, POUNCE_CONE_SOC, 1, 0.0) != 0)
         return fail(qp, "SOC(1) cone not added");
-    if ((rc = PounceQpSolve(qp)) != POUNCE_QP_ERR_CONES)
-        return fail(qp, "cones over 1 of 2 rows not refused with POUNCE_QP_ERR_CONES");
+    if ((rc = PounceQpSolve(qp)) != POUNCE_ERR_CONES)
+        return fail(qp, "cones over 1 of 2 rows not refused with POUNCE_ERR_CONES");
     printf("refused: cones covering 1 of 2 inequality rows (%d)\n", rc);
 
     /* A power-cone exponent must lie in (0, 1); nothing is added. */
-    if ((rc = PounceQpAddCone(qp, POUNCE_CONE_POW, 3, 1.5)) != POUNCE_QP_ERR_ARGUMENT)
-        return fail(qp, "alpha = 1.5 not refused with POUNCE_QP_ERR_ARGUMENT");
+    if ((rc = PounceQpAddCone(qp, POUNCE_CONE_POW, 3, 1.5)) != POUNCE_ERR_ARGUMENT)
+        return fail(qp, "alpha = 1.5 not refused with POUNCE_ERR_ARGUMENT");
     printf("refused: power cone with alpha = 1.5 (%d)\n", rc);
 
     PounceFreeQp(qp);

@@ -10,6 +10,20 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **One error namespace for the C API.** Every POUNCE C extension refuses
+  with a negative `POUNCE_ERR_*` code whose value means the same thing
+  whichever function returns it, and succeeds with `POUNCE_OK` (0), so a
+  wrapper keeps one code-to-message table. Generic codes (NULL, count,
+  index out of range, duplicate, NaN, flags, argument, internal) are -1 to
+  -8; complementarity pairs, bound updates and the QP handle each have their
+  own block (-20, -40, -60). New `PounceErrorString(code)` returns the
+  shared message. This replaces the per-family `POUNCE_CC_OK`,
+  `POUNCE_CC_ERR_*`, `POUNCE_COMPLEMENTS_ERR_*`, `POUNCE_BOUNDS_OK`,
+  `POUNCE_BOUNDS_ERR_*` and `POUNCE_QP_ERR_*` codes added during this cycle, which numbered the same meaning
+  differently (-2 was "out of range", "count" or "argument" depending on
+  the function); none of them shipped in a release. The results that are
+  not errors keep their own names: `POUNCE_QP_STATUS_*` and the
+  `POUNCE_COMPLEMENTS_*` outcomes.
 - **Julia L-BFGS nonlinear-variable hints.** Pounce.jl forwards complete
   structural Hessian support to the native subset API, keeping purely linear
   variables outside the approximation. Unknown evaluator/oracle structure and
@@ -32,7 +46,7 @@ changes.
     in the problem's index style and in the native shapes Python's
     `Problem(complementarity=)` and the `.nl` reader accept. Each
     declaration is checked at once by the classifier the lowering runs and
-    refused with a `POUNCE_CC_ERR_*` code, changing nothing.
+    refused with a `POUNCE_ERR_*` code, changing nothing.
   - *MOI semantics:* `AddPounceComplementsConstraint` takes JuMP's
     `[F, x] ∈ Complements` on a free row and maps it onto the native pairs
     by writing the sign MOI implies into the handle's row bounds (`F >= 0`,
@@ -86,7 +100,7 @@ changes.
     take `tol`, `max_iter`, `time_limit`, `tau`, `tau_max`, `qp_reg`,
     `method` (`ipm` / `active-set`), `hessian_inertia` and the `qp_presolve`,
     `qp_hsde`, `qp_equilibrate`, `qp_crossover` switches. `PounceQpSolve`
-    returns a `POUNCE_QP_STATUS_*`, or a `POUNCE_QP_ERR_*` before any engine
+    returns a `POUNCE_QP_STATUS_*`, or a `POUNCE_ERR_*` before any engine
     runs: an option the engine would drop is refused, not ignored (with a
     cone, `active-set`, `tau`, `tau_max`, every `qp_*` switch and any
     `hessian_inertia` claim), and so is a
@@ -117,7 +131,7 @@ changes.
   `m` and the number of pairs. Both functions take a `flags` argument that
   must be 0 for now, so a later relaxation can be asked for explicitly. An
   update is refused with a
-  `POUNCE_BOUNDS_ERR_*` code, changing nothing, if it would change what a
+  `POUNCE_ERR_*` code, changing nothing, if it would change what a
   declared pair pairs (its paired variable bound and row side), move a
   `Complements` variable to another row of the MOI table, give a
   `Complements` row a finite bound, or contradict a staged SQP working set.

@@ -95,7 +95,7 @@ The C library takes the same pairs, in the same native shapes, on an
 /* QpecSmall, index_style 0: pair row 0 with x1, row 1 with x2. */
 ipindex rows[] = {0, 1}, vars[] = {1, 2}, bad;
 int rc = SetPounceComplementarityPairs(nlp, 2, rows, vars, &bad);
-if (rc != POUNCE_CC_OK) { /* pair `bad` was refused; see rc */ }
+if (rc != POUNCE_OK) { /* pair `bad` was refused; see rc */ }
 ```
 
 `AddPounceComplementarityPair(nlp, row, var)` appends one pair;
@@ -107,10 +107,10 @@ declaration is checked at once against the handle's bounds (those given
 to `CreateIpoptProblem`, as `AddPounceComplementsConstraint` below may have
 edited them), by the same classifier the lowering runs, and a pair
 Python or the `.nl` reader would refuse is refused here with a code:
-`POUNCE_CC_ERR_OUT_OF_RANGE`, `POUNCE_CC_ERR_VAR_ALREADY`,
-`POUNCE_CC_ERR_ROW_ALREADY` or `POUNCE_CC_ERR_SHAPE` (plus
-`POUNCE_CC_ERR_NULL` and `POUNCE_CC_ERR_COUNT` for bad arguments, and
-`POUNCE_CC_ERR_INTERNAL` for an internal error). A refused call leaves the
+`POUNCE_ERR_OUT_OF_RANGE`, `POUNCE_ERR_VAR_ALREADY_PAIRED`,
+`POUNCE_ERR_ROW_ALREADY_PAIRED` or `POUNCE_ERR_SHAPE` (plus
+`POUNCE_ERR_NULL` and `POUNCE_ERR_COUNT` for bad arguments, and
+`POUNCE_ERR_INTERNAL` for an internal error). A refused call leaves the
 declared set as it was. The [C API](c-api.md#complementarity) page has
 every prototype and code; `examples/complementarity.c` in
 `crates/pounce-cinterface` declares, solves and reads back QpecSmall.
@@ -162,7 +162,7 @@ Writing the bound is not a solver trick: `F >= 0` is a constraint of the
 MPCC, and the return code says that it was written. The edits are
 permanent on the handle — clearing or replacing the pairs does not undo
 them. A negative return is a refusal that changes nothing:
-`POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE` (the row already has a side, whether
+`POUNCE_ERR_ROW_NOT_FREE` (the row already has a side, whether
 or not it agrees with the one MOI implies: declare it natively with
 `AddPounceComplementarityPair`), `_ERR_VAR_ALREADY_PAIRED` /
 `_ERR_ROW_ALREADY_PAIRED` (the variable or row is in a declared pair or in

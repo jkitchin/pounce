@@ -1232,6 +1232,17 @@ decision (each function documents its own codes); a wrapper must not keep
 one table across them. Renumbering is free until 0.17 is tagged and
 impossible after, so confirm the decision stands before tagging.
 
+**Superseded before 0.17 (branch `c-api-error-namespace`).** The decision
+above was reversed: the four families are replaced by one `POUNCE_ERR_*`
+namespace in which each value has one meaning everywhere (generic -1..-8,
+pairs from -20, bounds from -40, QP from -60), plus `PounceErrorString`.
+The codes named in this plan are the old per-family ones and their old
+numbers; `crates/pounce-cinterface/src/errors.rs` and `docs/src/c-api.md`,
+"Error codes", are current. Not part of the reversal: the uniform check
+order, since `SetPounceComplementarityPairs` validates pair by pair
+(range, duplicate, shape per pair) rather than check by check as
+`SetPounceBounds` does.
+
 ## 7. Stage 3 and Stage 4 — design and iteration list
 
 ### Stage 3 — matrix-form convex/conic entry

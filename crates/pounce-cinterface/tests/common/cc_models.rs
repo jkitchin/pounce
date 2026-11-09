@@ -271,7 +271,7 @@ impl Model {
                 ptr::null_mut(),
             )
         };
-        assert_eq!(rc, POUNCE_CC_OK);
+        assert_eq!(rc, POUNCE_OK);
     }
 
     pub fn option(&self, key: &str, value: &str) {

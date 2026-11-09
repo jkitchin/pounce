@@ -196,7 +196,7 @@ fn with_pairs() -> IpoptProblem {
     for (r, v) in PAIRS {
         assert_eq!(
             unsafe { AddPounceComplementarityPair(prob, r, v) },
-            POUNCE_CC_OK
+            POUNCE_OK
         );
     }
     prob
@@ -497,7 +497,7 @@ fn no_working_set_is_reported_after_a_driver_solve() {
     for (r, v) in PAIRS {
         assert_eq!(
             unsafe { AddPounceComplementarityPair(prob, r, v) },
-            POUNCE_CC_OK
+            POUNCE_OK
         );
     }
     let mut p = Probe::default();
@@ -535,7 +535,7 @@ fn declare_pairs(prob: IpoptProblem) {
     for (r, v) in PAIRS {
         assert_eq!(
             unsafe { AddPounceComplementarityPair(prob, r, v) },
-            POUNCE_CC_OK
+            POUNCE_OK
         );
     }
 }

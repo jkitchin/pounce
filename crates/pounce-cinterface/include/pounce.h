@@ -42,9 +42,51 @@
 #define POUNCE_VERSION_PATCH 0
 #define POUNCE_VERSION "0.16.0"
 
+/* -----------------------------------------------------------------
+ * Error codes: one namespace for every POUNCE extension
+ *
+ * Each value has exactly one meaning wherever it is returned, so a
+ * wrapper can keep one code-to-message table (PounceErrorString is
+ * that table). Generic codes are -1..-19; each function family has its
+ * own block of 20. A new code is appended inside its block and a
+ * number is never reused. Non-negative returns stay per function: 0 is
+ * POUNCE_OK, and the QP statuses and AddPounceComplementsConstraint
+ * outcomes are results, not errors.
+ * ----------------------------------------------------------------- */
+#define POUNCE_OK                        0
+/* generic, -1..-19 */
+#define POUNCE_ERR_NULL                 -1   /* NULL handle, or a NULL array the call needed */
+#define POUNCE_ERR_COUNT                -2   /* count < 0, > n|m, or inconsistent with a NULL index array */
+#define POUNCE_ERR_OUT_OF_RANGE         -3   /* index outside [0,n) / [0,m) (in index style) */
+#define POUNCE_ERR_DUPLICATE            -4   /* index given twice where each may appear once */
+#define POUNCE_ERR_NAN                  -5   /* a NaN value */
+#define POUNCE_ERR_FLAGS                -6   /* flags has a bit this library does not define */
+#define POUNCE_ERR_ARGUMENT             -7   /* unknown view or cone kind; bad cone dim/alpha; P entries whose sum overflows */
+#define POUNCE_ERR_INTERNAL             -8   /* inconsistent handle or internal error; nothing changed */
+/* complementarity pairs, -20..-39 */
+#define POUNCE_ERR_VAR_ALREADY_PAIRED  -20   /* var in a pair, earlier in this batch, or in an earlier accepted call */
+#define POUNCE_ERR_ROW_ALREADY_PAIRED  -21   /* row in a pair, earlier in this batch, or in an earlier accepted call */
+#define POUNCE_ERR_SHAPE               -22   /* neither one-sided, one-sided+bound, nor mixed */
+#define POUNCE_ERR_ROW_NOT_FREE        -23   /* a Complements row has / would get a finite bound */
+#define POUNCE_ERR_VAR_BOUNDS          -24   /* var bounds NaN or crossed (l > u) */
+/* bound updates, -40..-59 */
+#define POUNCE_ERR_PAIR_CHANGED        -40   /* a declared pair would pair different sides */
+#define POUNCE_ERR_COMPLEMENTS_CLASS   -41   /* a Complements variable would change table row */
+#define POUNCE_ERR_WORKING_SET         -42   /* the staged working set would be contradicted */
+/* QP handle, -60..-79 */
+#define POUNCE_ERR_INCOMPLETE          -60   /* no objective, or declared rows never set */
+#define POUNCE_ERR_CONES               -61   /* cones do not partition the m_ineq rows; PSD mixed with exp/pow */
+#define POUNCE_ERR_OPTIONS             -62   /* a switch the engine would drop; with cones: active-set, tau, tau_max, qp_*, hessian_inertia other than auto */
+#define POUNCE_ERR_INDEFINITE          -63   /* method=ipm and P not certified PSD */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/** The message for a POUNCE_OK / POUNCE_ERR_* code: a static string the
+ *  caller must not free, "unknown error code" for any other value, never
+ *  NULL. Function-specific non-negative results read as unknown. */
+const char* PounceErrorString(int code);
 
 /* Scalar typedefs — match upstream Ipopt for binary compatibility. */
 typedef double ipnumber;
@@ -668,7 +710,7 @@ Bool IpoptClearNonlinearVariables(IpoptProblem ipopt_problem);
  *                       (the row's side picks the bound in the pair);
  *   mixed               the variable is boxed with x_L < x_U, the row free.
  * Anything else (a boxed or equality row, both sides free, a fixed
- * variable with a free row, ...) is refused with POUNCE_CC_ERR_SHAPE.
+ * variable with a free row, ...) is refused with POUNCE_ERR_SHAPE.
  * Bounds at or beyond +-1e19 are infinite. See docs/src/complementarity.md.
  *
  * Indices are in the problem's index style (the index_style given to
@@ -693,16 +735,8 @@ Bool IpoptClearNonlinearVariables(IpoptProblem ipopt_problem);
  * See docs/src/c-api.md, "Matching the CLI".
  * examples/complementarity.c uses every function below.
  * ------------------------------------------------------------------- */
-#define POUNCE_CC_OK                   0
-#define POUNCE_CC_ERR_NULL            -1   /* NULL handle, or NULL array with n_pairs > 0 */
-#define POUNCE_CC_ERR_OUT_OF_RANGE    -2   /* row or var outside [0,m) / [0,n) (in index style) */
-#define POUNCE_CC_ERR_VAR_ALREADY     -3   /* variable already in a pair (declared or in this batch) */
-#define POUNCE_CC_ERR_ROW_ALREADY     -4   /* row already in a pair */
-#define POUNCE_CC_ERR_SHAPE           -5   /* neither one-sided, one-sided+bound, nor mixed */
-#define POUNCE_CC_ERR_COUNT           -6   /* n_pairs < 0 */
-#define POUNCE_CC_ERR_INTERNAL        -7   /* internal error caught at the boundary */
 
-/** Append one pair. Returns POUNCE_CC_OK or a POUNCE_CC_ERR_* code. */
+/** Append one pair. Returns POUNCE_OK or a POUNCE_ERR_* code. */
 int AddPounceComplementarityPair(
     IpoptProblem ipopt_problem,
     ipindex      row,
@@ -715,8 +749,8 @@ int AddPounceComplementarityPair(
  * replaces) and stored only if every pair passes. n_pairs == 0 clears the
  * set (rows/vars may then be NULL). `bad_index` may be NULL; otherwise it
  * receives the batch position of the first refused pair (the second
- * occurrence, for a duplicate), or -1 on success, POUNCE_CC_ERR_NULL and
- * POUNCE_CC_ERR_COUNT.
+ * occurrence, for a duplicate), or -1 on success, POUNCE_ERR_NULL and
+ * POUNCE_ERR_COUNT.
  */
 int SetPounceComplementarityPairs(
     IpoptProblem   ipopt_problem,
@@ -787,13 +821,6 @@ Bool GetPounceComplementarityPairs(
 #define POUNCE_COMPLEMENTS_PAIR_UPPER              2
 #define POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR       3
 #define POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR       4
-#define POUNCE_COMPLEMENTS_ERR_NULL               -1   /* NULL handle */
-#define POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE       -2   /* row or var outside [0,m) / [0,n) (in index style) */
-#define POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED -3   /* var in a pair or an earlier accepted call */
-#define POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED -4   /* row in a pair or an earlier accepted call */
-#define POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE       -5   /* row has a finite bound (incl. one written here) */
-#define POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS         -6   /* var bounds NaN or crossed (l > u) */
-#define POUNCE_COMPLEMENTS_ERR_INTERNAL           -7   /* inconsistent handle or internal error; nothing changed */
 
 /** Declare [F, x] in Complements for (row, var); see the table above. A
  *  non-negative return is success, a negative one a refusal. */
@@ -817,7 +844,7 @@ int AddPounceComplementsConstraint(
  * Sparse: (x_idx[k], x_L[k], x_U[k]) for k < nx and (g_idx[k], g_L[k],
  * g_U[k]) for k < ng, indices in the problem's index style. A NULL index
  * array with the full count (n or m) is dense; with any other nonzero
- * count it is POUNCE_BOUNDS_ERR_COUNT, as is a count above n (or m), which
+ * count it is POUNCE_ERR_COUNT, as is a count above n (or m), which
  * must repeat an index. A NULL value array leaves that side
  * of the named entries unchanged. Cost: O(nx + ng + pairs touched),
  * independent of n, m and the number of pairs.
@@ -825,28 +852,28 @@ int AddPounceComplementsConstraint(
  * flags must be 0 (both functions). No bit is defined yet; it is there so
  * that a later relaxation of a refusal below can be asked for, rather than
  * changing what an existing call means. A bit this library does not define
- * is POUNCE_BOUNDS_ERR_FLAGS, so an older library never ignores one.
+ * is POUNCE_ERR_FLAGS, so an older library never ignores one.
  *
  * All or nothing. The batch is checked against the bounds it would
  * install, in this order, and a refused call changes nothing:
  *   1. the handle, then flags (and GetPounceBounds' view), then counts; then per entry, variables first, in batch order: index in
- *      range, not already in the batch (POUNCE_BOUNDS_ERR_DUPLICATE), no NaN;
+ *      range, not already in the batch (POUNCE_ERR_DUPLICATE), no NaN;
  *   2. per entry in batch order, for a variable or row in a declared pair
  *      or a Complements declaration:
  *      - a Complements variable keeps its row of the MOI table (lower-only,
  *        upper-only, boxed l < u, fixed, free), else
- *        POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS;
+ *        POUNCE_ERR_COMPLEMENTS_CLASS;
  *      - a Complements row stays free in the caller's bounds, else
- *        POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW;
+ *        POUNCE_ERR_ROW_NOT_FREE;
  *      - a declared pair keeps a native shape that pairs the same
  *        variable bound (lower/upper) with the same row side (lower/upper),
- *        or stays mixed, else POUNCE_BOUNDS_ERR_PAIR_CHANGED. Values may
+ *        or stays mixed, else POUNCE_ERR_PAIR_CHANGED. Values may
  *        move, and the variable may gain or lose the bound that is not in
  *        the pair. (A one-sided pair x >= l _|_ g <= u whose x gains an
  *        upper bound would re-classify as pairing g <= u with x <= x_U: a
  *        different condition, so it is refused.)
  *   3. a working set staged by IpoptSetWarmStartWorkingSet stays true at
- *      the entries touched, else POUNCE_BOUNDS_ERR_WORKING_SET.
+ *      the entries touched, else POUNCE_ERR_WORKING_SET.
  * Crossed bounds (l > u) are not refused here; the solve reports them, as
  * for CreateIpoptProblem. To change what a pair or a Complements
  * declaration means, build a new problem.
@@ -870,24 +897,11 @@ int AddPounceComplementsConstraint(
  * describes that solve. Sessions (IpoptCreateSolver) own their problem and
  * take no updates.
  * ------------------------------------------------------------------- */
-#define POUNCE_BOUNDS_OK                       0
-#define POUNCE_BOUNDS_ERR_NULL                -1   /* NULL handle */
-#define POUNCE_BOUNDS_ERR_COUNT               -2   /* count < 0, setter count > n|m, or NULL index array with count not 0, n|m */
-#define POUNCE_BOUNDS_ERR_OUT_OF_RANGE        -3   /* index outside [0,n) / [0,m) (in index style) */
-#define POUNCE_BOUNDS_ERR_DUPLICATE           -4   /* index twice on one side of the batch */
-#define POUNCE_BOUNDS_ERR_NAN                 -5   /* a NaN bound */
-#define POUNCE_BOUNDS_ERR_PAIR_CHANGED        -6   /* a declared pair would pair different sides */
-#define POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS   -7   /* a Complements variable would change table row */
-#define POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW     -8   /* a Complements row given a finite bound */
-#define POUNCE_BOUNDS_ERR_WORKING_SET         -9   /* the staged working set would be contradicted */
-#define POUNCE_BOUNDS_ERR_VIEW               -10   /* GetPounceBounds: unknown view */
-#define POUNCE_BOUNDS_ERR_INTERNAL           -11   /* inconsistent handle or internal error; nothing changed */
-#define POUNCE_BOUNDS_ERR_FLAGS              -12   /* flags has a bit this library does not define */
 #define POUNCE_BOUNDS_VIEW_USER                0
 #define POUNCE_BOUNDS_VIEW_EFFECTIVE           1
 
-/** Update bounds in place; see above. Returns POUNCE_BOUNDS_OK or a
- *  POUNCE_BOUNDS_ERR_* code. */
+/** Update bounds in place; see above. Returns POUNCE_OK or a
+ *  POUNCE_ERR_* code. */
 int SetPounceBounds(
     IpoptProblem    ipopt_problem,
     ipindex         nx,
@@ -903,7 +917,7 @@ int SetPounceBounds(
 );
 
 /** Read bounds in `view` (POUNCE_BOUNDS_VIEW_USER or _EFFECTIVE); see
- *  above. Returns POUNCE_BOUNDS_OK or a POUNCE_BOUNDS_ERR_* code. */
+ *  above. Returns POUNCE_OK or a POUNCE_ERR_* code. */
 int GetPounceBounds(
     IpoptProblem    ipopt_problem,
     ipindex         nx,
@@ -1361,7 +1375,7 @@ Bool IpoptSolverReducedHessian(
  *
  * PSD screen (gh#112). Under method=ipm (with or without cones) a P
  * that is not certified
- * positive semidefinite is refused (POUNCE_QP_ERR_INDEFINITE). With
+ * positive semidefinite is refused (POUNCE_ERR_INDEFINITE). With
  * hessian_inertia=auto (the default) the verdict comes from
  * pounce_convex::certify_psd_lower_triangle, as in the CLI's dispatch:
  * P passes when the inertia of P + t*I has no negative eigenvalue, at
@@ -1374,7 +1388,7 @@ Bool IpoptSolverReducedHessian(
  * disagree; this entry errs toward refusing. Without cones,
  * hessian_inertia=psd, indefinite or unknown replaces the verdict with
  * the caller's claim; with cones any value but auto is refused
- * (POUNCE_QP_ERR_OPTIONS), since solve_socp always screens.
+ * (POUNCE_ERR_OPTIONS), since solve_socp always screens.
  * Under method=active-set the verdict is handed to the engine
  * (indefinite P is solved to a local point, not refused).
  *
@@ -1395,14 +1409,6 @@ typedef struct PounceQpInfo* PounceQp;
 #define POUNCE_QP_STATUS_TIME_LIMIT          5
 #define POUNCE_QP_STATUS_NUMERICAL_FAILURE   6
 
-/* Negative returns of PounceQpSolve and PounceQpAddCone. */
-#define POUNCE_QP_ERR_NULL        -1   /* NULL handle */
-#define POUNCE_QP_ERR_ARGUMENT    -2   /* bad cone kind/dim/alpha; P entries whose sum overflows */
-#define POUNCE_QP_ERR_INCOMPLETE  -3   /* no objective, or declared rows never set */
-#define POUNCE_QP_ERR_CONES       -4   /* cones do not partition the m_ineq rows; PSD mixed with exp/pow */
-#define POUNCE_QP_ERR_OPTIONS     -5   /* a switch the engine would drop; with cones: active-set, tau, tau_max, qp_*, hessian_inertia other than auto */
-#define POUNCE_QP_ERR_INDEFINITE  -6   /* method=ipm and P not certified PSD */
-#define POUNCE_QP_ERR_INTERNAL    -7   /* internal error caught at the boundary */
 
 /* PounceQpAddCone kinds. */
 #define POUNCE_CONE_NONNEG  0   /* dim rows, dim >= 0: s >= 0 */
@@ -1480,8 +1486,8 @@ Bool PounceQpSetInequalities(PounceQp qp, ipindex nnz_g, const ipindex* g_row,
 Bool PounceQpSetBounds(PounceQp qp, const ipnumber* lb, const ipnumber* ub);
 
 /** Append a cone (POUNCE_CONE_*) to the partition of the G rows, in
- *  order. Returns its 0-based position, or POUNCE_QP_ERR_NULL /
- *  POUNCE_QP_ERR_ARGUMENT. alpha is read for POUNCE_CONE_POW only. */
+ *  order. Returns its 0-based position, or POUNCE_ERR_NULL /
+ *  POUNCE_ERR_ARGUMENT. alpha is read for POUNCE_CONE_POW only. */
 int PounceQpAddCone(PounceQp qp, int kind, ipindex dim, ipnumber alpha);
 
 /** tol (0,1); max_iter (whole, >= 1); time_limit (seconds, >= 0);
@@ -1494,7 +1500,7 @@ Bool PounceQpSetNumOption(PounceQp qp, const char* key, ipnumber value);
  *  no. FALSE on an unknown key or value. */
 Bool PounceQpSetStrOption(PounceQp qp, const char* key, const char* value);
 
-/** POUNCE_QP_STATUS_* (>= 0), or POUNCE_QP_ERR_* (< 0) before any
+/** POUNCE_QP_STATUS_* (>= 0), or POUNCE_ERR_* (< 0) before any
  *  engine runs. Discards the previous result either way. */
 int PounceQpSolve(PounceQp qp);
 

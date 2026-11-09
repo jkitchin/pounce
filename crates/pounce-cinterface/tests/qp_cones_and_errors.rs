@@ -205,7 +205,7 @@ fn indefinite() -> Qp {
 #[test]
 fn indefinite_p_is_refused_under_the_ipm() {
     let qp = indefinite();
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_INDEFINITE);
+    assert_eq!(qp.solve(), POUNCE_ERR_INDEFINITE);
     assert!(!qp.has_result());
 }
 
@@ -213,7 +213,7 @@ fn indefinite_p_is_refused_under_the_ipm() {
 fn indefinite_p_is_refused_under_an_explicit_ipm() {
     let qp = indefinite();
     assert_eq!(qp.str_opt("method", "ipm"), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_INDEFINITE);
+    assert_eq!(qp.solve(), POUNCE_ERR_INDEFINITE);
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn claimed_indefinite_is_refused_under_the_ipm() {
     let qp = Qp::new(1, 0, 0, 0);
     assert_eq!(qp.objective(&[(0, 0, 1.0)], &[-1.0]), TRUE);
     assert_eq!(qp.str_opt("hessian_inertia", "indefinite"), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_INDEFINITE);
+    assert_eq!(qp.solve(), POUNCE_ERR_INDEFINITE);
 }
 
 /// `unknown` and `psd` claims pass the IPM screen (the screen refuses only
@@ -250,7 +250,7 @@ fn claimed_unknown_and_psd_pass_the_ipm_screen() {
     let qp = indefinite();
     assert_eq!(qp.str_opt("hessian_inertia", "psd"), TRUE);
     assert_eq!(qp.str_opt("hessian_inertia", "auto"), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_INDEFINITE);
+    assert_eq!(qp.solve(), POUNCE_ERR_INDEFINITE);
 }
 
 /// The screen also guards the conic path (`solve_socp` runs Python's check
@@ -267,7 +267,7 @@ fn indefinite_p_is_refused_with_cones() {
         TRUE
     );
     assert_eq!(qp.cone(POUNCE_CONE_NONNEG, 2, 0.0), 0);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_INDEFINITE);
+    assert_eq!(qp.solve(), POUNCE_ERR_INDEFINITE);
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +285,7 @@ fn cones_covering_fewer_rows_than_m_ineq_are_refused() {
         TRUE
     );
     assert_eq!(short.cone(POUNCE_CONE_NONNEG, 2, 0.0), 0);
-    assert_eq!(short.solve(), POUNCE_QP_ERR_CONES);
+    assert_eq!(short.solve(), POUNCE_ERR_CONES);
     assert!(!short.has_result());
     // Control: the covering model solves.
     assert_eq!(qp.solve(), POUNCE_QP_STATUS_OPTIMAL);
@@ -295,7 +295,7 @@ fn cones_covering_fewer_rows_than_m_ineq_are_refused() {
 fn cones_covering_more_rows_than_m_ineq_are_refused() {
     let qp = nonneg_model();
     assert_eq!(qp.cone(POUNCE_CONE_SOC, 1, 0.0), 1);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_CONES);
+    assert_eq!(qp.solve(), POUNCE_ERR_CONES);
 }
 
 /// An exp cone is always 3 rows: one declared on 2 rows does not cover them.
@@ -305,7 +305,7 @@ fn an_exp_cone_on_too_few_rows_is_refused() {
     assert_eq!(qp.objective(&[], &[1.0]), TRUE);
     assert_eq!(qp.inequalities(&[], &[0.0, 0.0]), TRUE);
     assert_eq!(qp.cone(POUNCE_CONE_EXP, 3, 0.0), 0);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_CONES);
+    assert_eq!(qp.solve(), POUNCE_ERR_CONES);
 }
 
 /// A PSD cone of order `k` spans `k(k+1)/2` rows, not `k`.
@@ -315,7 +315,7 @@ fn a_psd_cone_counts_svec_rows() {
     assert_eq!(qp.objective(&[], &[1.0]), TRUE);
     assert_eq!(qp.inequalities(&[], &[0.0, 0.0]), TRUE);
     assert_eq!(qp.cone(POUNCE_CONE_PSD, 2, 0.0), 0);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_CONES);
+    assert_eq!(qp.solve(), POUNCE_ERR_CONES);
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn psd_mixed_with_a_power_cone_is_refused() {
     assert_eq!(qp.inequalities(&[], &[0.0; 4]), TRUE);
     assert_eq!(qp.cone(POUNCE_CONE_PSD, 1, 0.0), 0);
     assert_eq!(qp.cone(POUNCE_CONE_POW, 3, 0.5), 1);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_CONES);
+    assert_eq!(qp.solve(), POUNCE_ERR_CONES);
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn psd_mixed_with_an_exp_cone_is_refused() {
     assert_eq!(qp.inequalities(&[], &[0.0; 4]), TRUE);
     assert_eq!(qp.cone(POUNCE_CONE_EXP, 3, 0.0), 0);
     assert_eq!(qp.cone(POUNCE_CONE_PSD, 1, 0.0), 1);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_CONES);
+    assert_eq!(qp.solve(), POUNCE_ERR_CONES);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +345,7 @@ fn psd_mixed_with_an_exp_cone_is_refused() {
 fn refused(qp: &Qp, kind: i32, dim: Index, alpha: f64) {
     assert_eq!(
         qp.cone(kind, dim, alpha),
-        POUNCE_QP_ERR_ARGUMENT,
+        POUNCE_ERR_ARGUMENT,
         "kind {kind} dim {dim} alpha {alpha}"
     );
 }
@@ -417,7 +417,7 @@ fn unknown_cone_kind_is_refused() {
 fn add_cone_on_a_null_handle_is_refused() {
     assert_eq!(
         unsafe { PounceQpAddCone(null_mut(), POUNCE_CONE_NONNEG, 1, 0.0) },
-        POUNCE_QP_ERR_NULL
+        POUNCE_ERR_NULL
     );
 }
 
@@ -467,7 +467,7 @@ fn each_null_refused(
         }
         assert_eq!(
             qp.solve(),
-            POUNCE_QP_ERR_INCOMPLETE,
+            POUNCE_ERR_INCOMPLETE,
             "NULL {what}: nothing set"
         );
     }
@@ -568,21 +568,21 @@ fn nan_bound_is_refused_on_either_side() {
 #[test]
 fn no_objective_is_incomplete() {
     let qp = Qp::new(1, 0, 0, 0);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_INCOMPLETE);
+    assert_eq!(qp.solve(), POUNCE_ERR_INCOMPLETE);
 }
 
 #[test]
 fn equality_rows_never_set_are_incomplete() {
     let qp = Qp::new(1, 1, 0, 0);
     assert_eq!(qp.objective(&[], &[1.0]), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_INCOMPLETE);
+    assert_eq!(qp.solve(), POUNCE_ERR_INCOMPLETE);
 }
 
 #[test]
 fn inequality_rows_never_set_are_incomplete() {
     let qp = Qp::new(1, 0, 1, 0);
     assert_eq!(qp.objective(&[], &[1.0]), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_INCOMPLETE);
+    assert_eq!(qp.solve(), POUNCE_ERR_INCOMPLETE);
 }
 
 // ---------------------------------------------------------------------------
@@ -700,7 +700,7 @@ fn write_solve_report_before_solve_is_false() {
 fn conic_refuses(set: impl Fn(&Qp) -> Bool) {
     let qp = nonneg_model();
     assert_eq!(set(&qp), TRUE, "the option itself is valid");
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(qp.solve(), POUNCE_ERR_OPTIONS);
     assert!(!qp.has_result());
 }
 
@@ -771,7 +771,7 @@ fn indefinite_with_a_cone() -> Qp {
 fn conic_refuses_hessian_inertia_unknown() {
     let qp = indefinite_with_a_cone();
     assert_eq!(qp.str_opt("hessian_inertia", "unknown"), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(qp.solve(), POUNCE_ERR_OPTIONS);
     assert!(!qp.has_result());
     conic_refuses(|q| q.str_opt("hessian_inertia", "unknown"));
 }
@@ -780,7 +780,7 @@ fn conic_refuses_hessian_inertia_unknown() {
 fn conic_refuses_hessian_inertia_indefinite() {
     let qp = indefinite_with_a_cone();
     assert_eq!(qp.str_opt("hessian_inertia", "indefinite"), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(qp.solve(), POUNCE_ERR_OPTIONS);
     conic_refuses(|q| q.str_opt("hessian_inertia", "indefinite"));
 }
 
@@ -788,7 +788,7 @@ fn conic_refuses_hessian_inertia_indefinite() {
 fn conic_refuses_hessian_inertia_psd() {
     let qp = indefinite_with_a_cone();
     assert_eq!(qp.str_opt("hessian_inertia", "psd"), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(qp.solve(), POUNCE_ERR_OPTIONS);
     conic_refuses(|q| q.str_opt("hessian_inertia", "psd"));
 }
 
@@ -803,7 +803,7 @@ fn conic_accepts_hessian_inertia_auto() {
     assert_eq!(qp.solve(), POUNCE_QP_STATUS_OPTIMAL);
     let qp = indefinite_with_a_cone();
     assert_eq!(qp.str_opt("hessian_inertia", "auto"), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_INDEFINITE);
+    assert_eq!(qp.solve(), POUNCE_ERR_INDEFINITE);
 }
 
 /// The options `solve_socp` does take reach the conic path, and an explicit
@@ -839,21 +839,21 @@ fn box_qp() -> Qp {
 fn active_set_refuses_qp_reg() {
     let qp = box_qp();
     assert_eq!(qp.num_opt("qp_reg", 1e-10), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(qp.solve(), POUNCE_ERR_OPTIONS);
 }
 
 #[test]
 fn active_set_refuses_qp_hsde() {
     let qp = box_qp();
     assert_eq!(qp.str_opt("qp_hsde", "no"), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(qp.solve(), POUNCE_ERR_OPTIONS);
 }
 
 #[test]
 fn active_set_refuses_qp_crossover() {
     let qp = box_qp();
     assert_eq!(qp.str_opt("qp_crossover", "no"), TRUE);
-    assert_eq!(qp.solve(), POUNCE_QP_ERR_OPTIONS);
+    assert_eq!(qp.solve(), POUNCE_ERR_OPTIONS);
 }
 
 #[test]

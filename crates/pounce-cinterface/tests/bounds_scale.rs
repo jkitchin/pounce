@@ -139,10 +139,7 @@ fn declaring_pairs_one_at_a_time_costs_o1_per_call() {
     // with `validate_pairs`: O(P) per call, O(P^2) for P declarations.
     assert_flat("AddPounceComplementarityPair", 1000, false, |p, k| {
         for j in 0..k as Index {
-            assert_eq!(
-                unsafe { AddPounceComplementarityPair(p, j, j) },
-                POUNCE_CC_OK
-            );
+            assert_eq!(unsafe { AddPounceComplementarityPair(p, j, j) }, POUNCE_OK);
         }
     });
 }
@@ -170,10 +167,7 @@ fn bound_updates_cost_o1_per_entry() {
     // touch a declared pair.
     assert_flat("SetPounceBounds", 1000, false, |p, k| {
         for j in (0..k as Index).step_by(2) {
-            assert_eq!(
-                unsafe { AddPounceComplementarityPair(p, j, j) },
-                POUNCE_CC_OK
-            );
+            assert_eq!(unsafe { AddPounceComplementarityPair(p, j, j) }, POUNCE_OK);
         }
         for j in 0..k as Index {
             let (xi, xl, xu) = ([j], [0.0], [2.0]);
@@ -193,7 +187,7 @@ fn bound_updates_cost_o1_per_entry() {
                     std::ptr::null_mut(),
                 )
             };
-            assert_eq!(code, POUNCE_BOUNDS_OK);
+            assert_eq!(code, POUNCE_OK);
         }
     });
 }

@@ -286,7 +286,7 @@ pub fn solve_with(
             &mut bad,
         )
     };
-    assert_eq!(rc, POUNCE_CC_OK, "pairs refused at {bad}");
+    assert_eq!(rc, POUNCE_OK, "pairs refused at {bad}");
     let mut g = vec![0.0; m];
     let mut obj = 0.0;
     let (mut mult_g, mut mz_l, mut mz_u) = (vec![0.0; m], vec![0.0; n], vec![0.0; n]);

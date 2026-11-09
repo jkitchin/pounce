@@ -161,14 +161,6 @@ fn header_version_defines_match_the_crate() {
 fn header_complementarity_codes_match_the_implementation() {
     use pounce_cinterface::*;
     let rust: HashMap<&str, i64> = [
-        ("POUNCE_CC_OK", POUNCE_CC_OK),
-        ("POUNCE_CC_ERR_NULL", POUNCE_CC_ERR_NULL),
-        ("POUNCE_CC_ERR_OUT_OF_RANGE", POUNCE_CC_ERR_OUT_OF_RANGE),
-        ("POUNCE_CC_ERR_VAR_ALREADY", POUNCE_CC_ERR_VAR_ALREADY),
-        ("POUNCE_CC_ERR_ROW_ALREADY", POUNCE_CC_ERR_ROW_ALREADY),
-        ("POUNCE_CC_ERR_SHAPE", POUNCE_CC_ERR_SHAPE),
-        ("POUNCE_CC_ERR_COUNT", POUNCE_CC_ERR_COUNT),
-        ("POUNCE_CC_ERR_INTERNAL", POUNCE_CC_ERR_INTERNAL),
         ("POUNCE_CC_CLASS_S", POUNCE_CC_CLASS_S),
         ("POUNCE_CC_CLASS_W", POUNCE_CC_CLASS_W),
         ("POUNCE_CC_CLASS_NONE", POUNCE_CC_CLASS_NONE),
@@ -213,31 +205,6 @@ fn header_complementarity_codes_match_the_implementation() {
         (
             "POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR",
             POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR,
-        ),
-        ("POUNCE_COMPLEMENTS_ERR_NULL", POUNCE_COMPLEMENTS_ERR_NULL),
-        (
-            "POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE",
-            POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE,
-        ),
-        (
-            "POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED",
-            POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED,
-        ),
-        (
-            "POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED",
-            POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED,
-        ),
-        (
-            "POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE",
-            POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE,
-        ),
-        (
-            "POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS",
-            POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS,
-        ),
-        (
-            "POUNCE_COMPLEMENTS_ERR_INTERNAL",
-            POUNCE_COMPLEMENTS_ERR_INTERNAL,
         ),
     ]
     .into_iter()
@@ -315,13 +282,6 @@ fn header_qp_codes_match_the_implementation() {
             "POUNCE_QP_STATUS_NUMERICAL_FAILURE",
             POUNCE_QP_STATUS_NUMERICAL_FAILURE,
         ),
-        ("POUNCE_QP_ERR_NULL", POUNCE_QP_ERR_NULL),
-        ("POUNCE_QP_ERR_ARGUMENT", POUNCE_QP_ERR_ARGUMENT),
-        ("POUNCE_QP_ERR_INCOMPLETE", POUNCE_QP_ERR_INCOMPLETE),
-        ("POUNCE_QP_ERR_CONES", POUNCE_QP_ERR_CONES),
-        ("POUNCE_QP_ERR_OPTIONS", POUNCE_QP_ERR_OPTIONS),
-        ("POUNCE_QP_ERR_INDEFINITE", POUNCE_QP_ERR_INDEFINITE),
-        ("POUNCE_QP_ERR_INTERNAL", POUNCE_QP_ERR_INTERNAL),
         ("POUNCE_CONE_NONNEG", POUNCE_CONE_NONNEG),
         ("POUNCE_CONE_SOC", POUNCE_CONE_SOC),
         ("POUNCE_CONE_EXP", POUNCE_CONE_EXP),
@@ -387,34 +347,6 @@ fn header_qp_codes_match_the_implementation() {
 fn header_bounds_codes_match_the_implementation() {
     use pounce_cinterface::*;
     let rust: HashMap<&str, i64> = [
-        ("POUNCE_BOUNDS_OK", POUNCE_BOUNDS_OK),
-        ("POUNCE_BOUNDS_ERR_NULL", POUNCE_BOUNDS_ERR_NULL),
-        ("POUNCE_BOUNDS_ERR_COUNT", POUNCE_BOUNDS_ERR_COUNT),
-        (
-            "POUNCE_BOUNDS_ERR_OUT_OF_RANGE",
-            POUNCE_BOUNDS_ERR_OUT_OF_RANGE,
-        ),
-        ("POUNCE_BOUNDS_ERR_DUPLICATE", POUNCE_BOUNDS_ERR_DUPLICATE),
-        ("POUNCE_BOUNDS_ERR_NAN", POUNCE_BOUNDS_ERR_NAN),
-        (
-            "POUNCE_BOUNDS_ERR_PAIR_CHANGED",
-            POUNCE_BOUNDS_ERR_PAIR_CHANGED,
-        ),
-        (
-            "POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS",
-            POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS,
-        ),
-        (
-            "POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW",
-            POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW,
-        ),
-        (
-            "POUNCE_BOUNDS_ERR_WORKING_SET",
-            POUNCE_BOUNDS_ERR_WORKING_SET,
-        ),
-        ("POUNCE_BOUNDS_ERR_VIEW", POUNCE_BOUNDS_ERR_VIEW),
-        ("POUNCE_BOUNDS_ERR_INTERNAL", POUNCE_BOUNDS_ERR_INTERNAL),
-        ("POUNCE_BOUNDS_ERR_FLAGS", POUNCE_BOUNDS_ERR_FLAGS),
         ("POUNCE_BOUNDS_VIEW_USER", POUNCE_BOUNDS_VIEW_USER),
         ("POUNCE_BOUNDS_VIEW_EFFECTIVE", POUNCE_BOUNDS_VIEW_EFFECTIVE),
     ]
@@ -453,5 +385,106 @@ fn header_bounds_codes_match_the_implementation() {
             rust.contains_key(name.as_str()),
             "pounce.h defines `{name}` but this test does not know the Rust constant"
         );
+    }
+}
+
+/// The shared error namespace: every `#define POUNCE_OK` / `POUNCE_ERR_*`
+/// in the header against `POUNCE_ERROR_CODES`, the table
+/// `PounceErrorString` reads, both ways. So a code defined on one side
+/// only, renumbered on one side, or left without a message fails here.
+/// Each value must also be unique and sit in its name's block, and each
+/// message must be distinct, so the code-to-text map is a bijection.
+#[test]
+fn header_error_codes_match_the_implementation() {
+    use pounce_cinterface::*;
+    use std::ffi::CStr;
+
+    let header = include_str!("../include/pounce.h");
+    let mut defined: HashMap<String, i64> = HashMap::new();
+    for line in header.lines() {
+        let Some(rest) = line.trim().strip_prefix("#define ") else {
+            continue;
+        };
+        let mut words = rest.split_whitespace();
+        let Some(name) = words
+            .next()
+            .filter(|n| *n == "POUNCE_OK" || n.starts_with("POUNCE_ERR_"))
+        else {
+            continue;
+        };
+        let value: i64 = words
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("`#define {name}` has no integer value"));
+        assert!(
+            defined.insert(name.to_string(), value).is_none(),
+            "pounce.h defines `{name}` twice"
+        );
+    }
+    assert!(defined.len() > 1, "no POUNCE_ERR_* defines found");
+
+    let rust: HashMap<&str, i64> = POUNCE_ERROR_CODES
+        .iter()
+        .map(|(n, c, _)| (*n, i64::from(*c)))
+        .collect();
+    assert_eq!(rust.len(), POUNCE_ERROR_CODES.len(), "a name listed twice");
+    for (name, value) in &rust {
+        assert_eq!(
+            defined.get(*name),
+            Some(value),
+            "pounce.h `{name}` disagrees with the Rust table's {value} (or is missing)"
+        );
+    }
+    for name in defined.keys() {
+        assert!(
+            rust.contains_key(name.as_str()),
+            "pounce.h defines `{name}` but POUNCE_ERROR_CODES has no entry (no message)"
+        );
+    }
+
+    let mut values = std::collections::HashSet::new();
+    let mut messages = std::collections::HashSet::new();
+    for &(name, code, msg) in POUNCE_ERROR_CODES {
+        assert!(values.insert(code), "`{name}` reuses the value {code}");
+        let text = unsafe { CStr::from_ptr(PounceErrorString(code)) };
+        assert_eq!(
+            text, msg,
+            "PounceErrorString({code}) is not `{name}`'s text"
+        );
+        assert_ne!(text.to_bytes(), b"unknown error code");
+        assert!(messages.insert(msg), "`{name}` shares its message");
+        let block = match name {
+            "POUNCE_OK" => 0..=0,
+            "POUNCE_ERR_NULL"
+            | "POUNCE_ERR_COUNT"
+            | "POUNCE_ERR_OUT_OF_RANGE"
+            | "POUNCE_ERR_DUPLICATE"
+            | "POUNCE_ERR_NAN"
+            | "POUNCE_ERR_FLAGS"
+            | "POUNCE_ERR_ARGUMENT"
+            | "POUNCE_ERR_INTERNAL" => -19..=-1,
+            "POUNCE_ERR_VAR_ALREADY_PAIRED"
+            | "POUNCE_ERR_ROW_ALREADY_PAIRED"
+            | "POUNCE_ERR_SHAPE"
+            | "POUNCE_ERR_ROW_NOT_FREE"
+            | "POUNCE_ERR_VAR_BOUNDS" => -39..=-20,
+            "POUNCE_ERR_PAIR_CHANGED"
+            | "POUNCE_ERR_COMPLEMENTS_CLASS"
+            | "POUNCE_ERR_WORKING_SET" => -59..=-40,
+            "POUNCE_ERR_INCOMPLETE"
+            | "POUNCE_ERR_CONES"
+            | "POUNCE_ERR_OPTIONS"
+            | "POUNCE_ERR_INDEFINITE" => -79..=-60,
+            other => panic!("`{other}` is in no block: assign it one here"),
+        };
+        assert!(
+            block.contains(&code),
+            "`{name}` = {code} is outside its block"
+        );
+    }
+    // error-path: PounceErrorString
+    for unknown in [1, 7, -9, -19, -25, -1000, i32::MIN, i32::MAX] {
+        let text = unsafe { CStr::from_ptr(PounceErrorString(unknown)) };
+        assert_eq!(text.to_bytes(), b"unknown error code", "code {unknown}");
     }
 }
