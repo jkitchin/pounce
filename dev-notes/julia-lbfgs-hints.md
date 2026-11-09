@@ -40,8 +40,9 @@ lists, freed handles, and mutation during a solve are rejected.
 
 ## Evidence
 
-Implementation: `901c8a9c23db876e316e7b8cc9d54998ec647c85`. Final tests use the
-test revision `ad06a4ebab4538f3984e71d66abdbab49f26e3f3`.
+Implementation: `901c8a9c23db876e316e7b8cc9d54998ec647c85`. Initial validation
+used test revision `ad06a4ebab4538f3984e71d66abdbab49f26e3f3`; subsequent
+regression-test promotion is recorded below.
 
 The integration fixture reuses the model from
 `crates/pounce-cinterface/tests/nonlinear_variables_mask.rs`, with its nonlinear
@@ -61,7 +62,13 @@ optional symbols are simulated by substituting the lookup handle while the
 required bindings continue to use the real solver library; that path runs a
 real full-space solve.
 
-## Local validation
+The permanent suite also checks fixed nonlinear columns (including an empty
+reduced nonlinear space), switching Hessian modes, enabling the full-space
+override after a hinted solve, and adding a first-order-only oracle after a
+hinted solve. These cases verify that rebuilt handles discard stale declarations
+and that fixed-column compression preserves the intended subset.
+
+## Initial local validation
 
 At wrapper/test revision `ad06a4ebab4538f3984e71d66abdbab49f26e3f3`, all four
 full-suite runs below pass **4,055 assertions** each on macOS arm64, including
@@ -95,3 +102,26 @@ Julia formatting, documentation consistency, mdBook build, and
 `git diff --check` pass. No Rust solver code is modified; the Julia controls
 above exercise the changed approximation-space selection. Hosted CI is
 separate from these local results.
+
+## Promoted review regressions
+
+Test revision `546fa66d83304a034fff707c16a8bb10b45465da` promotes the 47
+additional review assertions into `test/nonlinear_variables.jl`, which is
+already included by `test/runtests.jl` and therefore runs in normal package CI.
+The full suite now passes **4,102 assertions** on each of Julia 1.10.13 and
+1.13.3 against upstream native `d5fa9808`. The expanded focused suite passes
+**127 assertions** on native v0.15.0 and v0.16.0, and with minimum-supported
+JuMP 1.29.0/MOI 1.48.0. The native builds, hashes, platform and other dependency
+versions are the same as in the initial validation above. Only validation
+notes and the local roadmap changed during these runs.
+
+| Native source | Julia | Check | Log SHA-256 |
+|---|---|---|---|
+| Upstream `d5fa9808` | 1.10.13 | Full suite | `adf423a3039a9448aefdf6c36687d2f546b194e5bb4b536f0cebb4fec8b33275` |
+| Upstream `d5fa9808` | 1.13.3 | Full suite | `68db10ec31a27ae0782187bda824047aa08adebe18622559f7e76df78cca1a93` |
+| v0.15.0 | 1.10.13 | Focused | `bbe134d87cf83a14da675e48ae10ebb1b2a4080f5f4364194ef1502103ebd402` |
+| v0.16.0 | 1.13.3 | Focused | `168fdda08eb2622c4e0d780e4eb19bf3c99a807c405770001d959d71e42bf0ba` |
+| Upstream `d5fa9808`, minimum JuMP/MOI | 1.10.13 | Focused | `2be7e0c113a67b7ca1c482856ad3d874277dcc95f390b21d60d9b0d32b33905e` |
+
+The full suites include the threading subprocess. Julia formatting and
+`git diff --check` pass. This promotion changes tests and documentation only.
