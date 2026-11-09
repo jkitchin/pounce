@@ -144,7 +144,7 @@ install, and a refusal changes nothing. In order:
 | check | code |
 |---|---|
 | NULL handle | `POUNCE_BOUNDS_ERR_NULL` (-1) |
-| a negative count, or a NULL index array with a count other than 0 or the full size | `_ERR_COUNT` (-2) |
+| a negative count, a setter count above `n` (or `m`), or a NULL index array with a count other than 0 or the full size | `_ERR_COUNT` (-2) |
 | per entry, variables first: index out of range | `_ERR_OUT_OF_RANGE` (-3) |
 | the same index twice on one side | `_ERR_DUPLICATE` (-4) |
 | a NaN bound | `_ERR_NAN` (-5) |
@@ -159,7 +159,10 @@ rest. The `Complements` and pair checks then run entry by entry in batch
 order (a variable's `Complements` check before its pair's), so the first
 offending entry is the one reported; the working-set check comes last.
 `bad_index` receives the position of the refused entry in the batch,
-`0..nx-1` for variables and `nx..nx+ng-1` for rows, or `-1`.
+`0..nx-1` for variables and `nx..nx+ng-1` for rows, or `-1`. A pair is
+checked once, against everything the batch does to it, so a
+`_PAIR_CHANGED` refusal names the batch's first entry touching the pair
+(variables come first), which need not be the entry that changed it.
 
 **Declared pairs.** A pair's meaning is read off bounds, so an update may
 move the paired bounds' values, and the variable may gain or lose the bound

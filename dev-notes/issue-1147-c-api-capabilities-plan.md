@@ -1051,7 +1051,9 @@ int GetPounceBounds(IpoptProblem p,
 
 - Indices in the problem's index style. `x_idx == NULL` with `nx == n` (or
   `g_idx == NULL` with `ng == m`) is dense; `NULL` with any other nonzero
-  count is `POUNCE_BOUNDS_ERR_COUNT`.
+  count is `POUNCE_BOUNDS_ERR_COUNT`, as is a setter count above `n` (or
+  `m`): it must repeat an index, and refusing it before reading any entry
+  keeps a garbage count from sizing an allocation (review of PR #1157).
 - A NULL value array leaves that side unchanged (setter) or unwritten
   (getter).
 - One call covers variables and rows so that a variable and its paired row

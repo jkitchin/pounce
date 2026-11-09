@@ -280,6 +280,43 @@ fn bad_counts_are_refused() {
     free(p);
 }
 
+/// A count above n (or m) must repeat an index, so it is refused before any
+/// entry is read or any space reserved. Before the review of PR #1157 the
+/// setter reserved `count` entries first: a garbage count such as this one
+/// sized the allocation (an abort, past `ffi_guard`) and then read the
+/// one-entry arrays out of bounds.
+#[test]
+fn a_count_above_the_side_is_refused_before_reading() {
+    let p = create_qpec(0);
+    let before = snapshot(p);
+    let idx: [Index; 1] = [0];
+    let val = [0.0; 1];
+    for (nx, ng) in [(Index::MAX, 0), (0, Index::MAX), (N as Index + 1, 0)] {
+        let mut bad = -7;
+        let code = unsafe {
+            SetPounceBounds(
+                p,
+                nx,
+                idx.as_ptr(),
+                val.as_ptr(),
+                val.as_ptr(),
+                ng,
+                idx.as_ptr(),
+                val.as_ptr(),
+                val.as_ptr(),
+                &mut bad,
+            )
+        };
+        assert_eq!(
+            (code, bad),
+            (POUNCE_BOUNDS_ERR_COUNT, -1),
+            "nx={nx} ng={ng}"
+        );
+    }
+    assert_eq!(snapshot(p), before);
+    free(p);
+}
+
 #[test]
 fn out_of_range_is_refused_at_its_batch_position() {
     let p = create_qpec(0);

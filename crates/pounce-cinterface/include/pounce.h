@@ -817,7 +817,8 @@ int AddPounceComplementsConstraint(
  * Sparse: (x_idx[k], x_L[k], x_U[k]) for k < nx and (g_idx[k], g_L[k],
  * g_U[k]) for k < ng, indices in the problem's index style. A NULL index
  * array with the full count (n or m) is dense; with any other nonzero
- * count it is POUNCE_BOUNDS_ERR_COUNT. A NULL value array leaves that side
+ * count it is POUNCE_BOUNDS_ERR_COUNT, as is a count above n (or m), which
+ * must repeat an index. A NULL value array leaves that side
  * of the named entries unchanged. Cost: O(nx + ng + pairs touched),
  * independent of n, m and the number of pairs.
  *
@@ -847,6 +848,9 @@ int AddPounceComplementsConstraint(
  *
  * bad_index (may be NULL) receives the position of the refused entry in
  * the batch -- 0..nx-1 for variables, nx..nx+ng-1 for rows -- or -1.
+ * A pair is checked once, against everything the batch does to it, and
+ * PAIR_CHANGED is charged to the batch's first entry naming its variable
+ * or row (variables come first), not necessarily the one that changed it.
  *
  * Two views. The USER bounds are what CreateIpoptProblem and
  * SetPounceBounds wrote. The EFFECTIVE bounds are what the solve (and
@@ -863,7 +867,7 @@ int AddPounceComplementsConstraint(
  * ------------------------------------------------------------------- */
 #define POUNCE_BOUNDS_OK                       0
 #define POUNCE_BOUNDS_ERR_NULL                -1   /* NULL handle */
-#define POUNCE_BOUNDS_ERR_COUNT               -2   /* count < 0, or NULL index array with count not 0, n|m */
+#define POUNCE_BOUNDS_ERR_COUNT               -2   /* count < 0, setter count > n|m, or NULL index array with count not 0, n|m */
 #define POUNCE_BOUNDS_ERR_OUT_OF_RANGE        -3   /* index outside [0,n) / [0,m) (in index style) */
 #define POUNCE_BOUNDS_ERR_DUPLICATE           -4   /* index twice on one side of the batch */
 #define POUNCE_BOUNDS_ERR_NAN                 -5   /* a NaN bound */

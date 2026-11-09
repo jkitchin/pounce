@@ -249,7 +249,11 @@ unsafe fn read_side(
     base: Index,
     cur: impl Fn(usize) -> (Number, Number),
 ) -> Result<Side, Refusal> {
-    if count < 0 || (idx.is_null() && count != 0 && count != len) {
+    // More entries than the side has indices must repeat one, so it is
+    // refused here, before anything is reserved: a garbage count (say an
+    // uninitialised `nx`) would otherwise size the reservation below, and a
+    // failed allocation aborts the process, past `ffi_guard`.
+    if count < 0 || count > len || (idx.is_null() && count != 0 && count != len) {
         return Err((POUNCE_BOUNDS_ERR_COUNT, -1));
     }
     let k = count as usize;
