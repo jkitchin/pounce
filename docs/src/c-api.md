@@ -294,7 +294,8 @@ With pairs declared, `IpoptSolve` runs the complementarity driver instead
 of one solve and the second-opinion ladder, honours the
 `complementarity_strategy`, `complementarity_continuation` and
 `complementarity_lift` options, and writes the reported point, its `g`,
-objective and multipliers into the caller's buffers. `GetIpoptIterCount`
+objective and multipliers into the caller's buffers (the multipliers are the declared
+model's; see [Multipliers](complementarity.md#multipliers)). `GetIpoptIterCount`
 and the other post-solve accessors describe that reported solve, not the
 whole run. With no pairs declared nothing changes. Three things refuse
 pairs, because each is defined over the caller's rows while the driver

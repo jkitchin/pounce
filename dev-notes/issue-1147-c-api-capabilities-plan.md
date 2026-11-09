@@ -3384,7 +3384,7 @@ Gate:
   the effective rows of a `Complements` row (the solve leg fails with
   `Invalid_Problem_Definition`; `bounds_update.rs` fails too); a setter
   calling `validate_pairs` on every call (scale ratio 6.0 against 2.5).
-- **Observed, not caused here, not fixed (needs a decision):** after a
+- **Observed, not caused here — fixed after review (§9, "Reported MPCC multipliers"):** after a
   driver solve, `mult_g` does not hold the original model's row
   multipliers, while `mult_x_U` does. Fresh handles, no setter involved.
   MOI `Complements` QpecSmall with x in `[0.25, 0.75]` solves to
@@ -3416,6 +3416,38 @@ Gate:
   `examples/bounds_update.c` appeared mid-run without its
   `EXPECTED_STDOUT` entry and `cargo test` stops at the first failing
   binary. Gates since use `--no-fail-fast`.
+
+### Reported MPCC multipliers (follow-up on PR #1157, asked for by the human)
+
+The defect S2-I3 recorded, fixed for every frontend at the source:
+`MpccTnlp::forward_finalize` (and the non-deferred `finalize_solution`)
+handed the caller's model the lowered solve's row multipliers and dropped
+the product rows' `ν`.
+
+- `pounce-algorithm::mpcc`: `Certificate.multipliers:
+  Option<ModelMultipliers>` — each stationarity column carries a `Slot`
+  (row `λ_i = -sθ`, pair/ordinary bound signed on its side, fixed variable
+  split), filled when the system has full rank and the fit is `tight`, on
+  both the dense and the sparse route. The shared `run` test helper now
+  holds dense = sparse multipliers and `∇f + Jᵀλ - z_L + z_U` within
+  `resid_tol` for every certificate test model (flipping the row slot's sign
+  fails 7 of them).
+- `pounce-nlp::mpcc`: `declared_duals`, the fallback — `λ_i += ν s_H G`,
+  `ν s_G H` onto the pair's bound, signed. Not enough on its own: with
+  `ν ~ 1e8` and a row solved to `1e-10`, `ν H` lands `0.034` on an inactive
+  bound (measured on QpecSmall, exact product), stationary but not
+  complementary. Hence the certificate's fit first.
+- `pounce-restoration::mpcc_driver`: certificate computed before
+  `forward_finalize`, its multipliers scaled by `sense` (measured: the plain
+  path reports multipliers for `f` under `obj_scaling_factor = -1`).
+  Driver-internal `last_lambda`, gaps and warm starts untouched.
+- `python/pounce/_continuation.py`: the bound-activity fingerprint reads
+  `|z|`, since a pair-held bound's multiplier may now be negative.
+- Tests: `pounce-restoration/tests/mpcc_reported_duals.rs` (non-degenerate
+  QpecSmall exact values on six option paths; biactive; mixed pair, where
+  `z_L[x] = -1`; maximize), all failing before. Python
+  `test_the_reported_multipliers_are_the_models`; C API
+  `the_reported_row_multipliers_are_the_models`.
 
 ### Facts recorded while planning (2ac0ad9)
 

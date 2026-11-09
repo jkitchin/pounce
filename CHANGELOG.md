@@ -125,6 +125,19 @@ changes.
   header's structs to the Rust layout.
 
 ### Fixed
+- **Multipliers reported after a complementarity solve are the model's.**
+  In every frontend (C API, Python, CLI `.sol`), a solve with declared pairs
+  reported row multipliers that were the solver's split between a row and
+  its product row, which is not unique where a pair is strictly
+  complementary: QpecSmall with `x` in `[0.25, 0.75]` reported `mult_g` near
+  `-1e8` where the model's are `(1/8, -1/8)`, and a mixed pair put a
+  multiplier of `8.8e6` on a bound. The driver now reports the
+  certificate's least-squares multipliers on the active set when they are
+  unique, and otherwise folds each product row's multiplier back onto its
+  pair's row and bound. A bound held by its pair carries a sign-free
+  multiplier, so it can now be negative; under `obj_scaling_factor < 0` the
+  multipliers are for `f`, as without pairs. Status, point, objective and
+  iterations are unchanged. See "Multipliers" in the complementarity guide.
 - **`pounce.h`'s version defines match the library.** `POUNCE_VERSION_MINOR`
   and `POUNCE_VERSION` still said `0.1.0` while `GetIpoptVersion` reported
   `0.16.0`; they now equal the crate version, and a test and the release

@@ -268,3 +268,24 @@ fn the_previous_solve_stays_readable_until_the_next() {
     assert_eq!(stats.total_iterations, total);
     unsafe { FreeIpoptProblem(p) };
 }
+
+#[test]
+fn the_reported_row_multipliers_are_the_models() {
+    // MOI Complements QpecSmall with x in [0.25, 0.75]: the answer
+    // (3/4, 7/8, 1/8) has both pairs non-degenerate, so its multipliers
+    // are unique: λ = (1/8, -1/8), z_U[x] = 3/4 (∇f + Jᵀλ - z_L + z_U = 0).
+    // They were reported as the lowered model's row/product split,
+    // [-2.2e7, -1.8e7]; fixed in the driver for every frontend.
+    for lbfgs in [false, true] {
+        let (x_l, x_u, g_l, g_u) = new_bounds(Kind::Complements);
+        let p = build(Kind::Complements, lbfgs, &x_l, &x_u, &g_l, &g_u);
+        let o = solve_from(p, START, None);
+        unsafe { FreeIpoptProblem(p) };
+        assert_eq!(o.status, SOLVE_SUCCEEDED);
+        let ctx = format!("lbfgs={lbfgs}: {o:?}");
+        assert!((o.mult_g[0] - 0.125).abs() < 1e-5, "{ctx}");
+        assert!((o.mult_g[1] + 0.125).abs() < 1e-5, "{ctx}");
+        assert!((o.mult_x_u[0] - 0.75).abs() < 1e-5, "{ctx}");
+        assert!(o.mult_x_l.iter().all(|z| z.abs() < 1e-6), "{ctx}");
+    }
+}

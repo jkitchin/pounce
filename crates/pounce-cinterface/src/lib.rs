@@ -5256,6 +5256,7 @@ mod tests {
                 primal_violation: 0.0,
                 feasible: true,
                 worst_biactive_sign: 0.0,
+                multipliers: None,
             }),
             b_check: None,
             escapes: 3,

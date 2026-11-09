@@ -746,6 +746,74 @@ impl MpccTnlp {
         )
     }
 
+    /// The declared model's duals at an inner-shaped point `x` whose inner
+    /// rows are `g`, from the wrapper's (`inner_duals`-mapped) `z_l`, `z_u`
+    /// and `lambda` — `lambda` with the product rows' multipliers `ν` after
+    /// the inner model's `m` rows. This is what the caller's
+    /// `finalize_solution` receives; the driver keeps the wrapper's own.
+    ///
+    /// The caller's model has no product rows, so each `ν_k` goes back onto
+    /// its pair's sides: `∇p_k = s_G H_k e_j + s_H G_k ∇g_i`, so row `i`'s
+    /// multiplier takes `ν_k s_H G_k` and `z_U - z_L` at variable `j` takes
+    /// `ν_k s_G H_k`, on the bound in the pair (`z_L` for `s_G > 0`, `z_U`
+    /// otherwise), signed: a bound held by its pair has a sign-free
+    /// multiplier, and splitting it onto the other bound would break that
+    /// bound's complementarity. A
+    /// lifted row's mapped multiplier is `λ_i - s_H ν_k G_k` at `w`'s
+    /// stationarity ([`Self::inner_duals`]), so the same shift returns the
+    /// lifted solve's own `λ_i`, and `w = H` there makes the bound term the
+    /// same too. With these the declared model's dual residual is the
+    /// lowered solve's.
+    ///
+    /// Dropping `ν_k` instead left `λ_i` at the lowered model's split
+    /// between a row and its product, which is not unique at a
+    /// non-degenerate pair (`G > 0`, `H = 0`): QpecSmall's
+    /// `λ = (0.125, -0.125)` was reported as `(-7.9e7, -1.3e8)`.
+    ///
+    /// This keeps the lowered solve's stationarity, not the declared
+    /// model's complementarity: with `ν_k` large, `ν_k H_k` is not small
+    /// at a row solved to tolerance, and lands on an inactive bound. The
+    /// driver therefore forwards the multipliers its certificate fits on
+    /// the declared model's active set when they are unique
+    /// ([`Self::forward_finalize`]'s `model_duals`); this is the fallback.
+    fn declared_duals(
+        &self,
+        x: &[Number],
+        g: &[Number],
+        z_l: &[Number],
+        z_u: &[Number],
+        lambda: &[Number],
+    ) -> (Vec<Number>, Vec<Number>, Vec<Number>) {
+        let m = self.m_inner;
+        let mut lam = lambda[..m.min(lambda.len())].to_vec();
+        let (mut zl, mut zu) = (z_l.to_vec(), z_u.to_vec());
+        let nz = zl.len().min(zu.len());
+        for (k, p) in self.lowered.iter().enumerate() {
+            let Some(&nu) = lambda.get(m + k) else {
+                break;
+            };
+            if nu == 0.0
+                || p.var >= x.len()
+                || p.var >= nz
+                || p.row >= g.len()
+                || p.row >= lam.len()
+            {
+                continue;
+            }
+            let ((sg, b), (sh, c)) = (self.g_side[k], self.h_side[k]);
+            let (gk, hk) = (sg * (x[p.var] - b), sh * (g[p.row] - c));
+            lam[p.row] += nu * sh * gk;
+            // z_U - z_L += ν s_G H, on the pair's bound: -(ν s_G H) on z_L
+            // when it is the lower one (s_G > 0), +ν s_G H on z_U otherwise.
+            if sg > 0.0 {
+                zl[p.var] -= nu * sg * hk;
+            } else {
+                zu[p.var] += nu * sg * hk;
+            }
+        }
+        (zl, zu, lam)
+    }
+
     /// The box a branch NLP puts on a lifted row's variable: `g_i` in the
     /// branch's `[l, u]` is `w = s_H (g_i - c)` in the image of that box,
     /// infinite ends kept infinite. `None` when row `i` is not lifted or the
@@ -959,8 +1027,14 @@ impl MpccTnlp {
 
     /// Hand the inner model the solution of a driver-chosen solve (used with
     /// [`Self::set_defer_inner_finalize`]); `lambda` may include the product
-    /// rows' multipliers, which are dropped.
+    /// rows' multipliers, which are folded into the declared model's
+    /// ([`Self::declared_duals`]).
     #[allow(clippy::too_many_arguments)]
+    ///
+    /// `model_duals`, when given, are the declared model's multipliers
+    /// `(lambda, z_l, z_u)` fitted at `x` (the driver's certificate), and
+    /// are forwarded as they are; otherwise the wrapper's are folded back
+    /// by [`Self::declared_duals`].
     pub fn forward_finalize(
         &mut self,
         status: SolverReturn,
@@ -968,6 +1042,7 @@ impl MpccTnlp {
         z_l: &[Number],
         z_u: &[Number],
         lambda: &[Number],
+        model_duals: Option<(&[Number], &[Number], &[Number])>,
         ip_data: &IpoptData,
         ip_cq: &IpoptCq,
     ) {
@@ -977,14 +1052,20 @@ impl MpccTnlp {
         if self.m_inner > 0 {
             let _ = inner.eval_g(x, false, &mut g);
         }
+        let (z_l, z_u, lambda) = match model_duals {
+            Some((l, zl, zu)) if l.len() == self.m_inner && zl.len() == z_l.len() => {
+                (zl.to_vec(), zu.to_vec(), l.to_vec())
+            }
+            _ => self.declared_duals(x, &g, z_l, z_u, lambda),
+        };
         inner.finalize_solution(
             Solution {
                 status,
                 x,
-                z_l,
-                z_u,
+                z_l: &z_l,
+                z_u: &z_u,
                 g: &g,
-                lambda: &lambda[..self.m_inner.min(lambda.len())],
+                lambda: &lambda,
                 obj_value: f,
             },
             ip_data,
@@ -1394,14 +1475,21 @@ impl TNLP for MpccTnlp {
         if self.defer_inner_finalize {
             return;
         }
+        let (z_l, z_u, lambda) = self.declared_duals(
+            &self.last_x,
+            &g,
+            &self.last_z_l,
+            &self.last_z_u,
+            &self.last_lambda,
+        );
         self.inner.borrow_mut().finalize_solution(
             Solution {
                 status: sol.status,
                 x: &self.last_x,
-                z_l: &self.last_z_l,
-                z_u: &self.last_z_u,
+                z_l: &z_l,
+                z_u: &z_u,
                 g: &g,
-                lambda: &self.last_lambda[..m.min(self.last_lambda.len())],
+                lambda: &lambda,
                 obj_value: sol.obj_value,
             },
             ip_data,
