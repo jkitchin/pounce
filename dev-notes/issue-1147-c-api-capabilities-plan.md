@@ -1232,6 +1232,52 @@ decision (each function documents its own codes); a wrapper must not keep
 one table across them. Renumbering is free until 0.17 is tagged and
 impossible after, so confirm the decision stands before tagging.
 
+**Superseded before 0.17 (branch `c-api-error-namespace`).** The decision
+above was reversed: the four families are replaced by one `POUNCE_ERR_*`
+namespace in which each value has one meaning everywhere (generic -1..-8,
+pairs from -20, bounds from -40, QP from -60), plus `PounceErrorString`.
+The codes named in this plan are the old per-family ones and their old
+numbers; `crates/pounce-cinterface/src/errors.rs` and `docs/src/c-api.md`,
+"Error codes", are current. (The uniform check order was first left out
+of the reversal, because `SetPounceComplementarityPairs` validated pair by
+pair; it was adopted later on the same branch, below.)
+
+Also before 0.17: `SetPounceComplementarityPairs` gained a reserved
+`unsigned int flags` before `bad_index` (must be 0; unknown bits are
+`POUNCE_ERR_FLAGS`, checked after the handle and before the count), matching
+`SetPounceBounds`, so a later relaxation of the batch setter is opt-in. The
+prototypes quoted in this plan predate it.
+
+And the uniform check order, after all (same branch): every function checks
+the handle, then `flags`/enum arguments, then counts and the arrays they
+size, then each entry's argument checks (range, duplicate / already paired,
+NaN) over the whole batch, then each entry's meaning over the whole batch,
+then state beyond the batch. Three places deviated and were changed, none
+by touching `validate_pairs` (the lowering shares it):
+`SetPounceComplementarityPairs` now runs range and already-paired over the
+batch before calling it, so only shape is left for it to refuse;
+`AddPounceComplementsConstraint` checks already-used before row-free (so a
+row it wrote reads `ROW_ALREADY_PAIRED`, no longer `ROW_NOT_FREE`, and the
+tests that used that code to detect the edit now read `GetPounceBounds`'
+effective view instead); `SetPounceBounds` checks both sides' counts in full
+before any entry (a bad `ng` used to lose to an `x` entry's fault).
+`tests/check_order.rs` pins each, with a later-stage fault placed first in
+the batch and a control that the later fault is refused on its own; each
+fix's revert fails it. The check orders quoted earlier in this plan predate
+this.
+
+PR review of that change found two more: `GetPounceBounds` checked each
+side's NULL-array count consistency only when it reached that side (so an
+`x` entry's range fault beat a bad `ng`), and `SetPounceComplementarityPairs`
+had no upper bound on `n_pairs`, so a garbage count sized a read and an
+allocation and a real `n_pairs > min(n, m)` came back as `*_ALREADY_PAIRED`
+rather than `COUNT`. Both now check counts first (the getter allows
+duplicates, so it checks only the NULL-array consistency, not
+`count <= len`). The batch setter's shape pass now calls `classify_pair`
+directly instead of re-running range and duplicate checks inside
+`validate_pairs`. `tests/check_order.rs` also pins the getter and
+`PounceQpSolve`'s order (INCOMPLETE, CONES, OPTIONS, INDEFINITE).
+
 ## 7. Stage 3 and Stage 4 — design and iteration list
 
 ### Stage 3 — matrix-form convex/conic entry

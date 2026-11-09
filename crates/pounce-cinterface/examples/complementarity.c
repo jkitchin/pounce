@@ -182,7 +182,7 @@ int main(int argc, char **argv)
 
     /* 1. Native pair: row 0 has one finite side, y1 one finite bound. */
     int rc = AddPounceComplementarityPair(prob, 0, 1);
-    if (rc != POUNCE_CC_OK) return fail(prob, "native pair (0, 1) refused");
+    if (rc != POUNCE_OK) return fail(prob, "native pair (0, 1) refused");
 
     /* 2. MOI pair on the free row 1: y2 >= 0 only, so F >= 0 is written. */
     rc = AddPounceComplementsConstraint(prob, 1, 2);
@@ -190,13 +190,13 @@ int main(int argc, char **argv)
         return fail(prob, "Complements (1, 2) did not return PAIR_LOWER");
 
     /* 3. Refusals: each is a negative code and leaves the two pairs. */
-    if (AddPounceComplementarityPair(prob, 1, 1) != POUNCE_CC_ERR_VAR_ALREADY)
+    if (AddPounceComplementarityPair(prob, 1, 1) != POUNCE_ERR_VAR_ALREADY_PAIRED)
         return fail(prob, "y1 paired twice was not ERR_VAR_ALREADY");
-    if (AddPounceComplementarityPair(prob, M, 0) != POUNCE_CC_ERR_OUT_OF_RANGE)
+    if (AddPounceComplementarityPair(prob, M, 0) != POUNCE_ERR_OUT_OF_RANGE)
         return fail(prob, "row m was not ERR_OUT_OF_RANGE");
-    /* Row 1 now has a side (written in step 2), so it is no longer free. */
-    if (AddPounceComplementsConstraint(prob, 1, 0) != POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE)
-        return fail(prob, "edited row 1 was not ERR_ROW_NOT_FREE");
+    /* Row 1 was used in step 2 (and bounded by it): already paired. */
+    if (AddPounceComplementsConstraint(prob, 1, 0) != POUNCE_ERR_ROW_ALREADY_PAIRED)
+        return fail(prob, "used row 1 was not ERR_ROW_ALREADY_PAIRED");
 
     ipindex rows[2], vars[2];
     if (GetPounceComplementarityPairCount(prob) != 2

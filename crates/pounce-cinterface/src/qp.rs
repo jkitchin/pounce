@@ -27,6 +27,7 @@
 //! scale and the report's status mapping are `pounce_convex::report`'s, the
 //! definitions Python and the CLI call.
 
+use crate::errors::*;
 use crate::{
     Bool, ExtensibleOut, FALSE, Index, Number, TRUE, ffi_guard, struct_size_of, write_extensible,
 };
@@ -58,15 +59,6 @@ pub const POUNCE_QP_STATUS_DUAL_INFEASIBLE: c_int = 3;
 pub const POUNCE_QP_STATUS_ITERATION_LIMIT: c_int = 4;
 pub const POUNCE_QP_STATUS_TIME_LIMIT: c_int = 5;
 pub const POUNCE_QP_STATUS_NUMERICAL_FAILURE: c_int = 6;
-
-/// Negative returns of [`PounceQpSolve`] and [`PounceQpAddCone`].
-pub const POUNCE_QP_ERR_NULL: c_int = -1;
-pub const POUNCE_QP_ERR_ARGUMENT: c_int = -2;
-pub const POUNCE_QP_ERR_INCOMPLETE: c_int = -3;
-pub const POUNCE_QP_ERR_CONES: c_int = -4;
-pub const POUNCE_QP_ERR_OPTIONS: c_int = -5;
-pub const POUNCE_QP_ERR_INDEFINITE: c_int = -6;
-pub const POUNCE_QP_ERR_INTERNAL: c_int = -7;
 
 /// [`PounceQpAddCone`] kinds.
 pub const POUNCE_CONE_NONNEG: c_int = 0;
@@ -614,7 +606,7 @@ pub unsafe extern "C" fn PounceQpSetBounds(
 /// order `k ≥ 1` for `POUNCE_CONE_PSD` (spanning `k(k+1)/2` svec rows).
 /// `alpha` is the power cone's exponent, in `(0, 1)`, and ignored otherwise.
 /// Returns the cone's 0-based position (and discards the previous solve's
-/// result), or `POUNCE_QP_ERR_NULL` / `POUNCE_QP_ERR_ARGUMENT` (nothing
+/// result), or `POUNCE_ERR_NULL` / `POUNCE_ERR_ARGUMENT` (nothing
 /// added).
 ///
 /// # Safety
@@ -626,12 +618,12 @@ pub unsafe extern "C" fn PounceQpAddCone(
     dim: Index,
     alpha: Number,
 ) -> c_int {
-    ffi_guard(POUNCE_QP_ERR_INTERNAL, || {
+    ffi_guard(POUNCE_ERR_INTERNAL, || {
         let Some(info) = qp.as_mut() else {
-            return POUNCE_QP_ERR_NULL;
+            return POUNCE_ERR_NULL;
         };
         let Ok(d) = usize::try_from(dim) else {
-            return POUNCE_QP_ERR_ARGUMENT;
+            return POUNCE_ERR_ARGUMENT;
         };
         let spec = match kind {
             POUNCE_CONE_NONNEG => ConeSpec::Nonneg(d),
@@ -639,10 +631,10 @@ pub unsafe extern "C" fn PounceQpAddCone(
             POUNCE_CONE_EXP if d == 3 => ConeSpec::Exponential,
             POUNCE_CONE_POW if d == 3 && alpha > 0.0 && alpha < 1.0 => ConeSpec::Power(alpha),
             POUNCE_CONE_PSD if d >= 1 && d.checked_mul(d + 1).is_some() => ConeSpec::Psd(d),
-            _ => return POUNCE_QP_ERR_ARGUMENT,
+            _ => return POUNCE_ERR_ARGUMENT,
         };
         let Ok(pos) = c_int::try_from(info.cones.len()) else {
-            return POUNCE_QP_ERR_ARGUMENT;
+            return POUNCE_ERR_ARGUMENT;
         };
         info.cones.push(spec);
         info.last = None;
@@ -758,7 +750,7 @@ pub unsafe extern "C" fn PounceQpSetStrOption(
 // ---------------------------------------------------------------------------
 
 /// Solve the problem the handle holds. Returns a `POUNCE_QP_STATUS_*` (`≥ 0`)
-/// and keeps the result for the getters, or a negative `POUNCE_QP_ERR_*`
+/// and keeps the result for the getters, or a negative `POUNCE_ERR_*`
 /// before any engine runs (the previous result is discarded either way):
 ///
 /// * `INCOMPLETE` — no objective, or `m_eq > 0` / `m_ineq > 0` rows never set.
@@ -781,15 +773,15 @@ pub unsafe extern "C" fn PounceQpSetStrOption(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn PounceQpSolve(qp: PounceQp) -> c_int {
     let Some(info) = qp.as_mut() else {
-        return POUNCE_QP_ERR_NULL;
+        return POUNCE_ERR_NULL;
     };
     info.last = None;
-    ffi_guard(POUNCE_QP_ERR_INTERNAL, || solve(info))
+    ffi_guard(POUNCE_ERR_INTERNAL, || solve(info))
 }
 
 fn solve(info: &mut PounceQpInfo) -> c_int {
     if info.c.is_none() || info.b.is_none() || info.h.is_none() {
-        return POUNCE_QP_ERR_INCOMPLETE;
+        return POUNCE_ERR_INCOMPLETE;
     }
     let s = info.settings;
     let conic = !info.cones.is_empty();
@@ -804,7 +796,7 @@ fn solve(info: &mut PounceQpInfo) -> c_int {
             .iter()
             .try_fold(0usize, |acc, c| acc.checked_add(c.dim()));
         if (nonsym && psd) || rows != Some(info.m_ineq) {
-            return POUNCE_QP_ERR_CONES;
+            return POUNCE_ERR_CONES;
         }
         if s.method != Method::Ipm
             || s.tau.is_some()
@@ -812,20 +804,20 @@ fn solve(info: &mut PounceQpInfo) -> c_int {
             || s.switches != EngineSwitches::default()
             || s.inertia != InertiaChoice::Auto
         {
-            return POUNCE_QP_ERR_OPTIONS;
+            return POUNCE_ERR_OPTIONS;
         }
     } else if s
         .switches
         .check(s.method == Method::ActiveSet, false)
         .is_err()
     {
-        return POUNCE_QP_ERR_OPTIONS;
+        return POUNCE_ERR_OPTIONS;
     }
     let Ok(inertia) = psd_inertia(info) else {
-        return POUNCE_QP_ERR_ARGUMENT;
+        return POUNCE_ERR_ARGUMENT;
     };
     if s.method == Method::Ipm && check_ipm_inertia(inertia).is_err() {
-        return POUNCE_QP_ERR_INDEFINITE;
+        return POUNCE_ERR_INDEFINITE;
     }
 
     let prob = info.problem();
@@ -1172,9 +1164,9 @@ mod tests {
                 PounceQpSetObjective(qp, 3, pr.as_ptr(), pc.as_ptr(), pv.as_ptr(), c.as_ptr()),
                 TRUE
             );
-            assert_eq!(PounceQpSolve(qp), POUNCE_QP_ERR_INDEFINITE);
+            assert_eq!(PounceQpSolve(qp), POUNCE_ERR_INDEFINITE);
             set_rows(qp, 2.0, 5.0);
-            assert_eq!(PounceQpSolve(qp), POUNCE_QP_ERR_INDEFINITE);
+            assert_eq!(PounceQpSolve(qp), POUNCE_ERR_INDEFINITE);
             assert_eq!(runs(), 1);
             let pv = [2.0, 1.0, 2.0];
             assert_eq!(
