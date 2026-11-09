@@ -94,7 +94,7 @@ The C library takes the same pairs, in the same native shapes, on an
 #include "pounce.h"
 /* QpecSmall, index_style 0: pair row 0 with x1, row 1 with x2. */
 ipindex rows[] = {0, 1}, vars[] = {1, 2}, bad;
-int rc = SetPounceComplementarityPairs(nlp, 2, rows, vars, &bad);
+int rc = SetPounceComplementarityPairs(nlp, 2, rows, vars, 0, &bad);
 if (rc != POUNCE_OK) { /* pair `bad` was refused; see rc */ }
 ```
 

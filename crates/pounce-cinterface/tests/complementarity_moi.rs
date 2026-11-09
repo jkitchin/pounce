@@ -539,7 +539,9 @@ fn an_edit_keeps_earlier_pairs_valid_and_rebuilds_qpec_small_exactly() {
     let vars = [1, 2];
     let mut bad = -42;
     assert_eq!(
-        unsafe { SetPounceComplementarityPairs(prob, 2, rows.as_ptr(), vars.as_ptr(), &mut bad) },
+        unsafe {
+            SetPounceComplementarityPairs(prob, 2, rows.as_ptr(), vars.as_ptr(), 0, &mut bad)
+        },
         POUNCE_OK
     );
     assert_eq!(bad, -1);

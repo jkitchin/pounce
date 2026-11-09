@@ -63,7 +63,7 @@ use pounce_restoration::resto_inner_solver::{
 };
 use pounce_restoration::second_opinion_driver::run_second_opinion_ladder;
 use std::cell::RefCell;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::rc::Rc;
 
 /// Mirrors C `Number` typedef in `IpStdCInterface.h`.
@@ -2107,6 +2107,10 @@ pub unsafe extern "C" fn IpoptClearNonlinearVariables(ipopt_problem: IpoptProble
 // Declared complementarity pairs (gh#1147)
 // ---------------------------------------------------------------------------
 
+/// The bits [`SetPounceComplementarityPairs`]' `flags` may carry in this
+/// version: none.
+const KNOWN_PAIR_FLAGS: c_uint = 0;
+
 fn pair_error_code(kind: &PairErrorKind) -> c_int {
     match kind {
         PairErrorKind::OutOfRange => POUNCE_ERR_OUT_OF_RANGE,
@@ -2234,10 +2238,18 @@ pub unsafe extern "C" fn AddPounceComplementarityPair(
 /// and stored only if every pair passes; otherwise the previous set stays.
 /// `n_pairs == 0` clears the set (the arrays may then be NULL).
 ///
+/// `flags` must be 0. No bit is defined yet: it exists so that a later
+/// relaxation (re-validating against the pairs being replaced, last-wins
+/// duplicates, ...) can be asked for explicitly rather than change what an
+/// existing call does. A bit this library does not define is refused with
+/// [`POUNCE_ERR_FLAGS`], so an older library never silently ignores one.
+/// Checked after the handle and before the count, as in
+/// [`SetPounceBounds`].
+///
 /// `bad_index`, when non-NULL, receives the position in the batch of the
 /// first refused pair (for a duplicate, the second occurrence), or `-1`
 /// on success and on the errors that concern no single pair
-/// ([`POUNCE_ERR_NULL`], [`POUNCE_ERR_COUNT`]).
+/// ([`POUNCE_ERR_NULL`], [`POUNCE_ERR_FLAGS`], [`POUNCE_ERR_COUNT`]).
 ///
 /// # Safety
 ///
@@ -2250,6 +2262,7 @@ pub unsafe extern "C" fn SetPounceComplementarityPairs(
     n_pairs: Index,
     rows: *const Index,
     vars: *const Index,
+    flags: c_uint,
     bad_index: *mut Index,
 ) -> c_int {
     ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
@@ -2261,6 +2274,9 @@ pub unsafe extern "C" fn SetPounceComplementarityPairs(
         report(-1);
         if ipopt_problem.is_null() {
             return POUNCE_ERR_NULL;
+        }
+        if flags & !KNOWN_PAIR_FLAGS != 0 {
+            return POUNCE_ERR_FLAGS;
         }
         if n_pairs < 0 {
             return POUNCE_ERR_COUNT;
@@ -5546,6 +5562,7 @@ mod tests {
                     2,
                     rows.as_ptr(),
                     vars.as_ptr(),
+                    0,
                     std::ptr::null_mut()
                 ),
                 POUNCE_OK
@@ -5560,6 +5577,7 @@ mod tests {
                     2,
                     rows.as_ptr(),
                     vars.as_ptr(),
+                    0,
                     std::ptr::null_mut()
                 ),
                 POUNCE_ERR_ROW_ALREADY_PAIRED

@@ -283,6 +283,7 @@ pub fn solve_with(
             pairs.len() as Index,
             rows.as_ptr(),
             vars.as_ptr(),
+            0,
             &mut bad,
         )
     };

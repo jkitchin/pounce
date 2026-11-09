@@ -24,6 +24,11 @@ changes.
   the function); none of them shipped in a release. The results that are
   not errors keep their own names: `POUNCE_QP_STATUS_*` and the
   `POUNCE_COMPLEMENTS_*` outcomes.
+- **`SetPounceComplementarityPairs` takes a reserved `flags` argument**,
+  before `bad_index`, as `SetPounceBounds` does. It must be 0; an unknown
+  bit is refused with `POUNCE_ERR_FLAGS`, so a later relaxation of the
+  batch setter can be opt-in. The function is new this cycle, so no
+  released caller changes.
 - **Julia L-BFGS nonlinear-variable hints.** Pounce.jl forwards complete
   structural Hessian support to the native subset API, keeping purely linear
   variables outside the approximation. Unknown evaluator/oracle structure and

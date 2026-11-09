@@ -234,6 +234,7 @@ pairs](complementarity.md#declaring-pairs)):
 int     AddPounceComplementarityPair(IpoptProblem, ipindex row, ipindex var);
 int     SetPounceComplementarityPairs(IpoptProblem, ipindex n_pairs,
                                       const ipindex *rows, const ipindex *vars,
+                                      unsigned int flags /* 0 */,
                                       ipindex *bad_index /* may be NULL */);
 Bool    ClearPounceComplementarityPairs(IpoptProblem);
 ipindex GetPounceComplementarityPairCount(IpoptProblem);   /* -1 on NULL */
@@ -242,7 +243,11 @@ Bool    GetPounceComplementarityPairs(IpoptProblem, ipindex *rows, ipindex *vars
 
 `Add` appends; `Set` replaces the set with a batch, all or nothing, and
 writes the batch position of the first refused pair to `bad_index` (`-1` on
-success); `n_pairs = 0` clears. Indices are in the problem's index style,
+success); `n_pairs = 0` clears. `flags` must be 0: as for
+`SetPounceBounds`, no bit is defined yet, and one this library does not know
+is refused with `POUNCE_ERR_FLAGS` (-6, checked after the handle and before
+the count), so a later relaxation is opt-in and an older library never
+ignores it. Indices are in the problem's index style,
 and are read back in it. Each declaration is checked at once, against the
 handle's bounds and the pairs already declared, by the classifier the
 solve's lowering runs, so a pair Python or the `.nl` reader would refuse is
@@ -256,6 +261,7 @@ refused here, and a refused call changes nothing:
 | `POUNCE_ERR_VAR_ALREADY_PAIRED` | -20 | the variable is already in a pair, or twice in the batch |
 | `POUNCE_ERR_ROW_ALREADY_PAIRED` | -21 | the row is already in a pair, or twice in the batch |
 | `POUNCE_ERR_SHAPE` | -22 | not a native shape (boxed or equality row, both sides free, a fixed variable with a free row, ...) |
+| `POUNCE_ERR_FLAGS` | -6 | `Set`: `flags` has a bit this library does not define |
 | `POUNCE_ERR_COUNT` | -2 | `n_pairs < 0` |
 | `POUNCE_ERR_INTERNAL` | -8 | an internal error caught at the boundary; not a diagnosis of the input |
 

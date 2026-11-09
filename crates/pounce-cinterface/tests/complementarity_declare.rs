@@ -50,6 +50,7 @@ fn set(prob: IpoptProblem, pairs: &[(Index, Index)]) -> (i32, Index) {
             pairs.len() as Index,
             rows.as_ptr(),
             vars.as_ptr(),
+            0,
             &mut bad,
         )
     };
@@ -138,7 +139,8 @@ fn set_with_zero_pairs_clears_and_accepts_null_arrays() {
     let p = create_qpec(0);
     assert_eq!(add(p, 0, 1), POUNCE_OK);
     let mut bad = -42;
-    let code = unsafe { SetPounceComplementarityPairs(p, 0, ptr::null(), ptr::null(), &mut bad) };
+    let code =
+        unsafe { SetPounceComplementarityPairs(p, 0, ptr::null(), ptr::null(), 0, &mut bad) };
     assert_eq!((code, bad), (POUNCE_OK, -1));
     assert_eq!(declared(p), vec![]);
     free(p);
@@ -149,13 +151,13 @@ fn set_accepts_a_null_bad_index() {
     let p = create_qpec(0);
     let (rows, vars) = ([0], [1]);
     let code = unsafe {
-        SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), ptr::null_mut())
+        SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), 0, ptr::null_mut())
     };
     assert_eq!(code, POUNCE_OK);
     // ... and on a refusal too: nothing to write, still a code.
     let (rows, vars) = ([0], [9]);
     let code = unsafe {
-        SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), ptr::null_mut())
+        SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), 0, ptr::null_mut())
     };
     assert_eq!(code, POUNCE_ERR_OUT_OF_RANGE);
     assert_eq!(declared(p), vec![(0, 1)]);
@@ -211,7 +213,7 @@ fn null_handle_is_refused_by_every_entry_point() {
         assert_eq!(AddPounceComplementarityPair(null, 0, 1), POUNCE_ERR_NULL);
         // error-path: SetPounceComplementarityPairs
         assert_eq!(
-            SetPounceComplementarityPairs(null, 1, rows.as_ptr(), vars.as_ptr(), &mut bad),
+            SetPounceComplementarityPairs(null, 1, rows.as_ptr(), vars.as_ptr(), 0, &mut bad),
             POUNCE_ERR_NULL
         );
         assert_eq!(bad, -1);
@@ -236,9 +238,58 @@ fn set_refuses_a_negative_count() {
     let mut bad = -42;
     // error-path: SetPounceComplementarityPairs
     let code =
-        unsafe { SetPounceComplementarityPairs(p, -1, rows.as_ptr(), vars.as_ptr(), &mut bad) };
+        unsafe { SetPounceComplementarityPairs(p, -1, rows.as_ptr(), vars.as_ptr(), 0, &mut bad) };
     assert_eq!((code, bad), (POUNCE_ERR_COUNT, -1));
     assert_eq!(declared(p), vec![(0, 1)]);
+    free(p);
+}
+
+/// `flags` is reserved: every bit is refused today, whatever the batch.
+/// Each branch the check sits between is reached: a batch that would
+/// otherwise be accepted (so the refusal is the flag's alone), a clear
+/// (`n_pairs == 0`, which must not clear), a negative count (flags are
+/// checked first) and a NULL handle (the handle is checked first).
+#[test]
+fn set_refuses_every_flag_bit() {
+    let p = create_qpec(0);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
+    let (rows, vars) = ([1], [2]);
+    let mut bad = -42;
+    // error-path: SetPounceComplementarityPairs
+    for bit in 0..u32::BITS {
+        let flags = 1u32 << bit;
+        for n in [1, 0] {
+            bad = -42;
+            let code = unsafe {
+                SetPounceComplementarityPairs(p, n, rows.as_ptr(), vars.as_ptr(), flags, &mut bad)
+            };
+            assert_eq!(
+                (code, bad),
+                (POUNCE_ERR_FLAGS, -1),
+                "bit {bit}, n_pairs {n}"
+            );
+            assert_eq!(declared(p), vec![(0, 1)], "bit {bit} changed the pairs");
+        }
+    }
+    let code =
+        unsafe { SetPounceComplementarityPairs(p, -1, rows.as_ptr(), vars.as_ptr(), 1, &mut bad) };
+    assert_eq!(code, POUNCE_ERR_FLAGS, "flags are checked before the count");
+    let code = unsafe {
+        SetPounceComplementarityPairs(
+            ptr::null_mut(),
+            1,
+            rows.as_ptr(),
+            vars.as_ptr(),
+            1,
+            &mut bad,
+        )
+    };
+    assert_eq!(code, POUNCE_ERR_NULL, "the handle is checked before flags");
+    // The same batch with flags = 0 is accepted: the refusals above were the flag's.
+    let code =
+        unsafe { SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), 0, &mut bad) };
+    assert_eq!((code, bad), (POUNCE_OK, -1));
+    assert_eq!(declared(p), vec![(1, 2)]);
     free(p);
 }
 
@@ -254,7 +305,7 @@ fn set_refuses_null_arrays_with_a_positive_count() {
         (a.as_ptr(), ptr::null()),
         (ptr::null(), ptr::null()),
     ] {
-        let code = unsafe { SetPounceComplementarityPairs(p, 1, rows, vars, &mut bad) };
+        let code = unsafe { SetPounceComplementarityPairs(p, 1, rows, vars, 0, &mut bad) };
         assert_eq!((code, bad), (POUNCE_ERR_NULL, -1));
         assert_eq!(declared(p), vec![(0, 1)]);
     }

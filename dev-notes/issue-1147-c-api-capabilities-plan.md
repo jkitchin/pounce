@@ -1243,6 +1243,12 @@ order, since `SetPounceComplementarityPairs` validates pair by pair
 (range, duplicate, shape per pair) rather than check by check as
 `SetPounceBounds` does.
 
+Also before 0.17: `SetPounceComplementarityPairs` gained a reserved
+`unsigned int flags` before `bad_index` (must be 0; unknown bits are
+`POUNCE_ERR_FLAGS`, checked after the handle and before the count), matching
+`SetPounceBounds`, so a later relaxation of the batch setter is opt-in. The
+prototypes quoted in this plan predate it.
+
 ## 7. Stage 3 and Stage 4 — design and iteration list
 
 ### Stage 3 — matrix-form convex/conic entry

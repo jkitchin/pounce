@@ -268,6 +268,7 @@ impl Model {
                 pairs.len() as Index,
                 rows.as_ptr(),
                 vars.as_ptr(),
+                0,
                 ptr::null_mut(),
             )
         };

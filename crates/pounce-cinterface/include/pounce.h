@@ -749,14 +749,18 @@ int AddPounceComplementarityPair(
  * replaces) and stored only if every pair passes. n_pairs == 0 clears the
  * set (rows/vars may then be NULL). `bad_index` may be NULL; otherwise it
  * receives the batch position of the first refused pair (the second
- * occurrence, for a duplicate), or -1 on success, POUNCE_ERR_NULL and
- * POUNCE_ERR_COUNT.
+ * occurrence, for a duplicate), or -1 on success, POUNCE_ERR_NULL,
+ * POUNCE_ERR_FLAGS and POUNCE_ERR_COUNT. `flags` must be 0: no bit is
+ * defined yet, and an unknown bit is POUNCE_ERR_FLAGS (checked after the
+ * handle, before the count), so a later relaxation is opt-in and an older
+ * library never ignores one.
  */
 int SetPounceComplementarityPairs(
     IpoptProblem   ipopt_problem,
     ipindex        n_pairs,
     const ipindex *rows,
     const ipindex *vars,
+    unsigned int   flags,
     ipindex       *bad_index
 );
 
