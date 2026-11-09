@@ -244,4 +244,71 @@ end
     end
 end
 
+@testset "Fixed columns and empty reduced nonlinear space" begin
+    # Native compression must drop fixed columns from the declared subset,
+    # including the case where no nonlinear columns remain.
+    for columns in ([2], [2, 5], [1, 2, 5])
+        points = Vector{Float64}[]
+        objectives = Float64[]
+        for automatic in (true, false)
+            model, x = mixed_model(; automatic)
+            for i in columns
+                fix(x[i], 1.0; force = true)
+            end
+            solve_with_trace(model)
+            push!(points, value.(x))
+            push!(objectives, objective_value(model))
+            @test abs(sum(value.(x[[2, 5, 1, 3]])) - 4) < 1e-6
+            @test value(x[2])^2 + value(x[5])^2 - value(x[4]) - value(x[6]) <= 1 + 1e-6
+        end
+        @test objectives[1] ≈ objectives[2] atol = 1e-6
+        @test points[1] ≈ points[2] atol = 1e-5
+    end
+end
+
+@testset "Option changes release previous declarations" begin
+    model, _ = mixed_model()
+    solve_with_trace(model)
+    for approximation in ("exact", "limited-memory", "finite-difference")
+        old = unsafe_backend(model).native.problem
+        set_optimizer_attribute(model, "hessian_approximation", approximation)
+        trace = solve_with_trace(model)
+        reference, _ = mixed_model(; approximation)
+        @test trace == solve_with_trace(reference)
+        @test old.ipopt_problem == C_NULL
+    end
+    set_optimizer_attribute(model, "hessian_approximation", "limited-memory")
+    solve_with_trace(model)
+    set_optimizer_attribute(model, "num_linear_variables", 0)
+    trace = solve_with_trace(model)
+    full, _ = mixed_model(; automatic = false)
+    @test trace == solve_with_trace(full)
+end
+
+function add_unknown_oracle(model, x)
+    # The row is linear, but its oracle does not advertise Hessian structure.
+    oracle = MOI.VectorNonlinearOracle(;
+        dimension = 1,
+        l = [-Inf],
+        u = [100.0],
+        eval_f = (ret, x) -> (ret[1] = x[1]; nothing),
+        jacobian_structure = [(1, 1)],
+        eval_jacobian = (ret, x) -> (ret[1] = 1.0; nothing),
+    )
+    @constraint(model, [x[2]] in oracle)
+end
+
+@testset "Known-to-unknown structure discards subset" begin
+    model, x = mixed_model()
+    solve_with_trace(model)
+    old = unsafe_backend(model).native.problem
+    add_unknown_oracle(model, x)
+    trace = solve_with_trace(model)
+    full, y = mixed_model(; automatic = false)
+    add_unknown_oracle(full, y)
+    @test trace == solve_with_trace(full)
+    @test Ext._nonlinear_variables(unsafe_backend(model)) === nothing
+    @test old.ipopt_problem == C_NULL
+end
+
 end # module
