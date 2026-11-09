@@ -454,10 +454,14 @@ class Continuation:
     @staticmethod
     def _active_signature(zl, zu, tol=ACTIVE_TOL):
         """Boolean bound-activity fingerprint, as in pounce#90's
-        ``PathFollower._active_signature``."""
+        ``PathFollower._active_signature``. By magnitude: a bound held by a
+        complementarity pair carries a sign-free multiplier, negative when
+        the pair, not the bound, holds the variable there; it is active
+        either way. Ordinary bound multipliers are nonnegative, so for them
+        this is the old test."""
         if zl is None or zu is None:
             return None
-        return (np.asarray(zl, float) > tol, np.asarray(zu, float) > tol)
+        return (np.abs(np.asarray(zl, float)) > tol, np.abs(np.asarray(zu, float)) > tol)
 
     @staticmethod
     def _signature_changed(a, b) -> bool:

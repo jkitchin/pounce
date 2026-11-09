@@ -100,6 +100,32 @@ def test_qpec_small_is_solved_and_certified(x0):
     assert "stationarity: S" in cc["summary"]
 
 
+@pytest.mark.parametrize(
+    "opts",
+    [{}, {"complementarity_strategy": "exact"}, {"complementarity_lift": "yes"},
+     {"hessian_approximation": "limited-memory"}],
+)
+def test_the_reported_multipliers_are_the_models(opts):
+    """x in [0.25, 0.75]: the answer is (3/4, 7/8, 1/8), both pairs
+    non-degenerate (y > 0, rows active), so the multipliers are unique. In
+    Ipopt's convention (grad f + J^T lambda - z_L + z_U = 0): lambda =
+    (1/8, -1/8), z_U[x] = 3/4, every other bound multiplier 0. They were
+    reported as the lowered model's row/product split, around -1e8."""
+    prob = pounce.Problem(
+        n=3, m=2, problem_obj=QpecSmall(),
+        lb=[0.25, 0.0, 0.0], ub=[0.75, INF, INF], cl=[0.0, 0.0], cu=[INF, INF],
+        complementarity=[(0, 1), (1, 2)],
+    )
+    prob.add_option("print_level", 0)
+    for k, v in opts.items():
+        prob.add_option(k, v)
+    x, info = prob.solve(np.array([0.5, 0.5, 0.5]))
+    np.testing.assert_allclose(x, [0.75, 0.875, 0.125], atol=1e-6)
+    np.testing.assert_allclose(info["mult_g"], [0.125, -0.125], atol=1e-5)
+    np.testing.assert_allclose(info["mult_x_U"], [0.75, 0.0, 0.0], atol=1e-5)
+    np.testing.assert_allclose(info["mult_x_L"], [0.0, 0.0, 0.0], atol=1e-5)
+
+
 def test_a_converged_point_that_is_not_strongly_stationary_says_so():
     prob = pounce.Problem(
         n=2, m=1, problem_obj=Ralph1(), lb=[0.0, 0.0], ub=[INF, INF], cl=[0.0], cu=[INF],

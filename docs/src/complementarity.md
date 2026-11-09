@@ -464,6 +464,38 @@ whose sign-free residual is inside the band but not the `max(1e-6, tol)` floor
 alone is not `tight`: the driver keeps it, runs the remaining formulations, and
 reports it only if none of them produces a tight answer.
 
+### Multipliers
+
+The multipliers you get back — Python's `info["mult_g"]`, `info["mult_x_L"]`,
+`info["mult_x_U"]`, the C API's `mult_g` / `mult_x_L` / `mult_x_U` buffers,
+an AMPL `.sol` file's duals — are your model's, in Ipopt's convention
+`∇f + Jᵀλ − z_L + z_U = 0`, at the reported point. Your model has no product
+rows, so the solver's multipliers are not passed through as they are. When the
+certificate's stationarity system has a unique solution and reproduces `∇f`
+within its floor (`tight`), that solution is reported: the least-squares fit on
+the rows and bounds active at the point. Otherwise each product row's multiplier
+is folded back onto its pair's row and bound, which keeps the solve's own
+stationarity.
+
+Two things differ from a model without pairs:
+
+- A row in a pair carries its multiplier whatever its sign, and so does the
+  bound in a pair. When the pair, not the bound, holds a variable at the
+  bound (its row strictly positive), that bound's multiplier can be
+  negative: `0 <= x <= 1 ⟂ y - x` with `min (x - 0.5)² + (y - 2)²` stops at
+  `(0, 2)` with `z_L[x] = -1`. It is reported on that bound, not moved to
+  the other one, where it would break that bound's complementarity.
+- At a biactive pair the multipliers are not unique; the reported ones are
+  one choice that makes the point stationary.
+
+Under `obj_scaling_factor < 0` (maximize) the multipliers are for `f`
+itself, as without pairs.
+
+Through 0.16 the row multipliers were the solver's split between a row and its
+product row, which is not unique where a pair is strictly complementary:
+QpecSmall with `x` in `[0.25, 0.75]` reported `mult_g` near `-1e8` where the
+model's multipliers are `(1/8, -1/8)`.
+
 ### Complementary to `tol`, not to `sqrt(tol)`
 
 Every formulation stops at a pair product near the last relaxation, `τ =

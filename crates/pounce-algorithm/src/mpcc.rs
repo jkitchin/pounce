@@ -663,6 +663,13 @@ pub enum StationarityClass {
 #[derive(Debug, Clone)]
 pub struct Certificate {
     pub class: StationarityClass,
+    /// The declared model's multipliers that decided the class, when they
+    /// are unique (full-rank system) and reproduce `∇f` within
+    /// `resid_tol`: the least-squares fit on the active set at the point,
+    /// in Ipopt's convention (`∇f + Jᵀλ - z_L + z_U = 0`). A pair's bound
+    /// multiplier sits, signed, on the bound in the pair; a row in a pair
+    /// carries its multiplier whatever its sign. `None` otherwise.
+    pub multipliers: Option<ModelMultipliers>,
     pub n_pairs: usize,
     pub n_biactive: usize,
     /// Pairs with neither side at zero — complementarity does not hold.
@@ -695,6 +702,48 @@ pub struct Certificate {
 
 /// The point and model data [`certify`] reads. All indices 0-based, the
 /// Jacobian as `(row, col, value)` triplets of the *inner* model's rows.
+/// A model's multipliers at a point: one per row and per variable bound.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelMultipliers {
+    pub lambda: Vec<Number>,
+    pub z_l: Vec<Number>,
+    pub z_u: Vec<Number>,
+}
+
+/// Which multiplier a stationarity column stands for (see [`certify`]):
+/// the column is `s ∇g_i` or `s e_j`, and `Aθ = ∇f`.
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    /// `λ_i = -s θ`.
+    Row(usize, Number),
+    /// `s > 0`: `z_L[j] = θ`; `s < 0`: `z_U[j] = θ`. Signed: a bound held
+    /// by its pair, whose multiplier is sign-free.
+    Bound(usize, Number),
+    /// A fixed variable (both bounds active, one column): `θ` split onto
+    /// `z_L` (positive part) and `z_U` (negative part).
+    Fixed(usize),
+}
+
+fn multipliers_from(slots: &[Slot], theta: &[Number], n: usize, m: usize) -> ModelMultipliers {
+    let mut mm = ModelMultipliers {
+        lambda: vec![0.0; m],
+        z_l: vec![0.0; n],
+        z_u: vec![0.0; n],
+    };
+    for (slot, &t) in slots.iter().zip(theta) {
+        match *slot {
+            Slot::Row(i, s) => mm.lambda[i] += -s * t,
+            Slot::Bound(j, s) if s > 0.0 => mm.z_l[j] += t,
+            Slot::Bound(j, _) => mm.z_u[j] += t,
+            Slot::Fixed(j) => {
+                mm.z_l[j] += t.max(0.0);
+                mm.z_u[j] += (-t).max(0.0);
+            }
+        }
+    }
+    mm
+}
+
 pub struct CertificateInput<'a> {
     pub x: &'a [Number],
     pub grad_f: &'a [Number],
@@ -942,6 +991,8 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
 
     // Columns: (sparse entries, sign class).
     let mut cols: Vec<(Vec<(usize, Number)>, Sign)> = Vec::new();
+    // Per column, the multiplier it stands for; pushed with it.
+    let mut slots: Vec<Slot> = Vec::new();
     for i in 0..m {
         if let Some(k) = pair_row[i] {
             let sh = h_side[k].0;
@@ -949,8 +1000,14 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
                 rows_of[i].iter().map(|&(c, v)| (c, sh * v)).collect();
             match (g_act[k], h_act[k]) {
                 (_, false) => {}
-                (true, true) => cols.push((grad_h, Sign::Biactive)),
-                (false, true) => cols.push((grad_h, Sign::Free)),
+                (true, true) => {
+                    cols.push((grad_h, Sign::Biactive));
+                    slots.push(Slot::Row(i, sh));
+                }
+                (false, true) => {
+                    cols.push((grad_h, Sign::Free));
+                    slots.push(Slot::Row(i, sh));
+                }
             }
             continue;
         }
@@ -959,9 +1016,18 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
         let at_hi = hi < INF && hi - inp.g[i] <= row_tol;
         let neg: Vec<(usize, Number)> = rows_of[i].iter().map(|&(c, v)| (c, -v)).collect();
         match (at_lo, at_hi) {
-            (true, true) => cols.push((rows_of[i].clone(), Sign::Free)),
-            (true, false) => cols.push((rows_of[i].clone(), Sign::NonNeg)),
-            (false, true) => cols.push((neg, Sign::NonNeg)),
+            (true, true) => {
+                cols.push((rows_of[i].clone(), Sign::Free));
+                slots.push(Slot::Row(i, 1.0));
+            }
+            (true, false) => {
+                cols.push((rows_of[i].clone(), Sign::NonNeg));
+                slots.push(Slot::Row(i, 1.0));
+            }
+            (false, true) => {
+                cols.push((neg, Sign::NonNeg));
+                slots.push(Slot::Row(i, -1.0));
+            }
             (false, false) => {}
         }
     }
@@ -970,8 +1036,14 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
             let sg = g_side[k].0;
             match (g_act[k], h_act[k]) {
                 (false, _) => {}
-                (true, true) => cols.push((vec![(j, sg)], Sign::Biactive)),
-                (true, false) => cols.push((vec![(j, sg)], Sign::Free)),
+                (true, true) => {
+                    cols.push((vec![(j, sg)], Sign::Biactive));
+                    slots.push(Slot::Bound(j, sg));
+                }
+                (true, false) => {
+                    cols.push((vec![(j, sg)], Sign::Free));
+                    slots.push(Slot::Bound(j, sg));
+                }
             }
             // A one-sided pair variable's other bound, when it has one, is an
             // ordinary limit: a sign-constrained column when active. (A mixed
@@ -985,6 +1057,7 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
                 };
                 if other_active {
                     cols.push((vec![(j, -sg)], Sign::NonNeg));
+                    slots.push(Slot::Bound(j, -sg));
                 }
             }
             continue;
@@ -993,12 +1066,22 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
         let at_lo = lo > -INF && inp.x[j] - lo <= row_tol;
         let at_hi = hi < INF && hi - inp.x[j] <= row_tol;
         match (at_lo, at_hi) {
-            (true, true) => cols.push((vec![(j, 1.0)], Sign::Free)),
-            (true, false) => cols.push((vec![(j, 1.0)], Sign::NonNeg)),
-            (false, true) => cols.push((vec![(j, -1.0)], Sign::NonNeg)),
+            (true, true) => {
+                cols.push((vec![(j, 1.0)], Sign::Free));
+                slots.push(Slot::Fixed(j));
+            }
+            (true, false) => {
+                cols.push((vec![(j, 1.0)], Sign::NonNeg));
+                slots.push(Slot::Bound(j, 1.0));
+            }
+            (false, true) => {
+                cols.push((vec![(j, -1.0)], Sign::NonNeg));
+                slots.push(Slot::Bound(j, -1.0));
+            }
             (false, false) => {}
         }
     }
+    debug_assert_eq!(slots.len(), cols.len());
 
     let b = inp.grad_f.to_vec();
     let k = cols.len();
@@ -1038,6 +1121,7 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
         primal_violation,
         feasible,
         worst_biactive_sign: 0.0,
+        multipliers: None,
     };
     if n_neither > 0 || !feasible {
         // Complementarity, or feasibility itself, fails at this point: no
@@ -1083,6 +1167,9 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
                 if cert.residual <= accept_tol {
                     classify_unique(&mut cert, &theta);
                 }
+                if cert.tight {
+                    cert.multipliers = Some(multipliers_from(&slots, &theta, n, m));
+                }
                 return cert;
             }
             LeastSquares::RankDeficient if n.saturating_mul(k) <= MAX_DENSE_ENTRIES => {
@@ -1116,6 +1203,9 @@ fn certify_routed(inp: &CertificateInput<'_>, force_sparse: Option<bool>) -> Cer
     }
     if rank == k {
         classify_unique(&mut cert, &theta);
+        if cert.tight {
+            cert.multipliers = Some(multipliers_from(&slots, &theta, n, m));
+        }
         return cert;
     }
 
@@ -2232,6 +2322,37 @@ mod tests {
                 (dense.residual - sparse.residual).abs() <= 1e-6 * dense.resid_tol,
                 "dense {dense:?}\nsparse {sparse:?}"
             );
+        }
+        // The multipliers, when returned: the same on both paths, and
+        // `∇f + Jᵀλ - z_L + z_U = 0` to the residual the class was judged on
+        // (every model below is a check of the column-to-multiplier map).
+        assert_eq!(
+            dense.multipliers.is_some(),
+            sparse.multipliers.is_some(),
+            "dense {dense:?}\nsparse {sparse:?}"
+        );
+        if let (Some(d), Some(sp)) = (&dense.multipliers, &sparse.multipliers) {
+            let pairs = d
+                .lambda
+                .iter()
+                .zip(&sp.lambda)
+                .chain(d.z_l.iter().zip(&sp.z_l))
+                .chain(d.z_u.iter().zip(&sp.z_u));
+            for (a, b) in pairs {
+                assert!(
+                    (a - b).abs() <= 1e-8 * (1.0 + a.abs()),
+                    "dense {d:?}\nsparse {sp:?}"
+                );
+            }
+            let mut r: Vec<Number> = grad_f.to_vec();
+            for &(row, col, v) in &m.jac {
+                r[col] += v * d.lambda[row];
+            }
+            for ((rj, zl), zu) in r.iter_mut().zip(&d.z_l).zip(&d.z_u) {
+                *rj += -zl + zu;
+            }
+            let worst = r.iter().fold(0.0_f64, |w, v| w.max(v.abs()));
+            assert!(worst <= dense.resid_tol, "stationarity {worst:e}: {d:?}");
         }
         dense
     }
