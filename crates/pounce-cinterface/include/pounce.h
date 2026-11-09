@@ -775,7 +775,9 @@ Bool GetPounceComplementarityPairs(
  * So after a clear the handle solves a plain NLP with the edited row
  * bounds -- neither the original model nor the complementarity one. The
  * only way back to the original bounds is FreeIpoptProblem and
- * CreateIpoptProblem again.
+ * CreateIpoptProblem again. GetPounceBounds reads the bounds before the
+ * edit (VIEW_USER) and after it (VIEW_EFFECTIVE); SetPounceBounds can move
+ * x's bounds within its table row and keeps the edit in step.
  * A row that already has a side is a native declaration: use
  * AddPounceComplementarityPair. GetPounceComplementarityPairs lists the
  * pairs declared here like any other.
@@ -799,6 +801,110 @@ int AddPounceComplementsConstraint(
     IpoptProblem ipopt_problem,
     ipindex      row,
     ipindex      var
+);
+
+/* ---------------------------------------------------------------------
+ * In-place bound updates (gh#1147 Stage 2)
+ *
+ * SetPounceBounds changes variable and constraint bounds on an existing
+ * handle, keeping everything else on it: options, scaling, the
+ * nonlinear-variables hint, declared pairs and Complements declarations.
+ * It saves no solver work -- every IpoptSolve builds its solver afresh --
+ * only the Free + Create + replay of that state. Warm starts stay explicit:
+ * pass the previous x and multipliers to IpoptSolve, with
+ * warm_start_init_point=yes.
+ *
+ * Sparse: (x_idx[k], x_L[k], x_U[k]) for k < nx and (g_idx[k], g_L[k],
+ * g_U[k]) for k < ng, indices in the problem's index style. A NULL index
+ * array with the full count (n or m) is dense; with any other nonzero
+ * count it is POUNCE_BOUNDS_ERR_COUNT. A NULL value array leaves that side
+ * of the named entries unchanged. Cost: O(nx + ng + pairs touched),
+ * independent of n, m and the number of pairs.
+ *
+ * All or nothing. The batch is checked against the bounds it would
+ * install, in this order, and a refused call changes nothing:
+ *   1. counts; then per entry, variables first, in batch order: index in
+ *      range, not already in the batch (POUNCE_BOUNDS_ERR_DUPLICATE), no NaN;
+ *   2. per entry in batch order, for a variable or row in a declared pair
+ *      or a Complements declaration:
+ *      - a Complements variable keeps its row of the MOI table (lower-only,
+ *        upper-only, boxed l < u, fixed, free), else
+ *        POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS;
+ *      - a Complements row stays free in the caller's bounds, else
+ *        POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW;
+ *      - a declared pair keeps a native shape that pairs the same
+ *        variable bound (lower/upper) with the same row side (lower/upper),
+ *        or stays mixed, else POUNCE_BOUNDS_ERR_PAIR_CHANGED. Values may
+ *        move, and the variable may gain or lose the bound that is not in
+ *        the pair. (A one-sided pair x >= l _|_ g <= u whose x gains an
+ *        upper bound would re-classify as pairing g <= u with x <= x_U: a
+ *        different condition, so it is refused.)
+ *   3. a working set staged by IpoptSetWarmStartWorkingSet stays true at
+ *      the entries touched, else POUNCE_BOUNDS_ERR_WORKING_SET.
+ * Crossed bounds (l > u) are not refused here; the solve reports them, as
+ * for CreateIpoptProblem. To change what a pair or a Complements
+ * declaration means, build a new problem.
+ *
+ * bad_index (may be NULL) receives the position of the refused entry in
+ * the batch -- 0..nx-1 for variables, nx..nx+ng-1 for rows -- or -1.
+ *
+ * Two views. The USER bounds are what CreateIpoptProblem and
+ * SetPounceBounds wrote. The EFFECTIVE bounds are what the solve (and
+ * every other function) sees: the user bounds with the row edits
+ * AddPounceComplementsConstraint made. They differ only on those rows, and
+ * SetPounceBounds writes the user view and re-derives the edit.
+ * GetPounceBounds reads either; it takes the same index arguments
+ * (duplicates allowed), writes nothing on a refusal, and skips a NULL
+ * output array.
+ *
+ * The outcome of the most recent solve stays readable after an update; it
+ * describes that solve. Sessions (IpoptCreateSolver) own their problem and
+ * take no updates.
+ * ------------------------------------------------------------------- */
+#define POUNCE_BOUNDS_OK                       0
+#define POUNCE_BOUNDS_ERR_NULL                -1   /* NULL handle */
+#define POUNCE_BOUNDS_ERR_COUNT               -2   /* count < 0, or NULL index array with count not 0, n|m */
+#define POUNCE_BOUNDS_ERR_OUT_OF_RANGE        -3   /* index outside [0,n) / [0,m) (in index style) */
+#define POUNCE_BOUNDS_ERR_DUPLICATE           -4   /* index twice on one side of the batch */
+#define POUNCE_BOUNDS_ERR_NAN                 -5   /* a NaN bound */
+#define POUNCE_BOUNDS_ERR_PAIR_CHANGED        -6   /* a declared pair would pair different sides */
+#define POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS   -7   /* a Complements variable would change table row */
+#define POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW     -8   /* a Complements row given a finite bound */
+#define POUNCE_BOUNDS_ERR_WORKING_SET         -9   /* the staged working set would be contradicted */
+#define POUNCE_BOUNDS_ERR_VIEW               -10   /* GetPounceBounds: unknown view */
+#define POUNCE_BOUNDS_ERR_INTERNAL           -11   /* inconsistent handle or internal error; nothing changed */
+#define POUNCE_BOUNDS_VIEW_USER                0
+#define POUNCE_BOUNDS_VIEW_EFFECTIVE           1
+
+/** Update bounds in place; see above. Returns POUNCE_BOUNDS_OK or a
+ *  POUNCE_BOUNDS_ERR_* code. */
+int SetPounceBounds(
+    IpoptProblem    ipopt_problem,
+    ipindex         nx,
+    const ipindex  *x_idx,
+    const ipnumber *x_L,
+    const ipnumber *x_U,
+    ipindex         ng,
+    const ipindex  *g_idx,
+    const ipnumber *g_L,
+    const ipnumber *g_U,
+    ipindex        *bad_index
+);
+
+/** Read bounds in `view` (POUNCE_BOUNDS_VIEW_USER or _EFFECTIVE); see
+ *  above. Returns POUNCE_BOUNDS_OK or a POUNCE_BOUNDS_ERR_* code. */
+int GetPounceBounds(
+    IpoptProblem    ipopt_problem,
+    ipindex         nx,
+    const ipindex  *x_idx,
+    ipnumber       *x_L,
+    ipnumber       *x_U,
+    ipindex         ng,
+    const ipindex  *g_idx,
+    ipnumber       *g_L,
+    ipnumber       *g_U,
+    int             view,
+    ipindex        *bad_index
 );
 
 /* ---------------------------------------------------------------------

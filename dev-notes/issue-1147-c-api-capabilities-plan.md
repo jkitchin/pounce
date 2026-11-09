@@ -40,7 +40,7 @@ Unblocked by the Julia side's answer on gh#1147 (comment 6739730460). Branch
 (§6.6); implementation proceeds on them meanwhile.
 
 - [x] **S2-I1** Pair lookup on the handle: `DeclaredPairs` (list + var→pair / row→pair maps) replaces `complementarity: Vec`; `complements_used` records the MOI table row and the caller's row bounds. `AddPounceComplementarityPair` and `AddPounceComplementsConstraint` become O(1) per call instead of O(P). No surface change; one behaviour change (§9, S2-I1).
-- [ ] **S2-I2** `SetPounceBounds` / `GetPounceBounds` and the `POUNCE_BOUNDS_*` codes; every refusal code and every branch of the pair rule (§6.2 D3) tested, each refusal checked to leave the handle unchanged.
+- [x] **S2-I2** `SetPounceBounds` / `GetPounceBounds` and the `POUNCE_BOUNDS_*` codes; every refusal code and every branch of the pair rule (§6.2 D3) tested, each refusal checked to leave the handle unchanged.
 - [ ] **S2-I3** Parity and scale: update-then-solve equals fresh-`Create`-then-solve (NLP, MPCC native pair, MOI Complements pair; exact and L-BFGS); explicit warm re-solve after an update; complexity guard (k-entry update cost independent of n, m and P).
 - [ ] **S2-I4** `pounce.h`, README, `docs/src/c-api.md`, `docs/src/complementarity.md`, CHANGELOG, `examples/bounds_update.c`; §8 ABI checklist extended; export guard green; PR with §6.6 for confirmation.
 
@@ -1097,8 +1097,9 @@ Codes:
 ```
 
 Check order (first failure wins): NULL, counts, then per entry in batch
-order range → duplicate → NaN, then per touched pair (in the order of its
-first touching entry) D2/D3, then the working set.
+order range → duplicate → NaN, then per entry in batch order D2 then D3
+(a pair touched by two entries is checked, and blamed, at the first), then
+the working set at the touched entries.
 
 **D2 — Two bound layers; `Complements` rows take the caller's free bounds only.**
 
@@ -3303,6 +3304,33 @@ Gate:
 - `tests/bounds_scale.rs`: per-call cost at P = 1 000 vs 20 000, limit 2.5.
   Against `origin/main`'s sources: ratios 6.4 and 7.3, both tests fail.
   With the change: 0.9–1.0 over five runs.
+
+### S2-I2 — `SetPounceBounds` / `GetPounceBounds` (commit that ticks S2-I2)
+
+- `src/bounds.rs`: the two entry points, the `POUNCE_BOUNDS_*` codes, and
+  `set_bounds`: read both sides (range → duplicate → NaN per entry), check
+  D2 then D3 entry by entry against the post-update bounds, then the staged
+  working set at the touched entries, then commit. Nothing allocates per
+  `n`/`m`; staging and pair look-ups are hash maps.
+- `lib.rs`: `bound_status_consistent` / `cons_status_consistent` factored
+  out of `IpoptSetWarmStartWorkingSet`, so the setter and it apply one
+  rule. `zero_based`, `complements_row`, `ComplementsRow::row_bounds` made
+  crate-visible.
+- Header section, README bullet, book section "Updating bounds"; the
+  `Complements` paragraphs say what the user view is. Export guard reads
+  `src/bounds.rs`; `header_abi` holds the `POUNCE_BOUNDS_*` defines.
+- `tests/bounds_update.rs`, 24 tests: every code (refusals at the last batch
+  position, handle snapshot equal after), every D3 branch with its
+  accepted sibling, all five MOI table rows both ways, the class rule after
+  a clear, the working-set rule. `bounds.rs` unit test: a planted
+  unclassifiable pair answers `POUNCE_BOUNDS_ERR_INTERNAL` with `bad_index`
+  `-1` and changes nothing.
+- Mutation checks of the pair rule, both caught: accepting any native shape
+  fails 3 tests (orientation flip, paired side moved, mixed row gaining a
+  side); comparing the `PairShape` variant instead of the identity fails 2
+  (unpaired bound gained — the accepted branch — and paired side moved).
+- One test expectation was wrong as first written (a row's batch position
+  counted from 2 with one variable entry); fixed in the test.
 
 ### Facts recorded while planning (2ac0ad9)
 

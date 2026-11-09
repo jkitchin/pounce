@@ -106,6 +106,19 @@ POUNCE extensions:
   edits, and the record of which rows and variables the helper has used,
   survive `ClearPounceComplementarityPairs`; to get the original row bounds
   back, free the problem and create it again.
+- In-place bound updates (gh#1147 Stage 2): `SetPounceBounds` changes
+  variable and row bounds on an existing handle, sparse (index arrays in the
+  problem's index style; a NULL index array with the full count is dense)
+  and all or nothing, at a cost independent of `n`, `m` and the number of
+  pairs. It keeps options, scaling, the nonlinear-variables hint, declared
+  pairs and `Complements` declarations, and refuses (`POUNCE_BOUNDS_ERR_*`,
+  changing nothing) an update that would change what a declared pair pairs,
+  move a `Complements` variable to another row of the MOI table, give a
+  `Complements` row a finite bound, or contradict a staged working set.
+  `GetPounceBounds` reads the caller's bounds (`POUNCE_BOUNDS_VIEW_USER`)
+  or the solve's, with the `Complements` row edits
+  (`POUNCE_BOUNDS_VIEW_EFFECTIVE`). No solver state is reused; warm starts
+  stay explicit through `IpoptSolve`'s buffers.
 - Complementarity outcome (gh#1147): `GetPounceComplementarityStats`
   (`#[repr(C)]`, extensible `PounceComplementarityStats`: strategy, what was reported
   and by which formulation, total iterations, the stationarity certificate,

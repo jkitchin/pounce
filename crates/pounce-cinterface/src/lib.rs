@@ -36,6 +36,7 @@ pub mod fortran;
 pub mod qp;
 pub mod solver;
 
+pub use bounds::*;
 pub use qp::*;
 
 use bounds::{ComplementsLedger, ComplementsRow, ComplementsUse, DeclaredPairs};
@@ -1761,6 +1762,32 @@ fn bound_status_to_int(s: pounce_qp::BoundStatus) -> c_int {
     }
 }
 
+/// Whether a staged variable status is a true claim about bounds `[lo, hi]`:
+/// `Fixed` needs `lo == hi`, `AtLower`/`AtUpper` a finite side. Shared by
+/// [`IpoptSetWarmStartWorkingSet`] and [`bounds::SetPounceBounds`], which
+/// re-checks a staged set against the bounds it would install.
+pub(crate) fn bound_status_consistent(s: pounce_qp::BoundStatus, lo: Number, hi: Number) -> bool {
+    match s {
+        pounce_qp::BoundStatus::Fixed => lo == hi,
+        pounce_qp::BoundStatus::AtLower => lo > NLP_LOWER_BOUND_INF,
+        pounce_qp::BoundStatus::AtUpper => hi < NLP_UPPER_BOUND_INF,
+        pounce_qp::BoundStatus::Inactive => true,
+    }
+}
+
+/// The row counterpart of [`bound_status_consistent`]: `Equality` needs two
+/// equal finite sides.
+pub(crate) fn cons_status_consistent(s: pounce_qp::ConsStatus, lo: Number, hi: Number) -> bool {
+    let lo_finite = lo > NLP_LOWER_BOUND_INF;
+    let hi_finite = hi < NLP_UPPER_BOUND_INF;
+    match s {
+        pounce_qp::ConsStatus::Equality => lo_finite && hi_finite && lo == hi,
+        pounce_qp::ConsStatus::AtLower => lo_finite,
+        pounce_qp::ConsStatus::AtUpper => hi_finite,
+        pounce_qp::ConsStatus::Inactive => true,
+    }
+}
+
 fn int_to_bound_status(v: c_int) -> Option<pounce_qp::BoundStatus> {
     use pounce_qp::BoundStatus::*;
     match v {
@@ -1935,15 +1962,7 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
                 let Some(s) = int_to_bound_status(v) else {
                     return FALSE;
                 };
-                let lo_finite = info.x_l[i] > NLP_LOWER_BOUND_INF;
-                let hi_finite = info.x_u[i] < NLP_UPPER_BOUND_INF;
-                let consistent = match s {
-                    pounce_qp::BoundStatus::Fixed => info.x_l[i] == info.x_u[i],
-                    pounce_qp::BoundStatus::AtLower => lo_finite,
-                    pounce_qp::BoundStatus::AtUpper => hi_finite,
-                    pounce_qp::BoundStatus::Inactive => true,
-                };
-                if !consistent {
+                if !bound_status_consistent(s, info.x_l[i], info.x_u[i]) {
                     return FALSE;
                 }
             }
@@ -1961,17 +1980,7 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
                 let Some(s) = int_to_cons_status(v) else {
                     return FALSE;
                 };
-                let lo_finite = info.g_l[i] > NLP_LOWER_BOUND_INF;
-                let hi_finite = info.g_u[i] < NLP_UPPER_BOUND_INF;
-                let consistent = match s {
-                    pounce_qp::ConsStatus::Equality => {
-                        lo_finite && hi_finite && info.g_l[i] == info.g_u[i]
-                    }
-                    pounce_qp::ConsStatus::AtLower => lo_finite,
-                    pounce_qp::ConsStatus::AtUpper => hi_finite,
-                    pounce_qp::ConsStatus::Inactive => true,
-                };
-                if !consistent {
+                if !cons_status_consistent(s, info.g_l[i], info.g_u[i]) {
                     return FALSE;
                 }
             }
@@ -2134,7 +2143,7 @@ fn pair_error_code(kind: &PairErrorKind) -> c_int {
 /// out of range in its own order (range, duplicate variable, duplicate
 /// row, shape, pair by pair). `checked_sub` keeps `i32::MIN` in Fortran
 /// style from overflowing.
-fn zero_based(p: Index, offset: Index, len: Index) -> usize {
+pub(crate) fn zero_based(p: Index, offset: Index, len: Index) -> usize {
     match p.checked_sub(offset) {
         Some(z) if z >= 0 && z < len => z as usize,
         _ => usize::MAX,
@@ -2409,7 +2418,7 @@ pub const POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS: c_int = -6;
 /// boundary. Nothing was changed.
 pub const POUNCE_COMPLEMENTS_ERR_INTERNAL: c_int = -7;
 
-fn complements_row(xl: Number, xu: Number) -> Option<ComplementsRow> {
+pub(crate) fn complements_row(xl: Number, xu: Number) -> Option<ComplementsRow> {
     if xl.is_nan() || xu.is_nan() {
         return None;
     }
@@ -2426,7 +2435,7 @@ fn complements_row(xl: Number, xu: Number) -> Option<ComplementsRow> {
 impl ComplementsRow {
     /// The row bounds the table gives a free row, and whether it declares a
     /// pair.
-    fn row_bounds(self, gl: Number, gu: Number) -> (Number, Number, bool) {
+    pub(crate) fn row_bounds(self, gl: Number, gu: Number) -> (Number, Number, bool) {
         match self {
             ComplementsRow::Mixed => (gl, gu, true),
             ComplementsRow::Lower => (0.0, gu, true),
