@@ -10,6 +10,12 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Julia L-BFGS nonlinear-variable hints.** Pounce.jl forwards complete
+  structural Hessian support to the native subset API, keeping purely linear
+  variables outside the approximation. Unknown evaluator/oracle structure and
+  missing optional native symbols retain the previous behavior; an explicit
+  `num_linear_variables` option overrides automatic detection. Low-level
+  one-based set/clear bindings are also available.
 - **Declared complementarity through the C API (gh#1147).** A C program, or
   a wrapper linking `libpounce_cinterface`, can now solve a model with
   complementarity pairs through the same driver, options and certificate

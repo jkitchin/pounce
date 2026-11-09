@@ -85,6 +85,30 @@ function _setup_inner(model::Optimizer)::Pounce.IpoptProblem
     return model.native.problem
 end
 
+# Use structural entries, never Hessian values at a particular point. The
+# combined sparsity includes quadratic terms, the NLP block, and oracle indices
+# mapped into model space. `nothing` means at least one source is unknown.
+function _nonlinear_variables(model::Optimizer)
+    H = model.evaluator.hessian_sparsity
+    H === nothing && return nothing
+    variables = BitSet()
+    for (i, j) in H
+        push!(variables, i, j)
+    end
+    return collect(variables)
+end
+
+function _set_nonlinear_variable_hints(model::Optimizer, inner::Pounce.IpoptProblem)
+    inner.hessian_approximation == "limited-memory" || return
+    # An explicit native prefix option remains the user's override. In
+    # particular, num_linear_variables=0 requests the original full space.
+    any(name -> lowercase(name) == "num_linear_variables", keys(model.options)) && return
+    Pounce.supports_nonlinear_variable_hints() || return
+    variables = _nonlinear_variables(model)
+    variables === nothing || Pounce.IpoptSetNonlinearVariables(inner, variables)
+    return
+end
+
 function MOI.optimize!(model::Optimizer)
     if model.native.problem !== nothing && model.native.problem.solving
         error("A POUNCE optimizer cannot be solved recursively")
@@ -149,6 +173,7 @@ function _optimize!(model::Optimizer)
             )
         end
     end
+    _set_nonlinear_variable_hints(model, inner)
     if model.silent
         Pounce.AddIpoptIntOption(inner, "print_level", 0)
     end

@@ -96,6 +96,29 @@ path; it does not expose POUNCE's full CLI routing or sensitivity-session API.
 
 ## Options and starts
 
+With `hessian_approximation="limited-memory"`, the wrapper automatically tells
+POUNCE which variables can have nonzero Hessian rows or columns. It uses the
+complete structural Hessian pattern from quadratic terms, the nonlinear
+evaluator, and vector nonlinear oracles (mapped into model variable order).
+This keeps purely linear variables out of the L-BFGS approximation; it does
+not infer linearity from derivative values at the starting point.
+
+If any evaluator or oracle lacks Hessian structure, or the loaded native
+library lacks the optional hint symbols, automatic detection is skipped.
+An explicit `num_linear_variables` option also disables automatic detection
+and preserves the native prefix convention. Set it to `0` to use the original
+full approximation space. Exact and finite-difference solves receive no
+automatic hints. Structural edits recompute the subset; parameter and bound
+updates retain the conservative structural pattern.
+
+Low-level users can call `Pounce.supports_nonlinear_variable_hints()`,
+`Pounce.IpoptSetNonlinearVariables(prob, [2, 5])`, and
+`Pounce.IpoptClearNonlinearVariables(prob)`. The list uses distinct one-based
+indices. An empty list declares a structurally zero Hessian; clearing a list
+restores the native default. Direct declarations override `num_linear_variables`
+and may also guide native finite-difference sparsity. Only omit variables whose
+Hessian rows/columns are identically zero, and change hints between solves.
+
 ```julia
 set_optimizer_attribute(model, "tol", 1e-8)
 set_optimizer_attribute(model, "max_iter", 500)

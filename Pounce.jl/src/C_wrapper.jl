@@ -395,6 +395,73 @@ function AddIpoptIntOption(prob::IpoptProblem, keyword::String, value::Integer)
     return
 end
 
+"""
+    supports_nonlinear_variable_hints()
+
+Return whether the loaded library provides both nonlinear-variable hint entry
+points. These optional symbols are not required to load Pounce.
+"""
+function supports_nonlinear_variable_hints()
+    return all(
+        symbol -> Libdl.dlsym_e(_library_handle[], symbol) != C_NULL,
+        (:IpoptSetNonlinearVariables, :IpoptClearNonlinearVariables),
+    )
+end
+
+function _nonlinear_variable_symbol(prob::IpoptProblem, symbol::Symbol)
+    prob.solving && error("Cannot change nonlinear-variable hints during a solve")
+    Base.unsafe_convert(Ptr{Cvoid}, prob) # Reject a freed handle before the call.
+    supports_nonlinear_variable_hints() ||
+        error("The loaded POUNCE library does not support nonlinear-variable hints")
+    return Libdl.dlsym(_library_handle[], symbol)
+end
+
+"""
+    IpoptSetNonlinearVariables(prob, indices::AbstractVector{<:Integer})
+
+Declare the variables that may have nonzero Lagrangian Hessian rows/columns.
+Indices are one-based, distinct, and may be noncontiguous or unordered. An empty
+list declares a structurally zero Hessian; it does not mean unknown structure.
+The native library copies the list. Change hints only between solves.
+
+This restricts the limited-memory approximation and takes precedence over the
+native `num_linear_variables` option. Exact Hessians ignore the declaration;
+native finite-difference Hessians may also use it for their structural pattern.
+Only omit variables whose Hessian rows/columns are identically zero, not merely
+zero at the current point. Use `IpoptClearNonlinearVariables` for unknown structure.
+"""
+function IpoptSetNonlinearVariables(prob::IpoptProblem, indices::AbstractVector{<:Integer})
+    symbol = _nonlinear_variable_symbol(prob, :IpoptSetNonlinearVariables)
+    length(indices) <= prob.n && all(i -> 1 <= i <= prob.n, indices) ||
+        throw(ArgumentError("Nonlinear-variable indices must lie in 1:$(prob.n)"))
+    length(unique(indices)) == length(indices) ||
+        throw(ArgumentError("Nonlinear-variable indices must be distinct"))
+    positions = Cint[i for i in indices]
+    ret = ccall(
+        symbol,
+        Bool,
+        (Ptr{Cvoid}, Cint, Ptr{Cint}),
+        prob,
+        length(positions),
+        positions,
+    )
+    ret || error("POUNCE rejected the nonlinear-variable declaration")
+    return
+end
+
+"""
+    IpoptClearNonlinearVariables(prob)
+
+Remove a nonlinear-variable declaration between solves. Native defaults (all
+variables nonlinear, unless `num_linear_variables` is set) apply again.
+"""
+function IpoptClearNonlinearVariables(prob::IpoptProblem)
+    symbol = _nonlinear_variable_symbol(prob, :IpoptClearNonlinearVariables)
+    ret = ccall(symbol, Bool, (Ptr{Cvoid},), prob)
+    ret || error("POUNCE rejected clearing the nonlinear-variable declaration")
+    return
+end
+
 function OpenIpoptOutputFile(prob::IpoptProblem, file_name::String, print_level::Int)
     if !isascii(file_name)
         error("POUNCE: Non ASCII parameters not supported")

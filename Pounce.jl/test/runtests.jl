@@ -9,6 +9,7 @@ flush(stdout)
     include("library.jl")
     include("extensions.jl")
     include("cinterface.jl")
+    include("nonlinear_variables.jl")
     @testset "Threaded C interface subprocess" begin
         script = joinpath(@__DIR__, "threading.jl")
         cmd = `$(Base.julia_cmd()) --startup-file=no --threads=2 --project=$(Base.active_project()) $script`
