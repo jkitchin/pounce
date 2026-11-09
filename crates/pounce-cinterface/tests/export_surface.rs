@@ -50,6 +50,9 @@ const GRANDFATHERED_NO_ERROR_PATH: &[&str] = &[];
 enum Class {
     I1,
     I32,
+    /// Unsigned 32-bit, kept apart from `I32` so a signed/unsigned mismatch
+    /// between export and prototype is caught.
+    U32,
     F64,
     Ptr,
     FnPtr(String),
@@ -95,6 +98,7 @@ fn rust_class(ty: &str) -> Result<Class, String> {
     Ok(match ty {
         "Bool" => Class::I1,
         "Index" | "c_int" | "i32" | "IpoptBoundStatus" | "IpoptConsStatus" => Class::I32,
+        "c_uint" | "u32" => Class::U32,
         "Number" | "f64" => Class::F64,
         "IpoptProblem" | "IpoptSolver" | "PounceQp" => Class::Ptr,
         "" | "()" => Class::Void,
@@ -273,6 +277,7 @@ fn c_class(decl: &str, has_name: bool) -> Result<Class, String> {
     Ok(match ty.as_str() {
         "bool" | "Bool" => Class::I1,
         "int" | "ipindex" | "Index" | "IpoptBoundStatus" | "IpoptConsStatus" => Class::I32,
+        "unsigned int" | "unsigned" => Class::U32,
         "ipnumber" | "Number" | "double" => Class::F64,
         "IpoptProblem" | "IpoptSolver" | "PounceQp" | "UserDataPtr" => Class::Ptr,
         "void" => Class::Void,

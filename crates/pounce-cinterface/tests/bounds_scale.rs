@@ -189,6 +189,7 @@ fn bound_updates_cost_o1_per_entry() {
                     gi.as_ptr(),
                     gl.as_ptr(),
                     gu.as_ptr(),
+                    0,
                     std::ptr::null_mut(),
                 )
             };

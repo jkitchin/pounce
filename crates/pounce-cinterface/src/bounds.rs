@@ -9,7 +9,7 @@
 //! [`pounce_nlp::mpcc::validate_pairs`] (which allocates `n + m` flags).
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::c_int;
+use std::ffi::{c_int, c_uint};
 use std::ops::Deref;
 
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
@@ -196,6 +196,14 @@ pub const POUNCE_BOUNDS_ERR_VIEW: c_int = -10;
 /// The handle is inconsistent (a declared pair that no longer classifies),
 /// or a Rust panic was caught at the boundary. Nothing was changed.
 pub const POUNCE_BOUNDS_ERR_INTERNAL: c_int = -11;
+/// `flags` has a bit this library does not define. No bits are defined yet;
+/// `flags` exists so that a later relaxation (last-wins duplicates,
+/// re-deriving a `Complements` pair, ...) can be opt-in rather than a
+/// change of meaning for existing callers, and an unknown bit is refused so
+/// an older library never silently ignores one (plan §6.2 D1).
+pub const POUNCE_BOUNDS_ERR_FLAGS: c_int = -12;
+/// The bits `flags` may carry in this version: none.
+const KNOWN_FLAGS: c_uint = 0;
 /// The bounds the caller gave (`CreateIpoptProblem`, `SetPounceBounds`).
 pub const POUNCE_BOUNDS_VIEW_USER: c_int = 0;
 /// The bounds the solve sees: the user's, with the edits
@@ -450,7 +458,8 @@ unsafe fn set_bounds(
 /// table row and rows staying free, a staged SQP working set staying true
 /// — and committed only if it passes. `bad_index` (may be NULL) receives
 /// the refused entry's position in the concatenated batch (`0..nx` for
-/// variables, `nx..nx+ng` for rows), or `-1`.
+/// variables, `nx..nx+ng` for rows), or `-1`. `flags` must be 0: no bit is
+/// defined yet, and an unknown bit is [`POUNCE_BOUNDS_ERR_FLAGS`].
 ///
 /// Expected cost O(k + touched pairs) for k entries, whatever n, m and the
 /// number of pairs.
@@ -471,6 +480,7 @@ pub unsafe extern "C" fn SetPounceBounds(
     g_idx: *const Index,
     g_L: *const Number,
     g_U: *const Number,
+    flags: c_uint,
     bad_index: *mut Index,
 ) -> c_int {
     let report = |k: Index| {
@@ -482,6 +492,9 @@ pub unsafe extern "C" fn SetPounceBounds(
     ffi_guard(POUNCE_BOUNDS_ERR_INTERNAL, || unsafe {
         if ipopt_problem.is_null() {
             return POUNCE_BOUNDS_ERR_NULL;
+        }
+        if flags & !KNOWN_FLAGS != 0 {
+            return POUNCE_BOUNDS_ERR_FLAGS;
         }
         match set_bounds(
             &mut *ipopt_problem,
@@ -506,7 +519,8 @@ pub unsafe extern "C" fn SetPounceBounds(
 /// Read variable and constraint bounds from a handle (gh#1147 Stage 2).
 ///
 /// Same index arguments as [`SetPounceBounds`] (duplicates allowed); a NULL
-/// output array is not written. `view` is [`POUNCE_BOUNDS_VIEW_USER`] (what
+/// output array is not written. `flags` must be 0, as for the setter.
+/// `view` is [`POUNCE_BOUNDS_VIEW_USER`] (what
 /// the caller gave) or [`POUNCE_BOUNDS_VIEW_EFFECTIVE`] (what the solve
 /// sees: the user bounds with `AddPounceComplementsConstraint`'s row
 /// edits). The two views differ only on rows that function edited. Every
@@ -528,6 +542,7 @@ pub unsafe extern "C" fn GetPounceBounds(
     g_L: *mut Number,
     g_U: *mut Number,
     view: c_int,
+    flags: c_uint,
     bad_index: *mut Index,
 ) -> c_int {
     let report = |k: Index| {
@@ -541,6 +556,9 @@ pub unsafe extern "C" fn GetPounceBounds(
             return POUNCE_BOUNDS_ERR_NULL;
         }
         let info = &*ipopt_problem;
+        if flags & !KNOWN_FLAGS != 0 {
+            return POUNCE_BOUNDS_ERR_FLAGS;
+        }
         if view != POUNCE_BOUNDS_VIEW_USER && view != POUNCE_BOUNDS_VIEW_EFFECTIVE {
             return POUNCE_BOUNDS_ERR_VIEW;
         }
@@ -681,6 +699,7 @@ mod tests {
                 [0].as_ptr(),
                 [-2e19].as_ptr(),
                 [2e19].as_ptr(),
+                0,
                 &mut bad,
             );
             assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_INTERNAL, -1));

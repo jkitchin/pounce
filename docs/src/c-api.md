@@ -117,12 +117,12 @@ int SetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx,
                     const ipnumber *x_L, const ipnumber *x_U,
                     ipindex ng, const ipindex *g_idx,
                     const ipnumber *g_L, const ipnumber *g_U,
-                    ipindex *bad_index);
+                    unsigned int flags, ipindex *bad_index);
 int GetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx,
                     ipnumber *x_L, ipnumber *x_U,
                     ipindex ng, const ipindex *g_idx,
                     ipnumber *g_L, ipnumber *g_U,
-                    int view, ipindex *bad_index);
+                    int view, unsigned int flags, ipindex *bad_index);
 ```
 
 `SetPounceBounds` changes bounds on a handle without rebuilding it, so
@@ -138,12 +138,19 @@ depends on the entries and the pairs they touch, not on `n`, `m` or the
 number of pairs. A NULL index array with the full count (`n` or `m`) is
 dense; a NULL value array leaves that side of the named entries as it was.
 
+`flags` must be 0 on both functions. No bit is defined yet: it exists so a
+later relaxation of one of the refusals below can be asked for explicitly,
+instead of changing what an existing call does. A bit the library does not
+know is refused with `_ERR_FLAGS` (-12), so an older library never ignores
+one silently.
+
 It is **all or nothing**: the batch is checked against the bounds it would
 install, and a refusal changes nothing. In order:
 
 | check | code |
 |---|---|
 | NULL handle | `POUNCE_BOUNDS_ERR_NULL` (-1) |
+| a bit in `flags` this library does not define | `_ERR_FLAGS` (-12) |
 | a negative count, a setter count above `n` (or `m`), or a NULL index array with a count other than 0 or the full size | `_ERR_COUNT` (-2) |
 | per entry, variables first: index out of range | `_ERR_OUT_OF_RANGE` (-3) |
 | the same index twice on one side | `_ERR_DUPLICATE` (-4) |

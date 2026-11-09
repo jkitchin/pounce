@@ -46,6 +46,7 @@ fn set(p: IpoptProblem, xs: &[Entry], gs: &[Entry]) -> (i32, Index) {
             gi.as_ptr(),
             gl.as_ptr(),
             gu.as_ptr(),
+            0,
             &mut bad,
         )
     };
@@ -81,6 +82,7 @@ fn get(p: IpoptProblem, view: i32) -> Dense {
             d.g_l.as_mut_ptr(),
             d.g_u.as_mut_ptr(),
             view,
+            0,
             &mut bad,
         )
     };
@@ -159,6 +161,7 @@ fn null_index_array_with_full_count_is_dense() {
             ptr::null(),
             ptr::null(),
             ptr::null(),
+            0,
             ptr::null_mut(),
         )
     };
@@ -185,6 +188,7 @@ fn null_value_array_leaves_that_side_unchanged() {
             ptr::null(),
             ptr::null(),
             ptr::null(),
+            0,
             ptr::null_mut(),
         )
     };
@@ -230,6 +234,7 @@ fn null_handle_is_refused() {
             ptr::null(),
             ptr::null(),
             ptr::null(),
+            0,
             &mut bad,
         )
     };
@@ -247,6 +252,7 @@ fn null_handle_is_refused() {
             ptr::null_mut(),
             ptr::null_mut(),
             POUNCE_BOUNDS_VIEW_USER,
+            0,
             &mut bad,
         )
     };
@@ -271,10 +277,61 @@ fn bad_counts_are_refused() {
                 ptr::null(),
                 lo.as_ptr(),
                 lo.as_ptr(),
+                0,
                 ptr::null_mut(),
             )
         };
         assert_eq!(code, POUNCE_BOUNDS_ERR_COUNT, "nx={nx} ng={ng}");
+    }
+    assert_eq!(snapshot(p), before);
+    free(p);
+}
+
+/// `flags` has no bits yet: any bit is refused, before the counts (so a
+/// call that is wrong in both ways names the flags), on both functions, and
+/// nothing is changed or written (plan §6.2 D1).
+#[test]
+fn an_unknown_flag_is_refused_first() {
+    let p = create_qpec(0);
+    let before = snapshot(p);
+    let (idx, val): ([Index; 1], [Number; 1]) = ([0], [0.5]);
+    for flags in [1u32, 0x8000_0000, u32::MAX] {
+        let mut bad = -7;
+        let code = unsafe {
+            SetPounceBounds(
+                p,
+                -1, // also a bad count: the flags are checked first
+                idx.as_ptr(),
+                val.as_ptr(),
+                val.as_ptr(),
+                0,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                flags,
+                &mut bad,
+            )
+        };
+        assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_FLAGS, -1), "set {flags:#x}");
+        let mut out = [-7.0; 1];
+        let code = unsafe {
+            GetPounceBounds(
+                p,
+                1,
+                idx.as_ptr(),
+                out.as_mut_ptr(),
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                POUNCE_BOUNDS_VIEW_USER,
+                flags,
+                &mut bad,
+            )
+        };
+        assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_FLAGS, -1), "get {flags:#x}");
+        assert_eq!(out, [-7.0]);
     }
     assert_eq!(snapshot(p), before);
     free(p);
@@ -304,6 +361,7 @@ fn a_count_above_the_side_is_refused_before_reading() {
                 idx.as_ptr(),
                 val.as_ptr(),
                 val.as_ptr(),
+                0,
                 &mut bad,
             )
         };
@@ -387,6 +445,7 @@ fn getter_refusals_write_nothing() {
             ptr::null_mut(),
             ptr::null_mut(),
             POUNCE_BOUNDS_VIEW_USER,
+            0,
             &mut bad,
         )
     };
@@ -404,6 +463,7 @@ fn getter_refusals_write_nothing() {
             ptr::null_mut(),
             ptr::null_mut(),
             2,
+            0,
             &mut bad,
         )
     };
@@ -420,6 +480,7 @@ fn getter_refusals_write_nothing() {
             ptr::null_mut(),
             ptr::null_mut(),
             POUNCE_BOUNDS_VIEW_USER,
+            0,
             &mut bad,
         )
     };

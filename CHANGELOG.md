@@ -104,7 +104,9 @@ changes.
   recreates the problem (and replays that state) to change a bound. Sparse
   (index arrays in the problem's index style; a NULL index array with the
   full count is dense), all or nothing, and at a cost independent of `n`,
-  `m` and the number of pairs. An update is refused with a
+  `m` and the number of pairs. Both functions take a `flags` argument that
+  must be 0 for now, so a later relaxation can be asked for explicitly. An
+  update is refused with a
   `POUNCE_BOUNDS_ERR_*` code, changing nothing, if it would change what a
   declared pair pairs (its paired variable bound and row side), move a
   `Complements` variable to another row of the MOI table, give a

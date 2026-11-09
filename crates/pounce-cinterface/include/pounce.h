@@ -822,9 +822,14 @@ int AddPounceComplementsConstraint(
  * of the named entries unchanged. Cost: O(nx + ng + pairs touched),
  * independent of n, m and the number of pairs.
  *
+ * flags must be 0 (both functions). No bit is defined yet; it is there so
+ * that a later relaxation of a refusal below can be asked for, rather than
+ * changing what an existing call means. A bit this library does not define
+ * is POUNCE_BOUNDS_ERR_FLAGS, so an older library never ignores one.
+ *
  * All or nothing. The batch is checked against the bounds it would
  * install, in this order, and a refused call changes nothing:
- *   1. counts; then per entry, variables first, in batch order: index in
+ *   1. the handle, then flags (and GetPounceBounds' view), then counts; then per entry, variables first, in batch order: index in
  *      range, not already in the batch (POUNCE_BOUNDS_ERR_DUPLICATE), no NaN;
  *   2. per entry in batch order, for a variable or row in a declared pair
  *      or a Complements declaration:
@@ -877,6 +882,7 @@ int AddPounceComplementsConstraint(
 #define POUNCE_BOUNDS_ERR_WORKING_SET         -9   /* the staged working set would be contradicted */
 #define POUNCE_BOUNDS_ERR_VIEW               -10   /* GetPounceBounds: unknown view */
 #define POUNCE_BOUNDS_ERR_INTERNAL           -11   /* inconsistent handle or internal error; nothing changed */
+#define POUNCE_BOUNDS_ERR_FLAGS              -12   /* flags has a bit this library does not define */
 #define POUNCE_BOUNDS_VIEW_USER                0
 #define POUNCE_BOUNDS_VIEW_EFFECTIVE           1
 
@@ -892,6 +898,7 @@ int SetPounceBounds(
     const ipindex  *g_idx,
     const ipnumber *g_L,
     const ipnumber *g_U,
+    unsigned int    flags,
     ipindex        *bad_index
 );
 
@@ -908,6 +915,7 @@ int GetPounceBounds(
     ipnumber       *g_L,
     ipnumber       *g_U,
     int             view,
+    unsigned int    flags,
     ipindex        *bad_index
 );
 

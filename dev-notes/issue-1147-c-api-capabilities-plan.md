@@ -1042,11 +1042,11 @@ tightening an accepted input later breaks callers.
 int SetPounceBounds(IpoptProblem p,
     ipindex nx, const ipindex *x_idx, const ipnumber *x_L, const ipnumber *x_U,
     ipindex ng, const ipindex *g_idx, const ipnumber *g_L, const ipnumber *g_U,
-    ipindex *bad_index);
+    unsigned int flags, ipindex *bad_index);
 int GetPounceBounds(IpoptProblem p,
     ipindex nx, const ipindex *x_idx, ipnumber *x_L, ipnumber *x_U,
     ipindex ng, const ipindex *g_idx, ipnumber *g_L, ipnumber *g_U,
-    int view, ipindex *bad_index);
+    int view, unsigned int flags, ipindex *bad_index);
 ```
 
 - Indices in the problem's index style. `x_idx == NULL` with `nx == n` (or
@@ -1198,11 +1198,39 @@ does not link this crate).
 
 ### 6.6 For confirmation in the PR
 
-- [ ] D1: one combined sparse call; dense via NULL index array; duplicates refused.
-- [ ] D2: two layers; `Complements` rows accept free user bounds only; class changes refused.
-- [ ] D3: pair identity (paired sides), not shape variant, is the invariant.
-- [ ] D4: crossed bounds not refused by the setter; staged working set contradiction refuses the update.
-- [ ] The code list and its check order.
+Confirmed by the human on 2026-11-09, after a review that argued each
+decision against its alternatives:
+
+- [x] D1: one combined sparse call; dense via NULL index array; duplicates
+  refused. **Amended:** both functions take `unsigned int flags`, which must
+  be 0; an unknown bit is `POUNCE_BOUNDS_ERR_FLAGS` (-12), checked right
+  after the handle. The argument list is fixed at release, and strict-first
+  only works if a later relaxation is opt-in rather than a change of meaning
+  for every caller. Candidate bits: last-wins duplicates, refusing crossed
+  bounds, re-deriving a `Complements` pair on a table-row change (D2),
+  auto-clearing a contradicted working set (D4).
+- [x] D2: two layers; `Complements` rows accept free user bounds only; class
+  changes refused. Refusing a table-row change is stricter than MOI (there
+  it re-derives the pair, possibly into a mixed one); it is the first
+  candidate flag, not needed by the repeated-OPF case, where values move and
+  pattern does not.
+- [x] D3: pair identity (paired sides), not shape variant, is the invariant.
+  "Any classifying state" lets an update silently re-pair; "same variant"
+  refuses harmless updates and still admits a re-pairing that keeps it.
+- [x] D4: crossed bounds not refused by the setter (as for
+  `CreateIpoptProblem`; MOI expects them at solve time); a staged working
+  set contradiction refuses the update; results stay readable (the warm
+  start reads them after the update); sessions take no updates.
+- [x] The code list and its check order, with `-12 FLAGS` appended. Codes are
+  never renumbered; new ones are appended.
+
+**Release-time check, not this PR's:** the C API's four error families
+(`POUNCE_CC_*`, `POUNCE_COMPLEMENTS_*`, `POUNCE_BOUNDS_*`, `POUNCE_QP_*`)
+are all new in 0.17 and number shared meanings differently (OUT_OF_RANGE -2
+vs -3, COUNT -6 vs -2, INTERNAL -7 vs -11). Per-function families are the
+decision (each function documents its own codes); a wrapper must not keep
+one table across them. Renumbering is free until 0.17 is tagged and
+impossible after, so confirm the decision stands before tagging.
 
 ## 7. Stage 3 and Stage 4 — design and iteration list
 
@@ -1694,17 +1722,17 @@ Two functions (`src/bounds.rs`, `#[unsafe(no_mangle)] pub unsafe extern
 "C"`, bodies through `ffi_guard`; `bad_index` is written `-1` before the
 guard):
 
-- [ ] `int SetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx, const ipnumber *x_L, const ipnumber *x_U, ipindex ng, const ipindex *g_idx, const ipnumber *g_L, const ipnumber *g_U, ipindex *bad_index)`
-- [ ] `int GetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx, ipnumber *x_L, ipnumber *x_U, ipindex ng, const ipindex *g_idx, ipnumber *g_L, ipnumber *g_U, int view, ipindex *bad_index)`
+- [ ] `int SetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx, const ipnumber *x_L, const ipnumber *x_U, ipindex ng, const ipindex *g_idx, const ipnumber *g_L, const ipnumber *g_U, unsigned int flags, ipindex *bad_index)`
+- [ ] `int GetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx, ipnumber *x_L, ipnumber *x_U, ipindex ng, const ipindex *g_idx, ipnumber *g_L, ipnumber *g_U, int view, unsigned int flags, ipindex *bad_index)`
 
-Fourteen `#define`s (held both ways by
+Fifteen `#define`s (held both ways by
 `header_bounds_codes_match_the_implementation` in `tests/header_abi.rs`):
 
 - [ ] `POUNCE_BOUNDS_OK 0`, `_ERR_NULL -1`, `_ERR_COUNT -2`,
       `_ERR_OUT_OF_RANGE -3`, `_ERR_DUPLICATE -4`, `_ERR_NAN -5`,
       `_ERR_PAIR_CHANGED -6`, `_ERR_COMPLEMENTS_CLASS -7`,
       `_ERR_COMPLEMENTS_ROW -8`, `_ERR_WORKING_SET -9`, `_ERR_VIEW -10`,
-      `_ERR_INTERNAL -11`.
+      `_ERR_INTERNAL -11`, `_ERR_FLAGS -12` (appended at the PR's confirmation).
 - [ ] `POUNCE_BOUNDS_VIEW_USER 0`, `POUNCE_BOUNDS_VIEW_EFFECTIVE 1`.
 
 Behaviour of existing functions:

@@ -159,6 +159,7 @@ fn update_dense(
             ptr::null(),
             g_l.as_ptr(),
             g_u.as_ptr(),
+            0,
             &mut bad,
         )
     };
@@ -217,6 +218,7 @@ fn a_sparse_update_equals_the_dense_one() {
                 gi.as_ptr(),
                 gl.as_ptr(),
                 gu.as_ptr(),
+                0,
                 ptr::null_mut(),
             )
         };

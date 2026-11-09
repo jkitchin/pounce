@@ -134,7 +134,7 @@ static int solve_to(IpoptProblem prob, const ipnumber want[N], ipnumber *obj)
 static int show_rows(IpoptProblem prob, int view, const char *label)
 {
     ipnumber gl[M], gu[M];
-    if (GetPounceBounds(prob, 0, NULL, NULL, NULL, M, NULL, gl, gu, view, NULL)
+    if (GetPounceBounds(prob, 0, NULL, NULL, NULL, M, NULL, gl, gu, view, 0, NULL)
         != POUNCE_BOUNDS_OK) {
         return 0;
     }
@@ -179,7 +179,7 @@ int main(void)
         const ipnumber lo[2] = {0.0, 0.0};
         const ipnumber hi[2] = {1.0, 5.0};
         ipindex bad = -1;
-        int rc = SetPounceBounds(prob, 2, idx, lo, hi, 0, NULL, NULL, NULL, &bad);
+        int rc = SetPounceBounds(prob, 2, idx, lo, hi, 0, NULL, NULL, NULL, 0, &bad);
         printf("refused: y1 <= 5 -> %d at entry %d\n", rc, (int)bad);
         if (rc != POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS || bad != 1) {
             return fail(prob, "expected POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS at 1");
@@ -190,7 +190,7 @@ int main(void)
         const ipindex idx[1] = {0};
         const ipnumber lo[1] = {0.0};
         ipindex bad = -1;
-        int rc = SetPounceBounds(prob, 0, NULL, NULL, NULL, 1, idx, lo, NULL, &bad);
+        int rc = SetPounceBounds(prob, 0, NULL, NULL, NULL, 1, idx, lo, NULL, 0, &bad);
         printf("refused: g_L[0] = 0 -> %d at entry %d\n", rc, (int)bad);
         if (rc != POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW || bad != 0) {
             return fail(prob, "expected POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW at 0");
@@ -202,7 +202,7 @@ int main(void)
         const ipindex idx[1] = {0};
         const ipnumber lo[1] = {0.25};
         const ipnumber hi[1] = {0.75};
-        if (SetPounceBounds(prob, 1, idx, lo, hi, 0, NULL, NULL, NULL, NULL)
+        if (SetPounceBounds(prob, 1, idx, lo, hi, 0, NULL, NULL, NULL, 0, NULL)
             != POUNCE_BOUNDS_OK) {
             return fail(prob, "SetPounceBounds");
         }
