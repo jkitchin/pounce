@@ -58,6 +58,8 @@ same directory. Scalars match upstream: `ipnumber` is `double`, `ipindex` is
   `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`,
   `GetPounceComplementarityPairs` and `AddPounceComplementsConstraint`
   declare complementarity pairs; see [Complementarity](#complementarity).
+- `SetPounceBounds` / `GetPounceBounds` change and read bounds on an
+  existing handle; see [Updating bounds](#updating-bounds).
 
 ## Solving
 
@@ -107,6 +109,95 @@ nearby problem; see the [active-set SQP warm-start design note](active-set-sqp-w
   plus declared pairs makes `IpoptSolve` (and `IpoptSolveWarmStart`) return
   `Invalid_Problem_Definition` without solving, and `IpoptGetWorkingSet`
   returns `FALSE` after a solve with pairs.
+
+## Updating bounds
+
+```c
+int SetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx,
+                    const ipnumber *x_L, const ipnumber *x_U,
+                    ipindex ng, const ipindex *g_idx,
+                    const ipnumber *g_L, const ipnumber *g_U,
+                    unsigned int flags, ipindex *bad_index);
+int GetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx,
+                    ipnumber *x_L, ipnumber *x_U,
+                    ipindex ng, const ipindex *g_idx,
+                    ipnumber *g_L, ipnumber *g_U,
+                    int view, unsigned int flags, ipindex *bad_index);
+```
+
+`SetPounceBounds` changes bounds on a handle without rebuilding it, so
+everything else on the handle stays: options, scaling, the
+nonlinear-variables hint, declared pairs and `Complements` declarations. It
+saves that bookkeeping, not solver work: each `IpoptSolve` builds its solver
+afresh either way. Warm starts stay explicit; pass the previous solution and
+multipliers to `IpoptSolve` with `warm_start_init_point=yes`.
+
+The update is **sparse**: `nx` variable entries `(x_idx[k], x_L[k], x_U[k])`
+and `ng` row entries, indices in the problem's index style, at a cost that
+depends on the entries and the pairs they touch, not on `n`, `m` or the
+number of pairs. A NULL index array with the full count (`n` or `m`) is
+dense; a NULL value array leaves that side of the named entries as it was.
+
+`flags` must be 0 on both functions. No bit is defined yet: it exists so a
+later relaxation of one of the refusals below can be asked for explicitly,
+instead of changing what an existing call does. A bit the library does not
+know is refused with `_ERR_FLAGS` (-12), so an older library never ignores
+one silently.
+
+It is **all or nothing**: the batch is checked against the bounds it would
+install, and a refusal changes nothing. In order:
+
+| check | code |
+|---|---|
+| NULL handle | `POUNCE_BOUNDS_ERR_NULL` (-1) |
+| a bit in `flags` this library does not define | `_ERR_FLAGS` (-12) |
+| a negative count, a setter count above `n` (or `m`), or a NULL index array with a count other than 0 or the full size | `_ERR_COUNT` (-2) |
+| per entry, variables first: index out of range | `_ERR_OUT_OF_RANGE` (-3) |
+| the same index twice on one side | `_ERR_DUPLICATE` (-4) |
+| a NaN bound | `_ERR_NAN` (-5) |
+| a `Complements` variable would move to another row of the MOI table | `_ERR_COMPLEMENTS_CLASS` (-7) |
+| a `Complements` row given a finite bound | `_ERR_COMPLEMENTS_ROW` (-8) |
+| a declared pair would pair a different variable bound or row side | `_ERR_PAIR_CHANGED` (-6) |
+| a staged SQP working set would claim something false | `_ERR_WORKING_SET` (-9) |
+| inconsistent handle, internal error | `_ERR_INTERNAL` (-11) |
+
+The range, duplicate and NaN checks run over every entry before any of the
+rest. The `Complements` and pair checks then run entry by entry in batch
+order (a variable's `Complements` check before its pair's), so the first
+offending entry is the one reported; the working-set check comes last.
+`bad_index` receives the position of the refused entry in the batch,
+`0..nx-1` for variables and `nx..nx+ng-1` for rows, or `-1`. A pair is
+checked once, against everything the batch does to it, so a
+`_PAIR_CHANGED` refusal names the batch's first entry touching the pair
+(variables come first), which need not be the entry that changed it.
+
+**Declared pairs.** A pair's meaning is read off bounds, so an update may
+move the paired bounds' values, and the variable may gain or lose the bound
+that is not in the pair, but the pair must keep pairing the same variable
+bound (lower or upper) with the same row side (or stay mixed). The rule is
+on what is paired, not on the shape's name: `x >= 0 ⟂ g <= 0` is a legal
+one-sided pair, and if `x` gains a finite upper bound the bounds classify as
+one-sided-plus-bound pairing `g <= 0` with `x <= x_U` — every state valid, a
+different complementarity condition. That update is refused, while the same
+upper bound on `x >= 0 ⟂ g >= 0` is accepted.
+
+**`Complements` declarations.** The handle keeps two views of the bounds.
+The *user* view is what `CreateIpoptProblem` and `SetPounceBounds` wrote;
+the *effective* view, which the solve and every other function see, adds
+the row edits `AddPounceComplementsConstraint` made. `SetPounceBounds`
+writes the user view: a `Complements` row must stay free there (the
+`F >= 0` the helper wrote is not an input), and a `Complements` variable
+must keep its row of the table (lower-only, upper-only, boxed, fixed, free),
+since a change of row can create or remove a pair. To change either, build a
+new problem. `GetPounceBounds` reads `POUNCE_BOUNDS_VIEW_USER` (0) or
+`POUNCE_BOUNDS_VIEW_EFFECTIVE` (1), takes the same index arguments
+(duplicates allowed), skips a NULL output array and writes nothing on a
+refusal (`_ERR_VIEW` (-10) for an unknown view).
+
+Crossed bounds (`l > u`) are not refused here; the solve reports them, as for
+`CreateIpoptProblem`. The getters for the most recent solve stay readable
+after an update and describe that solve. A session (`IpoptCreateSolver`)
+owns its problem, so it takes no updates.
 
 ## Sessions
 
@@ -213,7 +304,8 @@ With pairs declared, `IpoptSolve` runs the complementarity driver instead
 of one solve and the second-opinion ladder, honours the
 `complementarity_strategy`, `complementarity_continuation` and
 `complementarity_lift` options, and writes the reported point, its `g`,
-objective and multipliers into the caller's buffers. `GetIpoptIterCount`
+objective and multipliers into the caller's buffers (the multipliers are the declared
+model's; see [Multipliers](complementarity.md#multipliers)). `GetIpoptIterCount`
 and the other post-solve accessors describe that reported solve, not the
 whole run. With no pairs declared nothing changes. Three things refuse
 pairs, because each is defined over the caller's rows while the driver

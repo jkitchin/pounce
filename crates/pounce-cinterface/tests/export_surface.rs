@@ -12,7 +12,7 @@
 //!
 //! What it enforces, for every exported name:
 //!
-//! 1. **Header.** The set of C exports in `src/lib.rs` + `src/solver.rs` + `src/qp.rs`
+//! 1. **Header.** The set of C exports in `src/lib.rs` + `src/solver.rs` + `src/qp.rs` + `src/bounds.rs`
 //!    equals the set of top-level prototypes in `include/pounce.h`.
 //! 2. **Signature.** Same arity; each parameter and the return mapped to a
 //!    width class (`i1`, `i32`, `f64`, `ptr`, `fnptr(<typedef>)`, `void`)
@@ -50,6 +50,9 @@ const GRANDFATHERED_NO_ERROR_PATH: &[&str] = &[];
 enum Class {
     I1,
     I32,
+    /// Unsigned 32-bit, kept apart from `I32` so a signed/unsigned mismatch
+    /// between export and prototype is caught.
+    U32,
     F64,
     Ptr,
     FnPtr(String),
@@ -95,6 +98,7 @@ fn rust_class(ty: &str) -> Result<Class, String> {
     Ok(match ty {
         "Bool" => Class::I1,
         "Index" | "c_int" | "i32" | "IpoptBoundStatus" | "IpoptConsStatus" => Class::I32,
+        "c_uint" | "u32" => Class::U32,
         "Number" | "f64" => Class::F64,
         "IpoptProblem" | "IpoptSolver" | "PounceQp" => Class::Ptr,
         "" | "()" => Class::Void,
@@ -273,6 +277,7 @@ fn c_class(decl: &str, has_name: bool) -> Result<Class, String> {
     Ok(match ty.as_str() {
         "bool" | "Bool" => Class::I1,
         "int" | "ipindex" | "Index" | "IpoptBoundStatus" | "IpoptConsStatus" => Class::I32,
+        "unsigned int" | "unsigned" => Class::U32,
         "ipnumber" | "Number" | "double" => Class::F64,
         "IpoptProblem" | "IpoptSolver" | "PounceQp" | "UserDataPtr" => Class::Ptr,
         "void" => Class::Void,
@@ -438,7 +443,7 @@ fn test_corpus() -> String {
             corpus.push('\n');
         }
     }
-    for f in ["lib.rs", "solver.rs", "qp.rs", "fortran.rs"] {
+    for f in ["lib.rs", "solver.rs", "qp.rs", "bounds.rs", "fortran.rs"] {
         let src = read(root.join("src").join(f));
         if let Some(pos) = src.find("#[cfg(test)]") {
             corpus.push_str(&src[pos..]);
@@ -477,7 +482,7 @@ struct Surface {
 fn surface() -> Surface {
     let root = manifest_dir();
     let mut c = BTreeMap::new();
-    for f in ["lib.rs", "solver.rs", "qp.rs"] {
+    for f in ["lib.rs", "solver.rs", "qp.rs", "bounds.rs"] {
         let ex = rust_exports(&read(root.join("src").join(f)))
             .unwrap_or_else(|e| panic!("src/{f}: {e}"));
         for (k, v) in ex {

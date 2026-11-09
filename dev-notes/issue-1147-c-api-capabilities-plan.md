@@ -33,9 +33,16 @@ that ticks it.
 
 **Stop here and report to the human before starting any later stage.**
 
-### Stage 2 — in-place bounds/data update and warm re-solve
+### Stage 2 — in-place bound update (design in §6, decided 2026-11-09)
 
-- [ ] **S2-BLOCKED** Blocked on confirmation from the Julia side (§6). Do not start.
+Unblocked by the Julia side's answer on gh#1147 (comment 6739730460). Branch
+`c-api-bound-updates`. The decisions in §6.2 go to the PR for confirmation
+(§6.6); implementation proceeds on them meanwhile.
+
+- [x] **S2-I1** Pair lookup on the handle: `DeclaredPairs` (list + var→pair / row→pair maps) replaces `complementarity: Vec`; `complements_used` records the MOI table row and the caller's row bounds. `AddPounceComplementarityPair` and `AddPounceComplementsConstraint` become O(1) per call instead of O(P). No surface change; one behaviour change (§9, S2-I1).
+- [x] **S2-I2** `SetPounceBounds` / `GetPounceBounds` and the `POUNCE_BOUNDS_*` codes; every refusal code and every branch of the pair rule (§6.2 D3) tested, each refusal checked to leave the handle unchanged.
+- [x] **S2-I3** Parity and scale: update-then-solve equals fresh-`Create`-then-solve (NLP, MPCC native pair, MOI Complements pair; exact and L-BFGS); explicit warm re-solve after an update; complexity guard (k-entry update cost independent of n, m and P).
+- [x] **S2-I4** `pounce.h`, README, `docs/src/c-api.md`, `docs/src/complementarity.md`, CHANGELOG, `examples/bounds_update.c`; §8 ABI checklist extended; export guard green; PR with §6.6 for confirmation.
 
 ### Stage 3 — matrix-form convex/conic entry
 
@@ -993,34 +1000,237 @@ run.
 
 ---
 
-## 6. Stage 2 — BLOCKED: in-place data update and warm re-solve
+## 6. Stage 2 — in-place bound update
 
-Do not start. Open questions for the Julia side, to be answered in the issue
-before design:
+### 6.1 What the Julia side asked for (gh#1147, comment 6739730460)
 
-1. Which data changes are needed per re-solve: bounds only (`x_L/x_U/g_L/g_U`),
-   or also the starting point and multipliers (already in/out buffers of
-   `IpoptSolve`), or objective/constraint *coefficients* (which live in the
-   caller's callbacks and need no API)?
-2. Is "without rebuilding" about avoiding `CreateIpoptProblem` (cheap: it
-   copies four vectors) or about reusing solver state across solves (the
-   `IpoptSolver` session, symbolic factorization, SQP working set —
-   `IpoptSolveWarmStart` already carries the working set)?
-3. Does MOI's `modify`/`set(ConstraintSet)` path hit this often enough to
-   matter, and on which model sizes? A measurement from Pounce.jl's MOI tests
-   would decide.
-4. Should bound updates be allowed on a problem with declared pairs (the
-   shape classification can change, so a pair may become invalid)? If so,
-   the update must re-run `validate_pairs` and report.
-5. Interaction with `IpoptCreateSolver`'s consume-the-handle semantics: a
-   session cannot take new bounds today.
+- The missing native operation is updating `x_L/x_U/g_L/g_U` on an existing
+  handle. Pounce.jl keeps its evaluator across bound edits but frees and
+  recreates the native problem. `MOI.Parameter` updates already reuse the
+  handle; starts and multipliers already go through `IpoptSolve` with
+  `warm_start_init_point=yes`, and that explicit behaviour stays.
+- No performance claim. Persistent solver state (allocation, symbolic
+  analysis, numerical factorization, SQP working set) is a separate,
+  benchmark-driven feature, decided after a repeated-OPF measurement that
+  separates model copy, derivative setup, handle creation, symbolic analysis
+  and solve.
+- Bound updates with declared pairs: a conservative first version is
+  acceptable. Shape-preserving updates are validated; class changes are
+  refused or need an explicit rebuild. Keep the original declaration, keep
+  user bounds apart from bounds the lowering introduced, and never apply a
+  failed update partially.
+- Pounce.jl will give each MOI `Complements` function its own free row
+  before calling `AddPounceComplementsConstraint`.
+- Sensitivity sessions: out of scope (Pounce.jl does not expose them).
 
-Candidate shape, **not to be implemented until confirmed**:
-`Bool IpoptSetVariableBounds(IpoptProblem, const ipnumber* x_L, const ipnumber* x_U)`,
-`Bool IpoptSetConstraintBounds(IpoptProblem, const ipnumber* g_L, const ipnumber* g_U)`,
-both re-validating declared pairs, both refused on a consumed handle.
+What the code adds to that: a retained handle saves no solver work today.
+Every `IpoptSolve` builds a fresh `CCallbackTnlp` from the handle's bound
+vectors (`lib.rs`, the `x_l: info.x_l.clone()` in `IpoptSolve`) and runs
+`optimize_tnlp` from scratch. The setter's value is the handle state that a
+`Free` + `Create` loses and the caller must replay: options, scaling, the
+nonlinear-variables hint, declared pairs and the `Complements` bound edits.
 
----
+### 6.2 Decisions
+
+The rule behind all of them: **start strict.** Relaxing a refusal later is an
+ABI-compatible addition (a new flag or a code that stops being returned);
+tightening an accepted input later breaks callers.
+
+**D1 — Sparse is the primary form; one call for variables and rows.**
+
+```c
+int SetPounceBounds(IpoptProblem p,
+    ipindex nx, const ipindex *x_idx, const ipnumber *x_L, const ipnumber *x_U,
+    ipindex ng, const ipindex *g_idx, const ipnumber *g_L, const ipnumber *g_U,
+    unsigned int flags, ipindex *bad_index);
+int GetPounceBounds(IpoptProblem p,
+    ipindex nx, const ipindex *x_idx, ipnumber *x_L, ipnumber *x_U,
+    ipindex ng, const ipindex *g_idx, ipnumber *g_L, ipnumber *g_U,
+    int view, unsigned int flags, ipindex *bad_index);
+```
+
+- Indices in the problem's index style. `x_idx == NULL` with `nx == n` (or
+  `g_idx == NULL` with `ng == m`) is dense; `NULL` with any other nonzero
+  count is `POUNCE_BOUNDS_ERR_COUNT`, as is a setter count above `n` (or
+  `m`): it must repeat an index, and refusing it before reading any entry
+  keeps a garbage count from sizing an allocation (review of PR #1157).
+- A NULL value array leaves that side unchanged (setter) or unwritten
+  (getter).
+- One call covers variables and rows so that a variable and its paired row
+  move together without passing through an invalid state between two calls.
+- All or nothing: the batch is validated against the *post-update* bounds as
+  a whole, then committed. A refusal changes nothing.
+- A duplicate index within a side is refused (`ERR_DUPLICATE`): "last
+  wins" is a silent ambiguity.
+- `bad_index` (may be NULL) receives the position in the concatenated batch
+  — `0..nx-1` for variables, `nx..nx+ng-1` for rows — of the entry that
+  caused the refusal, or `-1`.
+- **Cost is O(k + touched pairs)** expected, never O(n + m): touched pairs
+  are found through var→pair and row→pair maps kept on the handle (S2-I1),
+  each re-classified with one `classify_pair`; the staged working set is
+  re-checked at touched indices only; staging is a hash map of the k new
+  values. `validate_pairs` is **not** called (it allocates `n + m` flags
+  and walks every pair).
+  The same fix makes Stage 1's per-pair `Add*` calls O(1): each cloned and
+  re-validated the whole stored set (and `AddPounceComplementsConstraint`
+  also scanned it for duplicates), O(P) per call, so P single-pair
+  declarations cost O(P²). Measured in a debug build (S2-I1): 4.0 → 25 µs
+  per call from P = 1 000 to 20 000 before, flat at ~0.07 µs after. The
+  `n + m` flags cost nothing visible: `vec![false; n]` is a lazily zeroed
+  allocation.
+
+Codes:
+
+```c
+#define POUNCE_BOUNDS_OK                       0
+#define POUNCE_BOUNDS_ERR_NULL                -1  /* NULL handle */
+#define POUNCE_BOUNDS_ERR_COUNT               -2  /* count < 0, or NULL index array with count not in {0, n|m} */
+#define POUNCE_BOUNDS_ERR_OUT_OF_RANGE        -3  /* index outside [0,n) / [0,m) in index style */
+#define POUNCE_BOUNDS_ERR_DUPLICATE           -4  /* an index twice on one side of the batch */
+#define POUNCE_BOUNDS_ERR_NAN                 -5  /* a NaN bound */
+#define POUNCE_BOUNDS_ERR_PAIR_CHANGED        -6  /* a native pair's paired sides would change (D3) */
+#define POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS   -7  /* a Complements variable would change MOI table row (D2) */
+#define POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW     -8  /* a Complements row given a finite bound (D2) */
+#define POUNCE_BOUNDS_ERR_WORKING_SET         -9  /* the staged SQP working set would contradict the bounds */
+#define POUNCE_BOUNDS_ERR_VIEW               -10  /* GetPounceBounds: unknown view */
+#define POUNCE_BOUNDS_ERR_INTERNAL           -11  /* inconsistent handle or caught panic; nothing changed */
+#define POUNCE_BOUNDS_VIEW_USER                0
+#define POUNCE_BOUNDS_VIEW_EFFECTIVE           1
+```
+
+Check order (first failure wins): NULL, counts, then per entry in batch
+order range → duplicate → NaN, then per entry in batch order D2 then D3
+(a pair touched by two entries is checked, and blamed, at the first), then
+the working set at the touched entries.
+
+**D2 — Two bound layers; `Complements` rows take the caller's free bounds only.**
+
+- *User* bounds are what `CreateIpoptProblem` and `SetPounceBounds` wrote.
+  *Effective* bounds are user bounds with the `AddPounceComplementsConstraint`
+  edits applied; they are what the solve and every existing function see.
+- Only rows used by `AddPounceComplementsConstraint` differ between the
+  layers, so the user layer is stored for those rows only (O(P) memory),
+  together with the MOI table row the call applied.
+- The setter writes the user layer. A `Complements` row must stay free in
+  it (`ERR_COMPLEMENTS_ROW` otherwise): MOI's `F` is a free function, and
+  accepting the edited value too would make `g_L = 0` mean two things. The
+  effective bounds are re-derived from the table row.
+- A `Complements` variable must keep its table row (lower-only, upper-only,
+  boxed `l < u`, fixed, free); otherwise `ERR_COMPLEMENTS_CLASS`, and the
+  frontend rebuilds. Re-deriving automatically can create or destroy a pair,
+  which moves the pair count, the indices `GetPounceComplementarityPairs`
+  returns and the outcome getters. An opt-in to allow it is a later
+  addition. The rule holds after `ClearPounceComplementarityPairs` too,
+  because the edits (and the ledger) survive a clear.
+- `GetPounceBounds` takes `view`, so a read-back round-trips exactly.
+- Existing behaviour is unchanged: edits still survive Clear/Set; existing
+  functions still see effective bounds.
+
+**D3 — A native pair keeps its paired sides; the shape variant may change.**
+
+`classify_pair` lets a `OneSided` pair's sides be chosen independently
+(`x ≥ l ⟂ g ≤ u` is legal), while `OneSidedPlusBound` pairs the row's side
+with the variable bound *of the same sense*. So `x ≥ l ⟂ g ≤ u`, after `x`
+gains a finite upper bound, classifies as `OneSidedPlusBound` pairing
+`g ≤ u` with `x ≤ x_U`: every step validates, and the complementarity
+condition has silently changed. "Same `PairShape` variant" is therefore the
+wrong invariant (it would also refuse harmless updates).
+
+The invariant is the pair's **identity**: `(sign of the paired variable
+side, sign of the paired row side)` for `OneSided`/`OneSidedPlusBound`, and
+`Mixed` for `Mixed`.
+
+- Allowed: paired bound values move; the variable gains or loses its
+  *unpaired* bound while the identity holds (`OneSided` ↔
+  `OneSidedPlusBound`); a `Mixed` box moves while `l < u` stays strict and
+  the row stays free.
+- Refused (`ERR_PAIR_CHANGED`): the update leaves no native shape, or a
+  different identity — a paired side becomes infinite, the orientation
+  flips, a `Mixed` row gains a side, a `Mixed` variable becomes fixed or
+  one-sided.
+
+**D4 — Everything else.**
+
+- NaN refused. Crossed bounds (`l > u`) are not refused by the setter: the
+  solve reports them, as for `CreateIpoptProblem`.
+- A staged SQP working set (`IpoptSetWarmStartWorkingSet`) is re-checked at
+  touched indices with the same rules that function applies; a
+  contradiction refuses the update (`ERR_WORKING_SET`) rather than dropping
+  the set silently. (`IpoptSolveWarmStart` already drops an invalid input
+  set silently and cold-starts — pre-existing, documented, unchanged.)
+- `last_solve` stays readable after an update; it holds its own copy of the
+  bounds, so the report and violation getters still describe that solve.
+  Result invalidation is the frontend's (MOI's) business.
+- Sessions: unreachable (`IpoptCreateSolver` consumes the handle).
+- The Fortran shim gets nothing.
+
+### 6.3 Out of scope
+
+Sensitivity-session updates; persistent factorization / symbolic / working
+set reuse (needs the measurement in §6.1); bound updates on the Stage 3
+`PounceQp` handle; Complements class changes (D2) and pair identity changes
+(D3).
+
+### 6.4 Tests (S2-I2, S2-I3)
+
+- Every code, the refusals placed at the *last* batch position with earlier
+  entries valid, each followed by a full-handle equality check
+  (`g_l`, `g_u`, `x_l`, `x_u`, pairs, ledger, staged working set).
+- D3 both branches: the orientation-flip fixture (refused) beside the
+  unpaired-bound gain with the same identity (accepted); `Mixed` row gaining
+  a side; `Mixed` variable collapsing to fixed.
+- D2: each of the five table rows with a same-class update (accepted) and a
+  class-changing one (refused); a `Complements` row given a finite bound;
+  user/effective views on a round trip; after `ClearPounceComplementarityPairs`.
+- Parity: update then solve equals `Create` with those bounds then solve —
+  status, objective, iterations, x — on an NLP, a native-pair MPCC and an
+  MOI-`Complements` MPCC, on both Hessian legs.
+- Scale: the cost of a 10-entry update does not grow with n = m and P
+  (ratio test across sizes, not an absolute time).
+
+### 6.5 Gate (each iteration)
+
+`cargo test -p pounce-cinterface` (all binaries); `cargo test -p pounce-cli
+--test cinterface_mpcc_parity`; export guard; CI clippy flags on this crate;
+`cargo fmt --all -- --check`; from S2-I4 also `make book`, `make ask-check`,
+`make c-api-examples`. No sweep: nothing on the solve path changes (the CLI
+does not link this crate).
+
+### 6.6 For confirmation in the PR
+
+Confirmed by the human on 2026-11-09, after a review that argued each
+decision against its alternatives:
+
+- [x] D1: one combined sparse call; dense via NULL index array; duplicates
+  refused. **Amended:** both functions take `unsigned int flags`, which must
+  be 0; an unknown bit is `POUNCE_BOUNDS_ERR_FLAGS` (-12), checked right
+  after the handle. The argument list is fixed at release, and strict-first
+  only works if a later relaxation is opt-in rather than a change of meaning
+  for every caller. Candidate bits: last-wins duplicates, refusing crossed
+  bounds, re-deriving a `Complements` pair on a table-row change (D2),
+  auto-clearing a contradicted working set (D4).
+- [x] D2: two layers; `Complements` rows accept free user bounds only; class
+  changes refused. Refusing a table-row change is stricter than MOI (there
+  it re-derives the pair, possibly into a mixed one); it is the first
+  candidate flag, not needed by the repeated-OPF case, where values move and
+  pattern does not.
+- [x] D3: pair identity (paired sides), not shape variant, is the invariant.
+  "Any classifying state" lets an update silently re-pair; "same variant"
+  refuses harmless updates and still admits a re-pairing that keeps it.
+- [x] D4: crossed bounds not refused by the setter (as for
+  `CreateIpoptProblem`; MOI expects them at solve time); a staged working
+  set contradiction refuses the update; results stay readable (the warm
+  start reads them after the update); sessions take no updates.
+- [x] The code list and its check order, with `-12 FLAGS` appended. Codes are
+  never renumbered; new ones are appended.
+
+**Release-time check, not this PR's:** the C API's four error families
+(`POUNCE_CC_*`, `POUNCE_COMPLEMENTS_*`, `POUNCE_BOUNDS_*`, `POUNCE_QP_*`)
+are all new in 0.17 and number shared meanings differently (OUT_OF_RANGE -2
+vs -3, COUNT -6 vs -2, INTERNAL -7 vs -11). Per-function families are the
+decision (each function documents its own codes); a wrapper must not keep
+one table across them. Renumbering is free until 0.17 is tagged and
+impossible after, so confirm the decision stands before tagging.
 
 ## 7. Stage 3 and Stage 4 — design and iteration list
 
@@ -1502,6 +1712,40 @@ Decisions made in S3-I1/S3-I2/S3-I3, to confirm:
 - [x] **`PounceQpResiduals` / `PounceQpCertificate` could not grow**:
       resolved by `struct_size`, as §8.5's item; layouts now 72/8 (padding 4
       at 4) and 32/8 (no padding), see §9.
+
+### 8.8 Stage 2 — in-place bound updates (filled in by S2-I4)
+
+Base for "added" is the surface of §8.1–8.7; nothing there changed (no
+prototype, struct or `#define` value). No new struct.
+
+Two functions (`src/bounds.rs`, `#[unsafe(no_mangle)] pub unsafe extern
+"C"`, bodies through `ffi_guard`; `bad_index` is written `-1` before the
+guard):
+
+- [ ] `int SetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx, const ipnumber *x_L, const ipnumber *x_U, ipindex ng, const ipindex *g_idx, const ipnumber *g_L, const ipnumber *g_U, unsigned int flags, ipindex *bad_index)`
+- [ ] `int GetPounceBounds(IpoptProblem, ipindex nx, const ipindex *x_idx, ipnumber *x_L, ipnumber *x_U, ipindex ng, const ipindex *g_idx, ipnumber *g_L, ipnumber *g_U, int view, unsigned int flags, ipindex *bad_index)`
+
+Fifteen `#define`s (held both ways by
+`header_bounds_codes_match_the_implementation` in `tests/header_abi.rs`):
+
+- [ ] `POUNCE_BOUNDS_OK 0`, `_ERR_NULL -1`, `_ERR_COUNT -2`,
+      `_ERR_OUT_OF_RANGE -3`, `_ERR_DUPLICATE -4`, `_ERR_NAN -5`,
+      `_ERR_PAIR_CHANGED -6`, `_ERR_COMPLEMENTS_CLASS -7`,
+      `_ERR_COMPLEMENTS_ROW -8`, `_ERR_WORKING_SET -9`, `_ERR_VIEW -10`,
+      `_ERR_INTERNAL -11`, `_ERR_FLAGS -12` (appended at the PR's confirmation).
+- [ ] `POUNCE_BOUNDS_VIEW_USER 0`, `POUNCE_BOUNDS_VIEW_EFFECTIVE 1`.
+
+Behaviour of existing functions:
+
+- [ ] `AddPounceComplementarityPair` / `AddPounceComplementsConstraint` no
+      longer re-validate the stored pairs (S2-I1, §9). Same codes, same
+      order, on every input a public call can produce; the difference is
+      reachable only by writing the handle's fields from Rust.
+- [ ] `AddPounceComplementsConstraint`'s edits gain a user view; the
+      effective bounds every existing function sees are unchanged.
+
+Pounce.jl: the version gate needs widening for these symbols, after this
+review, as for 0.16 (§8.6).
 
 ## 9. Per-iteration log
 
@@ -3099,6 +3343,141 @@ Gate:
   clippy::correctness -D clippy::suspicious`: exit 0, no warning in a file
   this round touched.
 - `cargo fmt --check`: clean.
+
+### S2-I1 — indexed pair records (commit that ticks S2-I1)
+
+- `src/bounds.rs` (new): `DeclaredPairs` and `ComplementsLedger`, each a list
+  plus var→entry / row→entry maps, mutated only through their methods;
+  `ComplementsRow` moved here; `ComplementsUse` records the table row and
+  the row bounds the edit replaced (the user layer of §6.2 D2).
+- `SetPounceComplementarityPairs` still validates the batch with
+  `validate_pairs` (one O(n + m + P) call per batch) and then rebuilds the
+  maps. `AddPounceComplementarityPair` and the `Complements` helper go
+  through `append_pair`: range, variable, row, shape — `validate_pairs`'s
+  per-pair checks in its order — against the maps.
+- **Behaviour change, deliberate:** the one-pair calls no longer re-validate
+  the *stored* set. Two unit tests planted an invalid stored pair (by
+  writing `x_u` directly) and expected `POUNCE_CC_ERR_INTERNAL` /
+  `POUNCE_COMPLEMENTS_ERR_INTERNAL`; both said they guarded against "a
+  future in-place bound update" skipping its re-check. That update is
+  S2-I2, and it re-classifies every pair it touches, so the invariant is
+  kept where it can break instead of re-proved on every declaration. The
+  tests are replaced by `pair_maps_follow_every_declaration_path` and
+  `complements_records_the_table_row_and_the_callers_row_bounds`. The
+  lowering still runs `validate_pairs` at solve time.
+- `tests/bounds_scale.rs`: per-call cost at P = 1 000 vs 20 000, limit 2.5.
+  Against `origin/main`'s sources: ratios 6.4 and 7.3, both tests fail.
+  With the change: 0.9–1.0 over five runs.
+
+### S2-I2 — `SetPounceBounds` / `GetPounceBounds` (commit that ticks S2-I2)
+
+- `src/bounds.rs`: the two entry points, the `POUNCE_BOUNDS_*` codes, and
+  `set_bounds`: read both sides (range → duplicate → NaN per entry), check
+  D2 then D3 entry by entry against the post-update bounds, then the staged
+  working set at the touched entries, then commit. Nothing allocates per
+  `n`/`m`; staging and pair look-ups are hash maps.
+- `lib.rs`: `bound_status_consistent` / `cons_status_consistent` factored
+  out of `IpoptSetWarmStartWorkingSet`, so the setter and it apply one
+  rule. `zero_based`, `complements_row`, `ComplementsRow::row_bounds` made
+  crate-visible.
+- Header section, README bullet, book section "Updating bounds"; the
+  `Complements` paragraphs say what the user view is. Export guard reads
+  `src/bounds.rs`; `header_abi` holds the `POUNCE_BOUNDS_*` defines.
+- `tests/bounds_update.rs`, 24 tests: every code (refusals at the last batch
+  position, handle snapshot equal after), every D3 branch with its
+  accepted sibling, all five MOI table rows both ways, the class rule after
+  a clear, the working-set rule. `bounds.rs` unit test: a planted
+  unclassifiable pair answers `POUNCE_BOUNDS_ERR_INTERNAL` with `bad_index`
+  `-1` and changes nothing.
+- Mutation checks of the pair rule, both caught: accepting any native shape
+  fails 3 tests (orientation flip, paired side moved, mixed row gaining a
+  side); comparing the `PairShape` variant instead of the identity fails 2
+  (unpaired bound gained — the accepted branch — and paired side moved).
+- One test expectation was wrong as first written (a row's batch position
+  counted from 2 with one variable entry); fixed in the test.
+
+### S2-I3 — solve parity and scale (commit that ticks S2-I3)
+
+- `tests/bounds_update_solve.rs`: update-then-solve equals
+  create-with-those-bounds-then-solve, the whole `Outcome` compared with
+  `==` (status, x, objective, iterations, all three multiplier arrays), on
+  QpecSmall as a plain NLP, with native pairs and with MOI `Complements`
+  declarations, each on the exact and the L-BFGS leg. Each update moves the
+  answer (x to its new upper bound 0.75, asserted), so equality is not two
+  copies of the original solve. A sparse, reordered update equals the dense
+  one. An explicit warm re-solve (`warm_start_init_point=yes`, previous x
+  and multipliers) reaches the cold answer. The previous solve's iteration
+  count and complementarity record survive an update.
+- `tests/bounds_scale.rs`: `bound_updates_cost_o1_per_entry`, ratio 0.4–0.9
+  over three runs.
+- Mutation checks, both caught: the commit writing the user row bounds into
+  the effective rows of a `Complements` row (the solve leg fails with
+  `Invalid_Problem_Definition`; `bounds_update.rs` fails too); a setter
+  calling `validate_pairs` on every call (scale ratio 6.0 against 2.5).
+- **Observed, not caused here — fixed after review (§9, "Reported MPCC multipliers"):** after a
+  driver solve, `mult_g` does not hold the original model's row
+  multipliers, while `mult_x_U` does. Fresh handles, no setter involved.
+  MOI `Complements` QpecSmall with x in `[0.25, 0.75]` solves to
+  `x = (0.75, 0.875, 0.125)`, objective `0.09375` (correct: `1.5(1-x)^2` at
+  `x = 0.75`), both pairs non-degenerate (`y > 0`, `g = 0`). Stationarity
+  in Ipopt's convention (`∇f + Jᵀλ - z_L + z_U = 0`) gives `λ = (0.125,
+  -0.125)` from the `y` rows, and then `z_U[x] = 0.5 + 0.125 + 0.125 = 0.75`
+  — exactly the reported `mult_x_U`. The reported `mult_g` is
+  `[-2.17e7, -1.82e7]`. With native pairs (row 1 at `g >= -0.2`):
+  `λ = (0.125, -0.025)`, `z_U = 0.65` as reported, `mult_g = [-81.0, -4.24]`.
+  The CLI and Python share the driver; whether they report the same values
+  was not checked. Changing what the driver reports is outside Stage 2
+  (loop rule 7: driver behaviour).
+
+### S2-I4 — example, docs, CHANGELOG, §8.8 (same commit as S2-I3)
+
+- `examples/bounds_update.c`: QpecSmall with both pairs declared the MOI
+  way, the two views printed, two refusals (`-7` at entry 1, `-8` at entry
+  0), then x's box shrunk in place and re-solved to `(3/4, 7/8, 1/8)`,
+  objective `3/32`. Registered in `c_examples_build_and_run.rs`.
+- CHANGELOG `[Unreleased]`: the setter/getter, and the O(1) declarations.
+- §8.8 ABI checklist for the human.
+- Gate: `cargo test -p pounce-cinterface --no-fail-fast` (29 binaries ok);
+  `cinterface_mpcc_parity` 16/16; clippy CI flags clean on the new files;
+  `cargo fmt --check`; `make c-api-examples`; `make ask-check` OK.
+  **`make book` not run:** `mdbook` is not installed on this machine; the
+  docs job on CI builds it.
+- Process note: one gate run counted 4 ok binaries instead of 28 because
+  `examples/bounds_update.c` appeared mid-run without its
+  `EXPECTED_STDOUT` entry and `cargo test` stops at the first failing
+  binary. Gates since use `--no-fail-fast`.
+
+### Reported MPCC multipliers (follow-up on PR #1157, asked for by the human)
+
+The defect S2-I3 recorded, fixed for every frontend at the source:
+`MpccTnlp::forward_finalize` (and the non-deferred `finalize_solution`)
+handed the caller's model the lowered solve's row multipliers and dropped
+the product rows' `ν`.
+
+- `pounce-algorithm::mpcc`: `Certificate.multipliers:
+  Option<ModelMultipliers>` — each stationarity column carries a `Slot`
+  (row `λ_i = -sθ`, pair/ordinary bound signed on its side, fixed variable
+  split), filled when the system has full rank and the fit is `tight`, on
+  both the dense and the sparse route. The shared `run` test helper now
+  holds dense = sparse multipliers and `∇f + Jᵀλ - z_L + z_U` within
+  `resid_tol` for every certificate test model (flipping the row slot's sign
+  fails 7 of them).
+- `pounce-nlp::mpcc`: `declared_duals`, the fallback — `λ_i += ν s_H G`,
+  `ν s_G H` onto the pair's bound, signed. Not enough on its own: with
+  `ν ~ 1e8` and a row solved to `1e-10`, `ν H` lands `0.034` on an inactive
+  bound (measured on QpecSmall, exact product), stationary but not
+  complementary. Hence the certificate's fit first.
+- `pounce-restoration::mpcc_driver`: certificate computed before
+  `forward_finalize`, its multipliers scaled by `sense` (measured: the plain
+  path reports multipliers for `f` under `obj_scaling_factor = -1`).
+  Driver-internal `last_lambda`, gaps and warm starts untouched.
+- `python/pounce/_continuation.py`: the bound-activity fingerprint reads
+  `|z|`, since a pair-held bound's multiplier may now be negative.
+- Tests: `pounce-restoration/tests/mpcc_reported_duals.rs` (non-degenerate
+  QpecSmall exact values on six option paths; biactive; mixed pair, where
+  `z_L[x] = -1`; maximize), all failing before. Python
+  `test_the_reported_multipliers_are_the_models`; C API
+  `the_reported_row_multipliers_are_the_models`.
 
 ### Facts recorded while planning (2ac0ad9)
 

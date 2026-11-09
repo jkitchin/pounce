@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   test:
-    name: Julia ${{ matrix.julia }} (${{ matrix.os }})
+    name: Julia ${{ matrix.julia }} / native ${{ matrix.native }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -25,23 +25,52 @@ jobs:
         include:
           - os: ubuntu-latest
             julia: '1.10'
+            native: current
           - os: ubuntu-latest
             julia: '1'
+            native: current
           - os: macos-latest
             julia: '1'
+            native: current
+          - os: ubuntu-latest
+            julia: '1.10'
+            native: v0.15.0
+          - os: ubuntu-latest
+            julia: '1'
+            native: v0.16.0
     steps:
       - uses: actions/checkout@v5
+      - name: Check out older native release
+        if: matrix.native != 'current'
+        uses: actions/checkout@v5
+        with:
+          repository: jkitchin/pounce
+          ref: ${{ matrix.native }}
+          path: native-compat
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: julia-cinterface-${{ runner.os }}
+          key: julia-cinterface-${{ runner.os }}-${{ matrix.native }}
+          workspaces: ${{ matrix.native == 'current' && '.' || 'native-compat' }} -> target
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.julia }}
       - uses: julia-actions/cache@v2
       - name: Build native library
-        run: cargo build --release --locked -p pounce-cinterface
-      - name: Record source revision
-        run: git rev-parse HEAD
+        shell: bash
+        env:
+          NATIVE_REF: ${{ matrix.native }}
+        run: |
+          native_dir=.
+          if [ "$NATIVE_REF" != current ]; then native_dir=native-compat; fi
+          echo "Wrapper revision: $(git rev-parse HEAD)"
+          echo "Native revision: $(git -C "$native_dir" rev-parse HEAD)"
+          cargo build --release --locked -p pounce-cinterface --manifest-path "$native_dir/Cargo.toml"
+          echo "POUNCE_LIBRARY_PATH=$GITHUB_WORKSPACE/$native_dir/target/release" >> "$GITHUB_ENV"
+          echo "POUNCE_HEADER_DIR=$GITHUB_WORKSPACE/$native_dir/crates/pounce-cinterface/include" >> "$GITHUB_ENV"
+      - name: Instantiate Julia wrapper
+        run: julia --project=Pounce.jl --startup-file=no -e 'using Pkg; Pkg.instantiate()'
+      - name: Check C ABI layout
+        run: julia --project=Pounce.jl --startup-file=no Pounce.jl/test/check_c_abi.jl "$POUNCE_HEADER_DIR"
       - name: Test Julia wrapper
         run: julia --project=Pounce.jl --startup-file=no -e 'using Pkg; Pkg.test()'

@@ -1532,6 +1532,7 @@ pub fn solve_mpcc(
                 &c.z_l,
                 &c.z_u,
                 &c.lambda,
+                None,
                 &IpoptData::default(),
                 &IpoptCq::default(),
             );
@@ -1566,24 +1567,41 @@ pub fn solve_mpcc(
         Reported::WeakFallback(s) => Some(s),
         _ => None,
     };
+    // Certified before forwarding: when the declared model's multipliers at
+    // the point are unique, the certificate's fit is what the caller
+    // receives (`MpccTnlp::forward_finalize`).
+    let certificate = match known_cert {
+        Some(c) => c,
+        None => certify_at(&inner, &pairs, &chosen.x, solver_tol, tol, sense),
+    };
     {
         let mut w = wrapper.borrow_mut();
         w.set_start_override(None);
+        // The certificate fits the minimized `σ·f`; the caller's model
+        // receives multipliers for `f` itself, as a solve without pairs
+        // reports them (upstream un-scales duals by the objective scaling).
+        let scaled = certificate
+            .as_ref()
+            .and_then(|c| c.multipliers.as_ref())
+            .map(|mm| {
+                let s = |v: &[Number]| v.iter().map(|x| sense * x).collect::<Vec<Number>>();
+                (s(&mm.lambda), s(&mm.z_l), s(&mm.z_u))
+            });
+        let model_duals = scaled
+            .as_ref()
+            .map(|(l, zl, zu)| (&l[..], &zl[..], &zu[..]));
         w.forward_finalize(
             chosen.solver_return,
             &chosen.x,
             &chosen.z_l,
             &chosen.z_u,
             &chosen.lambda,
+            model_duals,
             &IpoptData::default(),
             &IpoptCq::default(),
         );
     }
     let total_iterations = solves.iter().map(|s| s.iterations).sum();
-    let certificate = match known_cert {
-        Some(c) => c,
-        None => certify_at(&inner, &pairs, &chosen.x, solver_tol, tol, sense),
-    };
     let nat_res = model_at(&inner, &chosen.x, sense)
         .and_then(|mp| natural_residual(&mp.input(&pairs, solver_tol, tol)).map(|(r, _)| r));
     Ok(MpccOutcome {

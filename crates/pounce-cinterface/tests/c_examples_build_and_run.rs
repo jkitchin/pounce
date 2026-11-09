@@ -50,6 +50,10 @@ use std::process::Command;
 /// The stdout line each example prints on success.
 const EXPECTED_STDOUT: &[(&str, &str)] = &[
     (
+        "bounds_update.c",
+        "bounds_update example: re-solved to (3/4, 7/8, 1/8) after an in-place update, 2 refusals",
+    ),
+    (
         "complementarity.c",
         "complementarity example: S-stationary answer (1, 1, 0) certified",
     ),

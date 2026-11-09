@@ -380,3 +380,78 @@ fn header_qp_codes_match_the_implementation() {
         );
     }
 }
+
+/// The bound-update codes (gh#1147 Stage 2): every `#define POUNCE_BOUNDS_`
+/// in the header against the Rust constant of the same name, both ways.
+#[test]
+fn header_bounds_codes_match_the_implementation() {
+    use pounce_cinterface::*;
+    let rust: HashMap<&str, i64> = [
+        ("POUNCE_BOUNDS_OK", POUNCE_BOUNDS_OK),
+        ("POUNCE_BOUNDS_ERR_NULL", POUNCE_BOUNDS_ERR_NULL),
+        ("POUNCE_BOUNDS_ERR_COUNT", POUNCE_BOUNDS_ERR_COUNT),
+        (
+            "POUNCE_BOUNDS_ERR_OUT_OF_RANGE",
+            POUNCE_BOUNDS_ERR_OUT_OF_RANGE,
+        ),
+        ("POUNCE_BOUNDS_ERR_DUPLICATE", POUNCE_BOUNDS_ERR_DUPLICATE),
+        ("POUNCE_BOUNDS_ERR_NAN", POUNCE_BOUNDS_ERR_NAN),
+        (
+            "POUNCE_BOUNDS_ERR_PAIR_CHANGED",
+            POUNCE_BOUNDS_ERR_PAIR_CHANGED,
+        ),
+        (
+            "POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS",
+            POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS,
+        ),
+        (
+            "POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW",
+            POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW,
+        ),
+        (
+            "POUNCE_BOUNDS_ERR_WORKING_SET",
+            POUNCE_BOUNDS_ERR_WORKING_SET,
+        ),
+        ("POUNCE_BOUNDS_ERR_VIEW", POUNCE_BOUNDS_ERR_VIEW),
+        ("POUNCE_BOUNDS_ERR_INTERNAL", POUNCE_BOUNDS_ERR_INTERNAL),
+        ("POUNCE_BOUNDS_ERR_FLAGS", POUNCE_BOUNDS_ERR_FLAGS),
+        ("POUNCE_BOUNDS_VIEW_USER", POUNCE_BOUNDS_VIEW_USER),
+        ("POUNCE_BOUNDS_VIEW_EFFECTIVE", POUNCE_BOUNDS_VIEW_EFFECTIVE),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k, i64::from(v)))
+    .collect();
+
+    let header = include_str!("../include/pounce.h");
+    let mut defined: HashMap<String, i64> = HashMap::new();
+    for line in header.lines() {
+        let Some(rest) = line.trim().strip_prefix("#define ") else {
+            continue;
+        };
+        let mut words = rest.split_whitespace();
+        let Some(name) = words.next().filter(|n| n.starts_with("POUNCE_BOUNDS_")) else {
+            continue;
+        };
+        let value: i64 = words
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("`#define {name}` has no integer value"));
+        assert!(
+            defined.insert(name.to_string(), value).is_none(),
+            "pounce.h defines `{name}` twice"
+        );
+    }
+    for (name, value) in &rust {
+        assert_eq!(
+            defined.get(*name),
+            Some(value),
+            "pounce.h `{name}` disagrees with the Rust constant {value} (or is missing)"
+        );
+    }
+    for name in defined.keys() {
+        assert!(
+            rust.contains_key(name.as_str()),
+            "pounce.h defines `{name}` but this test does not know the Rust constant"
+        );
+    }
+}

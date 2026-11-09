@@ -14,6 +14,70 @@ below. Exact binary hashes and runtime environments are in the
 [artifact inventory](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c#file-julia-wrapper-artifacts-json). These are local validation
 results; hosted CI results, binary publication, and registration are not claimed here.
 
+## Native 0.17 compatibility audit
+
+Wrapper implementation: `813bd5e8468f5897e6b12abf93db12051d517de3`.
+The branch starts from upstream `d5fa98080b9bce9fa3f5a93eb06b435c802dc286`.
+At that revision, the forthcoming 0.17 C APIs are present, but the native
+version is still 0.16.0 and there is no v0.17 release tag. The version-gate
+unit tests cover 0.17 acceptance and 0.18 rejection; testing the development
+source does not establish validation of a released 0.17 binary.
+
+The header audit compares these exact native sources:
+
+| Source | Commit |
+|---|---|
+| v0.15.0 | `13c38013498eecf54578d2c0b8405b0086dd62a6` |
+| v0.16.0 | `9cbb5a711661c07525e66c3ebb7d2b42bea56785` |
+| Upstream development | `d5fa98080b9bce9fa3f5a93eb06b435c802dc286` |
+
+After removing comments and normalizing whitespace in `pounce.h`, all 23
+function declarations named by `_required_native_symbols`, all six callback
+typedefs, the scalar/handle typedefs, and `PounceLinearSolverStats` are
+identical. The corresponding normalized `IpoptReturnCodes.h` files are also
+identical. The existing linear-statistics struct retains its twelve fields;
+the new output structs' `struct_size` convention does not apply to it.
+The required-symbol list is unchanged, so loading an older library does not
+require the new complementarity or convex/conic entry points.
+
+`Pounce.jl/test/check_c_abi.jl` compiles a C probe against the selected native
+headers and compares scalar sizes, the linear-statistics struct size, and
+every field offset with Julia. CI runs it alongside the full suite for
+current native source and the two supported release tags. For example:
+
+```sh
+export POUNCE_LIBRARY_PATH=/path/to/native/target/release
+julia --project=Pounce.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=Pounce.jl Pounce.jl/test/check_c_abi.jl /path/to/native/crates/pounce-cinterface/include
+julia --project=Pounce.jl -e 'using Pkg; Pkg.test()'
+```
+
+Local validation on macOS arm64 at the wrapper implementation commit above
+passes **3,980 assertions in each full-suite run**, including its check of
+the separate two-worker threading subprocess. Each run also passes **17 C
+ABI layout assertions**. The suite was invoked through `test/runtests.jl`
+in temporary environments containing all package test dependencies: JuMP
+1.32.1, MathOptInterface 1.54.0, Ipopt.jl 1.16.0 and JSON 1.13.4. Julia 1.10
+and 1.13 use separately resolved manifests. Native builds use Rust 1.96.0
+and `cargo build --release --locked -p pounce-cinterface`.
+Only validation documentation and the local roadmap changed during the runs.
+
+| Native source | Julia | Full-suite + ABI log SHA-256 |
+|---|---|---|
+| Upstream `d5fa9808` | 1.10.13 | `094e63a49cef3010cb5b368b6cc4bf3d7094be1646e0de6c108bf5270f98e805` |
+| Upstream `d5fa9808` | 1.13.3 | `c61dc0dc64cd63de63f318d901c1230d57b67d753eb84afddaac7850a061de54` |
+| v0.15.0 | 1.10.13 | `e2396883851f0d68be71c575c8b98a53fdbe6bd3c8f005fc0e4cd80e5bd7676a` |
+| v0.16.0 | 1.13.3 | `3f9122c8435b88be0424a6cc1748948389eaf37194e76b3915764a372f1fe40a` |
+
+Native library SHA-256 values:
+
+- Upstream `d5fa9808`: `4a9dd2a85dc363778e3899b0ea090198720eb3f874b32e0d8bce29cb5f9e2418`.
+- v0.15.0: `575c336c8a0512c0b39ba8cdd9dfa25224ead87fd43a4a5e0c57ed04546ca64a`.
+- v0.16.0: `7bce9ff05910c002a4b31a56f1fd307ef1624338f9506a7791d9b24c83ce26cc`.
+
+Documentation consistency, the mdBook build, workflow YAML parsing, and
+`git diff --check` pass. Hosted CI is separate from these local results.
+
 ## Archived raw evidence
 
 The [raw JSON archive](https://gist.github.com/frederikgeth/f7c3ce3cfac484180851f0ae0099d665/f10e07124e87a6171bf84b2180cfafb052d60c3c) preserves the measurement records and
