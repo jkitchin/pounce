@@ -705,6 +705,106 @@ def _check_x0_impl(
     }
 
 
+# ---- diagnose (model doctor) -------------------------------------------
+
+
+@mcp.tool()
+def diagnose_model(
+    nl_file: str,
+    x0_file: str | None = None,
+    sol_file: str | None = None,
+    rank_tol: float | None = None,
+    max_per_code: int = 25,
+    timeout_seconds: float = 300.0,
+) -> dict[str, Any]:
+    """Check a model without solving it, and say what is wrong with it.
+
+    Runs `pounce diagnose`: proves what the algebra and bounds alone can
+    prove (crossed bounds, contradictory or duplicate rows, rows that can
+    never hold, unbounded objective directions, operators the bounds do not
+    keep inside their domain), then evaluates at one point and reports which
+    operator made a value or derivative NaN/Inf, the structural and numerical
+    rank of the equality Jacobian with the smallest sets of dependent
+    equations, and coefficient / Jacobian scale ranges. Includes everything
+    `check_x0` reports. No solve, no model changes.
+
+    Use this FIRST when a solve ended Infeasible_Problem_Detected,
+    Invalid_Number_Detected or Restoration_Failed, or on a new model.
+
+    Every finding carries `severity` (error / warning / info) and `basis`:
+    `proof` and `structural` findings hold at every point; `numerical` ones
+    hold at the named point only; `heuristic` ones are risks, not facts.
+
+    Args:
+        nl_file: Path to the AMPL `.nl` problem.
+        x0_file: Optional file of n values to evaluate at instead of the
+            model's starting point.
+        sol_file: Optional AMPL `.sol`; its primal values are the point (e.g.
+            where a failed solve stopped). At most one of x0_file / sol_file.
+        rank_tol: Singular-value threshold relative to sigma_max (default
+            max(m, n)*eps).
+        max_per_code: Findings kept per code.
+        timeout_seconds: Kill the check after this many seconds.
+
+    Returns:
+        Dict with `verdict` (CLEAN / WARNINGS / ERRORS), `summary` counts,
+        `errors` and `warnings` (the findings, most severe first),
+        `unavailable_checks` (checks that did not run, with reasons),
+        `exit_code` (0, or 22 when a finding is an error), and `report`
+        (the full `pounce.diagnose/v1` JSON).
+    """
+    if x0_file is not None and sol_file is not None:
+        raise ValueError("pass at most one of x0_file and sol_file")
+    nl = Path(nl_file).expanduser()
+    if not nl.exists():
+        raise FileNotFoundError(f"no such .nl file: {nl}")
+    binary = _find_pounce_bin()
+    fd, tmp = tempfile.mkstemp(suffix=".json", prefix="pounce-diagnose-")
+    os.close(fd)
+    report_path = Path(tmp)
+    argv: list[str] = [
+        binary, "diagnose", str(nl),
+        "--json-output", str(report_path),
+        "--max-per-code", str(max_per_code),
+    ]
+    if x0_file is not None:
+        argv += ["--x0-file", str(Path(x0_file).expanduser())]
+    if sol_file is not None:
+        argv += ["--sol", str(Path(sol_file).expanduser())]
+    if rank_tol is not None:
+        argv += ["--rank-tol", repr(rank_tol)]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as e:
+        report_path.unlink(missing_ok=True)
+        raise TimeoutError(
+            f"pounce diagnose did not finish within {timeout_seconds}s"
+        ) from e
+    report: dict[str, Any] = {}
+    if report_path.exists():
+        try:
+            report = json.loads(report_path.read_text())
+        except json.JSONDecodeError:
+            report = {}
+        finally:
+            report_path.unlink(missing_ok=True)
+    findings = report.get("findings", [])
+    return {
+        "verdict": report.get("verdict"),
+        "summary": report.get("summary", {}),
+        "errors": [f for f in findings if f.get("severity") == "error"],
+        "warnings": [f for f in findings if f.get("severity") == "warning"],
+        "unavailable_checks": [
+            c for c in report.get("checks", []) if c.get("status") == "unavailable"
+        ],
+        "exit_code": proc.returncode,
+        "stderr_tail": proc.stderr[-2000:],
+        "report": report,
+    }
+
+
 # ---- suggest_initialization ------------------------------------------
 
 

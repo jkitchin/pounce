@@ -177,6 +177,12 @@ fn real_main() -> ExitCode {
         return pounce_cli::check_x0::run_from_argv(&raw_argv[2..]);
     }
 
+    // `pounce diagnose <problem.nl>` — check a model without solving it
+    // (gh#1160). See `pounce_cli::diagnose` and docs/src/diagnose.md.
+    if raw_argv.get(1).map(|s| s == "diagnose").unwrap_or(false) {
+        return pounce_cli::diagnose::run_from_argv(&raw_argv[2..]);
+    }
+
     let mut args = match Args::parse_argv(std::env::args().collect()) {
         Ok(a) => a,
         Err(msg) => {

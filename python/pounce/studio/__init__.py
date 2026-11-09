@@ -9,7 +9,8 @@ Install with the ``mcp`` extra and run the console script::
 The tools: solve a model (``run_problem``), analyse a solve report
 (``diagnose``, ``convergence_trace``, ...), check a solution against the
 canonical model (``verify_solution``), preflight a start point
-(``check_x0``), and drive a live, steppable solve (``debug_start`` /
+(``check_x0``), check a model without solving it (``diagnose_model``), and
+drive a live, steppable solve (``debug_start`` /
 ``debug_command`` / ``debug_close``). The report analysis is the Rust
 ``pounce-studio-core`` crate, mounted in this package's extension as
 ``pounce._pounce.studio``; the server itself is ``pounce.studio.server``.

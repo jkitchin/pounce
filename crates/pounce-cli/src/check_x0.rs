@@ -54,6 +54,10 @@ pub struct CheckX0Args {
     /// Optional whitespace-separated file of `n` values overriding the
     /// model's starting point (`--x0-file`).
     pub x0_file: Option<PathBuf>,
+    /// A starting point supplied in memory, with a label for the report
+    /// (`pounce diagnose --sol` reads one from a `.sol` file). Takes
+    /// precedence over `x0_file` and the model's own start.
+    pub x0_values: Option<(String, Vec<Number>)>,
     /// Violations above this are counted in `n_violated` (default 1e-6).
     pub feas_tol: Number,
     /// `bound_push` used for the clamp preview (default 1e-2).
@@ -76,6 +80,7 @@ impl Default for CheckX0Args {
             nl: None,
             builtin: None,
             x0_file: None,
+            x0_values: None,
             feas_tol: 1e-6,
             bound_push: 1e-2,
             bound_frac: 1e-2,
@@ -672,7 +677,16 @@ pub fn check_tnlp_with_quadratics(
     // --- starting point ---
     let mut x = vec![0.0; n];
     let (mut zl_buf, mut zu_buf, mut lam_buf) = (vec![0.0; n], vec![0.0; n], vec![0.0; m]);
-    let x0_source = if let Some(path) = &args.x0_file {
+    let x0_source = if let Some((label, vals)) = &args.x0_values {
+        if vals.len() != n {
+            return Err(format!(
+                "{label} has {} values but the problem has {n} variables",
+                vals.len()
+            ));
+        }
+        x.copy_from_slice(vals);
+        label.clone()
+    } else if let Some(path) = &args.x0_file {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let vals: Result<Vec<Number>, _> = text
@@ -1381,6 +1395,12 @@ fn block_json(b: &RowScaleBlock) -> serde_json::Value {
 }
 
 fn report_json(o: &CheckX0Outcome) -> String {
+    serde_json::to_string_pretty(&report_value(o)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// The `pounce.check-x0/v1` report as a JSON value, for embedding in
+/// another report (`pounce diagnose` carries it as its x0 section).
+pub fn report_value(o: &CheckX0Outcome) -> serde_json::Value {
     use serde_json::json;
     let row = |r: &RowReport| {
         json!({
@@ -1390,7 +1410,7 @@ fn report_json(o: &CheckX0Outcome) -> String {
     };
     let nf =
         |e: &NonFinite| json!({"index": e.index, "name": e.name, "value": e.value.to_string()});
-    let report = json!({
+    json!({
         "pounce_check_x0_version": 1,
         "schema": "pounce.check-x0/v1",
         "solver": format!("pounce {}", env!("CARGO_PKG_VERSION")),
@@ -1476,8 +1496,7 @@ fn report_json(o: &CheckX0Outcome) -> String {
         "warnings": o.warnings,
         "fatal": o.fatal,
         "verdict": o.verdict,
-    });
-    serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string())
+    })
 }
 
 #[cfg(test)]

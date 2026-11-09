@@ -19,6 +19,7 @@
 - [Solution Output](solution-output.md)
 - [JSON Solve Report](json-output.md)
   - [Schema v1 Reference](schema/solve-report-v1.md)
+- [Diagnosing a Model](diagnose.md)
 - [Verifying Solutions](verify.md)
 - [Sensitivity Analysis](sensitivity.md)
 - [Sessions: Factor-Once / Solve-Many](sessions.md)
