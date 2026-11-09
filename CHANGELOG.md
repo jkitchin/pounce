@@ -10,6 +10,10 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Pounce.jl accepts native POUNCE 0.17.** The existing NLP bindings and
+  diagnostics retain support for 0.15.x and 0.16.x. Julia CI checks the
+  current native source and both older release lines; new complementarity
+  and convex/conic bindings remain separate follow-ups.
 - **Declared complementarity through the C API (gh#1147).** A C program, or
   a wrapper linking `libpounce_cinterface`, can now solve a model with
   complementarity pairs through the same driver, options and certificate
