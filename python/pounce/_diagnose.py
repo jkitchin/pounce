@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 __all__ = ["diagnose", "DiagnoseReport"]
 
@@ -101,6 +101,11 @@ def diagnose(
     rank_tol: Optional[float] = None,
     max_dependent_sets: Optional[int] = None,
     max_per_code: Optional[int] = None,
+    extra_points: Optional[Sequence[Any]] = None,
+    opt_tol: Optional[float] = None,
+    weak_band: Optional[float] = None,
+    seed: Optional[int] = None,
+    convexity_samples: Optional[int] = None,
     timeout: Optional[float] = 300.0,
 ) -> DiagnoseReport:
     """Check a ``.nl`` model without solving it.
@@ -110,12 +115,22 @@ def diagnose(
         x0: a starting point (sequence of ``n`` floats) for the numerical
             checks. At most one of ``x0``, ``x0_file`` and ``sol_file``.
         x0_file: a file of ``n`` whitespace-separated values.
-        sol_file: an AMPL ``.sol``; its primal values are the point.
+        sol_file: an AMPL ``.sol``; its primal values are the point, and
+            its multipliers enable the solution checks (KKT audit, LICQ,
+            MFCQ, reduced Hessian).
         feas_tol: slack before a row or bound counts as violated (1e-6).
         rank_tol: singular-value threshold relative to sigma_max
             (default ``max(m, n)*eps``).
         max_dependent_sets: minimal dependent sets to localize (5).
         max_per_code: findings kept per code (25).
+        extra_points: further points (each a sequence of ``n`` floats) for
+            the rank-robustness comparison.
+        opt_tol: stationarity / zero-multiplier tolerance, relative to
+            ``max(1, |grad f|)`` (1e-6).
+        weak_band: near-active band, relative (1e-4).
+        seed: convexity sampler seed (0); the same seed replays the same
+            counterexamples.
+        convexity_samples: sample pairs per function (64).
         timeout: seconds before the check is killed.
 
     Returns:
@@ -149,11 +164,21 @@ def diagnose(
             argv += ["--x0-file", str(Path(x0_file).expanduser())]
         elif sol_file is not None:
             argv += ["--sol", str(Path(sol_file).expanduser())]
+        for k, pt in enumerate(extra_points or []):
+            fd, ptmp = tempfile.mkstemp(suffix=".txt", prefix=f"pounce-diagnose-p{k}-")
+            with os.fdopen(fd, "w") as fh:
+                fh.write(" ".join(repr(float(v)) for v in pt))
+            cleanup.append(Path(ptmp))
+            argv += ["--extra-point", ptmp]
         for flag, val in (
             ("--feas-tol", feas_tol),
             ("--rank-tol", rank_tol),
             ("--max-dependent-sets", max_dependent_sets),
             ("--max-per-code", max_per_code),
+            ("--opt-tol", opt_tol),
+            ("--weak-band", weak_band),
+            ("--seed", seed),
+            ("--convexity-samples", convexity_samples),
         ):
             if val is not None:
                 argv += [flag, repr(val)]

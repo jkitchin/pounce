@@ -36,6 +36,22 @@ changes.
     sentinel-sized finite bounds are flagged.
   - Exit code 22 when any finding is an error. Docs:
     `docs/src/diagnose.md`.
+  - *Phase 2, at a solution (`--sol`):*
+    - KKT audit: stationarity, multiplier signs, complementarity, weakly
+      and nearly active constraints. The `.sol` sign conventions are
+      resolved empirically; bound multipliers come from the
+      `ipopt_zL_out` / `ipopt_zU_out` suffixes.
+    - LICQ, with minimal dependent active sets and the range over which
+      non-unique multipliers can move.
+    - MFCQ, via Wolfe's minimum-norm point, with a cancelling witness when
+      it fails and a verified direction when it holds.
+    - The reduced Hessian's second-order condition.
+  - *Phase 2, at any point:*
+    - Rank robustness under a tolerance sweep, row/column equilibration,
+      a column-pivoted QR, and other points (`--extra-point`).
+    - Hessian inertia.
+    - Seeded, replayable Jensen counterexamples to the curvature each
+      function's bounds need for a convex problem.
 - **Julia L-BFGS nonlinear-variable hints.** Pounce.jl forwards complete
   structural Hessian support to the native subset API, keeping purely linear
   variables outside the approximation. Unknown evaluator/oracle structure and

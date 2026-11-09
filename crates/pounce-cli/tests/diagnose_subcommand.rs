@@ -190,3 +190,115 @@ fn usage_errors_exit_2() {
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("Usage: pounce diagnose"));
 }
+
+// ---------------------------------------------------------------- phase 2
+
+/// Solve `name` in a fresh temp dir and return the path of its `.sol`.
+fn solve_to_sol(name: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "pounce_diagnose_p2_{}_{}",
+        std::process::id(),
+        name.trim_end_matches(".nl")
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let nl = dir.join(name);
+    std::fs::copy(fixture(name), &nl).unwrap();
+    let out = Command::new(pounce_exe())
+        .arg(&nl)
+        .current_dir(&dir)
+        .output()
+        .expect("solve");
+    let sol = nl.with_extension("sol");
+    assert!(
+        sol.exists(),
+        "no .sol for {name}: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    (nl, sol)
+}
+
+fn diagnose_sol(name: &str) -> serde_json::Value {
+    let (nl, sol) = solve_to_sol(name);
+    let out = Command::new(pounce_exe())
+        .arg("diagnose")
+        .arg(&nl)
+        .arg("--sol")
+        .arg(&sol)
+        .arg("--json")
+        .output()
+        .expect("spawn");
+    let _ = std::fs::remove_dir_all(nl.parent().unwrap());
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("not JSON ({e}): {}", String::from_utf8_lossy(&out.stderr)))
+}
+
+#[test]
+fn converged_convex_qp_is_a_strict_local_minimizer() {
+    let v = diagnose_sol("convex_qp.nl");
+    assert!(
+        finding(&v, "second_order_sufficient").is_some(),
+        "{:#}",
+        v["findings"]
+    );
+    for bad in [
+        "not_stationary_at_point",
+        "multiplier_sign_violation",
+        "complementarity_violation",
+        "licq_fails",
+    ] {
+        assert!(finding(&v, bad).is_none(), "{bad}: {:#}", v["findings"]);
+    }
+    assert_eq!(
+        v["sections"]["kkt_audit"]["bound_multipliers"],
+        "from the .sol suffixes"
+    );
+}
+
+#[test]
+fn duplicated_equalities_fail_licq_with_nonunique_multipliers() {
+    let v = diagnose_sol("rankdef_eq_qp.nl");
+    assert!(finding(&v, "licq_fails").is_some(), "{:#}", v["findings"]);
+    assert!(
+        finding(&v, "nonunique_multipliers").is_some(),
+        "{:#}",
+        v["findings"]
+    );
+    assert!(
+        finding(&v, "rank_loss_persistent").is_some(),
+        "{:#}",
+        v["findings"]
+    );
+}
+
+#[test]
+fn hs13_optimum_is_not_a_kkt_point() {
+    // HS13's minimizer (1, 0) is a cusp where no constraint qualification
+    // holds and no multipliers exist.
+    let v = diagnose_sol("hs13_bigstart.nl");
+    assert!(
+        finding(&v, "not_stationary_at_point").is_some(),
+        "{:#}",
+        v["findings"]
+    );
+}
+
+#[test]
+fn saddle_point_has_negative_reduced_curvature() {
+    let v = diagnose_sol("nonconvex_two_escapes.nl");
+    assert!(
+        finding(&v, "reduced_hessian_negative_curvature").is_some(),
+        "{:#}",
+        v["findings"]
+    );
+}
+
+#[test]
+fn without_sol_the_solution_checks_say_why_not() {
+    let (_, v) = diagnose("convex_qp.nl", &[]);
+    let checks = v["checks"].as_array().unwrap();
+    for c in ["kkt_audit", "licq", "mfcq", "reduced_hessian"] {
+        let rec = checks.iter().find(|r| r["check"] == c).expect(c);
+        assert_eq!(rec["status"], "unavailable", "{c}");
+        assert!(rec["reason"].as_str().unwrap().contains("--sol"));
+    }
+}

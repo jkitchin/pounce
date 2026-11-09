@@ -38,7 +38,7 @@ const NULL_WEIGHT_TOL: Number = 1e-3;
 /// Names listed in a finding's text before "and N more".
 const NAMES_SHOWN: usize = 12;
 
-fn list(names: &[String]) -> String {
+pub(crate) fn list(names: &[String]) -> String {
     let shown: Vec<&str> = names.iter().take(NAMES_SHOWN).map(String::as_str).collect();
     let more = names.len().saturating_sub(shown.len());
     if more > 0 {
@@ -48,12 +48,12 @@ fn list(names: &[String]) -> String {
     }
 }
 
-fn fixed_mask(prob: &NlProblem) -> Vec<bool> {
+pub(crate) fn fixed_mask(prob: &NlProblem) -> Vec<bool> {
     (0..prob.n).map(|j| prob.x_l[j] == prob.x_u[j]).collect()
 }
 
 /// Equality rows, in row order.
-fn equality_rows(prob: &NlProblem) -> Vec<usize> {
+pub(crate) fn equality_rows(prob: &NlProblem) -> Vec<usize> {
     (0..prob.m)
         .filter(|&i| prob.g_l[i] == prob.g_u[i] && prob.g_l[i].is_finite())
         .collect()
@@ -127,27 +127,108 @@ pub fn check_structural(prob: &NlProblem, pt: &PointEval, report: &mut Report) -
     Some(matching.size)
 }
 
-/// Dense row-major Jacobian of `rows` restricted to `cols`.
-struct Dense {
-    rows: Vec<usize>,
-    cols: Vec<usize>,
-    a: Vec<Number>,
+/// A dense row-major matrix of Jacobian rows (or other gradients) over a
+/// selection of columns, with the identity of each row and column kept.
+pub(crate) struct Dense {
+    /// Original row identity of each dense row (meaning is up to the
+    /// caller: a constraint index, or an encoded active-set entry).
+    pub rows: Vec<usize>,
+    /// Original variable index of each dense column.
+    pub cols: Vec<usize>,
+    /// `rows.len() × max(cols.len(), 1)` entries, row-major.
+    pub a: Vec<Number>,
 }
 
 impl Dense {
-    fn sub(&self, keep: &[usize]) -> Mat<Number> {
-        // Only columns some kept row touches matter for the rank.
-        let n = self.cols.len();
-        let used: Vec<usize> = (0..n)
+    pub fn ncols(&self) -> usize {
+        self.cols.len().max(1)
+    }
+
+    /// The submatrix of rows `keep`, restricted to the columns those rows
+    /// touch (the other columns cannot change the rank).
+    pub fn sub(&self, keep: &[usize]) -> Mat<Number> {
+        let n = self.ncols();
+        let used: Vec<usize> = (0..self.cols.len())
             .filter(|&c| keep.iter().any(|&r| self.a[r * n + c] != 0.0))
             .collect();
         Mat::from_fn(keep.len(), used.len().max(1), |i, j| {
             used.get(j).map(|&c| self.a[keep[i] * n + c]).unwrap_or(0.0)
         })
     }
+
+    /// The whole matrix.
+    pub fn full(&self) -> Mat<Number> {
+        let n = self.ncols();
+        Mat::from_fn(self.rows.len(), n, |i, j| self.a[i * n + j])
+    }
+
+    /// Singular values, largest first.
+    pub fn singular_values(&self) -> Option<Vec<Number>> {
+        if self.rows.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut s = self.full().singular_values().ok()?;
+        s.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+        Some(s)
+    }
 }
 
-fn rank_of(m: &Mat<Number>, tau: Number) -> Option<usize> {
+/// The dense block of Jacobian rows `rows` at `pt`, over the columns of
+/// non-fixed variables those rows touch. `Err` carries why it could not be
+/// built (non-finite entries, or larger than the dense limits).
+pub(crate) fn dense_jacobian_rows(
+    prob: &NlProblem,
+    pt: &PointEval,
+    rows: &[usize],
+    opts: &DiagnoseOptions,
+) -> Result<Dense, String> {
+    let fixed = fixed_mask(prob);
+    let mut row_pos = vec![usize::MAX; prob.m];
+    for (p, &r) in rows.iter().enumerate() {
+        row_pos[r] = p;
+    }
+    let mut col_pos: BTreeMap<usize, usize> = BTreeMap::new();
+    for (k, &r) in pt.jac_irow.iter().enumerate() {
+        let c = pt.jac_jcol[k];
+        if r < prob.m && row_pos[r] != usize::MAX && !fixed[c] {
+            let next = col_pos.len();
+            col_pos.entry(c).or_insert(next);
+        }
+    }
+    let (m, n) = (rows.len(), col_pos.len());
+    if m.saturating_mul(n.max(1)) > opts.max_dense_entries || m.min(n) > opts.max_dense_dim {
+        return Err(format!(
+            "the block is {m} × {n}, larger than the dense-SVD limit (--max-dense-entries {}, --max-dense-dim {})",
+            opts.max_dense_entries, opts.max_dense_dim
+        ));
+    }
+    let mut cols: Vec<usize> = vec![0; n];
+    for (&c, &p) in &col_pos {
+        cols[p] = c;
+    }
+    let ncols = n.max(1);
+    let mut a = vec![0.0; m * ncols];
+    for (k, &r) in pt.jac_irow.iter().enumerate() {
+        let c = pt.jac_jcol[k];
+        if r >= prob.m || row_pos[r] == usize::MAX || fixed[c] {
+            continue;
+        }
+        a[row_pos[r] * ncols + col_pos[&c]] += pt.jac_val[k];
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(format!(
+            "the Jacobian has non-finite entries at {} (see nonfinite_localization)",
+            pt.label
+        ));
+    }
+    Ok(Dense {
+        rows: rows.to_vec(),
+        cols,
+        a,
+    })
+}
+
+pub(crate) fn rank_of(m: &Mat<Number>, tau: Number) -> Option<usize> {
     let s = m.singular_values().ok()?;
     Some(s.iter().filter(|&&v| v > tau).count())
 }
@@ -168,7 +249,9 @@ fn null_weights(d: &Dense, keep: &[usize], tau: Number) -> Option<Vec<Number>> {
     Some(w)
 }
 
-/// The left-null combination of a minimal dependent set (one dependency).
+/// The left-null combination of a minimal dependent set (one dependency),
+/// scaled so its largest coefficient is ±1, and the relative residual
+/// `‖cᵀ A_S‖∞ / max|A_S|`.
 fn null_combination(d: &Dense, set: &[usize]) -> Option<(Vec<Number>, Number)> {
     let m = d.sub(set);
     let svd = m.svd().ok()?;
@@ -181,7 +264,6 @@ fn null_combination(d: &Dense, set: &[usize]) -> Option<(Vec<Number>, Number)> {
             *v /= scale;
         }
     }
-    // Residual ‖cᵀ A_S‖∞, relative to the largest entry of A_S.
     let ncols = m.ncols();
     let mut resid = 0.0_f64;
     let mut amax = 0.0_f64;
@@ -194,6 +276,106 @@ fn null_combination(d: &Dense, set: &[usize]) -> Option<(Vec<Number>, Number)> {
         resid = resid.max(acc.abs());
     }
     Some((c, if amax > 0.0 { resid / amax } else { 0.0 }))
+}
+
+/// One inclusion-minimal dependent set: dense row positions, the left-null
+/// combination over them, and its relative residual.
+pub(crate) struct DependentSet {
+    pub rows: Vec<usize>,
+    pub combination: Vec<Number>,
+    pub residual: Number,
+}
+
+/// What [`minimal_dependent_sets`] found.
+pub(crate) struct SetSearch {
+    pub sets: Vec<DependentSet>,
+    /// The candidate set that exceeded `max_search`, when the search stopped
+    /// on it (dense row positions).
+    pub too_large: Option<Vec<usize>>,
+}
+
+/// Localize up to `max_sets` inclusion-minimal dependent row sets of `d`
+/// under the absolute singular-value threshold `tau`. Each set is shrunk
+/// from the rows taking part in the left null space by a deletion filter
+/// (least-involved rows first); after each set, the row carrying its
+/// largest coefficient is removed and the search repeats.
+pub(crate) fn minimal_dependent_sets(
+    d: &Dense,
+    tau: Number,
+    deficiency: usize,
+    max_sets: usize,
+    max_search: usize,
+) -> SetSearch {
+    let mut out = SetSearch {
+        sets: Vec::new(),
+        too_large: None,
+    };
+    let mut working: Vec<usize> = (0..d.rows.len()).collect();
+    while out.sets.len() < deficiency.min(max_sets) {
+        let Some(w) = null_weights(d, &working, tau) else {
+            break;
+        };
+        let mut cand: Vec<(usize, Number)> = working
+            .iter()
+            .zip(&w)
+            .filter(|(_, wt)| **wt > NULL_WEIGHT_TOL)
+            .map(|(&r, &wt)| (r, wt))
+            .collect();
+        let dependent = |set: &[usize]| rank_of(&d.sub(set), tau).map(|r| r < set.len());
+        let mut set: Vec<usize> = cand.iter().map(|c| c.0).collect();
+        if set.is_empty() || dependent(&set) != Some(true) {
+            set = working.clone();
+            cand = working.iter().map(|&r| (r, 0.0)).collect();
+        }
+        if set.len() > max_search {
+            out.too_large = Some(set);
+            break;
+        }
+        cand.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        for (r, _) in &cand {
+            if set.len() <= 1 {
+                break;
+            }
+            let trial: Vec<usize> = set.iter().copied().filter(|x| x != r).collect();
+            if dependent(&trial) == Some(true) {
+                set = trial;
+            }
+        }
+        set.sort_unstable();
+        let Some((coef, resid)) = null_combination(d, &set) else {
+            break;
+        };
+        let drop = set
+            .iter()
+            .zip(&coef)
+            .max_by(|a, b| {
+                a.1.abs()
+                    .partial_cmp(&b.1.abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(&p, _)| p);
+        out.sets.push(DependentSet {
+            rows: set,
+            combination: coef,
+            residual: resid,
+        });
+        match drop {
+            Some(p) => working.retain(|&x| x != p),
+            None => break,
+        }
+    }
+    out
+}
+
+/// The default relative singular-value threshold, `max(m, n)·ε`, or the
+/// user's `--rank-tol`.
+pub(crate) fn default_rel_tol(d: &Dense, opts: &DiagnoseOptions) -> Number {
+    opts.rank_rel_tol
+        .unwrap_or((d.rows.len().max(d.cols.len()) as Number) * Number::EPSILON)
 }
 
 /// `numerical_rank`.
@@ -212,71 +394,24 @@ pub fn check_numerical(
         return;
     }
     let eq = equality_rows(prob);
-    let fixed = fixed_mask(prob);
-    let mut row_pos = vec![usize::MAX; prob.m];
-    for (p, &r) in eq.iter().enumerate() {
-        row_pos[r] = p;
-    }
-    let mut col_pos: BTreeMap<usize, usize> = BTreeMap::new();
-    for (k, &r) in pt.jac_irow.iter().enumerate() {
-        let c = pt.jac_jcol[k];
-        if row_pos[r] != usize::MAX && !fixed[c] {
-            let next = col_pos.len();
-            col_pos.entry(c).or_insert(next);
-        }
-    }
-    let (m, n) = (eq.len(), col_pos.len());
-    if m == 0 {
+    if eq.is_empty() {
         report.ran("numerical_rank");
         return;
     }
-    if m.saturating_mul(n.max(1)) > opts.max_dense_entries || m.min(n) > opts.max_dense_dim {
-        report.unavailable(
-            "numerical_rank",
-            format!("the equality Jacobian is {m} × {n}, larger than the dense-SVD limit (--max-dense-entries {}, --max-dense-dim {})", opts.max_dense_entries, opts.max_dense_dim),
-        );
-        return;
-    }
-    let mut cols: Vec<usize> = vec![0; n];
-    for (&c, &p) in &col_pos {
-        cols[p] = c;
-    }
-    let ncols = n.max(1);
-    let mut a = vec![0.0; m * ncols];
-    for (k, &r) in pt.jac_irow.iter().enumerate() {
-        let c = pt.jac_jcol[k];
-        if row_pos[r] == usize::MAX || fixed[c] {
-            continue;
+    let d = match dense_jacobian_rows(prob, pt, &eq, opts) {
+        Ok(d) => d,
+        Err(e) => {
+            report.unavailable("numerical_rank", format!("equality Jacobian: {e}"));
+            return;
         }
-        a[row_pos[r] * ncols + col_pos[&c]] += pt.jac_val[k];
-    }
-    if a.iter().any(|v| !v.is_finite()) {
-        report.unavailable(
-            "numerical_rank",
-            format!(
-                "the equality Jacobian has non-finite entries at {} (see nonfinite_localization)",
-                pt.label
-            ),
-        );
-        return;
-    }
-    let d = Dense {
-        rows: eq.clone(),
-        cols,
-        a,
     };
-    let all: Vec<usize> = (0..m).collect();
-    let full = d.sub(&all);
-    let Ok(s) = full.singular_values() else {
+    let (m, n) = (d.rows.len(), d.cols.len());
+    let Some(s) = d.singular_values() else {
         report.unavailable("numerical_rank", "the SVD did not converge");
         return;
     };
-    let mut s = s;
-    s.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
     let smax = s.first().copied().unwrap_or(0.0);
-    let rel = opts
-        .rank_rel_tol
-        .unwrap_or((m.max(n) as Number) * Number::EPSILON);
+    let rel = default_rel_tol(&d, opts);
     let tau = smax * rel;
     report
         .tolerances
@@ -314,67 +449,25 @@ pub fn check_numerical(
                     format!("At {}, the equality Jacobian has numerical rank {rank}, below its structural rank {sr}, so a deficiency of {} comes from the values, not the sparsity pattern.",
                         pt.label, sr - rank))
                 .why("Value-dependent rank loss can appear at some points and not others; where it appears the solver needs dual regularization and the multipliers are not unique.")
-                .next("Inspect the dependent sets below, and repeat at another meaningful point (e.g. --sol) to see whether the loss persists.")
+                .next("Inspect the dependent sets below, and see rank_robustness for whether the loss persists at other points, tolerances and scalings.")
                 .evidence(json!({"point": pt.label, "rank": rank, "structural_rank": sr, "threshold": num(tau)})),
             );
     }
 
-    // Minimal dependent sets.
     let deficiency = m.saturating_sub(rank);
-    let mut working: Vec<usize> = all.clone();
-    let mut found = 0usize;
-    while found < deficiency.min(opts.max_dependent_sets) {
-        let Some(w) = null_weights(&d, &working, tau) else {
-            break;
-        };
-        let mut cand: Vec<(usize, Number)> = working
-            .iter()
-            .zip(&w)
-            .filter(|(_, wt)| **wt > NULL_WEIGHT_TOL)
-            .map(|(&r, &wt)| (r, wt))
-            .collect();
-        let dependent = |set: &[usize]| rank_of(&d.sub(set), tau).map(|r| r < set.len());
-        let mut set: Vec<usize> = cand.iter().map(|c| c.0).collect();
-        if set.is_empty() || dependent(&set) != Some(true) {
-            set = working.clone();
-            cand = working.iter().map(|&r| (r, 0.0)).collect();
-        }
-        if set.len() > opts.max_dependent_search {
-            let names: Vec<String> = set.iter().map(|&p| cname(prob, d.rows[p])).collect();
-            findings.push(
-                Finding::new("numerical_rank", "dependent_equality_rows_unlocalized", Severity::Warning,
-                    Basis::Numerical, Confidence::Medium,
-                    format!("At {}, the equality Jacobian is rank deficient by {deficiency}; {} rows take part in the null space, more than the minimal-set search limit (--max-dependent-search {}). Rows: {}.",
-                        pt.label, set.len(), opts.max_dependent_search, list(&names)))
-                .why("LICQ fails at this point; the solver needs dual regularization and the multipliers are not unique.")
-                .next("Raise --max-dependent-search, or inspect the listed rows for a redundant equation.")
-                .cons(names),
-            );
-            break;
-        }
-        // Deletion filter, least-involved rows first.
-        cand.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.0.cmp(&b.0))
-        });
-        for (r, _) in &cand {
-            if set.len() <= 1 {
-                break;
-            }
-            let trial: Vec<usize> = set.iter().copied().filter(|x| x != r).collect();
-            if dependent(&trial) == Some(true) {
-                set = trial;
-            }
-        }
-        set.sort_unstable();
-        let Some((coef, resid)) = null_combination(&d, &set) else {
-            break;
-        };
-        let names: Vec<String> = set.iter().map(|&p| cname(prob, d.rows[p])).collect();
+    let search = minimal_dependent_sets(
+        &d,
+        tau,
+        deficiency,
+        opts.max_dependent_sets,
+        opts.max_dependent_search,
+    );
+    for set in &search.sets {
+        let names: Vec<String> = set.rows.iter().map(|&p| cname(prob, d.rows[p])).collect();
         let combo: Vec<serde_json::Value> = set
+            .rows
             .iter()
-            .zip(&coef)
+            .zip(&set.combination)
             .map(|(&p, &c)| json!({"row": cname(prob, d.rows[p]), "coefficient": c}))
             .collect();
         let structural_note = match structural {
@@ -395,25 +488,23 @@ pub fn check_numerical(
             .next("Check whether one of these equations is implied by the others; the combination in the evidence shows how they cancel.")
             .cons(names)
             .evidence(json!({"point": pt.label, "left_null_combination": combo,
-                "relative_residual": num(resid), "threshold": num(tau),
+                "relative_residual": num(set.residual), "threshold": num(tau),
                 "method": "dense SVD, deletion filter at a fixed singular-value threshold"})),
         );
-        found += 1;
-        // Remove the row carrying the largest coefficient and search again.
-        let drop = set
-            .iter()
-            .zip(&coef)
-            .max_by(|a, b| {
-                a.1.abs()
-                    .partial_cmp(&b.1.abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(&p, _)| p);
-        match drop {
-            Some(p) => working.retain(|&x| x != p),
-            None => break,
-        }
     }
+    if let Some(set) = &search.too_large {
+        let names: Vec<String> = set.iter().map(|&p| cname(prob, d.rows[p])).collect();
+        findings.push(
+            Finding::new("numerical_rank", "dependent_equality_rows_unlocalized", Severity::Warning,
+                Basis::Numerical, Confidence::Medium,
+                format!("At {}, the equality Jacobian is rank deficient by {deficiency}; {} rows take part in the null space, more than the minimal-set search limit (--max-dependent-search {}). Rows: {}.",
+                    pt.label, set.len(), opts.max_dependent_search, list(&names)))
+            .why("LICQ fails at this point; the solver needs dual regularization and the multipliers are not unique.")
+            .next("Raise --max-dependent-search, or inspect the listed rows for a redundant equation.")
+            .cons(names),
+        );
+    }
+    let found = search.sets.len();
     if deficiency > found && found == opts.max_dependent_sets {
         findings.push(
             Finding::new("numerical_rank", "more_dependent_sets_not_searched", Severity::Info,

@@ -58,6 +58,15 @@ def test_in_memory_point():
     assert r.point == "the point passed as x0"
 
 
+@needs_cli
+def test_extra_points_reach_rank_robustness():
+    r = pounce.diagnose(
+        FIXTURES / "parametric.nl", extra_points=[[1.0] * 5, [2.0] * 5]
+    )
+    points = r.raw["sections"]["rank_robustness"]["points"]
+    assert len(points) == 3  # the main point and the two extras
+
+
 def test_argument_errors_fail_fast(tmp_path):
     with pytest.raises(ValueError):
         pounce.diagnose(tmp_path / "m.nl", x0=[0.0], sol_file="a.sol")

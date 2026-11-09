@@ -7,7 +7,7 @@
 //! reads a finished solve report, and the presolve structural checks surface
 //! only as presolve warnings. A user holding an `Infeasible_Problem_Detected`
 //! or `Invalid_Number_Detected` had no single command that asks "what is
-//! wrong with this model?". This is that command (gh#1160, phase 1).
+//! wrong with this model?". This is that command (gh#1160, phases 1–2).
 //!
 //! # What it checks, in order
 //!
@@ -23,6 +23,10 @@
 //! | `structural_rank` | structural | [`structure::check_structural`] |
 //! | `numerical_rank` | numerical | [`structure::check_numerical`] |
 //! | `jacobian_scaling` | numerical | [`scaling::check_jacobian`] |
+//! | `rank_robustness` | numerical | [`robustness::check_robustness`] (phase 2) |
+//! | `kkt_audit`, `licq`, `mfcq` | numerical | [`kkt::check_kkt`] (phase 2, needs `--sol`) |
+//! | `hessian_inertia`, `reduced_hessian` | numerical | [`convexity::check_hessian`] (phase 2) |
+//! | `convexity_sampling` | numerical | [`convexity::check_sampling`] (phase 2) |
 //!
 //! The numerical checks run at one point — the model's start, `--x0-file`,
 //! or the primal values of a `.sol` (`--sol`) — and say so in every finding.
@@ -34,11 +38,17 @@
 //!
 //! User-facing documentation: `docs/src/diagnose.md`.
 
+pub mod convexity;
 pub mod domain;
+pub mod kkt;
 pub mod report;
+pub mod robustness;
 pub mod scaling;
 pub mod statics;
 pub mod structure;
+
+#[cfg(test)]
+mod phase2_tests;
 
 use crate::check_x0::{
     CheckX0Args, CheckX0Outcome, check_tnlp_with_quadratics, clamp_to_interior, quad_row_coefs,
@@ -79,6 +89,20 @@ pub struct DiagnoseOptions {
     pub wide_range: Number,
     /// Findings kept per code (default 25).
     pub max_per_code: usize,
+    /// Stationarity / zero-multiplier tolerance, relative to `max(1, ‖∇f‖∞)`
+    /// (default 1e-6).
+    pub opt_tol: Number,
+    /// Inactive inequalities within this relative band of their bound are
+    /// reported as near-active (default 1e-4).
+    pub weak_band: Number,
+    /// Seed for the convexity sampler (default 0).
+    pub seed: u64,
+    /// Sample pairs per function (default 64).
+    pub convexity_samples: usize,
+    /// Half-width of the sampling box, relative to `max(1, |x_j|)` (default 1).
+    pub sample_radius: Number,
+    /// Relative slack before a Jensen gap counts (default 1e-9).
+    pub convexity_tol: Number,
 }
 
 impl Default for DiagnoseOptions {
@@ -93,6 +117,12 @@ impl Default for DiagnoseOptions {
             max_dependent_search: 200,
             wide_range: 1e8,
             max_per_code: 25,
+            opt_tol: 1e-6,
+            weak_band: 1e-4,
+            seed: 0,
+            convexity_samples: 64,
+            sample_radius: 1.0,
+            convexity_tol: 1e-9,
         }
     }
 }
@@ -105,6 +135,8 @@ pub struct DiagnoseArgs {
     pub sol: Option<PathBuf>,
     /// Replaces the point's label in the report (`--point-label`).
     pub point_label: Option<String>,
+    /// Further points for `rank_robustness` (`--extra-point`, repeatable).
+    pub extra_points: Vec<PathBuf>,
     pub json: bool,
     pub json_output: Option<PathBuf>,
     pub opts: DiagnoseOptions,
@@ -123,6 +155,13 @@ value or derivative NaN/Inf, structural and numerical rank of the equality
 Jacobian, the smallest sets of dependent equations, and Jacobian scale
 spread. The starting-point checks of `pounce check-x0` are included.
 
+With --sol it also checks the solution: stationarity, multiplier signs and
+complementarity, LICQ (with the dependent active constraints and how far
+the multipliers can move), MFCQ, near-active and weakly active
+constraints, and the reduced Hessian. At every point: whether a rank loss
+survives other tolerances, scalings, a QR, and other points; the Hessian's
+inertia; and sampled counterexamples to convexity.
+
 Arguments:
   <problem.nl>              AMPL .nl problem
 
@@ -130,6 +169,8 @@ Point for the numerical checks (default: the model's starting point):
   --x0-file <path>          n whitespace-separated values
   --sol <path>              the primal values in an AMPL .sol file
   --point-label <text>      name the point in the report
+  --extra-point <path>      a further point (n values) for rank_robustness;
+                            repeatable
 
 Options:
   --json                    print the JSON report (pounce.diagnose/v1)
@@ -146,6 +187,12 @@ Options:
                             (default 200)
   --wide-range <r>          magnitude ratio reported as wide (default 1e8)
   --max-per-code <k>        findings kept per code (default 25)
+  --opt-tol <t>             stationarity / zero-multiplier tolerance,
+                            relative to max(1, |grad f|) (default 1e-6)
+  --weak-band <t>           near-active band, relative (default 1e-4)
+  --seed <k>                convexity sampler seed (default 0)
+  --convexity-samples <k>   sample pairs per function (default 64)
+  --sample-radius <r>       sampling box half-width, relative (default 1)
   -h, --help                print this message
 
 Exit code: 0 = no error findings (warnings allowed), 22 = at least one
@@ -204,6 +251,14 @@ fn parse_argv(rest: &[String]) -> Result<Option<DiagnoseArgs>, String> {
             }
             "--wide-range" => a.opts.wide_range = parse(value(rest, &mut i, arg)?, arg)?,
             "--max-per-code" => a.opts.max_per_code = parse(value(rest, &mut i, arg)?, arg)?,
+            "--extra-point" => a.extra_points.push(value(rest, &mut i, arg)?.into()),
+            "--opt-tol" => a.opts.opt_tol = parse(value(rest, &mut i, arg)?, arg)?,
+            "--weak-band" => a.opts.weak_band = parse(value(rest, &mut i, arg)?, arg)?,
+            "--seed" => a.opts.seed = parse(value(rest, &mut i, arg)?, arg)?,
+            "--convexity-samples" => {
+                a.opts.convexity_samples = parse(value(rest, &mut i, arg)?, arg)?
+            }
+            "--sample-radius" => a.opts.sample_radius = parse(value(rest, &mut i, arg)?, arg)?,
             s if s.starts_with('-') => return Err(format!("unknown option `{s}`")),
             s => {
                 if a.nl.is_some() {
@@ -269,37 +324,67 @@ pub fn diagnose_file(args: &DiagnoseArgs) -> Result<Report, String> {
             prob.complementarity.len()
         ));
     }
-    let point = if let Some(p) = &args.sol {
-        let text =
-            std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
-        let sol = crate::verify::parse_sol(&text)?;
-        Some((format!("the solution in {}", p.display()), sol.x))
-    } else if let Some(p) = &args.x0_file {
+    let read_values = |p: &PathBuf| -> Result<Vec<Number>, String> {
         let text =
             std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
         let vals: Result<Vec<Number>, _> = text.split_whitespace().map(str::parse).collect();
-        let vals = vals.map_err(|e| format!("{}: bad value: {e}", p.display()))?;
-        Some((format!("the point in {}", p.display()), vals))
-    } else {
-        None
+        vals.map_err(|e| format!("{}: bad value: {e}", p.display()))
     };
-    let point = match (point, &args.point_label) {
-        (Some((_, v)), Some(l)) => Some((l.clone(), v)),
-        (p, _) => p,
-    };
-    let mut report = diagnose_problem(&prob, point, path.display().to_string(), &args.opts)?;
+    let mut inputs = Inputs::default();
+    if let Some(p) = &args.sol {
+        let text =
+            std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+        let sol = crate::verify::parse_sol(&text)?;
+        inputs.point = Some((format!("the solution in {}", p.display()), sol.x));
+        inputs.multipliers = (!sol.lambda.is_empty()).then_some(sol.lambda);
+        if sol.z_l.is_some() || sol.z_u.is_some() {
+            let n = prob.n;
+            inputs.bound_multipliers = Some((
+                sol.z_l.unwrap_or_else(|| vec![0.0; n]),
+                sol.z_u.unwrap_or_else(|| vec![0.0; n]),
+            ));
+        }
+        inputs.is_solution = true;
+    } else if let Some(p) = &args.x0_file {
+        inputs.point = Some((format!("the point in {}", p.display()), read_values(p)?));
+    }
+    if let (Some(pt), Some(l)) = (inputs.point.as_mut(), &args.point_label) {
+        pt.0 = l.clone();
+    }
+    for p in &args.extra_points {
+        inputs
+            .extra_points
+            .push((format!("the point in {}", p.display()), read_values(p)?));
+    }
+    let mut report = diagnose_problem(&prob, &inputs, path.display().to_string(), &args.opts)?;
     report.sha256 = Some(sha256::hex(&bytes));
     Ok(report)
 }
 
-/// Run every check on an in-memory problem. `point` overrides the model's
-/// starting point (label, values).
+/// What to evaluate at, beyond the model itself.
+#[derive(Debug, Clone, Default)]
+pub struct Inputs {
+    /// Overrides the model's starting point: (label, values).
+    pub point: Option<(String, Vec<Number>)>,
+    /// Constraint multipliers at `point`, as a `.sol` carries them.
+    pub multipliers: Option<Vec<Number>>,
+    /// Bound multipliers `(z_L, z_U)` at `point`, from the `.sol`'s
+    /// `ipopt_zL_out` / `ipopt_zU_out` suffixes when present.
+    pub bound_multipliers: Option<(Vec<Number>, Vec<Number>)>,
+    /// `point` is where a solve stopped (enables the KKT checks).
+    pub is_solution: bool,
+    /// Further points for `rank_robustness`.
+    pub extra_points: Vec<(String, Vec<Number>)>,
+}
+
+/// Run every check on an in-memory problem.
 pub fn diagnose_problem(
     prob: &NlProblem,
-    point: Option<(String, Vec<Number>)>,
+    inputs: &Inputs,
     source: String,
     opts: &DiagnoseOptions,
 ) -> Result<Report, String> {
+    let point = inputs.point.clone();
     let mut report = Report::new(source.clone(), prob.n, prob.m, opts.max_per_code);
     report.tolerances.insert("feas_tol", opts.feas_tol);
     report.tolerances.insert("domain_tol", opts.domain_tol);
@@ -365,11 +450,54 @@ pub fn diagnose_problem(
             format!("{label} after the interior clamp"),
         )
     });
-    let pt = PointEval::evaluate(&mut tnlp, x, label);
+    let mut pt = PointEval::evaluate(&mut tnlp, x, label);
+    pt.is_solution = inputs.is_solution;
     domain::check_nonfinite(prob, &pt, clamped_pt.as_ref(), &mut report);
     let sr = structure::check_structural(prob, &pt, &mut report);
     structure::check_numerical(prob, &pt, sr, opts, &mut report);
     scaling::check_jacobian(prob, &pt, opts, &mut report);
+
+    // Phase 2. Further points for the robustness check: the model's start
+    // (when the main point is another one) and each --extra-point.
+    let mut others: Vec<PointEval> = Vec::new();
+    if point.is_some() {
+        let x0 = starting_point(&mut tnlp, prob.n)?;
+        others.push(PointEval::evaluate(
+            &mut tnlp,
+            x0,
+            "the model's starting point".into(),
+        ));
+    }
+    for (l, v) in &inputs.extra_points {
+        if v.len() != prob.n {
+            return Err(format!(
+                "{l} has {} values but the problem has {} variables",
+                v.len(),
+                prob.n
+            ));
+        }
+        others.push(PointEval::evaluate(&mut tnlp, v.clone(), l.clone()));
+    }
+    robustness::check_robustness(prob, &pt, &others, opts, &mut report);
+    let kkt = kkt::check_kkt(
+        prob,
+        &pt,
+        inputs.multipliers.as_deref(),
+        inputs
+            .bound_multipliers
+            .as_ref()
+            .map(|(l, u)| (l.as_slice(), u.as_slice())),
+        opts,
+        &mut report,
+    );
+    convexity::check_hessian(prob, &mut tnlp, &pt, kkt.as_ref(), opts, &mut report);
+    if kkt.is_none() {
+        report.unavailable(
+            "reduced_hessian",
+            "needs a solution with multipliers: pass the solve's .sol with --sol",
+        );
+    }
+    convexity::check_sampling(prob, &pt, opts, &mut report);
     Ok(report)
 }
 
@@ -479,6 +607,8 @@ pub struct PointEval {
     pub jac_val: Vec<Number>,
     pub jac_structure_ok: bool,
     pub jac_ok: bool,
+    /// The point is where a solve stopped (`--sol`).
+    pub is_solution: bool,
 }
 
 impl PointEval {
@@ -539,6 +669,7 @@ impl PointEval {
             jac_val: jval,
             jac_structure_ok,
             jac_ok,
+            is_solution: false,
         }
     }
 
@@ -612,7 +743,13 @@ mod tests {
             con_names: vec!["sum".into(), "prod".into()],
         })
         .unwrap();
-        let r = diagnose_problem(&p, None, "t".into(), &DiagnoseOptions::default()).unwrap();
+        let r = diagnose_problem(
+            &p,
+            &Inputs::default(),
+            "t".into(),
+            &DiagnoseOptions::default(),
+        )
+        .unwrap();
         let bad: Vec<_> = r
             .findings
             .iter()
@@ -659,7 +796,13 @@ mod tests {
             con_names: vec![],
         })
         .unwrap();
-        let r = diagnose_problem(&p, None, "t".into(), &DiagnoseOptions::default()).unwrap();
+        let r = diagnose_problem(
+            &p,
+            &Inputs::default(),
+            "t".into(),
+            &DiagnoseOptions::default(),
+        )
+        .unwrap();
         assert!(r.has_errors());
         assert!(
             r.findings
@@ -686,7 +829,13 @@ mod tests {
             con_names: vec![],
         })
         .unwrap();
-        let r = diagnose_problem(&p, None, "t".into(), &DiagnoseOptions::default()).unwrap();
+        let r = diagnose_problem(
+            &p,
+            &Inputs::default(),
+            "t".into(),
+            &DiagnoseOptions::default(),
+        )
+        .unwrap();
         let f = r
             .findings
             .iter()
@@ -697,7 +846,13 @@ mod tests {
         // the same NaN is an error.
         let mut q = p.clone();
         q.x_l[0] = -1e19;
-        let r = diagnose_problem(&q, None, "t".into(), &DiagnoseOptions::default()).unwrap();
+        let r = diagnose_problem(
+            &q,
+            &Inputs::default(),
+            "t".into(),
+            &DiagnoseOptions::default(),
+        )
+        .unwrap();
         let f = r
             .findings
             .iter()

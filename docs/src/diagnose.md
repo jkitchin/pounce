@@ -33,6 +33,13 @@ at one point.
 | `structural_rank` | structural | equality rows that cannot be matched to distinct free variables (Dulmage–Mendelsohn over-determined block) |
 | `numerical_rank` | numerical | the rank of the equality Jacobian at the point, and the **smallest sets of dependent equations** |
 | `jacobian_scaling` | numerical | spread of the Jacobian's row and column scales at the point |
+| `rank_robustness` | numerical | whether the rank result survives another tolerance, row/column equilibration, a column-pivoted QR, and other points |
+| `kkt_audit` | numerical, needs `--sol` | stationarity, multiplier signs, complementarity, weakly and nearly active constraints |
+| `licq` | numerical, needs `--sol` | dependent active constraints, and how far their multipliers can move |
+| `mfcq` | numerical, needs `--sol` | whether some direction keeps the equalities and strictly improves every active inequality; a cancelling witness when none does |
+| `hessian_inertia` | numerical | eigenvalue signs of the Lagrangian (or objective) Hessian |
+| `reduced_hessian` | numerical, needs `--sol` | the second-order condition on the active constraints' tangent space |
+| `convexity_sampling` | numerical | seeded, replayable counterexamples to the curvature each function's bounds need |
 
 ## Reading a finding
 
@@ -73,7 +80,10 @@ another one:
 
 - `--x0-file x0.txt` — `n` whitespace-separated values.
 - `--sol result.sol` — the primal values of an AMPL `.sol`, for example the
-  point a failed solve stopped at.
+  point a failed solve stopped at. Its multipliers enable the solution-side
+  checks below.
+- `--extra-point x.txt` (repeatable) — further points for
+  `rank_robustness` to compare against.
 
 Comparing the two is often the fastest diagnosis: a rank loss present at both
 the start and the final point is likely a property of the formulation; one
@@ -118,6 +128,106 @@ LAPACK/NumPy convention, on the **unscaled** Jacobian; change it with
 `--rank-tol`. Because the SVD is dense it is skipped (and the check reported
 as not run) above `--max-dense-entries` / `--max-dense-dim`.
 
+## At a solution (`--sol`)
+
+Pass the `.sol` a solve wrote and `diagnose` checks the point it stopped at.
+
+**Multipliers.** The constraint multipliers come from the `.sol`'s dual
+block, and the bound multipliers from its `ipopt_zL_out` / `ipopt_zU_out`
+suffixes when present (otherwise they are inferred from the residual). Sign
+conventions differ between writers. As `pounce verify` does, `diagnose`
+takes the signs that make the point stationary. When the objective gradient
+is zero, a multiplier set and its negation are equally stationary, so it
+takes the reading with valid signs.
+
+**Which constraints are active.** A bound or row counts as active when it
+is within `--feas-tol` of its bound, or when it carries a multiplier and
+multiplier × slack is within the stationarity tolerance. The second test
+matters because an interior-point solution leaves binding constraints a
+small distance inside (z·slack ≈ μ).
+
+**What it reports.**
+
+- `not_stationary_at_point`: a Lagrangian-gradient residual above
+  `--opt-tol` (relative to `max(1, ‖∇f‖∞)`). The point is not a KKT point.
+  The textbook case is HS13, whose minimizer is a cusp where no multipliers
+  exist.
+- `multiplier_sign_violation`, `complementarity_violation`: multipliers
+  that do not belong to this point.
+- `weakly_active_constraints`: active, with a zero multiplier (strict
+  complementarity fails).
+- `near_active_inequalities`: inactive, but within `--weak-band` of the
+  bound.
+- `licq_fails`: the minimal dependent sets of active constraints, with
+  variable bounds included as unit vectors.
+- `nonunique_multipliers`: the range `t ∈ [lo, hi]` over which the
+  multipliers can move along the dependency without breaking stationarity
+  or sign. If the range is a single point, the multipliers are pinned and
+  nothing is reported.
+- `mfcq_fails` / `mfcq_holds`: the active inequality gradients are
+  projected onto the null space of the equality gradients. Wolfe's
+  minimum-norm-point algorithm then finds the hull point closest to 0.
+  - Zero means MFCQ fails. The weights in the evidence show which
+    gradients cancel.
+  - Nonzero gives a direction, which is checked to strictly improve every
+    active inequality.
+  - "Holds although LICQ fails" means the multipliers are bounded but not
+    unique.
+- `reduced_hessian_negative_curvature` / `reduced_hessian_singular` /
+  `second_order_sufficient`: eigenvalues of the Lagrangian Hessian on the
+  tangent space of the strongly active constraints. Near zero is judged
+  relative to the full Hessian's scale. Weakly active constraints are
+  treated as inactive, which can only enlarge the space tested, and the
+  finding says so.
+
+## Is a rank result robust?
+
+`rank_robustness` changes one thing at a time and recomputes the equality
+Jacobian's rank deficiency:
+
+- **Tolerance:** thresholds from 1000× below to 1000× above the default.
+  If the deficiency changes within ±100×, the finding is
+  `rank_tolerance_sensitive`.
+- **Scaling:** row-then-column equilibration. If the deficiency changes,
+  the finding is `rank_scaling_sensitive`.
+- **Algorithm:** a column-pivoted QR at the same relative threshold. If it
+  disagrees with the SVD, the finding is `rank_backend_disagreement`. (The
+  QR is dense: a sparse QR needs a `faer` feature this workspace does not
+  enable.)
+- **Points:** the main point, the model's start (when the main point is
+  another one) and each `--extra-point`. A loss at every point is
+  `rank_loss_persistent`, a loss at only some of them is
+  `rank_loss_point_specific`.
+
+A one-line `rank_robustness_summary` says which of these, if any, the
+result is sensitive to.
+
+## Convexity evidence
+
+`hessian_inertia` counts positive, negative and near-zero eigenvalues of
+the Hessian over the free variables. It is the Lagrangian's when `--sol`
+supplies multipliers, the objective's otherwise. This is local curvature.
+At a solution, `reduced_hessian` is the question that matters.
+
+`convexity_sampling` tests every nonlinear function against the curvature
+its bounds need for a convex problem:
+
+- convex for `g ≤ u`;
+- concave for `g ≥ l`;
+- affine for equalities and ranges;
+- convex for a minimized objective.
+
+It samples pairs `x, y` and a weight `t` from a box around the point. The
+box is the bounds intersected with `x ± --sample-radius·max(1, |x|)`, and
+it is used only if the interval walk certifies the function free of domain
+trouble on it. Each sample compares `f(t·x + (1−t)·y)` with the chord. A
+violation is reported with `x`, `y`, `t` and the values, which replay
+exactly, and the same `--seed` gives the same witness.
+
+Finding no counterexample proves nothing, and `convexity_summary` says so.
+A model with a counterexample is nonconvex, so a local solution need not
+be global.
+
 ## Exit code and JSON
 
 The exit code is `0` when no finding is an error, `22` when at least one is,
@@ -142,9 +252,9 @@ for f in report.errors():
 - A numerical finding is about one point. Rank, scaling and NaN findings at
   the start say nothing about the solution, and vice versa.
 - It does not search for a minimal infeasible subsystem (IIS); see discopt.
-- Constraint-qualification checks at a solution (LICQ/MFCQ with multipliers),
-  rank robustness across tolerances and points, and convexity evidence are
-  planned (gh#1160, phase 2).
+- The solution-side checks trust the `.sol` to belong to this model; a
+  stale file shows up as large residuals and complementarity violations,
+  not as an error.
 
 The idea list draws on [NLPDiagnostics.jl](https://github.com/frederikgeth/NLPDiagnostics.jl)
 and the JuMP model-debugging initiative; the dependent-set search on

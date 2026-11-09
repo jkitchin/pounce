@@ -532,6 +532,26 @@ fn strip_cse(e: &Expr) -> &Expr {
     }
 }
 
+/// Is `e` free of domain trouble over the box `[lo, hi]`? `true` only when
+/// the interval walk finds no operator whose argument enclosure reaches or
+/// touches the edge of its domain, and no imported function (which the walk
+/// cannot see into). Used to certify a box before sampling it.
+pub(crate) fn certified_on_box(e: &Expr, lo: &[Number], hi: &[Number], tol: Number) -> bool {
+    let names: Vec<String> = Vec::new();
+    let mut w = IvWalker {
+        lo,
+        hi,
+        names: &names,
+        tol,
+        cache: HashMap::new(),
+        events: Vec::new(),
+        atan_ratios: Vec::new(),
+        opaque: false,
+    };
+    let iv = w.walk(e, false);
+    w.events.is_empty() && !w.opaque && !iv.is_empty()
+}
+
 /// `expression_domains` + `row_enclosures`.
 pub fn check_domains(prob: &NlProblem, opts: &DiagnoseOptions, report: &mut Report) {
     let mut walker = IvWalker {
@@ -964,7 +984,9 @@ pub fn check_nonfinite(
         unavailable: false,
     };
     // Group rows by culprit node.
-    let mut by_culprit: BTreeMap<usize, (Culprit, Vec<(String, Option<usize>)>)> = BTreeMap::new();
+    // Rows grouped by culprit node: (label, row index; None = objective).
+    type Rows = Vec<(String, Option<usize>)>;
+    let mut by_culprit: BTreeMap<usize, (Culprit, Rows)> = BTreeMap::new();
     let mut unexplained: Vec<(String, Option<usize>)> = Vec::new();
     let mut unavailable_rows = 0usize;
 

@@ -715,6 +715,8 @@ def diagnose_model(
     sol_file: str | None = None,
     rank_tol: float | None = None,
     max_per_code: int = 25,
+    extra_point_files: list[str] | None = None,
+    seed: int = 0,
     timeout_seconds: float = 300.0,
 ) -> dict[str, Any]:
     """Check a model without solving it, and say what is wrong with it.
@@ -727,6 +729,14 @@ def diagnose_model(
     rank of the equality Jacobian with the smallest sets of dependent
     equations, and coefficient / Jacobian scale ranges. Includes everything
     `check_x0` reports. No solve, no model changes.
+
+    With `sol_file` it also checks the solution: stationarity, multiplier
+    signs and complementarity, LICQ (dependent active constraints and how
+    far their multipliers can move), MFCQ, weakly/nearly active
+    constraints, and the reduced Hessian (a negative eigenvalue means a
+    saddle, not a minimizer). At every point it reports whether a rank loss
+    survives other tolerances, scalings, a QR and other points, the
+    Hessian's inertia, and replayable counterexamples to convexity.
 
     Use this FIRST when a solve ended Infeasible_Problem_Detected,
     Invalid_Number_Detected or Restoration_Failed, or on a new model.
@@ -744,6 +754,9 @@ def diagnose_model(
         rank_tol: Singular-value threshold relative to sigma_max (default
             max(m, n)*eps).
         max_per_code: Findings kept per code.
+        extra_point_files: Files of n values each: further points to test
+            whether a rank loss persists.
+        seed: Seed for the convexity sampler (same seed, same witnesses).
         timeout_seconds: Kill the check after this many seconds.
 
     Returns:
@@ -773,6 +786,9 @@ def diagnose_model(
         argv += ["--sol", str(Path(sol_file).expanduser())]
     if rank_tol is not None:
         argv += ["--rank-tol", repr(rank_tol)]
+    for f in extra_point_files or []:
+        argv += ["--extra-point", str(Path(f).expanduser())]
+    argv += ["--seed", str(seed)]
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, timeout=timeout_seconds,
