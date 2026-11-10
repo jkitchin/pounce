@@ -47,7 +47,8 @@ No timing or application-speedup claim is made.
 
 ## Validation scope
 
-The new focused suite has 198 assertions on current native, covering:
+The focused suite has 377 assertions on current native after the review-check
+promotion below (198 originally), covering:
 
 - Direct and cached variable/affine/quadratic/nonlinear edits, compared against
   fresh models for primal solutions, duals and termination status.
@@ -61,8 +62,11 @@ The new focused suite has 198 assertions on current native, covering:
   guards.
 - Mixed QP, oracle, modern NLP and complementarity row offsets in exact and
   L-BFGS modes; simultaneous variable, row and parameter updates.
-- Complementarity same-class reuse, transient edits coalescing back to the
-  original class, class-change rebuilds, and fixed-to-fixed reuse.
+- All 25 complementarity bound-class transitions against fresh declarations,
+  including same-class reuse, transient edits coalescing back to the original
+  class, class-change rebuilds, and fixed-to-fixed reuse.
+- Explicit primal and lower/upper/row dual starts, including MOI sign conversion,
+  observed at the C boundary after a handle-preserving bound update.
 
 The same public bound-edit control was run on the archived parent and current
 wrapper with the same native library. Both solve to x=2 after changing an upper
@@ -87,7 +91,7 @@ Python tests are left to hosted CI for this Julia-only change. The existing
 native libraries were reused; no Cargo build intermediates were regenerated.
 
 
-## Final local results
+## Initial local results
 
 All feature validation below was run on implementation
 `1baee4edaef2702a0f0aec75a2f5f1dff9a88654` with a clean tracked worktree.
@@ -125,3 +129,39 @@ Environment Manifest SHA-256 values:
 - `/private/tmp/pounce-julia017-env/Manifest.toml`: `daf7593396cb46cc6b2dbf1b429b86e429c73cd01f92dbb0b83e21bf0d665beb`.
 - `/private/tmp/pounce-diagnostics-minimum/Manifest.toml`: `c695c4f78da44e564bc40cf8bfc3b4544b252d388e942523bfaf1bee41dd1136`.
 - `/private/tmp/pounce-bounds-parent-env/Manifest.toml`: `1593871bbe60aed73686f93167cfaf79abc3a0153e80ddc841cf2c8b4c3a234b`.
+
+
+## Permanent review regressions — 2026-11-10
+
+Promoted test revision: `c12bd77efd5d067f95bc72ff4bf2d23450687169`.
+The implementation is unchanged. The suite now includes the 179 selected review
+assertions: 175 for all 25 complementarity class transitions, and four for
+explicit primal/lower-bound/upper-bound/row dual starts after a bound update.
+The latter captures the Julia input buffers during the native callback and
+checks the MOI dual-sign conversion. Native capability guards keep the older
+library path valid. The remaining exploratory review checks stay in the
+original temporary review script; they were not part of this promotion.
+
+Validation on the clean test revision, using the same retained native binaries
+and dependency environments listed above:
+
+| Native | Julia | Scope | Result |
+|---|---|---|---|
+| Current `550b1d5e` | 1.10.13 | Full suite | 5,119 passed |
+| Current `550b1d5e` | 1.13.3 | Full suite | 5,119 passed |
+| Current, JuMP 1.29 / MOI 1.48 | 1.10.13 | Focused bounds | 377 passed |
+| v0.15.0 | 1.10.13 | Focused bounds / capability fallback | 101 passed |
+| v0.16.0 | 1.13.3 | Focused bounds / capability fallback | 101 passed |
+
+The earlier full older-native runs remain attributed to `1baee4ed`; they were
+not repeated for these capability-guarded test additions. Julia formatting and
+diff checks passed. No native code or user-facing behavior changed, and no new
+native build artifacts were generated.
+
+| File under `/private/tmp/` | SHA-256 |
+|---|---|
+| `pounce-bounds-promotion-current110.log` | `5268427eeea1dcd651c176069559e3b731f13ddc4cf1d4a2baebbd6c0b5a2f64` |
+| `pounce-bounds-promotion-current113.log` | `86e41928a88142c82fbcc40cc1c7388a8dbb386cec0076a280f88c71dc41f1ab` |
+| `pounce-bounds-promotion-minimum.log` | `68c669c60bc0d2a1f3deb1e33ffd3c0c1c786a07dd8c7df2be8f262a861bdfce` |
+| `pounce-bounds-promotion-v015.log` | `da8c570902dfc7025c5d9d189f77f6d65dde581943c3fc6af0ab07d63c22e74f` |
+| `pounce-bounds-promotion-v016.log` | `4db9c428a5e1578dc292923ab0b07b979b0932c630c91798949021717ac8bb65` |
