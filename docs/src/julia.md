@@ -28,8 +28,8 @@ file, and `Pounce.GetIpoptVersion()` reports its compiled POUNCE version.
 Pounce.jl 0.1 accepts native POUNCE 0.15.x, 0.16.x and 0.17.x and checks the required C symbols
 at import. Other native minor versions require a wrapper ABI review.
 The existing NLP bindings and diagnostics work across these versions. Native
-0.17's new complementarity and convex/conic entry points are not yet exposed by
-the Julia package and are not required at import; see the [C API](c-api.md).
+0.17's complementarity API is optional and detected at runtime (see below).
+Convex/conic entry points are not yet exposed; see the [C API](c-api.md).
 The existing linear-solver statistics struct remains unchanged, without the
 `struct_size` field used by the new native output structs.
 There is no registered Julia package or bundled JLL binary yet.
@@ -149,3 +149,91 @@ for the full callback contract, library configuration, supported interfaces,
 and test instructions. In particular, callbacks must not retain borrowed
 buffers, exceptions are rethrown only after returning from the C API, and
 restoration callback metrics refer to the feasibility subproblem.
+
+## Native complementarity
+
+With a native library providing the finalized 0.17 C API,
+`Pounce.supports_complementarity()` is true and the optimizer accepts
+`MOI.Complements` in vector-of-variables, vector affine, vector quadratic and
+vector nonlinear form. The second half must represent individual variables.
+For example:
+
+```julia
+model = Model(Pounce.Optimizer)
+@variable(model, x >= 0, start = 0.5)
+@constraint(model, pair, complements(2x - 1, x))
+optimize!(model)
+value(x) # approximately 0.5
+MOI.get(model, Pounce.ComplementarityStatistics())
+```
+
+Each function `F` gets a dedicated free native row. Its paired variable's bounds
+determine the meaning: lower-only means `F ≥ 0`, upper-only `F ≤ 0`, a boxed
+variable has mixed complementarity, a free variable requires `F = 0`, and a
+fixed variable imposes no condition on `F`. Existing scalar constraints remain
+independent. A variable may be paired only once, including fixed/free cases;
+repeat pairings are rejected before modifying the model. Parameters can occur
+in `F`, but cannot be paired variables. The wrapper does not silently introduce
+auxiliary variables to transform unsupported declarations.
+
+Bound edits invalidate results immediately and rebuild the native handle from
+the original declarations, including changes between these five classes.
+Parameter updates reuse the evaluators and handle. Ordinary scalar constraints,
+legacy NLP blocks, and vector nonlinear oracles may coexist with these rows.
+Complementarity functions use the selected automatic-differentiation backend;
+unknown Hessian information retains the existing limited-memory fallback.
+
+### Results and certificates
+
+`ConstraintPrimal` returns `[F(x); x]`. `PrimalStatus` independently checks the
+original bounds/rows and the mixed-complementarity natural map
+`x - clamp(x - F, lower, upper)`, even when the native status says success.
+Applications should also check their physical residuals in appropriate units.
+
+The native termination status describes the formulation that returned the
+point; it is not an MPCC stationarity certificate. Read the certificate and its
+residuals separately:
+
+- `ComplementarityStatistics()` returns an owned named tuple, including the
+  certificate class, tightness, natural residual, reported formulation,
+  B-stationarity verdict, polishing information and total driver iterations.
+- `ComplementaritySolves()` returns per-formulation statistics in driver order.
+- `ComplementarityText(which)` returns the summary or a polishing/B-check reason;
+  `which` is a `Pounce.POUNCE_CC_TEXT_*` constant.
+- `SolveReport()` includes the native `complementarity` block automatically.
+
+Stats/text return `nothing` and the solve list is empty when no driver ran
+(including models whose declarations all reduce to fixed/free NLP cases).
+Before a completed solve or after a model edit, getters reject the query.
+Native absent-value sentinels (`-1`, `NaN`, empty strings) are preserved, and
+integer categories use the corresponding `Pounce.POUNCE_CC_*` constants.
+`BarrierIterations()` remains the reported solve's count; use
+`stats.total_iterations` for work across the driver.
+
+The returned multipliers are stationarity multipliers and may be nonunique.
+For `[F; x]`, `ConstraintDual` reports the function-row multipliers followed by
+zeros. The variable-side contributions remain on the explicit bound constraints,
+so they are not counted twice. A paired lower/upper bound returns its signed
+native multiplier in the wrapper's usual objective-sense convention; it is not
+clamped to the ordinary NLP sign. Interval bounds report the combined value.
+Fixed/free declarations retain ordinary NLP bound handling. Because these are
+not convex dual certificates, `DualStatus` is `UNKNOWN_RESULT_STATUS` for models
+with complementarity declarations. Inspect MPCC certificates explicitly.
+Primal and bound-dual starts remain explicit; complementarity `ConstraintDualStart`
+is not supported. Live primal inspection is unavailable during the native MPCC
+driver, although intermediate callbacks can observe its scalar progress.
+
+The low-level optional bindings mirror `pounce.h`, with one-based row/variable
+indices and one-based `GetPounceComplementaritySolve(prob, k)` indexing. They
+initialize `struct_size` before each output call. Negative extension codes throw
+`Pounce.NativeAPIError` with the operation, native code, message and optional
+one-based batch position. Nonnegative declaration outcomes are successful;
+existing Bool-returning APIs retain their own convention. Clearing native pairs
+does **not** undo row edits made by `AddPounceComplementsConstraint`; recreate the
+handle to undo that lowering. Older libraries load normally and report
+complementarity as unsupported; no product-constraint fallback is applied.
+
+Application validation is reproducible with
+[`benchmarks/julia_mpcc_opf`](https://github.com/jkitchin/pounce/tree/main/benchmarks/julia_mpcc_opf),
+which uses the original MPCCModels volt-var/volt-watt cases and independently
+checks `min(G,H)` and the controller laws.

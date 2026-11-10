@@ -17,8 +17,23 @@ expected = [
     sizeof(Cdouble),
     sizeof(Bool),
     sizeof(stats),
-    [fieldoffset(stats, i) for i in 1:fieldcount(stats)]...,
+    [fieldoffset(stats, i) for i = 1:fieldcount(stats)]...,
 ]
+# Older release headers do not declare these optional extension types.
+header = read(joinpath(include_dir, "pounce.h"), String)
+if occursin("PounceComplementarityStats", header)
+    for (name, T) in (
+        ("PounceComplementarityStats", Pounce._CComplementarityStats),
+        ("PounceComplementaritySolve", Pounce._CComplementaritySolve),
+    )
+        push!(expressions, "sizeof($name)")
+        push!(expected, sizeof(T))
+        for (i, field) in enumerate(fieldnames(T))
+            push!(expressions, "offsetof($name, $field)")
+            push!(expected, fieldoffset(T, i))
+        end
+    end
+end
 mktempdir() do dir
     source = joinpath(dir, "layout.c")
     executable = joinpath(dir, "layout")
@@ -31,7 +46,9 @@ mktempdir() do dir
         println(io, "    return 0;\n}")
     end
     compiler = Cmd(Base.shell_split(get(ENV, "CC", "cc")))
-    run(`$compiler -std=c99 -Wall -Wextra -Werror -pedantic -I$include_dir $source -o $executable`)
+    run(
+        `$compiler -std=c99 -Wall -Wextra -Werror -pedantic -I$include_dir $source -o $executable`,
+    )
     actual = parse.(Int, split(read(`$executable`, String)))
     @testset "C ABI layout (native $(Pounce.GetIpoptVersion()))" begin
         @test length(actual) == length(expected)

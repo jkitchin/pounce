@@ -16,6 +16,7 @@ flush(stdout)
         @test success(run(cmd))
     end
     include("diagnostics.jl")
+    include("complementarity.jl")
     include("jump.jl")
     include("updates.jl")
     include("callbacks.jl")

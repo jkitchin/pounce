@@ -47,6 +47,10 @@ function test_MOI_Test()
         );
         exclude = String[
             # Tests purposefully excluded:
+            #  - This test never sets ObjectiveSense (the default is feasibility)
+            #    but expects a minimizer. complementarity.jl tests the same model
+            #    with explicit MIN_SENSE and checks feasibility sense separately.
+            "test_nonlinear_qp_complementarity_constraint",
             #  - Upstream: ZeroBridge does not support ConstraintDual
             "test_conic_linear_VectorOfVariables_2",
             #  - Excluded because this test is optional

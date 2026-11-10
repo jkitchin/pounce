@@ -42,6 +42,8 @@ function _setup_inner(model::Optimizer)::Pounce.IpoptProblem
         push!(g_L, bound.lower)
         push!(g_U, bound.upper)
     end
+    append!(g_L, fill(-Inf, _num_complementarity_rows(model)))
+    append!(g_U, fill(Inf, _num_complementarity_rows(model)))
     function eval_h_cb(x, rows, cols, obj_factor, lambda, values)
         return _eval_h_cb(model, x, rows, cols, obj_factor, lambda, values)
     end
@@ -63,6 +65,12 @@ function _setup_inner(model::Optimizer)::Pounce.IpoptProblem
         has_hessian ? eval_h_cb : nothing,
     )
     inner = model.native.problem::Pounce.IpoptProblem
+    try
+        _declare_complements!(model, inner)
+    catch
+        _release_native!(model)
+        rethrow()
+    end
     if model.data.sense == MOI.MIN_SENSE
         Pounce.AddIpoptNumOption(inner, "obj_scaling_factor", 1.0)
     elseif model.data.sense == MOI.MAX_SENSE

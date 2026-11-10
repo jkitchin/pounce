@@ -10,6 +10,8 @@ changes.
 ## [Unreleased]
 
 ### Added
+
+- Julia: support native `MOI.Complements`, signed MPCC multipliers and driver diagnostics, with runtime capability detection for older native libraries.
 - **`pounce diagnose`: check a model without solving it (gh#1160, phase 1).**
   A new CLI subcommand, `pounce.diagnose()` in Python and a
   `diagnose_model` Studio MCP tool. It reports findings in one schema
