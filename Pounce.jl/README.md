@@ -40,8 +40,9 @@ before exposing the library. A new native minor version requires a wrapper ABI
 review; an arbitrary Ipopt library is not compatible with POUNCE's callback ABI.
 
 Native 0.17 compatibility covers the existing NLP bindings and diagnostics.
-The new complementarity and convex/conic entry points are not yet bound by this
-package and are not required at import, so older supported libraries still load.
+Native complementarity is supported when the optional finalized C API is available;
+`Pounce.supports_complementarity()` detects it. Convex/conic entry points are not
+yet bound. Older supported libraries still load normally.
 The existing linear-solver statistics struct is unchanged; it does not acquire
 the `struct_size` field used by the new native output structs.
 
@@ -312,3 +313,38 @@ The MOI adapter, utility code, and portions of the C bindings/tests are adapted
 from Ipopt.jl under its MIT license. See [NOTICE.md](NOTICE.md) for the pinned
 upstream source and changes, and [LICENSE.md](LICENSE.md) for the license.
 POUNCE's Rust library retains its own EPL-2.0 license.
+
+## Native MOI.Complements
+
+On a native build with the finalized 0.17 complementarity API:
+
+```julia
+model = Model(Pounce.Optimizer)
+@variable(model, x >= 0, start = 0.5)
+@constraint(model, complements(2x - 1, x))
+optimize!(model)
+stats = MOI.get(model, Pounce.ComplementarityStatistics())
+```
+
+Vector variable, affine, quadratic and nonlinear functions are supported. Each
+paired component in the second half must be a single non-parameter variable,
+used in only one pair. All five variable-bound cases are lowered natively.
+Bound-class changes rebuild from the original declarations; parameter edits
+reuse the native handle. Older libraries report the constraint as unsupported.
+
+`ComplementarityStatistics`, `ComplementaritySolves`, `ComplementarityText` and
+`SolveReport` expose the driver's outcome and certificates. Native success does
+not establish MPCC stationarity. `PrimalStatus` checks the declared mixed
+complementarity; applications should also check their physical residuals.
+It requires all original primal residuals to meet `tol` for `FEASIBLE_POINT`,
+or `acceptable_tol` for `NEARLY_FEASIBLE_POINT`. Native acceptance can be less
+strict: the current driver's branch-polish trigger is `10 * tol`.
+Crossed bounds on a declared complementarity variable return `INVALID_MODEL`
+with no solution and an explanatory `RawStatusString`. Correcting the bounds
+allows another solve; low-level native API refusals still throw `NativeAPIError`.
+`ConstraintDual` returns function-row multipliers and a zero variable half;
+signed variable-side multipliers stay on the explicit bounds without clamping
+paired sides. `DualStatus` is unknown for these models, since the multipliers
+are not convex dual certificates. Complementarity dual starts are unsupported.
+See the [Julia guide](../docs/src/julia.md#native-complementarity) for the full
+result contract, low-level API, and application-validation harness.

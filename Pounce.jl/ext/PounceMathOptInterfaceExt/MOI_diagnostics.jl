@@ -35,7 +35,20 @@ struct SolveReport <: MOI.AbstractModelAttribute
     end
 end
 
+"""MPCC outcome statistics, or nothing if the completed solve ran no MPCC driver."""
+struct ComplementarityStatistics <: MOI.AbstractModelAttribute end
+"""Owned statistics for each lowered solve in driver order (empty without a driver)."""
+struct ComplementaritySolves <: MOI.AbstractModelAttribute end
+"""Owned MPCC driver text, or nothing if unavailable. `which` is POUNCE_CC_TEXT_*."""
+struct ComplementarityText <: MOI.AbstractModelAttribute
+    which::Int
+    ComplementarityText(which::Integer = Pounce.POUNCE_CC_TEXT_SUMMARY) = new(which)
+end
+
 const _DiagnosticAttribute = Union{
+    ComplementarityStatistics,
+    ComplementaritySolves,
+    ComplementarityText,
     NativeResiduals,
     RestorationStatistics,
     FiniteDifferenceHessianStatistics,
@@ -99,4 +112,22 @@ function MOI.set(model::Optimizer, ::RecordIterationHistory, value::Bool)
         _options_changed!(model)
     end
     return
+end
+
+function MOI.get(model::Optimizer, attr::ComplementarityStatistics)
+    prob = _diagnostic_problem(model, attr)
+    Pounce.supports_complementarity() || return nothing
+    return Pounce.GetPounceComplementarityStats(prob)
+end
+function MOI.get(model::Optimizer, attr::ComplementaritySolves)
+    prob = _diagnostic_problem(model, attr)
+    Pounce.supports_complementarity() || return NamedTuple[]
+    stats = Pounce.GetPounceComplementarityStats(prob)
+    stats === nothing && return NamedTuple[]
+    return [Pounce.GetPounceComplementaritySolve(prob, k) for k = 1:stats.n_solves]
+end
+function MOI.get(model::Optimizer, attr::ComplementarityText)
+    prob = _diagnostic_problem(model, attr)
+    Pounce.supports_complementarity() || return nothing
+    return Pounce.GetPounceComplementarityText(prob, attr.which)
 end

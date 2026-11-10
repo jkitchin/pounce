@@ -25,6 +25,7 @@ function MOI.is_empty(model::Optimizer)
            model.evaluator.nlp_data.evaluator isa _EmptyNLPEvaluator &&
            model.data.sense == MOI.FEASIBILITY_SENSE &&
            isempty(model.data.vector_nonlinear_oracle_constraints) &&
+           isempty(model.data.complementarity_constraints) &&
            length(model.data.qp_data) == 0 &&
            model.data.nlp_model === nothing &&
            model.native.problem === nothing
@@ -186,6 +187,10 @@ function MOI.get(model::Optimizer, attr::MOI.ListOfConstraintTypesPresent)
     ret = MOI.get(model.data.variables, attr)
     append!(ret, MOI.get(model.data.qp_data, attr))
     _add_scalar_nonlinear_constraints(ret, model.data.nlp_model)
+    for c in model.data.complementarity_constraints
+        pair = (typeof(c.func), MOI.Complements)
+        pair in ret || push!(ret, pair)
+    end
     if !isempty(model.data.vector_nonlinear_oracle_constraints)
         push!(ret, (MOI.VectorOfVariables, MOI.VectorNonlinearOracle{Float64}))
     end

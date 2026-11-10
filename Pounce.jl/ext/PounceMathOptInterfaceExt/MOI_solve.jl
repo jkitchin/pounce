@@ -42,6 +42,8 @@ function _setup_inner(model::Optimizer)::Pounce.IpoptProblem
         push!(g_L, bound.lower)
         push!(g_U, bound.upper)
     end
+    append!(g_L, fill(-Inf, _num_complementarity_rows(model)))
+    append!(g_U, fill(Inf, _num_complementarity_rows(model)))
     function eval_h_cb(x, rows, cols, obj_factor, lambda, values)
         return _eval_h_cb(model, x, rows, cols, obj_factor, lambda, values)
     end
@@ -63,6 +65,12 @@ function _setup_inner(model::Optimizer)::Pounce.IpoptProblem
         has_hessian ? eval_h_cb : nothing,
     )
     inner = model.native.problem::Pounce.IpoptProblem
+    try
+        _declare_complements!(model, inner)
+    catch
+        _release_native!(model)
+        rethrow()
+    end
     if model.data.sense == MOI.MIN_SENSE
         Pounce.AddIpoptNumOption(inner, "obj_scaling_factor", 1.0)
     elseif model.data.sense == MOI.MAX_SENSE
@@ -124,7 +132,7 @@ function MOI.optimize!(model::Optimizer)
         _optimize!(model)
     catch
         model.result.problem = nothing
-        model.result.invalid_model = false
+        model.result.invalid_model_reason = nothing
         model.result.barrier_iterations = 0
         model.result.native_solve_time = NaN
         rethrow()
@@ -135,6 +143,15 @@ function MOI.optimize!(model::Optimizer)
 end
 
 function _optimize!(model::Optimizer)
+    # Check original declarations on every attempt, before touching native state.
+    # A paired variable with crossed bounds has no valid Complements meaning.
+    for i in model.data.complementarity_variables
+        lower, upper = model.data.variables.lower[i], model.data.variables.upper[i]
+        if lower > upper
+            model.result.invalid_model_reason = "Complementarity variable $i: lower bound $lower exceeds upper bound $upper"
+            return
+        end
+    end
     if model.evaluator.structure_revision != model.data.structure_revision
         _setup_model(model)
     elseif model.evaluator.bounds_revision != model.data.bounds_revision
@@ -144,7 +161,7 @@ function _optimize!(model::Optimizer)
         end
         model.evaluator.bounds_revision = model.data.bounds_revision
     end
-    if model.result.invalid_model
+    if model.result.invalid_model_reason !== nothing
         return
     end
     inner = _setup_inner(model)

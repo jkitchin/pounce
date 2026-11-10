@@ -52,8 +52,10 @@ function MOI.eval_constraint(model::Optimizer, g, x)
     for (f, s) in model.data.vector_nonlinear_oracle_constraints
         offset = _eval_constraint(g, offset, x, f, s)
     end
-    g_nlp = view(g, (offset+1):length(g))
+    stop = _complementarity_offset(model)
+    g_nlp = view(g, (offset+1):stop)
     MOI.eval_constraint(model.evaluator.nlp_data.evaluator, g_nlp, x)
+    MOI.eval_constraint(model.evaluator.complementarity, view(g, (stop+1):length(g)), x)
     return
 end
 
@@ -85,6 +87,10 @@ function MOI.jacobian_structure(model::Optimizer)
             push!(J, (row + offset, col))
         end
     end
+    offset = _complementarity_offset(model)
+    for (row, col) in MOI.jacobian_structure(model.evaluator.complementarity)
+        push!(J, (row + offset, col))
+    end
     return J
 end
 
@@ -110,8 +116,14 @@ function MOI.eval_constraint_jacobian(model::Optimizer, values, x)
     for (f, s) in model.data.vector_nonlinear_oracle_constraints
         offset = _eval_constraint_jacobian(values, offset, x, f, s)
     end
-    nlp_values = view(values, (offset+1):length(values))
+    stop = length(values) - model.evaluator.complementarity_jacobian_nnz
+    nlp_values = view(values, (offset+1):stop)
     MOI.eval_constraint_jacobian(model.evaluator.nlp_data.evaluator, nlp_values, x)
+    MOI.eval_constraint_jacobian(
+        model.evaluator.complementarity,
+        view(values, (stop+1):length(values)),
+        x,
+    )
     return
 end
 
@@ -134,6 +146,7 @@ function MOI.hessian_lagrangian_structure(model::Optimizer)
         _hessian_lagrangian_structure(H, f, s)
     end
     append!(H, MOI.hessian_lagrangian_structure(model.evaluator.nlp_data.evaluator))
+    append!(H, MOI.hessian_lagrangian_structure(model.evaluator.complementarity))
     return H
 end
 
@@ -168,10 +181,19 @@ function MOI.eval_hessian_lagrangian(model::Optimizer, H, x, σ, μ)
     for (f, s) in model.data.vector_nonlinear_oracle_constraints
         offset, μ_offset = _eval_hessian_lagrangian(H, offset, x, μ, μ_offset, f, s)
     end
-    H_nlp = view(H, (offset+1):length(H))
-    μ_nlp = view(μ, (μ_offset+1):length(μ))
+    stop = length(H) - model.evaluator.complementarity_hessian_nnz
+    μ_stop = _complementarity_offset(model)
+    H_nlp = view(H, (offset+1):stop)
+    μ_nlp = view(μ, (μ_offset+1):μ_stop)
     nlp_σ = model.evaluator.nlp_data.has_objective ? σ : 0.0
     MOI.eval_hessian_lagrangian(model.evaluator.nlp_data.evaluator, H_nlp, x, nlp_σ, μ_nlp)
+    MOI.eval_hessian_lagrangian(
+        model.evaluator.complementarity,
+        view(H, (stop+1):length(H)),
+        x,
+        0.0,
+        view(μ, (μ_stop+1):length(μ)),
+    )
     return
 end
 
@@ -199,10 +221,10 @@ end
 
 
 function _setup_model(model::Optimizer)
-    model.result.invalid_model = false
+    model.result.invalid_model_reason = nothing
     if isempty(model.data.variables.lower)
         # A zero-variable model is not supported by this optimizer.
-        model.result.invalid_model = true
+        model.result.invalid_model_reason = "The model has no variable"
         return
     end
     if model.data.nlp_model !== nothing
@@ -211,12 +233,16 @@ function _setup_model(model::Optimizer)
             MOI.Nonlinear.Evaluator(model.data.nlp_model, model.data.ad_backend, vars),
         )
     end
+    _setup_complementarity_evaluator!(model)
     has_quadratic_constraints =
         any(isequal(_kFunctionTypeScalarQuadratic), model.data.qp_data.function_type)
     has_nlp_constraints =
         !isempty(model.evaluator.nlp_data.constraint_bounds) ||
         !isempty(model.data.vector_nonlinear_oracle_constraints)
-    has_hessian = :Hess in MOI.features_available(model.evaluator.nlp_data.evaluator)
+    has_complements = !isempty(model.data.complementarity_constraints)
+    has_hessian =
+        :Hess in MOI.features_available(model.evaluator.nlp_data.evaluator) &&
+        :Hess in MOI.features_available(model.evaluator.complementarity)
     for (_, s) in model.data.vector_nonlinear_oracle_constraints
         if s.set.eval_hessian_lagrangian === nothing
             has_hessian = false
@@ -231,13 +257,21 @@ function _setup_model(model::Optimizer)
         push!(init_feat, :Jac)
     end
     MOI.initialize(model.evaluator.nlp_data.evaluator, init_feat)
+    comp_feat = has_complements ? [:Jac] : Symbol[]
+    has_hessian && push!(comp_feat, :Hess)
+    MOI.initialize(model.evaluator.complementarity, comp_feat)
+    model.evaluator.complementarity_jacobian_nnz =
+        length(MOI.jacobian_structure(model.evaluator.complementarity))
+    model.evaluator.complementarity_hessian_nnz =
+        has_hessian ?
+        length(MOI.hessian_lagrangian_structure(model.evaluator.complementarity)) : 0
     model.evaluator.jacobian_sparsity = MOI.jacobian_structure(model)
     model.evaluator.hessian_sparsity = nothing
     if has_hessian
         model.evaluator.hessian_sparsity = MOI.hessian_lagrangian_structure(model)
     end
     model.evaluator.has_only_linear_constraints =
-        !has_nlp_constraints && !has_quadratic_constraints
+        !has_complements && !has_nlp_constraints && !has_quadratic_constraints
     model.evaluator.structure_revision = model.data.structure_revision
     model.evaluator.bounds_revision = model.data.bounds_revision
     return

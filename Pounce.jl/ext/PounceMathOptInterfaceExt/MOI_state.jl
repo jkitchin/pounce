@@ -35,6 +35,12 @@ end
 
 _CallbackState() = _CallbackState(nothing, Cint(0), Float64[], false)
 
+struct _ComplementarityConstraint
+    func::MOI.AbstractVectorFunction
+    variables::Vector{MOI.VariableIndex}
+    first_row::Int
+end
+
 Base.@kwdef mutable struct _ModelData
     revision::UInt = 1
     structure_revision::UInt = 1
@@ -51,6 +57,9 @@ Base.@kwdef mutable struct _ModelData
     nlp_dual_start::Union{Nothing,Vector{Float64}} = nothing
     mult_g_nlp::Dict{MOI.Nonlinear.ConstraintIndex,Float64} =
         Dict{MOI.Nonlinear.ConstraintIndex,Float64}()
+    complementarity_constraints::Vector{_ComplementarityConstraint} =
+        _ComplementarityConstraint[]
+    complementarity_variables::BitSet = BitSet()
     qp_data::QPBlockData{Float64} = QPBlockData{Float64}()
     nlp_model::Union{Nothing,MOI.Nonlinear.Model} = nothing
     ad_backend::MOI.Nonlinear.AbstractAutomaticDifferentiation =
@@ -67,6 +76,9 @@ Base.@kwdef mutable struct _EvaluatorCache
     jacobian_sparsity::Vector{Tuple{Int,Int}} = Tuple{Int,Int}[]
     hessian_sparsity::Union{Nothing,Vector{Tuple{Int,Int}}} = nothing
     has_only_linear_constraints::Bool = false
+    complementarity::MOI.AbstractNLPEvaluator = _EmptyNLPEvaluator()
+    complementarity_jacobian_nnz::Int = 0
+    complementarity_hessian_nnz::Int = 0
 end
 
 Base.@kwdef mutable struct _NativeCache
@@ -80,7 +92,7 @@ Base.@kwdef mutable struct _SolveResult
     # clears this reference before it can overwrite any buffers.
     problem::Union{Nothing,Pounce.IpoptProblem} = nothing
     revision::UInt = 0
-    invalid_model::Bool = false
+    invalid_model_reason::Union{Nothing,String} = nothing
     solve_time::Float64 = NaN
     native_solve_time::Float64 = NaN
     barrier_iterations::Int = 0

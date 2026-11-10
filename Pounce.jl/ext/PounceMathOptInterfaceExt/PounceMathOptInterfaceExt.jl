@@ -20,6 +20,9 @@ function __init__()
     setglobal!(Pounce, :LinearSolverStatistics, LinearSolverStatistics)
     setglobal!(Pounce, :SolveReport, SolveReport)
     setglobal!(Pounce, :RecordIterationHistory, RecordIterationHistory)
+    setglobal!(Pounce, :ComplementarityStatistics, ComplementarityStatistics)
+    setglobal!(Pounce, :ComplementaritySolves, ComplementaritySolves)
+    setglobal!(Pounce, :ComplementarityText, ComplementarityText)
     setglobal!(Pounce, :MOI, MOI)
     return
 end

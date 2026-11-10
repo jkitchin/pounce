@@ -1,15 +1,23 @@
 @testset "Optional MOI extension" begin
     function extension_child(code)
+        code *= """
+            ; @assert Pounce.supports_complementarity() == all(
+                s -> Pounce.Libdl.dlsym_e(Pounce._library_handle[], s) != C_NULL,
+                Pounce._complementarity_symbols,
+            )
+        """
         cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`
         return read(cmd, String)
     end
-    @test extension_child("""
-        import Pounce
-        @assert Base.get_extension(Pounce, :PounceMathOptInterfaceExt) === nothing
-        @assert !isdefined(Pounce, :Optimizer)
-        @assert all(id.name ∉ ("MathOptInterface", "JSON") for id in keys(Base.loaded_modules))
-        print("core-only")
-    """) == "core-only"
+    @test extension_child(
+        """
+    import Pounce
+    @assert Base.get_extension(Pounce, :PounceMathOptInterfaceExt) === nothing
+    @assert !isdefined(Pounce, :Optimizer)
+    @assert all(id.name ∉ ("MathOptInterface", "JSON") for id in keys(Base.loaded_modules))
+    print("core-only")
+""",
+    ) == "core-only"
     for imports in
         ("import Pounce; import MathOptInterface", "import MathOptInterface; import Pounce")
         @test extension_child(imports * """

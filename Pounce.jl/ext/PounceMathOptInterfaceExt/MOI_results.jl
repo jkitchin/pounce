@@ -41,7 +41,7 @@ end
 ### MOI.TerminationStatus
 
 function MOI.get(model::Optimizer, ::MOI.TerminationStatus)
-    if model.result.invalid_model
+    if model.result.invalid_model_reason !== nothing
         return MOI.INVALID_MODEL
     elseif !_has_result(model)
         return MOI.OPTIMIZE_NOT_CALLED
@@ -53,8 +53,8 @@ end
 ### MOI.RawStatusString
 
 function MOI.get(model::Optimizer, ::MOI.RawStatusString)
-    if model.result.invalid_model
-        return "The model has no variable"
+    if model.result.invalid_model_reason !== nothing
+        return model.result.invalid_model_reason
     elseif !_has_result(model)
         return "Optimize not called"
     end
@@ -78,13 +78,16 @@ function _manually_evaluated_primal_status(model::Optimizer)
     m, n = length(g_L), length(x)
     # 1e-8 is the default tolerance
     tol = model.result.tol
-    if all(x_L[i] - tol <= x[i] <= x_U[i] + tol for i = 1:n) &&
+    cc_violation = _complementarity_violation(model)
+    if cc_violation <= tol &&
+       all(x_L[i] - tol <= x[i] <= x_U[i] + tol for i = 1:n) &&
        all(g_L[i] - tol <= g[i] <= g_U[i] + tol for i = 1:m)
         return MOI.FEASIBLE_POINT
     end
     # 1e-6 is the default acceptable tolerance
     atol = model.result.acceptable_tol
-    if all(x_L[i] - atol <= x[i] <= x_U[i] + atol for i = 1:n) &&
+    if cc_violation <= atol &&
+       all(x_L[i] - atol <= x[i] <= x_U[i] + atol for i = 1:n) &&
        all(g_L[i] - atol <= g[i] <= g_U[i] + atol for i = 1:m)
         return MOI.NEARLY_FEASIBLE_POINT
     end
@@ -96,7 +99,8 @@ function MOI.get(model::Optimizer, attr::MOI.PrimalStatus)
         return MOI.NO_SOLUTION
     end
     _, status = _STATUS_CODES[Pounce.ApplicationReturnStatus(model.result.problem.status)]
-    if status == MOI.UNKNOWN_RESULT_STATUS
+    if status == MOI.UNKNOWN_RESULT_STATUS ||
+       !isempty(model.data.complementarity_constraints)
         # Not sure. RestorationFailure can terminate at a feasible (but
         # non-stationary) point.
         return _manually_evaluated_primal_status(model)
@@ -110,6 +114,7 @@ function MOI.get(model::Optimizer, attr::MOI.DualStatus)
     if !(1 <= attr.result_index <= MOI.get(model, MOI.ResultCount()))
         return MOI.NO_SOLUTION
     end
+    isempty(model.data.complementarity_constraints) || return MOI.UNKNOWN_RESULT_STATUS
     _, status = _STATUS_CODES[Pounce.ApplicationReturnStatus(model.result.problem.status)]
     return status
 end
@@ -230,6 +235,9 @@ function MOI.get(
     MOI.check_result_index_bounds(model, attr)
     MOI.throw_if_not_valid(model, ci)
     rc = model.result.problem.mult_x_L[ci.value] - model.result.problem.mult_x_U[ci.value]
+    if _is_paired_variable(model, ci.value)
+        return -_dual_multiplier(model) * model.result.problem.mult_x_U[ci.value]
+    end
     return min(0.0, _dual_multiplier(model) * rc)
 end
 
@@ -241,6 +249,9 @@ function MOI.get(
     MOI.check_result_index_bounds(model, attr)
     MOI.throw_if_not_valid(model, ci)
     rc = model.result.problem.mult_x_L[ci.value] - model.result.problem.mult_x_U[ci.value]
+    if _is_paired_variable(model, ci.value)
+        return _dual_multiplier(model) * model.result.problem.mult_x_L[ci.value]
+    end
     return max(0.0, _dual_multiplier(model) * rc)
 end
 
@@ -271,5 +282,7 @@ end
 function MOI.get(model::Optimizer, attr::MOI.NLPBlockDual)
     MOI.check_result_index_bounds(model, attr)
     s = -_dual_multiplier(model)
-    return s .* model.result.problem.mult_g[(_nlp_constraint_offset(model)+1):end]
+    return s .* model.result.problem.mult_g[(_nlp_constraint_offset(
+        model,
+    )+1):_complementarity_offset(model)]
 end

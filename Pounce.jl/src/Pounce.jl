@@ -3,6 +3,7 @@ module Pounce
 import Libdl
 # Populated by the optional MOI extension when JuMP/MathOptInterface is loaded.
 global Optimizer, CallbackFunction, NativeSolveTimeSec, MOI
+global ComplementarityStatistics, ComplementaritySolves, ComplementarityText
 global NativeResiduals, RestorationStatistics, FiniteDifferenceHessianStatistics, LinearSolverStatistics, SolveReport, RecordIterationHistory
 
 # Set at runtime, never serialize an absolute library path or a dlopen handle
@@ -80,6 +81,8 @@ function __init__()
         rethrow()
     end
     _library_handle[] = handle
+    _supports_complementarity[] =
+        all(s -> Libdl.dlsym_e(handle, s) != C_NULL, _complementarity_symbols)
     global libpounce = path
     return
 end
@@ -89,6 +92,7 @@ library_path() = libpounce
 
 include("C_wrapper.jl")
 include("diagnostics.jl")
+include("complementarity.jl")
 function column end
 
 end # module Pounce
