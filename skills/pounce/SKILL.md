@@ -1,6 +1,6 @@
 ---
 name: pounce
-description: Install pounce, and inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks how to install or set up pounce or pounce-studio, or asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, pre-flight an AMPL .nl or GAMS .gms file before solving, check or fix a starting point (check-x0), find out what is wrong with a model without solving it (pounce diagnose: contradictory or duplicate rows, domain errors, NaN sources, dependent equations, LICQ/MFCQ and second-order checks at a .sol), set up a warm start, or solve or interpret a model with complementarity constraints (AMPL complements, Pyomo mpec, MPCC).
+description: Install pounce, and inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks how to install or set up pounce or pounce-studio, or asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, pre-flight an AMPL .nl or GAMS .gms file before solving, check or fix a starting point (check-x0), find out what is wrong with a model without solving it (pounce diagnose — contradictory or duplicate rows, domain errors, NaN sources, dependent equations, LICQ/MFCQ and second-order checks at a .sol), set up a warm start, or solve or interpret a model with complementarity constraints (AMPL complements, Pyomo mpec, MPCC).
 ---
 
 # pounce — solver post-mortem and pre-flight
