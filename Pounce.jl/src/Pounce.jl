@@ -81,6 +81,8 @@ function __init__()
         rethrow()
     end
     _library_handle[] = handle
+    _supports_complementarity[] =
+        all(s -> Libdl.dlsym_e(handle, s) != C_NULL, _complementarity_symbols)
     global libpounce = path
     return
 end

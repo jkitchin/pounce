@@ -183,6 +183,13 @@ legacy NLP blocks, and vector nonlinear oracles may coexist with these rows.
 Complementarity functions use the selected automatic-differentiation backend;
 unknown Hessian information retains the existing limited-memory fallback.
 
+If a declared complementarity variable has a lower bound greater than its upper
+bound when `optimize!` is called, the wrapper returns `INVALID_MODEL` with no
+solution. `RawStatusString` identifies the variable and bounds. Correct the
+bounds and call `optimize!` again to recover; a temporary crossing repaired
+before the call does not invalidate the final model. Low-level native API
+validation failures still throw `NativeAPIError`.
+
 ### Results and certificates
 
 `ConstraintPrimal` returns `[F(x); x]`. `PrimalStatus` independently checks the
@@ -190,6 +197,12 @@ original bounds/rows and the mixed-complementarity natural map
 `x - clamp(x - F, lower, upper)`, even when the native status says success.
 It evaluates the equivalent `clamp(F, x - upper, x - lower)` to avoid losing
 a nonzero residual when `x` is large relative to `F`.
+All these primal residuals must satisfy `tol` for `FEASIBLE_POINT`, or
+`acceptable_tol` for `NEARLY_FEASIBLE_POINT`; otherwise the result is
+`INFEASIBLE_POINT`. This classification can be stricter than native acceptance:
+the current driver's branch-polish trigger is `10 * tol`, not the wrapper's
+feasibility threshold. A residual between `tol` and `10 * tol` is nearly
+feasible only if it and the other primal residuals satisfy `acceptable_tol`.
 Applications should also check their physical residuals in appropriate units.
 
 The native termination status describes the formulation that returned the

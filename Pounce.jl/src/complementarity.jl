@@ -16,9 +16,11 @@ const _complementarity_symbols = (
     :GetPounceComplementarityText,
 )
 
+# Populated from the selected runtime library in __init__, never at precompile time.
+const _supports_complementarity = Ref(false)
+
 """Whether the loaded library provides the finalized native complementarity API."""
-supports_complementarity() =
-    all(s -> Libdl.dlsym_e(_library_handle[], s) != C_NULL, _complementarity_symbols)
+supports_complementarity() = _supports_complementarity[]
 
 function _complementarity_symbol(prob::IpoptProblem, name::Symbol)
     prob.solving && error("Complementarity APIs are only available between solves")
@@ -148,7 +150,7 @@ function SetPounceComplementarityPairs(
     for (row, var) in zip(rows, vars)
         _check_pair_indices(prob, row, var)
     end
-    r, v, bad = Cint[rows...], Cint[vars...], Ref{Cint}(-1)
+    r, v, bad = Vector{Cint}(rows), Vector{Cint}(vars), Ref{Cint}(-1)
     code = ccall(
         symbol,
         Cint,

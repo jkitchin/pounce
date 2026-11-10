@@ -336,6 +336,12 @@ reuse the native handle. Older libraries report the constraint as unsupported.
 `SolveReport` expose the driver's outcome and certificates. Native success does
 not establish MPCC stationarity. `PrimalStatus` checks the declared mixed
 complementarity; applications should also check their physical residuals.
+It requires all original primal residuals to meet `tol` for `FEASIBLE_POINT`,
+or `acceptable_tol` for `NEARLY_FEASIBLE_POINT`. Native acceptance can be less
+strict: the current driver's branch-polish trigger is `10 * tol`.
+Crossed bounds on a declared complementarity variable return `INVALID_MODEL`
+with no solution and an explanatory `RawStatusString`. Correcting the bounds
+allows another solve; low-level native API refusals still throw `NativeAPIError`.
 `ConstraintDual` returns function-row multipliers and a zero variable half;
 signed variable-side multipliers stay on the explicit bounds without clamping
 paired sides. `DualStatus` is unknown for these models, since the multipliers

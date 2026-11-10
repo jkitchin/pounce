@@ -221,10 +221,10 @@ end
 
 
 function _setup_model(model::Optimizer)
-    model.result.invalid_model = false
+    model.result.invalid_model_reason = nothing
     if isempty(model.data.variables.lower)
         # A zero-variable model is not supported by this optimizer.
-        model.result.invalid_model = true
+        model.result.invalid_model_reason = "The model has no variable"
         return
     end
     if model.data.nlp_model !== nothing

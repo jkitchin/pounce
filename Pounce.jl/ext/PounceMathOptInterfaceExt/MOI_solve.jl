@@ -132,7 +132,7 @@ function MOI.optimize!(model::Optimizer)
         _optimize!(model)
     catch
         model.result.problem = nothing
-        model.result.invalid_model = false
+        model.result.invalid_model_reason = nothing
         model.result.barrier_iterations = 0
         model.result.native_solve_time = NaN
         rethrow()
@@ -143,6 +143,15 @@ function MOI.optimize!(model::Optimizer)
 end
 
 function _optimize!(model::Optimizer)
+    # Check original declarations on every attempt, before touching native state.
+    # A paired variable with crossed bounds has no valid Complements meaning.
+    for i in model.data.complementarity_variables
+        lower, upper = model.data.variables.lower[i], model.data.variables.upper[i]
+        if lower > upper
+            model.result.invalid_model_reason = "Complementarity variable $i: lower bound $lower exceeds upper bound $upper"
+            return
+        end
+    end
     if model.evaluator.structure_revision != model.data.structure_revision
         _setup_model(model)
     elseif model.evaluator.bounds_revision != model.data.bounds_revision
@@ -152,7 +161,7 @@ function _optimize!(model::Optimizer)
         end
         model.evaluator.bounds_revision = model.data.bounds_revision
     end
-    if model.result.invalid_model
+    if model.result.invalid_model_reason !== nothing
         return
     end
     inner = _setup_inner(model)

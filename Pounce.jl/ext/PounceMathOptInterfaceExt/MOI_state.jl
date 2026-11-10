@@ -92,7 +92,7 @@ Base.@kwdef mutable struct _SolveResult
     # clears this reference before it can overwrite any buffers.
     problem::Union{Nothing,Pounce.IpoptProblem} = nothing
     revision::UInt = 0
-    invalid_model::Bool = false
+    invalid_model_reason::Union{Nothing,String} = nothing
     solve_time::Float64 = NaN
     native_solve_time::Float64 = NaN
     barrier_iterations::Int = 0

@@ -41,7 +41,7 @@ end
 ### MOI.TerminationStatus
 
 function MOI.get(model::Optimizer, ::MOI.TerminationStatus)
-    if model.result.invalid_model
+    if model.result.invalid_model_reason !== nothing
         return MOI.INVALID_MODEL
     elseif !_has_result(model)
         return MOI.OPTIMIZE_NOT_CALLED
@@ -53,8 +53,8 @@ end
 ### MOI.RawStatusString
 
 function MOI.get(model::Optimizer, ::MOI.RawStatusString)
-    if model.result.invalid_model
-        return "The model has no variable"
+    if model.result.invalid_model_reason !== nothing
+        return model.result.invalid_model_reason
     elseif !_has_result(model)
         return "Optimize not called"
     end

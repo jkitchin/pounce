@@ -43,6 +43,111 @@ end
 end
 
 if Pounce.supports_complementarity()
+    @testset "Crossed paired bounds report an invalid model and recover" begin
+        for cached in (false, true), interval in (false, true), prior in (false, true)
+            m = cached ? Model(Pounce.Optimizer) : direct_model(Pounce.Optimizer())
+            set_silent(m)
+            @variable(m, x, start = 0.5)
+            if interval
+                b = @constraint(m, x in MOI.Interval(0.0, 1.0))
+            else
+                set_lower_bound(x, 0.0)
+                set_upper_bound(x, 1.0)
+            end
+            @constraint(m, complements(2x - 1, x))
+            prior && optimize!(m)
+            function change_lower(lower)
+                if interval
+                    MOI.set(
+                        backend(m),
+                        MOI.ConstraintSet(),
+                        index(b),
+                        MOI.Interval(lower, 1.0),
+                    )
+                else
+                    set_lower_bound(x, lower)
+                end
+            end
+            change_lower(2.0)
+            for _ = 1:2
+                failure = try
+                    optimize!(m)
+                    nothing
+                catch err
+                    err
+                end
+                @test failure === nothing
+                @test termination_status(m) == MOI.INVALID_MODEL
+                @test occursin("lower bound 2.0 exceeds upper bound 1.0", raw_status(m))
+                @test result_count(m) == 0
+                @test primal_status(m) == MOI.NO_SOLUTION
+                @test dual_status(m) == MOI.NO_SOLUTION
+                opt = unsafe_backend(m)
+                @test MOI.get(opt, MOI.BarrierIterations()) == 0
+                @test isnan(MOI.get(opt, Pounce.NativeSolveTimeSec()))
+                @test isfinite(MOI.get(opt, MOI.SolveTimeSec()))
+                @test_throws MOI.ResultIndexBoundsError MOI.get(
+                    opt,
+                    MOI.VariablePrimal(),
+                    index(x),
+                )
+                @test_throws MOI.GetAttributeNotAllowed MOI.get(
+                    opt,
+                    Pounce.ComplementarityStatistics(),
+                )
+                @test_throws MOI.GetAttributeNotAllowed MOI.get(
+                    opt,
+                    Pounce.NativeResiduals(),
+                )
+            end
+            change_lower(0.0)
+            optimize!(m)
+            fresh, y, _ = scalar_model(0.0, 1.0; cached)
+            optimize!(fresh)
+            @test termination_status(m) == termination_status(fresh) == MOI.LOCALLY_SOLVED
+            @test value(x) ≈ value(y) atol = 1e-6
+            @test !occursin("exceeds", raw_status(m))
+            empty!(m)
+            empty!(fresh)
+        end
+        # The new preflight applies only to declared complementarity variables.
+        m = direct_model(Pounce.Optimizer())
+        set_silent(m)
+        @variable(m, x, start = 0.5)
+        set_lower_bound(x, 2.0)
+        set_upper_bound(x, 1.0)
+        optimize!(m)
+        @test termination_status(m) == MOI.INVALID_MODEL
+        @test raw_status(m) == "Invalid_Problem_Definition"
+    end
+
+    @testset "Primal feasibility is independent of native success" begin
+        m, _, _ = scalar_model(-Inf, Inf)
+        optimize!(m)
+        opt = unsafe_backend(m)
+        prob = opt.result.problem
+        # Controlled output buffers test the getter contract, not a native trajectory.
+        prob.status = Cint(Pounce.Solve_Succeeded)
+        opt.result.tol = 1e-8
+        for acceptable in (1e-6, 2e-8)
+            opt.result.acceptable_tol = acceptable
+            for (residual, expected) in (
+                (0.5e-8, MOI.FEASIBLE_POINT),
+                (1e-8, MOI.FEASIBLE_POINT),
+                (1.5e-8, MOI.NEARLY_FEASIBLE_POINT),
+                (acceptable, MOI.NEARLY_FEASIBLE_POINT),
+                (2acceptable, MOI.INFEASIBLE_POINT),
+            )
+                prob.g[end] = residual
+                @test termination_status(m) == MOI.LOCALLY_SOLVED
+                @test primal_status(m) == expected
+            end
+            prob.g[end] = 5e-8 # Below the native polish trigger, but not necessarily acceptable.
+            @test primal_status(m) ==
+                  (acceptable >= 5e-8 ? MOI.NEARLY_FEASIBLE_POINT : MOI.INFEASIBLE_POINT)
+        end
+    end
+
     @testset "All five MOI bound cases; direct/cached and affine/nonlinear" begin
         for cached in (false, true),
             nonlinear in (false, true),
@@ -450,6 +555,7 @@ if Pounce.supports_complementarity()
         Pounce.ClearPounceComplementarityPairs(prob)
         @test Pounce.GetPounceComplementarityPairCount(prob) == 0
         @test Pounce.SetPounceComplementarityPairs(prob, [1], [1]) == 0
+        @test Pounce.SetPounceComplementarityPairs(prob, 1:1, view([1], :)) == 0
         optimize!(m)
         stats = Pounce.GetPounceComplementarityStats(prob)
         @test stats.n_solves > 0
