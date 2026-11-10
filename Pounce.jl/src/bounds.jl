@@ -23,7 +23,7 @@ function _bound_indices(indices, dimension)
     length(indices) <= typemax(Cint) || throw(ArgumentError("Bound count must fit Cint"))
     all(i -> 1 <= i <= dimension, indices) ||
         throw(ArgumentError("Bound indices must lie in 1:$dimension"))
-    return Cint[indices...]
+    return Vector{Cint}(indices)
 end
 
 function _bound_update(indices, lower, upper, dimension)
@@ -39,8 +39,8 @@ function _bound_update(indices, lower, upper, dimension)
             length(values) == count ||
             throw(DimensionMismatch("Bound arrays must match the selected index count"))
     end
-    lo = lower === nothing ? nothing : Float64[lower...]
-    up = upper === nothing ? nothing : Float64[upper...]
+    lo = lower === nothing ? nothing : Vector{Float64}(lower)
+    up = upper === nothing ? nothing : Vector{Float64}(upper)
     return count, idx, lo, up
 end
 

@@ -184,10 +184,10 @@ if Pounce.supports_bound_updates()
         @test Pounce.SetPounceBounds(prob; x_upper = [3.0, 2.0]) == 0
         @test Pounce.SetPounceBounds(
             prob;
-            x_indices = [2],
-            x_lower = [0.5],
-            g_indices = [2],
-            g_upper = [2.5],
+            x_indices = 2:2,
+            x_lower = view([0.5], :),
+            g_indices = view([2], :),
+            g_upper = 2.5:1.0:2.5,
         ) == 0
         got = Pounce.GetPounceBounds(prob; x_indices = [2, 1, 2], g_indices = [2, 1, 2])
         @test got.x_lower == [0.5, 0, 0.5]
@@ -264,6 +264,87 @@ else
 end
 
 if Pounce.supports_bound_updates() && Pounce.supports_complementarity()
+    @testset "Invalid paired bounds preserve pending edits until recovery" begin
+        function recovery_model(cached; free = false, edited = false)
+            m = cached ? Model(Pounce.Optimizer) : direct_model(Pounce.Optimizer())
+            set_silent(m)
+            @variable(m, x, start = 0.5)
+            if !free
+                set_lower_bound(x, 0.0)
+                set_upper_bound(x, 1.0)
+            end
+            @variable(m, 0 <= z <= (edited ? 1.5 : 4.0), start = 1.0)
+            @constraint(m, row, 2z <= (edited ? 2.5 : 6.0))
+            @constraint(m, complements(2x - 1, x))
+            @objective(m, Min, (z - 2)^2)
+            return m, x, z, row
+        end
+        for cached in (false, true), change_class in (false, true)
+            m, x, z, row = recovery_model(cached)
+            optimize!(m)
+            opt = unsafe_backend(m)
+            old, evaluator = opt.native.problem, opt.evaluator.nlp_data.evaluator
+            user_bounds = Pounce.GetPounceBounds(old)
+            effective_bounds =
+                Pounce.GetPounceBounds(old; view = Pounce.POUNCE_BOUNDS_VIEW_EFFECTIVE)
+            set_lower_bound(x, 2.0)
+            set_upper_bound(z, 1.5)
+            set_normalized_rhs(row, 2.5)
+            pending_x, pending_g =
+                copy(opt.native.pending_x_bounds), copy(opt.native.pending_g_bounds)
+            @test length(pending_x) == 2
+            @test length(pending_g) == 1
+            optimize!(m)
+            @test termination_status(m) == MOI.INVALID_MODEL
+            @test result_count(m) == 0
+            @test primal_status(m) == MOI.NO_SOLUTION
+            @test opt.native.problem === old
+            @test opt.native.pending_x_bounds == pending_x
+            @test opt.native.pending_g_bounds == pending_g
+            @test Pounce.GetPounceBounds(old) == user_bounds
+            @test Pounce.GetPounceBounds(old; view = Pounce.POUNCE_BOUNDS_VIEW_EFFECTIVE) ==
+                  effective_bounds
+            @test_throws MOI.GetAttributeNotAllowed MOI.get(opt, Pounce.NativeResiduals())
+            if change_class
+                delete_lower_bound(x)
+                delete_upper_bound(x)
+            else
+                set_lower_bound(x, 0.0)
+            end
+            optimize!(m)
+            fresh, fx, fz, _ = recovery_model(cached; free = change_class, edited = true)
+            optimize!(fresh)
+            @test termination_status(m) == termination_status(fresh) == MOI.LOCALLY_SOLVED
+            @test value(x) ≈ value(fx) atol = 1e-6
+            @test value(z) ≈ value(fz) atol = 1e-6
+            @test (opt.native.problem === old) == !change_class
+            @test opt.evaluator.nlp_data.evaluator === evaluator
+            @test isempty(opt.native.pending_x_bounds)
+            @test isempty(opt.native.pending_g_bounds)
+            @test Pounce.GetPounceBounds(opt.native.problem) ==
+                  Pounce.GetPounceBounds(unsafe_backend(fresh).native.problem)
+            @test Pounce.GetPounceBounds(
+                opt.native.problem;
+                view = Pounce.POUNCE_BOUNDS_VIEW_EFFECTIVE,
+            ) == Pounce.GetPounceBounds(
+                unsafe_backend(fresh).native.problem;
+                view = Pounce.POUNCE_BOUNDS_VIEW_EFFECTIVE,
+            )
+            if !change_class
+                # A crossed intermediate edit is harmless if repaired before solving.
+                set_lower_bound(x, 2.0)
+                set_lower_bound(x, 0.0)
+                optimize!(m)
+                @test termination_status(m) == MOI.LOCALLY_SOLVED
+                @test opt.native.problem === old
+                @test value(z) ≈ value(fz) atol = 1e-6
+            end
+            empty!(m)
+            empty!(fresh)
+        end
+    end
+
+
     function complementarity_transition_model(bounds)
         m = Pounce.Optimizer()
         MOI.set(m, MOI.Silent(), true)
