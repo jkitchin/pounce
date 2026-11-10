@@ -93,6 +93,44 @@ end
 end
 
 if Pounce.supports_bound_updates()
+    @testset "Explicit starts survive handle-preserving bound updates" begin
+        m = direct_model(Pounce.Optimizer())
+        set_silent(m)
+        set_optimizer_attribute(m, "presolve", "no")
+        set_optimizer_attribute(m, "warm_start_init_point", "yes")
+        @variable(m, 0 <= x <= 4, start = 0.5)
+        c = @constraint(m, 2x <= 10)
+        @objective(m, Min, (x - 2)^2)
+        optimize!(m)
+        opt = unsafe_backend(m)
+        old = opt.native.problem
+        set_upper_bound(x, 1.5)
+        set_start_value(x, 0.75)
+        set_dual_start_value(LowerBoundRef(x), 10.0)
+        set_dual_start_value(UpperBoundRef(x), -20.0)
+        set_dual_start_value(c, -30.0)
+        inputs = NTuple{4,Vector{Float64}}[]
+        # Native output buffers are written after callbacks return; observe the
+        # explicit Julia input buffers at the C boundary, including MOI dual signs.
+        MOI.set(
+            opt,
+            Pounce.CallbackFunction(),
+            (args...) -> begin
+                p = opt.native.problem
+                push!(
+                    inputs,
+                    (copy(p.x), copy(p.mult_x_L), copy(p.mult_x_U), copy(p.mult_g)),
+                )
+                false
+            end,
+        )
+        optimize!(m)
+        @test !isempty(inputs)
+        @test first(inputs) == ([0.75], [10.0], [20.0], [30.0])
+        @test opt.native.problem === old
+        @test Pounce.GetPounceBounds(old).x_upper == [1.5]
+    end
+
     @testset "Failed native updates retain the batch for correction" begin
         m, x, c = scalar_model(:affine, 4.0)
         optimize!(m)
@@ -226,6 +264,52 @@ else
 end
 
 if Pounce.supports_bound_updates() && Pounce.supports_complementarity()
+    function complementarity_transition_model(bounds)
+        m = Pounce.Optimizer()
+        MOI.set(m, MOI.Silent(), true)
+        x, b = MOI.add_constrained_variable(m, MOI.Interval(bounds...))
+        MOI.set(m, MOI.VariablePrimalStart(), x, 0.5)
+        f = MOI.VectorAffineFunction(
+            [
+                MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x)),
+                MOI.VectorAffineTerm(2, MOI.ScalarAffineTerm(1.0, x)),
+            ],
+            [-1.0, 0.0],
+        )
+        MOI.add_constraint(m, f, MOI.Complements(2))
+        return m, x, b
+    end
+    @testset "Every complementarity class transition versus a fresh declaration" begin
+        classes = [(-1.0, Inf), (-Inf, 3.0), (-1.0, 3.0), (-Inf, Inf), (0.5, 0.5)]
+        for from in classes, to in classes
+            m, x, b = complementarity_transition_model(from)
+            MOI.optimize!(m)
+            old = m.native.problem
+            evaluator = m.evaluator.complementarity
+            MOI.set(m, MOI.ConstraintSet(), b, MOI.Interval(to...))
+            @test MOI.get(m, MOI.ResultCount()) == 0
+            MOI.optimize!(m)
+            fresh, y, _ = complementarity_transition_model(to)
+            MOI.optimize!(fresh)
+            @test MOI.get(m, MOI.VariablePrimal(), x) ≈
+                  MOI.get(fresh, MOI.VariablePrimal(), y) atol = 1e-6
+            @test MOI.get(m, MOI.PrimalStatus()) == MOI.get(fresh, MOI.PrimalStatus())
+            @test (m.native.problem === old) == (from == to)
+            @test m.evaluator.complementarity === evaluator
+            @test Pounce.GetPounceBounds(m.native.problem) ==
+                  Pounce.GetPounceBounds(fresh.native.problem)
+            @test Pounce.GetPounceBounds(
+                m.native.problem;
+                view = Pounce.POUNCE_BOUNDS_VIEW_EFFECTIVE,
+            ) == Pounce.GetPounceBounds(
+                fresh.native.problem;
+                view = Pounce.POUNCE_BOUNDS_VIEW_EFFECTIVE,
+            )
+            MOI.empty!(m)
+            MOI.empty!(fresh)
+        end
+    end
+
     function mixed_model(final, approximation)
         m = direct_model(Pounce.Optimizer())
         set_silent(m)
