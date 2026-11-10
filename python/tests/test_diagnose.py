@@ -67,6 +67,22 @@ def test_extra_points_reach_rank_robustness():
     assert len(points) == 3  # the main point and the two extras
 
 
+@needs_cli
+def test_numpy_scalars_are_accepted():
+    # repr(np.float64(x)) is 'np.float64(x)' under NumPy >= 2; the wrapper
+    # must format by kind so the CLI can parse it.
+    np = pytest.importorskip("numpy")
+    r = pounce.diagnose(
+        FIXTURES / "parametric.nl",
+        feas_tol=np.float64(1e-6),
+        seed=np.int64(3),
+        convexity_samples=np.int32(8),
+        convexity_tol=np.float32(1e-9),
+    )
+    assert r.raw["sections"]["convexity_sampling"]["seed"] == 3
+    assert r.raw["tolerances"]["feas_tol"] == 1e-6
+
+
 def test_argument_errors_fail_fast(tmp_path):
     with pytest.raises(ValueError):
         pounce.diagnose(tmp_path / "m.nl", x0=[0.0], sol_file="a.sol")

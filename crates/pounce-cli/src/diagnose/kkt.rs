@@ -93,6 +93,9 @@ pub struct KktState {
     pub lambda: Option<Vec<Number>>,
     /// Tolerance under which a multiplier counts as zero.
     pub mult_tol: Number,
+    /// When `mu` is `None`: why (no duals, or a dual count that does not
+    /// match the model).
+    pub why_no_multipliers: Option<String>,
 }
 
 fn act_tol(b: Number, tol: Number) -> Number {
@@ -284,6 +287,17 @@ pub fn check_kkt(
         _ if prob.m == 0 => Some(&[]),
         _ => None,
     };
+    // Why there are no multipliers, when there are none: a dual vector of
+    // the wrong length means the .sol belongs to another model (a presolved
+    // or edited one), which is worth saying rather than "none".
+    let no_mult_reason = match lambda_file {
+        Some(l) if !l.is_empty() && l.len() != prob.m => format!(
+            "the .sol has {} constraint multipliers but the model has {} rows, so it does not belong to this model",
+            l.len(),
+            prob.m
+        ),
+        _ => "the .sol has no constraint multipliers".to_string(),
+    };
     #[allow(clippy::type_complexity)]
     let mut kkt: Option<(
         Vec<Number>,
@@ -373,13 +387,16 @@ pub fn check_kkt(
         mult_tol,
         grad_scale,
         bounds_file.is_some(),
+        &no_mult_reason,
         opts,
         report,
     );
     let licq_ok = licq(prob, pt, &active, mu.as_deref(), mult_tol, opts, report);
     mfcq(prob, pt, &active, licq_ok, opts, report);
 
+    let why_no_multipliers = mu.is_none().then_some(no_mult_reason);
     Some(KktState {
+        why_no_multipliers,
         active,
         mu,
         lambda: kkt.map(|k| k.3),
@@ -397,11 +414,12 @@ fn kkt_audit(
     mult_tol: Number,
     grad_scale: Number,
     bounds_from_file: bool,
+    no_mult_reason: &str,
     opts: &DiagnoseOptions,
     report: &mut Report,
 ) {
-    let (Some((resid, _, _, lam, sigma)), Some(mu)) = (kkt, mu) else {
-        report.unavailable("kkt_audit", "the .sol has no constraint multipliers");
+    let (Some((resid, zl_raw, zu_raw, lam, sigma)), Some(mu)) = (kkt, mu) else {
+        report.unavailable("kkt_audit", no_mult_reason);
         return;
     };
     let (worst_j, worst) = resid
@@ -431,14 +449,24 @@ fn kkt_audit(
             .evidence(json!({"residual": num(worst), "tolerance": num(opts.opt_tol * grad_scale)})),
         );
     }
-    // Sign violations on active inequality rows. (Bound multipliers are
-    // clipped at zero, so a wrong-sign bound multiplier shows up as
-    // stationarity residual instead.)
+    // Sign violations on active inequality rows, and — when the .sol
+    // carries bound multipliers — on active bounds. The residual uses the
+    // file's z unclipped, so a wrong-sign z consistent with ∇f leaves no
+    // residual and has to be caught here. (Inferred bound multipliers are
+    // non-negative by construction.)
     let wrong: Vec<(String, Number)> = active
         .iter()
         .zip(mu)
-        .filter(|(a, m)| matches!(a, Active::RowLower(_) | Active::RowUpper(_)) && **m < -mult_tol)
-        .map(|(a, m)| (a.name(prob), *m))
+        .filter_map(|(a, m)| match *a {
+            Active::RowLower(_) | Active::RowUpper(_) if *m < -mult_tol => Some((a.name(prob), *m)),
+            Active::VarLower(j) if bounds_from_file && zl_raw[j] < -mult_tol => {
+                Some((a.name(prob), zl_raw[j]))
+            }
+            Active::VarUpper(j) if bounds_from_file && zu_raw[j] < -mult_tol => {
+                Some((a.name(prob), zu_raw[j]))
+            }
+            _ => None,
+        })
         .collect();
     if !wrong.is_empty() {
         let names: Vec<String> = wrong.iter().map(|w| w.0.clone()).collect();

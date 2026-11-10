@@ -216,7 +216,7 @@ impl Sink<'_> {
             self.report.findings.push(f);
         } else {
             *self.report.truncated.entry(f.code).or_insert(0) += 1;
-            self.report.truncated_severity.insert(f.code, f.severity);
+            *self.report.dropped.entry(f.severity).or_insert(0) += 1;
         }
     }
 }
@@ -234,7 +234,10 @@ pub struct Report {
     pub findings: Vec<Finding>,
     /// Per-code count of findings dropped by the cap.
     pub truncated: BTreeMap<&'static str, usize>,
-    truncated_severity: BTreeMap<&'static str, Severity>,
+    /// Findings dropped by the cap, per severity. A code can mix severities
+    /// (a non-finite value the clamp clears is a warning, one it does not is
+    /// an error), so the per-code count alone cannot say which were dropped.
+    dropped: BTreeMap<Severity, usize>,
     kept_per_code: BTreeMap<&'static str, usize>,
     pub max_per_code: usize,
     /// Tolerances used, by name, so a reader can reproduce the run.
@@ -255,7 +258,7 @@ impl Report {
             checks: Vec::new(),
             findings: Vec::new(),
             truncated: BTreeMap::new(),
-            truncated_severity: BTreeMap::new(),
+            dropped: BTreeMap::new(),
             kept_per_code: BTreeMap::new(),
             max_per_code: max_per_code.max(1),
             tolerances: BTreeMap::new(),
@@ -286,28 +289,19 @@ impl Report {
     /// Findings of severity `sev`, counting those the cap dropped.
     pub fn count(&self, sev: Severity) -> usize {
         self.findings.iter().filter(|f| f.severity == sev).count()
-            + self
-                .truncated
-                .iter()
-                .filter(|(code, _)| self.truncated_severity.get(*code) == Some(&sev))
-                .map(|(_, n)| *n)
-                .sum::<usize>()
+            + self.dropped.get(&sev).copied().unwrap_or(0)
     }
 
-    /// `true` when any finding is an error.
+    /// `true` when any finding is an error, including ones the cap dropped.
     pub fn has_errors(&self) -> bool {
-        self.findings.iter().any(|f| f.severity == Severity::Error)
+        self.count(Severity::Error) > 0
     }
 
     /// `ERRORS` / `WARNINGS` / `CLEAN`.
     pub fn verdict(&self) -> &'static str {
         if self.has_errors() {
             "ERRORS"
-        } else if self
-            .findings
-            .iter()
-            .any(|f| f.severity == Severity::Warning)
-        {
+        } else if self.count(Severity::Warning) > 0 {
             "WARNINGS"
         } else {
             "CLEAN"
@@ -474,4 +468,23 @@ pub fn fmt_num(v: Number) -> String {
 /// An interval for JSON evidence.
 pub fn interval(lo: Number, hi: Number) -> Value {
     json!([num(lo), num(hi)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_error_dropped_by_the_cap_still_sets_the_verdict() {
+        let mut r = Report::new("t".into(), 0, 0, 1);
+        let mut sink = r.ran("c");
+        let f = |sev| Finding::new("c", "mixed", sev, Basis::Numerical, Confidence::High, "x");
+        sink.push(f(Severity::Warning));
+        sink.push(f(Severity::Error)); // dropped: the cap is 1 per code
+        assert!(r.findings.iter().all(|f| f.severity == Severity::Warning));
+        assert!(r.has_errors());
+        assert_eq!(r.verdict(), "ERRORS");
+        assert_eq!(r.count(Severity::Error), 1);
+        assert_eq!(r.count(Severity::Warning), 1);
+    }
 }

@@ -170,7 +170,15 @@ pub fn check_hessian(
 
     // Reduced Hessian at a KKT point.
     let Some(k) = kkt else { return };
-    let Some(mu) = k.mu.as_ref() else { return };
+    let Some(mu) = k.mu.as_ref() else {
+        report.unavailable(
+            "reduced_hessian",
+            k.why_no_multipliers
+                .clone()
+                .unwrap_or_else(|| "the .sol has no constraint multipliers".into()),
+        );
+        return;
+    };
     let strong: Vec<Active> = k
         .active
         .iter()

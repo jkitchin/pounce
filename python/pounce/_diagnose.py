@@ -106,6 +106,7 @@ def diagnose(
     weak_band: Optional[float] = None,
     seed: Optional[int] = None,
     convexity_samples: Optional[int] = None,
+    convexity_tol: Optional[float] = None,
     timeout: Optional[float] = 300.0,
 ) -> DiagnoseReport:
     """Check a ``.nl`` model without solving it.
@@ -131,6 +132,8 @@ def diagnose(
         seed: convexity sampler seed (0); the same seed replays the same
             counterexamples.
         convexity_samples: sample pairs per function (64).
+        convexity_tol: relative Jensen gap that counts as a counterexample
+            (1e-9).
         timeout: seconds before the check is killed.
 
     Returns:
@@ -170,18 +173,26 @@ def diagnose(
                 fh.write(" ".join(repr(float(v)) for v in pt))
             cleanup.append(Path(ptmp))
             argv += ["--extra-point", ptmp]
+        # Format by kind, not with repr(): under NumPy >= 2,
+        # repr(np.float64(1e-6)) is 'np.float64(1e-06)', which the CLI
+        # cannot parse.
         for flag, val in (
             ("--feas-tol", feas_tol),
             ("--rank-tol", rank_tol),
-            ("--max-dependent-sets", max_dependent_sets),
-            ("--max-per-code", max_per_code),
             ("--opt-tol", opt_tol),
             ("--weak-band", weak_band),
+            ("--convexity-tol", convexity_tol),
+        ):
+            if val is not None:
+                argv += [flag, repr(float(val))]
+        for flag, val in (
+            ("--max-dependent-sets", max_dependent_sets),
+            ("--max-per-code", max_per_code),
             ("--seed", seed),
             ("--convexity-samples", convexity_samples),
         ):
             if val is not None:
-                argv += [flag, repr(val)]
+                argv += [flag, str(int(val))]
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         if proc.returncode not in (0, 22):
             raise RuntimeError(

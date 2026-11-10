@@ -395,7 +395,7 @@ pub fn check_linear_rows(prob: &NlProblem, opts: &DiagnoseOptions, report: &mut 
             "intersection": interval(lo, hi),
             "exactly_proportional": exact,
         });
-        if empty_beyond(lo, hi, tol) {
+        if empty_beyond(lo, hi, tol) && exact {
             sink.push(
                 Finding::new("linear_rows", "inconsistent_parallel_rows", Severity::Error,
                     Basis::Proof, conf,
@@ -405,10 +405,24 @@ pub fn check_linear_rows(prob: &NlProblem, opts: &DiagnoseOptions, report: &mut 
                 .cons(cons)
                 .evidence(evidence),
             );
+        } else if empty_beyond(lo, hi, tol) {
+            // Proportional only to ~11 significant digits: a tiny
+            // difference in direction lets the rows meet far away (x + y ≤ 1
+            // and x + (1 + 1e-12)·y ≥ 2 meet at y ≈ 1e12), so this proves
+            // nothing.
+            sink.push(
+                Finding::new("linear_rows", "nearly_parallel_conflicting_rows", Severity::Warning,
+                    Basis::Heuristic, Confidence::Medium,
+                    format!("Rows {} are nearly proportional (equal to about 11 significant digits) with right-hand sides that conflict along their common direction; they can only both hold far from the origin.", cons.join(", ")))
+                .why("If the coefficients were meant to be equal, the problem is infeasible; if not, the only feasible points are extreme, and the near-parallel rows make the Jacobian badly conditioned there.")
+                .next("Check whether the coefficients differ by rounding in the source data.")
+                .cons(cons)
+                .evidence(evidence),
+            );
         } else if n_eq >= 2 {
             sink.push(
                 Finding::new("linear_rows", "duplicate_equality_rows", Severity::Warning,
-                    Basis::Proof, conf,
+                    if exact { Basis::Proof } else { Basis::Heuristic }, conf,
                     format!("Equalities {} are proportional: the same equation written {} times.", cons.join(", "), n_eq))
                 .why("Their Jacobian rows are linearly dependent at every point, so LICQ fails and the multipliers are not unique; the interior-point method will need dual regularization and may converge slowly.")
                 .next("Keep one of them, or confirm the duplication is intended.")
@@ -417,7 +431,8 @@ pub fn check_linear_rows(prob: &NlProblem, opts: &DiagnoseOptions, report: &mut 
             );
         } else {
             sink.push(
-                Finding::new("linear_rows", "parallel_rows", Severity::Info, Basis::Proof, conf,
+                Finding::new("linear_rows", "parallel_rows", Severity::Info,
+                    if exact { Basis::Proof } else { Basis::Heuristic }, conf,
                     format!("Rows {} have proportional left-hand sides; together they bound one linear function.", cons.join(", ")))
                 .why("At most one of them can be binding at a time on each side; the others are redundant.")
                 .next("Combine them into one ranged row if that matches the intent.")
@@ -578,6 +593,22 @@ mod tests {
             2,
         );
         assert_eq!(codes(&run_linear(&p)), vec!["inconsistent_parallel_rows"]);
+    }
+
+    #[test]
+    fn nearly_parallel_conflicting_rows_are_not_a_proof() {
+        // x + y <= 1 and x + (1 + 1e-12) y >= 2 share a key to 11 digits
+        // but meet at y ≈ 1e12: feasible, so no proof-level error.
+        let p = problem(
+            vec![add(v(0), v(1)), add(v(0), mul(c(1.0 + 1e-12), v(1)))],
+            vec![-1e19, 2.0],
+            vec![1.0, 1e19],
+            2,
+        );
+        let r = run_linear(&p);
+        assert_eq!(codes(&r), vec!["nearly_parallel_conflicting_rows"]);
+        assert_eq!(r.findings[0].severity, Severity::Warning);
+        assert_eq!(r.findings[0].basis, Basis::Heuristic);
     }
 
     #[test]

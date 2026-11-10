@@ -81,7 +81,10 @@ another one:
 - `--x0-file x0.txt` — `n` whitespace-separated values.
 - `--sol result.sol` — the primal values of an AMPL `.sol`, for example the
   point a failed solve stopped at. Its multipliers enable the solution-side
-  checks below.
+  checks below. A solve evaluates a start only after its interior clamp
+  (`bound_push`) moves it inside the bounds, so a NaN that the clamp moves
+  away from is reported as a warning. A `--sol` point is where a solve
+  already stopped, so it is never clamped.
 - `--extra-point x.txt` (repeatable) — further points for
   `rank_robustness` to compare against.
 
@@ -242,7 +245,8 @@ trouble on it. Each sample compares `f(t·x + (1−t)·y)` with the chord. A
 violation is reported with `x`, `y`, `t` and the values, which replay
 exactly, and the same `--seed` gives the same witness.
 
-Finding no counterexample proves nothing, and `convexity_summary` says so.
+Finding no counterexample proves nothing, and `convexity_summary` says so. A gap counts when it exceeds `--convexity-tol`
+(default 1e-9) relative to the function values.
 A model with a counterexample is nonconvex, so a local solution need not
 be global.
 

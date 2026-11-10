@@ -193,6 +193,8 @@ Options:
   --seed <k>                convexity sampler seed (default 0)
   --convexity-samples <k>   sample pairs per function (default 64)
   --sample-radius <r>       sampling box half-width, relative (default 1)
+  --convexity-tol <t>       relative Jensen gap that counts as a
+                            counterexample (default 1e-9)
   -h, --help                print this message
 
 Exit code: 0 = no error findings (warnings allowed), 22 = at least one
@@ -259,6 +261,7 @@ fn parse_argv(rest: &[String]) -> Result<Option<DiagnoseArgs>, String> {
                 a.opts.convexity_samples = parse(value(rest, &mut i, arg)?, arg)?
             }
             "--sample-radius" => a.opts.sample_radius = parse(value(rest, &mut i, arg)?, arg)?,
+            "--convexity-tol" => a.opts.convexity_tol = parse(value(rest, &mut i, arg)?, arg)?,
             s if s.starts_with('-') => return Err(format!("unknown option `{s}`")),
             s => {
                 if a.nl.is_some() {
@@ -389,6 +392,9 @@ pub fn diagnose_problem(
     report.tolerances.insert("feas_tol", opts.feas_tol);
     report.tolerances.insert("domain_tol", opts.domain_tol);
     report.tolerances.insert("wide_range", opts.wide_range);
+    report
+        .tolerances
+        .insert("convexity_tol", opts.convexity_tol);
 
     // Static checks: the model as written.
     statics::check_bounds(prob, &mut report);
@@ -424,6 +430,18 @@ pub fn diagnose_problem(
         feas_tol: opts.feas_tol,
         ..Default::default()
     };
+    // A solve starts from a point only after its interior clamp; if the
+    // clamp moves it, evaluate there too so a non-finite value the clamp
+    // removes is not reported as fatal. A solution is a point a solve
+    // already reached — often exactly on an active bound — so it is never
+    // clamped: what is non-finite there is non-finite.
+    let clamped: Vec<Number> = (0..prob.n)
+        .map(|j| clamp_to_interior(x[j], prob.x_l[j], prob.x_u[j], BOUND_PUSH, BOUND_FRAC))
+        .collect();
+    let clamped = (!inputs.is_solution && clamped != x).then_some(clamped);
+    let hess_after_clamp = clamped
+        .as_ref()
+        .and_then(|c| hessian_nonfinite(&mut tnlp, c, prob.m));
     match check_tnlp_with_quadratics(
         &mut tnlp,
         &prob.var_names,
@@ -433,23 +451,17 @@ pub fn diagnose_problem(
         &quad,
         &x0_args,
     ) {
-        Ok(o) => start_point_findings(&o, &label, &mut report),
+        Ok(o) => start_point_findings(
+            &o,
+            &label,
+            inputs.is_solution,
+            hess_after_clamp,
+            &mut report,
+        ),
         Err(e) => report.unavailable("start_point", e),
     }
-
-    // The solver starts from this point only after its interior clamp; if
-    // the clamp moves it, evaluate there too so a non-finite value the clamp
-    // removes is not reported as fatal.
-    let clamped: Vec<Number> = (0..prob.n)
-        .map(|j| clamp_to_interior(x[j], prob.x_l[j], prob.x_u[j], BOUND_PUSH, BOUND_FRAC))
-        .collect();
-    let clamped_pt = (clamped != x).then(|| {
-        PointEval::evaluate(
-            &mut tnlp,
-            clamped,
-            format!("{label} after the interior clamp"),
-        )
-    });
+    let clamped_pt = clamped
+        .map(|c| PointEval::evaluate(&mut tnlp, c, format!("{label} after the interior clamp")));
     let mut pt = PointEval::evaluate(&mut tnlp, x, label);
     pt.is_solution = inputs.is_solution;
     domain::check_nonfinite(prob, &pt, clamped_pt.as_ref(), &mut report);
@@ -491,10 +503,16 @@ pub fn diagnose_problem(
         &mut report,
     );
     convexity::check_hessian(prob, &mut tnlp, &pt, kkt.as_ref(), opts, &mut report);
-    if kkt.is_none() {
+    // Every check either ran or says why not: reduced_hessian is skipped
+    // without a solution, and also whenever hessian_inertia returned early.
+    if !report.checks.iter().any(|c| c.name == "reduced_hessian") {
         report.unavailable(
             "reduced_hessian",
-            "needs a solution with multipliers: pass the solve's .sol with --sol",
+            if kkt.is_none() {
+                "needs a solution with multipliers: pass the solve's .sol with --sol"
+            } else {
+                "the Hessian could not be evaluated here (see hessian_inertia)"
+            },
         );
     }
     convexity::check_sampling(prob, &pt, opts, &mut report);
@@ -523,7 +541,48 @@ fn starting_point(tnlp: &mut dyn TNLP, n: usize) -> Result<Vec<Number>, String> 
 }
 
 /// The `check-x0` outcome as findings, plus the full report as a section.
-fn start_point_findings(o: &CheckX0Outcome, label: &str, report: &mut Report) {
+/// Non-finite entries in the Hessian of the Lagrangian at `x` (objective
+/// factor 1, zero multipliers, as `check-x0` evaluates it). `None` when the
+/// evaluator has no exact Hessian.
+fn hessian_nonfinite(tnlp: &mut dyn TNLP, x: &[Number], m: usize) -> Option<usize> {
+    let nnz = tnlp.get_nlp_info()?.nnz_h_lag.max(0) as usize;
+    if nnz == 0 {
+        return Some(0);
+    }
+    let (mut hr, mut hc, mut hv) = (vec![0i32; nnz], vec![0i32; nnz], vec![0.0; nnz]);
+    let lambda = vec![0.0; m];
+    let ok = tnlp.eval_h(
+        None,
+        false,
+        1.0,
+        None,
+        false,
+        SparsityRequest::Structure {
+            irow: &mut hr,
+            jcol: &mut hc,
+        },
+    ) && tnlp.eval_h(
+        Some(x),
+        true,
+        1.0,
+        Some(&lambda),
+        true,
+        SparsityRequest::Values { values: &mut hv },
+    );
+    ok.then(|| hv.iter().filter(|v| !v.is_finite()).count())
+}
+
+/// `is_solution`: the point is a `.sol` a solve reached, so start-point
+/// advice (the clamp, an all-zero start) does not apply. `hess_after_clamp`:
+/// the Hessian's non-finite count at the clamped start, when the clamp
+/// moved it.
+fn start_point_findings(
+    o: &CheckX0Outcome,
+    label: &str,
+    is_solution: bool,
+    hess_after_clamp: Option<usize>,
+    report: &mut Report,
+) {
     report
         .sections
         .insert("check_x0", crate::check_x0::report_value(o));
@@ -541,7 +600,7 @@ fn start_point_findings(o: &CheckX0Outcome, label: &str, report: &mut Report) {
             .evidence(json!({"count": o.n_bound_violations, "max_violation": o.max_bound_violation})),
         );
     }
-    if o.x0_all_zero && o.n_vars > 0 {
+    if o.x0_all_zero && o.n_vars > 0 && !is_solution {
         sink.push(
             Finding::new("start_point", "start_all_zero", Severity::Info, Basis::Numerical,
                 Confidence::Certain,
@@ -550,7 +609,7 @@ fn start_point_findings(o: &CheckX0Outcome, label: &str, report: &mut Report) {
             .next("Supply a starting point from the model's meaning, or check one with --x0-file."),
         );
     }
-    if o.n_clamp_moved > 0 {
+    if o.n_clamp_moved > 0 && !is_solution {
         sink.push(
             Finding::new("start_point", "start_moved_by_bound_push", Severity::Info, Basis::Numerical,
                 Confidence::Certain,
@@ -562,11 +621,20 @@ fn start_point_findings(o: &CheckX0Outcome, label: &str, report: &mut Report) {
     }
     if o.n_con_violations > 0 {
         sink.push(
-            Finding::new("start_point", "start_constraint_violation", Severity::Info, Basis::Numerical,
+            Finding::new("start_point", "start_constraint_violation",
+                if is_solution { Severity::Warning } else { Severity::Info }, Basis::Numerical,
                 Confidence::Certain,
                 format!("{} constraint(s) are violated at {label}; the largest violation is {:.3e}.", o.n_con_violations, o.max_con_violation))
-            .why("Infeasible starts are normal for an interior-point method, but a very large violation usually means a wrong or missing starting point.")
-            .next("Compare the worst rows (sections.check_x0) with what the start was meant to satisfy.")
+            .why(if is_solution {
+                "A solution that violates its constraints beyond the tolerance is not feasible; check the solve's status."
+            } else {
+                "Infeasible starts are normal for an interior-point method, but a very large violation usually means a wrong or missing starting point."
+            })
+            .next(if is_solution {
+                "Compare with `pounce verify`, and the worst rows in sections.check_x0."
+            } else {
+                "Compare the worst rows (sections.check_x0) with what the start was meant to satisfy."
+            })
             .cons(rows(&o.con_violations))
             .evidence(json!({"count": o.n_con_violations, "max_violation": o.max_con_violation})),
         );
@@ -574,18 +642,21 @@ fn start_point_findings(o: &CheckX0Outcome, label: &str, report: &mut Report) {
     if let Some(h) = o.hess_nonfinite_count
         && h > 0
     {
+        // Downgrade only when the Hessian was re-evaluated at the clamped
+        // start and is finite there.
+        let cleared = hess_after_clamp == Some(0);
         sink.push(
                 Finding::new("start_point", "nonfinite_hessian_at_point",
-                    if o.n_clamp_moved > 0 { Severity::Warning } else { Severity::Error },
+                    if cleared { Severity::Warning } else { Severity::Error },
                     Basis::Numerical, Confidence::Certain,
                     format!("The Hessian of the Lagrangian has {h} non-finite entr{} at {label}.", if h == 1 { "y" } else { "ies" }))
-                .why(if o.n_clamp_moved > 0 {
-                    "The interior clamp moves this start before the first evaluation, so a default solve may not see it; a solve that evaluates the Hessian here aborts with Invalid_Number_Detected. Re-check the clamped point (sections.check_x0.interior_clamp) with --x0-file."
+                .why(if cleared {
+                    "The interior clamp moves this start, and the Hessian is finite at the clamped point, so a default solve does not see it; a solve that evaluates the Hessian here aborts with Invalid_Number_Detected."
                 } else {
                     "A solve that needs the Hessian here aborts with Invalid_Number_Detected."
                 })
                 .next("Look for second-derivative poles (sqrt, log, fractional powers near 0) in the nonlinear rows.")
-                .evidence(json!({"count": h})),
+                .evidence(json!({"count": h, "count_after_interior_clamp": hess_after_clamp})),
             );
     }
 }
@@ -862,6 +933,96 @@ mod tests {
     }
 
     #[test]
+    fn a_solution_point_is_not_clamped() {
+        // The same log(x) at x = 0, but as a .sol point: the clamp models a
+        // solve's start, not a point a solve reached, so no downgrade.
+        let p = NlProblem::from_expressions(NlProblemParts {
+            minimize: true,
+            objective: Expr::Var(0),
+            obj_constant: 0.0,
+            constraints: vec![Expr::Unary(UnaryOp::Log, Box::new(Expr::Var(0)))],
+            x_l: vec![0.0],
+            x_u: vec![10.0],
+            x0: vec![0.0],
+            g_l: vec![-5.0],
+            g_u: vec![1e19],
+            var_names: vec![],
+            con_names: vec![],
+        })
+        .unwrap();
+        let inputs = Inputs {
+            point: Some(("a solution".into(), vec![0.0])),
+            multipliers: Some(vec![0.0]),
+            is_solution: true,
+            ..Inputs::default()
+        };
+        let r = diagnose_problem(&p, &inputs, "t".into(), &DiagnoseOptions::default()).unwrap();
+        let f = r
+            .findings
+            .iter()
+            .find(|f| f.code == "nonfinite_from_pole")
+            .expect("localized");
+        assert_eq!(f.severity, Severity::Error);
+        assert!(
+            !r.findings
+                .iter()
+                .any(|f| f.code == "start_moved_by_bound_push")
+        );
+    }
+
+    #[test]
+    fn a_nonfinite_hessian_is_downgraded_only_if_finite_after_the_clamp() {
+        // The Hessian check uses zero multipliers, so the pole goes in the
+        // objective: min x0 + log(x1 - shift), x in [0, 10]^2.
+        let mk = |shift: Number, x0: Vec<Number>| {
+            NlProblem::from_expressions(NlProblemParts {
+                minimize: true,
+                objective: Expr::Binary(
+                    BinOp::Add,
+                    Box::new(Expr::Var(0)),
+                    Box::new(Expr::Unary(
+                        UnaryOp::Log,
+                        Box::new(Expr::Binary(
+                            BinOp::Sub,
+                            Box::new(Expr::Var(1)),
+                            Box::new(Expr::Const(shift)),
+                        )),
+                    )),
+                ),
+                obj_constant: 0.0,
+                constraints: vec![],
+                x_l: vec![0.0, 0.0],
+                x_u: vec![10.0, 10.0],
+                x0,
+                g_l: vec![],
+                g_u: vec![],
+                var_names: vec![],
+                con_names: vec![],
+            })
+            .unwrap()
+        };
+        let hess = |p: &NlProblem| {
+            let r = diagnose_problem(
+                p,
+                &Inputs::default(),
+                "t".into(),
+                &DiagnoseOptions::default(),
+            )
+            .unwrap();
+            r.findings
+                .iter()
+                .find(|f| f.code == "nonfinite_hessian_at_point")
+                .map(|f| f.severity)
+        };
+        // x = (0, 5), shift 5: the clamp moves only x0, the pole at x1 = 5
+        // stays, so a default solve hits it: an error.
+        assert_eq!(hess(&mk(5.0, vec![0.0, 5.0])), Some(Severity::Error));
+        // x = (0, 0), shift 0: the clamp moves x1 off the pole, and the
+        // Hessian is finite there: a warning.
+        assert_eq!(hess(&mk(0.0, vec![0.0, 0.0])), Some(Severity::Warning));
+    }
+
+    #[test]
     fn argv_parsing() {
         let a = parse_argv(&[
             "m.nl".into(),
@@ -874,6 +1035,10 @@ mod tests {
         assert!(a.json);
         assert_eq!(a.opts.rank_rel_tol, Some(1e-10));
         assert!(parse_argv(&[]).is_err());
+        let b = parse_argv(&["m.nl".into(), "--convexity-tol".into(), "1e-6".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(b.opts.convexity_tol, 1e-6);
         assert!(parse_argv(&["m.nl".into(), "--bogus".into()]).is_err());
         assert!(
             parse_argv(&[

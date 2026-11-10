@@ -708,3 +708,118 @@ fn feral_and_svd_disagree_in_both_directions() {
     assert_eq!(f.evidence["svd_deficiency"], 1);
     assert_eq!(f.evidence["feral_inertia_deficiency"], 0);
 }
+
+// ----------------------------------------------------- review follow-ups
+
+#[test]
+fn a_wrong_sign_bound_multiplier_from_the_sol_is_reported() {
+    // min -x0, x0 in [0, 10], at x0 = 0: the true multiplier is on the
+    // upper side; a file claiming z_L = -1 at the lower bound is
+    // stationary (∇f = -1 = z_L) but has the wrong sign.
+    let p = build(M {
+        obj: neg(v(0)),
+        cons: vec![],
+        g_l: vec![],
+        g_u: vec![],
+        x_l: vec![0.0],
+        x_u: vec![10.0],
+    });
+    let mut inputs = Inputs {
+        point: Some(("sol".into(), vec![0.0])),
+        multipliers: Some(vec![]),
+        bound_multipliers: Some((vec![-1.0], vec![0.0])),
+        is_solution: true,
+        extra_points: Vec::new(),
+    };
+    let r = diagnose_problem(&p, &inputs, "t".into(), &DiagnoseOptions::default()).unwrap();
+    assert!(!has(&r, "not_stationary_at_point"), "{:?}", codes(&r));
+    assert!(has(&r, "multiplier_sign_violation"), "{:?}", codes(&r));
+    // A valid one at an active bound is not: min x0 at x0 = 0, z_L = 1.
+    let q = build(M {
+        obj: v(0),
+        cons: vec![],
+        g_l: vec![],
+        g_u: vec![],
+        x_l: vec![0.0],
+        x_u: vec![10.0],
+    });
+    inputs.bound_multipliers = Some((vec![1.0], vec![0.0]));
+    let r = diagnose_problem(&q, &inputs, "t".into(), &DiagnoseOptions::default()).unwrap();
+    assert!(
+        !has(&r, "multiplier_sign_violation") && !has(&r, "not_stationary_at_point"),
+        "{:?}",
+        codes(&r)
+    );
+}
+
+fn unavailable_reason<'a>(r: &'a Report, check: &str) -> Option<&'a str> {
+    r.checks
+        .iter()
+        .find(|c| c.name == check)
+        .and_then(|c| match &c.status {
+            report::CheckStatus::Unavailable(why) => Some(why.as_str()),
+            report::CheckStatus::Ran => None,
+        })
+}
+
+#[test]
+fn a_dual_count_that_does_not_match_says_so() {
+    let p = build(M {
+        obj: sq(v(0)),
+        cons: vec![v(0), v(1)],
+        g_l: vec![0.0, 0.0],
+        g_u: vec![1.0, 1.0],
+        x_l: vec![-INF; 2],
+        x_u: vec![INF; 2],
+    });
+    let r = at_solution(&p, vec![0.0, 0.5], vec![0.0, 0.0, 0.0]);
+    let why = unavailable_reason(&r, "kkt_audit").expect("unavailable");
+    assert!(
+        why.contains("3 constraint multipliers but the model has 2 rows"),
+        "{why}"
+    );
+    assert!(
+        unavailable_reason(&r, "reduced_hessian")
+            .unwrap()
+            .contains("does not belong")
+    );
+}
+
+#[test]
+fn every_check_is_recorded_with_a_sol_but_no_duals() {
+    let p = build(M {
+        obj: sq(v(0)),
+        cons: vec![v(0)],
+        g_l: vec![0.0],
+        g_u: vec![1.0],
+        x_l: vec![-INF],
+        x_u: vec![INF],
+    });
+    let inputs = Inputs {
+        point: Some(("sol".into(), vec![0.5])),
+        multipliers: None,
+        bound_multipliers: None,
+        is_solution: true,
+        extra_points: Vec::new(),
+    };
+    let r = diagnose_problem(&p, &inputs, "t".into(), &DiagnoseOptions::default()).unwrap();
+    for c in [
+        "kkt_audit",
+        "licq",
+        "mfcq",
+        "hessian_inertia",
+        "reduced_hessian",
+        "convexity_sampling",
+        "rank_robustness",
+    ] {
+        assert!(
+            r.checks.iter().any(|k| k.name == c),
+            "{c} missing from checks"
+        );
+    }
+    assert!(
+        unavailable_reason(&r, "reduced_hessian")
+            .unwrap()
+            .contains("no constraint multipliers")
+    );
+}
