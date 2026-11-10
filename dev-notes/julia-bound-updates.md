@@ -209,3 +209,41 @@ generated; retained libraries were reused.
 | `pounce-john1164-v015.log` | `6c99ce78d261eb90ebda1e786cf63644e0365b78a94a6b0f043e97ca379e5827` |
 | `pounce-john1164-v016.log` | `96235f2db2e4bfb2fb569d252f7533678bbf423e41348ebc8acc63828113b05f` |
 | `pounce-john1164-docs.log` | `7a10d85d1c1afc07e9f8f4fab47b447db1488cc3c727c13b30b7a50586570db7` |
+
+
+## Integration onto merged upstream main — 2026-11-10
+
+#1163 merged as `f07320aa3593a4c628705d4e225b789bc78a727b`. The six
+#1164-specific commits were replayed above that main commit, producing clean
+validated revision `391d3967604799cf76f648e5f1e620251797ed06`.
+Range-diff reports all six commits unchanged. The entire tree is identical to
+previous published head `5879bc83e3d9d31f9c48e6d14fe6ac08b948dad8`; the diff
+against main contains only the bound-update follow-up. No source or test edits
+were needed during this rebase. The subsequent evidence commit changes only
+this validation note.
+
+Fresh validation on that rebased revision, macOS arm64:
+
+| Native | Julia | Scope | Passed |
+|---|---|---|---:|
+| Current `550b1d5e` | 1.10.13 | Full suite | 5,446 |
+| Current `550b1d5e` | 1.13.3 | Full suite | 5,446 |
+| Current, JuMP 1.29 / MOI 1.48 | 1.10.13 | Complementarity and bounds | 1,225 |
+| v0.15.0 | 1.10.13 | Loading/extension/complementarity/bounds fallback | 114 |
+| v0.16.0 | 1.13.3 | Loading/extension/complementarity/bounds fallback | 114 |
+
+Native crates and Cargo files at main `f07320aa` are unchanged from retained
+library source `550b1d5e002198b6b0d1fd31727544d2ca837f2c`. Reused the previously
+recorded binaries and dependency environments; no new native compilation
+artifacts were generated. Julia formatting, diff checks, documentation
+consistency and mdBook passed. Earlier measurements remain associated with
+their original wrapper revisions.
+
+| Log under `/private/tmp/` | SHA-256 |
+|---|---|
+| `pounce-main1164-full110.log` | `3192fe9e41eaa26f8b0c62136969496dabe86a100f8cbc6709351c2ca1fff485` |
+| `pounce-main1164-full113.log` | `f7bbedf9983ac09782c1e46ce69824daa899c878e5b814f726c518f450fb2674` |
+| `pounce-main1164-min.log` | `9f46816c571e92cbaea6e0333a4f3906c11acb732cd962dd6974e3f31b13d9ec` |
+| `pounce-main1164-v015.log` | `bc9896dd898792e2dbefef5d6d16b458f4aa63d2a0f2c827591e386ae0ebf19e` |
+| `pounce-main1164-v016.log` | `ce1d3d234de256253bb22e891d35011cfc56248202d2d897f5fce9bcb0dd8d61` |
+| `pounce-main1164-docs.log` | `7a10d85d1c1afc07e9f8f4fab47b447db1488cc3c727c13b30b7a50586570db7` |
