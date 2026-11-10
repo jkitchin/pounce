@@ -146,3 +146,48 @@ At the user's request, completed Cargo build intermediates were removed from
 the current and earlier development build directories. Runnable native libraries,
 executables and evidence were retained. No test depends on those discarded
 intermediates; subsequent validation used the retained, hashed libraries.
+
+
+## Review correction: stable complementarity feasibility
+
+Fix and permanent regressions: `64a9a4eb2605cffd729d47fdb0959866688aaaa6`.
+The native library remains the build of
+`550b1d5e002198b6b0d1fd31727544d2ca837f2c`, SHA-256
+`2b29fb0ab0dd1d602143ad802fa4d0b729d337de97b2e5a4d8501944bbfedae8`.
+
+The initial natural-map calculation could lose F when subtracting it from a
+large x. Actual solves stopped with `max_iter=0` at x=1e16/F=±1 or
+x=1e12/F=±1e-5 incorrectly returned `FEASIBLE_POINT`. Free, lower-only,
+upper-only and boxed interior declarations all reproduced. The equivalent
+`abs(clamp(F, x-upper, x-lower))` preserves these residuals.
+
+The permanent tests first ran against the pre-fix implementation at `8bdb5c6`
+with only the new tests in the worktree: 32 assertions failed across 16 actual
+solves (the primal status and residual in each). The log records the parent
+commit and worktree-diff hash. After correction, all 156 new assertions pass:
+80 cover those actual solves, and 76 cover controlled returned points at bounds,
+fixed/free cases, out-of-bound points and nonfinite values. The controlled-point
+checks test result interpretation, not native convergence or diagnosis.
+
+Validation on the clean fix commit above:
+
+| Environment | Validation | Result |
+|---|---|---|
+| Julia 1.10.13, current native | Full suite | 4,742 passed |
+| Julia 1.13.3, current native | Full suite | 4,742 passed |
+| Julia 1.10.13, JuMP 1.29 / MOI 1.48, current native | Focused complementarity | 521 passed |
+
+Julia/Rust formatting, diff checks, documentation consistency and mdBook passed.
+The release guard passed using the same verified temporary-file workaround
+noted above. No native rebuild was needed. The older-native, C ABI and OPF
+results in the earlier sections retain their original implementation revision;
+they were not rerun for this result-calculation change. Hosted CI on the updated
+PR is separate from these local results.
+
+| File under `/private/tmp/` | SHA-256 |
+|---|---|
+| `pounce-complements-cancellation-red.log` | `4a97784558382359969690786bc20aa0a435d43b8a1ad3972162c58a07f7f1b6` |
+| `pounce-complements-cancellation-110.log` | `7f615345d0a14afc592f00208683e2f882ed7eb9416e9776479c71fcfb8f3f65` |
+| `pounce-complements-cancellation-113.log` | `3a482e937dfe28feca35ac230bd9786d993ff67dc938c3e114c6e86b6860c2b6` |
+| `pounce-complements-cancellation-minimum.log` | `00c5439bc5f6ae6ea44d4bbbe5a6f7fd254060a5db7e085920bbb1df3485050f` |
+| `pounce-complements-cancellation-release.log` | `61c54d7cd127ee2b577376b3b4b9fa12a329225f1367d9786d63db52a606f8be` |
