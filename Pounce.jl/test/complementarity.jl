@@ -180,6 +180,69 @@ if Pounce.supports_complementarity()
         @test primal_status(m) == MOI.INFEASIBLE_POINT
     end
 
+    @testset "Large interior values do not hide complementarity infeasibility" begin
+        for (start, magnitude) in ((1e16, 1.0), (1e12, 1e-5)),
+            f in (-magnitude, magnitude),
+            (lower, upper) in ((-Inf, Inf), (0.0, Inf), (-Inf, 2start), (0.0, 2start))
+
+            m = direct_model(Pounce.Optimizer())
+            set_silent(m)
+            @variable(m, x, start = start)
+            isfinite(lower) && set_lower_bound(x, lower)
+            isfinite(upper) && set_upper_bound(x, upper)
+            c = @constraint(m, complements(f, x))
+            set_optimizer_attribute(m, "max_iter", 0)
+            optimize!(m)
+            @test termination_status(m) == MOI.ITERATION_LIMIT
+            @test value(x) == start
+            @test value(c) == [f, start]
+            # Every returned point is interior, so the original declaration
+            # requires F = 0. Both magnitudes exceed the feasibility tolerances.
+            @test primal_status(m) == MOI.INFEASIBLE_POINT
+            @test Ext._complementarity_violation(unsafe_backend(m)) == magnitude
+        end
+    end
+
+    @testset "Complementarity feasibility at bounds and nonfinite results" begin
+        cases = (
+            (-Inf, Inf, ((0.0, 1.0, 1.0), (0.0, -1.0, 1.0), (1e16, 0.0, 0.0))),
+            (0.0, Inf, ((0.0, 1.0, 0.0), (0.0, -1.0, 1.0), (-1.0, 1.0, 1.0))),
+            (-Inf, 1.0, ((1.0, -1.0, 0.0), (1.0, 1.0, 1.0), (2.0, -1.0, 1.0))),
+            (
+                0.0,
+                1.0,
+                (
+                    (0.0, 1.0, 0.0),
+                    (0.0, -1.0, 1.0),
+                    (1.0, -1.0, 0.0),
+                    (1.0, 1.0, 1.0),
+                    (0.5, 2.0, 0.5),
+                    (0.5, -2.0, 0.5),
+                ),
+            ),
+            (0.5, 0.5, ((0.5, 1.0, 0.0), (0.5, -1.0, 0.0), (0.0, -1.0, 0.5))),
+        )
+        for (lower, upper, points) in cases
+            m, _, _ = scalar_model(lower, upper)
+            optimize!(m)
+            opt = unsafe_backend(m)
+            prob = opt.result.problem
+            # Exercise the result getter with controlled returned x/F values,
+            # independently of the native solver's bound pushes or convergence.
+            for (x, f, violation) in points
+                prob.x[1], prob.g[end] = x, f
+                @test Ext._complementarity_violation(opt) == violation
+                expected = violation == 0 ? MOI.FEASIBLE_POINT : MOI.INFEASIBLE_POINT
+                @test primal_status(m) == expected
+            end
+            for (x, f) in ((NaN, 0.0), (Inf, 0.0), (0.5, NaN), (0.5, Inf))
+                prob.x[1], prob.g[end] = x, f
+                @test Ext._complementarity_violation(opt) == Inf
+                @test primal_status(m) == MOI.INFEASIBLE_POINT
+            end
+        end
+    end
+
     @testset "Signed multipliers, maximum sense, and no double counting" begin
         for maximize in (false, true), upper in (false, true)
             m = direct_model(Pounce.Optimizer())

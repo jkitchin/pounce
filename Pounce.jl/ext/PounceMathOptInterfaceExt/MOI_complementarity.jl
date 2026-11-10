@@ -223,7 +223,10 @@ function _complementarity_violation(model)
             # when x is fixed, and |F| when x is free. Bounds are checked too.
             x, f = prob.x[i], prob.g[row]
             isfinite(x) && isfinite(f) || return Inf
-            residual = max(residual, abs(x - clamp(x - f, lower, upper)))
+            # Equivalent to x - clamp(x - f, lower, upper), but without
+            # subtracting F from a large x and rounding an interior residual
+            # to zero. In particular, a free variable retains |F| exactly.
+            residual = max(residual, abs(clamp(f, x - upper, x - lower)))
         end
     end
     return residual

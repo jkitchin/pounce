@@ -188,6 +188,8 @@ unknown Hessian information retains the existing limited-memory fallback.
 `ConstraintPrimal` returns `[F(x); x]`. `PrimalStatus` independently checks the
 original bounds/rows and the mixed-complementarity natural map
 `x - clamp(x - F, lower, upper)`, even when the native status says success.
+It evaluates the equivalent `clamp(F, x - upper, x - lower)` to avoid losing
+a nonzero residual when `x` is large relative to `F`.
 Applications should also check their physical residuals in appropriate units.
 
 The native termination status describes the formulation that returned the
