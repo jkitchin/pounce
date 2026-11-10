@@ -27,11 +27,45 @@ function _eval_h_cb(model, x, rows, cols, obj_factor, lambda, values)
     return
 end
 
+function _apply_bound_updates!(model::Optimizer)
+    cache = model.native
+    isempty(cache.pending_x_bounds) && isempty(cache.pending_g_bounds) && return true
+    xs, gs = sort!(collect(cache.pending_x_bounds)), sort!(collect(cache.pending_g_bounds))
+    qp, offset = model.data.qp_data, _nlp_constraint_offset(model)
+    bounds = model.evaluator.nlp_data.constraint_bounds
+    gl = [r <= length(qp) ? qp.g_L[r] : bounds[r-offset].lower for r in gs]
+    gu = [r <= length(qp) ? qp.g_U[r] : bounds[r-offset].upper for r in gs]
+    try
+        Pounce.SetPounceBounds(
+            cache.problem;
+            x_indices = xs,
+            x_lower = model.data.variables.lower[xs],
+            x_upper = model.data.variables.upper[xs],
+            g_indices = gs,
+            g_lower = gl,
+            g_upper = gu,
+        )
+    catch err
+        if err isa Pounce.NativeAPIError && err.code == Pounce.POUNCE_ERR_COMPLEMENTS_CLASS
+            # Native updates are atomic. Recreate from the original MOI
+            # declarations when a variable changes its complementarity class.
+            _release_native!(model)
+            return false
+        end
+        rethrow()
+    end
+    empty!(cache.pending_x_bounds)
+    empty!(cache.pending_g_bounds)
+    return true
+end
+
 function _setup_inner(model::Optimizer)::Pounce.IpoptProblem
     if model.native.problem !== nothing &&
        model.native.revision == model.data.revision &&
        model.native.options_revision == model.options_revision
-        return model.native.problem
+        if _apply_bound_updates!(model)
+            return model.native.problem
+        end
     end
     g_L, g_U = copy(model.data.qp_data.g_L), copy(model.data.qp_data.g_U)
     for (_, s) in model.data.vector_nonlinear_oracle_constraints

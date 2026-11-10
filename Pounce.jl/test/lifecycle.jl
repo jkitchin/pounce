@@ -35,7 +35,7 @@ end
     handle = model.native.problem
     MOI.set(model, MOI.ConstraintSet(), c, MOI.LessThan(4.0))
     no_result(model)
-    @test handle.ipopt_problem == C_NULL
+    @test (handle.ipopt_problem != C_NULL) == Pounce.supports_bound_updates()
     MOI.optimize!(model)
     @test MOI.get(model, MOI.VariablePrimal(), x) ≈ log(4) atol = 1e-6
     @test MOI.get(model, MOI.NLPBlock()).evaluator === evaluator

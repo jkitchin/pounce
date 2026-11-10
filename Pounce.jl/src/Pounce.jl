@@ -93,6 +93,7 @@ library_path() = libpounce
 include("C_wrapper.jl")
 include("diagnostics.jl")
 include("complementarity.jl")
+include("bounds.jl")
 function column end
 
 end # module Pounce

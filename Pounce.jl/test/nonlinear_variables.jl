@@ -218,7 +218,7 @@ end
     @test value(x[2]) ≈ 1 atol = 1e-6
     set_upper_bound(x[2], 0.5)
     solve_with_trace(model)
-    @test inner.ipopt_problem == C_NULL
+    @test (inner.ipopt_problem != C_NULL) == Pounce.supports_bound_updates()
     @test Ext._nonlinear_variables(unsafe_backend(model)) == [2, 3]
     @test value(x[2]) ≈ 0.5 atol = 1e-6
 end

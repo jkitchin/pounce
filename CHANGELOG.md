@@ -13,6 +13,9 @@ changes.
 - **Julia: native `MOI.Complements`, signed MPCC multipliers and driver diagnostics.**
   Runtime capability detection preserves older-library support. Primal feasibility
   checks avoid cancellation, and crossed paired-variable bounds report `INVALID_MODEL`.
+
+- Julia: coalesce variable and scalar-constraint bound edits into optional native in-place updates; retain immediate result invalidation and rebuild for complementarity class changes or older libraries.
+- Julia: support native `MOI.Complements`, signed MPCC multipliers and driver diagnostics, with runtime capability detection for older native libraries and cancellation-resistant complementarity feasibility checks.
 - **`pounce diagnose`: check a model without solving it (gh#1160, phase 1).**
   A new CLI subcommand, `pounce.diagnose()` in Python and a
   `diagnose_model` Studio MCP tool. It reports findings in one schema

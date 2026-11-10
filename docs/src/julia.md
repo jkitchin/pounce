@@ -90,6 +90,51 @@ declarations take precedence over `num_linear_variables` and may also guide
 native finite-difference sparsity. Only omit identically zero Hessian
 rows/columns, and set or clear declarations between solves.
 
+## Repeated solves and bound updates
+
+On a library with `Pounce.supports_bound_updates() == true`, edits to variable
+bounds and scalar affine, quadratic or nonlinear constraint sets reuse the
+native problem handle. Repeated edits to the same entry are combined, and one
+atomic sparse update applies the final bounds just before the next solve.
+Results become unavailable immediately after an edit, even before the native
+update occurs. Parameter edits in the same batch preserve the pending bounds.
+
+The native handle retains its options, scaling and nonlinear-variable hints.
+Each solve still constructs a new solver: this does not retain factorizations
+or automatically warm-start. Set primal/dual starts and `warm_start_init_point`
+explicitly when desired. There is no measured speedup claim here.
+
+Changing a complementarity variable between lower-only, upper-only, boxed,
+fixed and free requires rebuilding from the original declarations. Ordinary
+NLP variables may change bound class in place. Structural edits, replacement
+of a legacy NLP block, and changed solver options still rebuild the handle.
+Older native libraries retain the rebuild path for all bound edits. Other
+native update errors are surfaced without silently discarding the requested
+changes; correcting the model and solving again retries the pending bounds.
+
+For an explicitly owned low-level problem:
+
+```julia
+Pounce.SetPounceBounds(prob; x_indices = [2], x_upper = [3.0])
+Pounce.SetPounceBounds(prob; g_lower = new_lower_bounds) # dense row update
+before_lowering = Pounce.GetPounceBounds(prob)
+effective = Pounce.GetPounceBounds(prob; view = Pounce.POUNCE_BOUNDS_VIEW_EFFECTIVE)
+subset = Pounce.GetPounceBounds(prob; x_indices = [2], g_indices = Int[])
+```
+
+Indices are one-based. Omitted indices select a dense block when updating a
+bound array; omitted arrays leave their side unchanged. With no arrays or
+indices, that block is untouched. Getter indices default to the whole block,
+and an empty vector selects none. Getters return owned `x_lower`, `x_upper`,
+`g_lower`, and `g_upper` arrays. USER bounds precede native `Complements`
+lowering; EFFECTIVE bounds include those row edits.
+
+Negative native codes raise `Pounce.NativeAPIError`; `bad_index` is the one-based
+position in the batch, variables followed by rows. A failed batch changes no
+native bounds. Unlike MOI's result invalidation, low-level diagnostics remain
+readable after an update and still describe the preceding solve. Bound APIs
+cannot be used inside a callback or after freeing a problem.
+
 ## Comparing with Ipopt
 
 Pounce and Ipopt.jl can coexist in one Julia process. Construct otherwise
@@ -176,8 +221,9 @@ repeat pairings are rejected before modifying the model. Parameters can occur
 in `F`, but cannot be paired variables. The wrapper does not silently introduce
 auxiliary variables to transform unsupported declarations.
 
-Bound edits invalidate results immediately and rebuild the native handle from
-the original declarations, including changes between these five classes.
+Bound edits invalidate results immediately. With native bound-update support,
+same-class edits reuse the handle; changes between these five classes rebuild
+it from the original declarations. Older libraries retain the rebuild path.
 Parameter updates reuse the evaluators and handle. Ordinary scalar constraints,
 legacy NLP blocks, and vector nonlinear oracles may coexist with these rows.
 Complementarity functions use the selected automatic-differentiation backend;
