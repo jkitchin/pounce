@@ -234,6 +234,12 @@ function _setup_model(model::Optimizer)
         )
     end
     _setup_complementarity_evaluator!(model)
+    empty!(model.evaluator.nlp_rows)
+    if model.data.nlp_model !== nothing
+        for (row, ci) in enumerate(keys(model.data.nlp_model.constraints))
+            model.evaluator.nlp_rows[ci] = row
+        end
+    end
     has_quadratic_constraints =
         any(isequal(_kFunctionTypeScalarQuadratic), model.data.qp_data.function_type)
     has_nlp_constraints =

@@ -10,6 +10,9 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Julia: batch bound edits through optional native in-place updates.**
+  Retain immediate result invalidation and pending edits across invalid paired
+  bounds; rebuild for complementarity class changes or older libraries.
 - **Julia: native `MOI.Complements`, signed MPCC multipliers and driver diagnostics.**
   Runtime capability detection preserves older-library support. Primal feasibility
   checks avoid cancellation, and crossed paired-variable bounds report `INVALID_MODEL`.

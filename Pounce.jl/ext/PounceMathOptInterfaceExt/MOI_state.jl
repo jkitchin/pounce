@@ -79,12 +79,16 @@ Base.@kwdef mutable struct _EvaluatorCache
     complementarity::MOI.AbstractNLPEvaluator = _EmptyNLPEvaluator()
     complementarity_jacobian_nnz::Int = 0
     complementarity_hessian_nnz::Int = 0
+    nlp_rows::Dict{MOI.Nonlinear.ConstraintIndex,Int} =
+        Dict{MOI.Nonlinear.ConstraintIndex,Int}()
 end
 
 Base.@kwdef mutable struct _NativeCache
     problem::Union{Nothing,Pounce.IpoptProblem} = nothing
     revision::UInt = 0
     options_revision::UInt = 0
+    pending_x_bounds::Set{Int} = Set{Int}()
+    pending_g_bounds::Set{Int} = Set{Int}()
 end
 
 Base.@kwdef mutable struct _SolveResult
@@ -163,7 +167,14 @@ function _model_changed!(
 end
 
 _structure_changed!(model::Optimizer) = _model_changed!(model; structure = true)
-_bounds_changed!(model::Optimizer) = _model_changed!(model; bounds = true)
+function _bounds_changed!(model::Optimizer; variable = nothing, constraint = nothing)
+    _model_changed!(model; bounds = true, rebuild_native = !Pounce.supports_bound_updates())
+    if model.native.problem !== nothing
+        variable === nothing || push!(model.native.pending_x_bounds, variable)
+        constraint === nothing || push!(model.native.pending_g_bounds, constraint)
+    end
+    return
+end
 _parameters_changed!(model::Optimizer) = _model_changed!(model; rebuild_native = false)
 
 function _options_changed!(model::Optimizer)

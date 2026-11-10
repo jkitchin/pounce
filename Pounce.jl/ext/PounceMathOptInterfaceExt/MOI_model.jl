@@ -326,7 +326,7 @@ end
 function MOI.add_constraint(model::Optimizer, x::MOI.VariableIndex, set::_SETS)
     _assert_not_solving(model)
     index = MOI.add_constraint(model.data.variables, x, set)
-    _bounds_changed!(model)
+    _bounds_changed!(model; variable = x.value)
     return index
 end
 
@@ -338,14 +338,14 @@ function MOI.set(
 ) where {S<:_SETS}
     _assert_not_solving(model)
     MOI.set(model.data.variables, MOI.ConstraintSet(), ci, set)
-    _bounds_changed!(model)
+    _bounds_changed!(model; variable = ci.value)
     return
 end
 
 function MOI.delete(model::Optimizer, ci::MOI.ConstraintIndex{MOI.VariableIndex,<:_SETS})
     _assert_not_solving(model)
     MOI.delete(model.data.variables, ci)
-    _bounds_changed!(model)
+    _bounds_changed!(model; variable = ci.value)
     return
 end
 
@@ -398,7 +398,7 @@ function MOI.set(
 }
     _assert_not_solving(model)
     MOI.set(model.data.qp_data, MOI.ConstraintSet(), ci, set)
-    _bounds_changed!(model)
+    _bounds_changed!(model; constraint = ci.value)
     return
 end
 
@@ -522,7 +522,10 @@ function MOI.set(
     func = model.data.nlp_model[index].expression
     model.data.nlp_model.constraints[index] = MOI.Nonlinear.Constraint(func, set)
     # Refresh the NLP bound snapshot on the next solve; derivatives remain valid.
-    _bounds_changed!(model)
+    row =
+        model.native.problem === nothing ? nothing :
+        _nlp_constraint_offset(model) + model.evaluator.nlp_rows[index]
+    _bounds_changed!(model; constraint = row)
     return
 end
 

@@ -144,10 +144,13 @@ Use JuMP/MOI dual conventions; the wrapper converts signs for POUNCE, including
 maximization. Repeated solves do not automatically reuse the previous solution.
 They also do not promise reuse of native solver factorizations.
 
-Model edits invalidate results immediately. Bound changes refresh the bound
-snapshot while retaining the initialized derivative evaluator; parameter updates
-reuse compatible evaluator and native-handle caches. Structural edits rebuild
-them. Changes to starts, solver options, or callbacks retain the last completed
+Model edits invalidate results immediately. Bound changes retain the initialized
+derivative evaluator. When `Pounce.supports_bound_updates()` is true, variable
+and scalar-constraint bound edits are coalesced and applied to the native handle
+just before the next solve. Complementarity class changes rebuild from the
+original declarations; older libraries always rebuild on bound edits. Parameter
+updates reuse compatible evaluator and native-handle caches. Structural edits
+rebuild them. Changes to starts, solver options, or callbacks retain the last completed
 optimizer result until another solve starts (JuMP may apply its own access
 guards). Every new attempt clears result availability before setup. Options are
 applied to a fresh handle when changed, including removal of a time limit, so
@@ -157,6 +160,14 @@ inside its callback is rejected before the model data is changed.
 Optimizer fields are implementation details. Use MOI attributes to query models
 and results; use the qualified low-level C bindings for explicitly owned native
 problems.
+
+For explicitly owned low-level problems, `SetPounceBounds` supports sparse
+one-based indices and dense updates, with omitted bound arrays leaving that
+side unchanged. `GetPounceBounds` returns owned arrays in the original USER or
+lowered EFFECTIVE view. Refused updates are atomic. These APIs are unavailable
+during callbacks. Low-level diagnostics still describe the preceding solve
+until the next solve; MOI results are invalidated immediately by model edits.
+See the [bound-update guide](../docs/src/julia.md#repeated-solves-and-bound-updates).
 
 After `optimize!`, two timers are available:
 
