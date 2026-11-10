@@ -73,6 +73,7 @@ Environment variables:
 | `analyze_problem`     | Inspect a builtin or `.nl` file: dimensions, class, option suggestions  |
 | `run_problem`         | Shell out to the `pounce` CLI; return parsed report + embedded analysis |
 | `verify_solution`     | Independently check a `.sol` against a canonical `.nl` (feasibility + optional KKT); returns a content-addressed, optionally HMAC-signed receipt — see note below |
+| `diagnose_model`      | Check a `.nl` without solving it (`pounce diagnose`): proved contradictions, domain risks, NaN sources, rank and minimal dependent equations; with a `.sol`, KKT/LICQ/MFCQ and the reduced Hessian |
 | `explain`             | Glossary lookup for per-iter columns and diagnose finding codes         |
 | `citations`           | Curated paper references by subsystem topic or bib key                  |
 | `load_solve_report`   | Validate a JSON report and return a headline summary                    |
