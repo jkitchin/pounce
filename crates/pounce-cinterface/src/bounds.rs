@@ -15,6 +15,7 @@ use std::ops::Deref;
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_nlp::mpcc::{ComplementarityPair, PairShape, classify_pair};
 
+use crate::errors::*;
 use crate::{
     Index, IpoptProblem, IpoptProblemInfo, bound_status_consistent, complements_row,
     cons_status_consistent, ffi_guard, zero_based,
@@ -165,43 +166,6 @@ impl ComplementsLedger {
 // SetPounceBounds / GetPounceBounds (gh#1147 Stage 2, plan §6.2)
 // ---------------------------------------------------------------------------
 
-/// The update was applied (setter) or the bounds were written (getter).
-pub const POUNCE_BOUNDS_OK: c_int = 0;
-/// NULL handle.
-pub const POUNCE_BOUNDS_ERR_NULL: c_int = -1;
-/// A negative count, or a NULL index array with a count that is neither 0
-/// nor the full size (`n` for variables, `m` for rows).
-pub const POUNCE_BOUNDS_ERR_COUNT: c_int = -2;
-/// An index outside `[0, n)` / `[0, m)`, read in the problem's index style.
-pub const POUNCE_BOUNDS_ERR_OUT_OF_RANGE: c_int = -3;
-/// An index given twice on one side of the batch (setter only).
-pub const POUNCE_BOUNDS_ERR_DUPLICATE: c_int = -4;
-/// A NaN bound.
-pub const POUNCE_BOUNDS_ERR_NAN: c_int = -5;
-/// A declared pair would leave its native shapes, or change which variable
-/// bound and which row side it pairs (plan §6.2 D3).
-pub const POUNCE_BOUNDS_ERR_PAIR_CHANGED: c_int = -6;
-/// A variable used by `AddPounceComplementsConstraint` would move to another
-/// row of the MOI table (lower-only, upper-only, boxed, fixed, free).
-pub const POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS: c_int = -7;
-/// A row used by `AddPounceComplementsConstraint` given a finite bound: MOI's
-/// `F` is a free function (plan §6.2 D2).
-pub const POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW: c_int = -8;
-/// The working set staged by `IpoptSetWarmStartWorkingSet` would claim
-/// something the new bounds contradict.
-pub const POUNCE_BOUNDS_ERR_WORKING_SET: c_int = -9;
-/// `GetPounceBounds`: `view` is neither `POUNCE_BOUNDS_VIEW_USER` nor
-/// `POUNCE_BOUNDS_VIEW_EFFECTIVE`.
-pub const POUNCE_BOUNDS_ERR_VIEW: c_int = -10;
-/// The handle is inconsistent (a declared pair that no longer classifies),
-/// or a Rust panic was caught at the boundary. Nothing was changed.
-pub const POUNCE_BOUNDS_ERR_INTERNAL: c_int = -11;
-/// `flags` has a bit this library does not define. No bits are defined yet;
-/// `flags` exists so that a later relaxation (last-wins duplicates,
-/// re-deriving a `Complements` pair, ...) can be opt-in rather than a
-/// change of meaning for existing callers, and an unknown bit is refused so
-/// an older library never silently ignores one (plan §6.2 D1).
-pub const POUNCE_BOUNDS_ERR_FLAGS: c_int = -12;
 /// The bits `flags` may carry in this version: none.
 const KNOWN_FLAGS: c_uint = 0;
 /// The bounds the caller gave (`CreateIpoptProblem`, `SetPounceBounds`).
@@ -246,6 +210,12 @@ struct Side {
     at: HashMap<usize, usize>,
 }
 
+/// A side's count is usable: in `[0, len]`, and with a NULL index array
+/// either 0 or `len` (the whole side, in order).
+fn count_ok(count: Index, idx: *const Index, len: Index) -> bool {
+    (0..=len).contains(&count) && (!idx.is_null() || count == 0 || count == len)
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn read_side(
     count: Index,
@@ -261,8 +231,8 @@ unsafe fn read_side(
     // refused here, before anything is reserved: a garbage count (say an
     // uninitialised `nx`) would otherwise size the reservation below, and a
     // failed allocation aborts the process, past `ffi_guard`.
-    if count < 0 || count > len || (idx.is_null() && count != 0 && count != len) {
-        return Err((POUNCE_BOUNDS_ERR_COUNT, -1));
+    if !count_ok(count, idx, len) {
+        return Err((POUNCE_ERR_COUNT, -1));
     }
     let k = count as usize;
     let mut side = Side {
@@ -277,10 +247,10 @@ unsafe fn read_side(
             zero_based(unsafe { *idx.add(p) }, offset, len)
         };
         if j == usize::MAX {
-            return Err((POUNCE_BOUNDS_ERR_OUT_OF_RANGE, pos));
+            return Err((POUNCE_ERR_OUT_OF_RANGE, pos));
         }
         if side.at.insert(j, p).is_some() {
-            return Err((POUNCE_BOUNDS_ERR_DUPLICATE, pos));
+            return Err((POUNCE_ERR_DUPLICATE, pos));
         }
         let (cl, cu) = cur(j);
         let l = if lo.is_null() {
@@ -294,7 +264,7 @@ unsafe fn read_side(
             unsafe { *hi.add(p) }
         };
         if l.is_nan() || u.is_nan() {
-            return Err((POUNCE_BOUNDS_ERR_NAN, pos));
+            return Err((POUNCE_ERR_NAN, pos));
         }
         side.entries.push((j, l, u));
     }
@@ -332,10 +302,11 @@ unsafe fn set_bounds(
     g_u: *const Number,
 ) -> Result<(), Refusal> {
     let offset = if info.index_style == 1 { 1 } else { 0 };
-    // Both counts before any entry, so a bad count is never reported as an
-    // entry's fault.
-    if nx < 0 || ng < 0 {
-        return Err((POUNCE_BOUNDS_ERR_COUNT, -1));
+    // Both counts in full before any entry (the C API's check order,
+    // `errors.rs`), so a bad `ng` is never reported after an `x` entry's
+    // fault, nor a bad count as an entry's. `read_side` repeats the test.
+    if !count_ok(nx, x_idx, info.n) || !count_ok(ng, g_idx, info.m) {
+        return Err((POUNCE_ERR_COUNT, -1));
     }
     let xs = unsafe {
         read_side(nx, x_idx, x_l, x_u, info.n, offset, 0, |v| {
@@ -376,13 +347,13 @@ unsafe fn set_bounds(
         let Some(old) = classify_pair(info.x_l[v], info.x_u[v], info.g_l[r], info.g_u[r]) else {
             // A stored pair that no longer classifies: the handle was
             // already inconsistent; not the caller's entry.
-            return Err((POUNCE_BOUNDS_ERR_INTERNAL, -1));
+            return Err((POUNCE_ERR_INTERNAL, -1));
         };
         let (xl, xu) = var_new(v);
         let (gl, gu) = row_new_effective(r);
         match classify_pair(xl, xu, gl, gu) {
             Some(new) if identity(new) == identity(old) => Ok(()),
-            _ => Err((POUNCE_BOUNDS_ERR_PAIR_CHANGED, pos)),
+            _ => Err((POUNCE_ERR_PAIR_CHANGED, pos)),
         }
     };
 
@@ -392,7 +363,7 @@ unsafe fn set_bounds(
         if let Some(e) = info.complements_used.of_var(v)
             && complements_row(l, u) != Some(info.complements_used[e].table)
         {
-            return Err((POUNCE_BOUNDS_ERR_COMPLEMENTS_CLASS, pos));
+            return Err((POUNCE_ERR_COMPLEMENTS_CLASS, pos));
         }
         if let Some(q) = info.complementarity.of_var(v) {
             check_pair(q, pos)?;
@@ -401,7 +372,7 @@ unsafe fn set_bounds(
     for (p, &(r, l, u)) in gs.entries.iter().enumerate() {
         let pos = nx + p as Index;
         if info.complements_used.of_row(r).is_some() && !is_free(l, u) {
-            return Err((POUNCE_BOUNDS_ERR_COMPLEMENTS_ROW, pos));
+            return Err((POUNCE_ERR_ROW_NOT_FREE, pos));
         }
         if let Some(q) = info.complementarity.of_row(r) {
             check_pair(q, pos)?;
@@ -412,13 +383,13 @@ unsafe fn set_bounds(
     if let Some(ws) = info.pending_working_set.as_ref() {
         for (p, &(v, l, u)) in xs.entries.iter().enumerate() {
             if !bound_status_consistent(ws.bounds[v], l, u) {
-                return Err((POUNCE_BOUNDS_ERR_WORKING_SET, p as Index));
+                return Err((POUNCE_ERR_WORKING_SET, p as Index));
             }
         }
         for (p, &(r, _, _)) in gs.entries.iter().enumerate() {
             let (l, u) = row_new_effective(r);
             if !cons_status_consistent(ws.constraints[r], l, u) {
-                return Err((POUNCE_BOUNDS_ERR_WORKING_SET, nx + p as Index));
+                return Err((POUNCE_ERR_WORKING_SET, nx + p as Index));
             }
         }
     }
@@ -459,7 +430,7 @@ unsafe fn set_bounds(
 /// — and committed only if it passes. `bad_index` (may be NULL) receives
 /// the refused entry's position in the concatenated batch (`0..nx` for
 /// variables, `nx..nx+ng` for rows), or `-1`. `flags` must be 0: no bit is
-/// defined yet, and an unknown bit is [`POUNCE_BOUNDS_ERR_FLAGS`].
+/// defined yet, and an unknown bit is [`POUNCE_ERR_FLAGS`].
 ///
 /// Expected cost O(k + touched pairs) for k entries, whatever n, m and the
 /// number of pairs.
@@ -489,12 +460,12 @@ pub unsafe extern "C" fn SetPounceBounds(
         }
     };
     report(-1);
-    ffi_guard(POUNCE_BOUNDS_ERR_INTERNAL, || unsafe {
+    ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
         if ipopt_problem.is_null() {
-            return POUNCE_BOUNDS_ERR_NULL;
+            return POUNCE_ERR_NULL;
         }
         if flags & !KNOWN_FLAGS != 0 {
-            return POUNCE_BOUNDS_ERR_FLAGS;
+            return POUNCE_ERR_FLAGS;
         }
         match set_bounds(
             &mut *ipopt_problem,
@@ -507,7 +478,7 @@ pub unsafe extern "C" fn SetPounceBounds(
             g_L,
             g_U,
         ) {
-            Ok(()) => POUNCE_BOUNDS_OK,
+            Ok(()) => POUNCE_OK,
             Err((code, pos)) => {
                 report(pos);
                 code
@@ -551,22 +522,29 @@ pub unsafe extern "C" fn GetPounceBounds(
         }
     };
     report(-1);
-    ffi_guard(POUNCE_BOUNDS_ERR_INTERNAL, || unsafe {
+    ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
         if ipopt_problem.is_null() {
-            return POUNCE_BOUNDS_ERR_NULL;
+            return POUNCE_ERR_NULL;
         }
         let info = &*ipopt_problem;
         if flags & !KNOWN_FLAGS != 0 {
-            return POUNCE_BOUNDS_ERR_FLAGS;
+            return POUNCE_ERR_FLAGS;
         }
         if view != POUNCE_BOUNDS_VIEW_USER && view != POUNCE_BOUNDS_VIEW_EFFECTIVE {
-            return POUNCE_BOUNDS_ERR_VIEW;
+            return POUNCE_ERR_ARGUMENT;
         }
         let offset = if info.index_style == 1 { 1 } else { 0 };
+        // Both counts before any entry (the C API's check order, stage 3).
+        // The getter allows duplicates, so a count may exceed the side's
+        // length when an index array is given; only the NULL-array
+        // consistency of `count_ok` applies.
+        let null_ok = |count: Index, idx: *const Index, len: Index| {
+            count >= 0 && (!idx.is_null() || count == 0 || count == len)
+        };
+        if !null_ok(nx, x_idx, info.n) || !null_ok(ng, g_idx, info.m) {
+            return POUNCE_ERR_COUNT;
+        }
         let resolve = |count: Index, idx: *const Index, len: Index, base: Index| {
-            if count < 0 || (idx.is_null() && count != 0 && count != len) {
-                return Err((POUNCE_BOUNDS_ERR_COUNT, -1));
-            }
             (0..count as usize)
                 .map(|p| {
                     let j = if idx.is_null() {
@@ -575,16 +553,13 @@ pub unsafe extern "C" fn GetPounceBounds(
                         zero_based(*idx.add(p), offset, len)
                     };
                     if j == usize::MAX {
-                        Err((POUNCE_BOUNDS_ERR_OUT_OF_RANGE, base + p as Index))
+                        Err((POUNCE_ERR_OUT_OF_RANGE, base + p as Index))
                     } else {
                         Ok(j)
                     }
                 })
                 .collect::<Result<Vec<usize>, Refusal>>()
         };
-        if nx < 0 || ng < 0 {
-            return POUNCE_BOUNDS_ERR_COUNT;
-        }
         let (vars, rows) = match resolve(nx, x_idx, info.n, 0)
             .and_then(|v| resolve(ng, g_idx, info.m, nx).map(|r| (v, r)))
         {
@@ -615,7 +590,7 @@ pub unsafe extern "C" fn GetPounceBounds(
                 *g_U.add(p) = u;
             }
         }
-        POUNCE_BOUNDS_OK
+        POUNCE_OK
     })
 }
 
@@ -684,7 +659,7 @@ mod tests {
                 None,
             );
             assert!(!p.is_null());
-            assert_eq!(AddPounceComplementarityPair(p, 0, 0), crate::POUNCE_CC_OK);
+            assert_eq!(AddPounceComplementarityPair(p, 0, 0), crate::POUNCE_OK);
             (&mut (*p).x_u)[0] = 0.0;
             let before = ((&*p).x_l.clone(), (&*p).x_u.clone(), (&*p).g_l.clone());
             let (idx, lo, hi) = ([1], [-1.0], [3.0]);
@@ -702,7 +677,7 @@ mod tests {
                 0,
                 &mut bad,
             );
-            assert_eq!((code, bad), (POUNCE_BOUNDS_ERR_INTERNAL, -1));
+            assert_eq!((code, bad), (POUNCE_ERR_INTERNAL, -1));
             assert_eq!(
                 before,
                 ((&*p).x_l.clone(), (&*p).x_u.clone(), (&*p).g_l.clone())

@@ -141,7 +141,7 @@ dense; a NULL value array leaves that side of the named entries as it was.
 `flags` must be 0 on both functions. No bit is defined yet: it exists so a
 later relaxation of one of the refusals below can be asked for explicitly,
 instead of changing what an existing call does. A bit the library does not
-know is refused with `_ERR_FLAGS` (-12), so an older library never ignores
+know is refused with `POUNCE_ERR_FLAGS` (-6), so an older library never ignores
 one silently.
 
 It is **all or nothing**: the batch is checked against the bounds it would
@@ -149,17 +149,17 @@ install, and a refusal changes nothing. In order:
 
 | check | code |
 |---|---|
-| NULL handle | `POUNCE_BOUNDS_ERR_NULL` (-1) |
-| a bit in `flags` this library does not define | `_ERR_FLAGS` (-12) |
+| NULL handle | `POUNCE_ERR_NULL` (-1) |
+| a bit in `flags` this library does not define | `_ERR_FLAGS` (-6) |
 | a negative count, a setter count above `n` (or `m`), or a NULL index array with a count other than 0 or the full size | `_ERR_COUNT` (-2) |
 | per entry, variables first: index out of range | `_ERR_OUT_OF_RANGE` (-3) |
 | the same index twice on one side | `_ERR_DUPLICATE` (-4) |
 | a NaN bound | `_ERR_NAN` (-5) |
-| a `Complements` variable would move to another row of the MOI table | `_ERR_COMPLEMENTS_CLASS` (-7) |
-| a `Complements` row given a finite bound | `_ERR_COMPLEMENTS_ROW` (-8) |
-| a declared pair would pair a different variable bound or row side | `_ERR_PAIR_CHANGED` (-6) |
-| a staged SQP working set would claim something false | `_ERR_WORKING_SET` (-9) |
-| inconsistent handle, internal error | `_ERR_INTERNAL` (-11) |
+| a `Complements` variable would move to another row of the MOI table | `_ERR_COMPLEMENTS_CLASS` (-41) |
+| a `Complements` row given a finite bound | `_ERR_ROW_NOT_FREE` (-23) |
+| a declared pair would pair a different variable bound or row side | `_ERR_PAIR_CHANGED` (-40) |
+| a staged SQP working set would claim something false | `_ERR_WORKING_SET` (-42) |
+| inconsistent handle, internal error | `_ERR_INTERNAL` (-8) |
 
 The range, duplicate and NaN checks run over every entry before any of the
 rest. The `Complements` and pair checks then run entry by entry in batch
@@ -192,7 +192,7 @@ since a change of row can create or remove a pair. To change either, build a
 new problem. `GetPounceBounds` reads `POUNCE_BOUNDS_VIEW_USER` (0) or
 `POUNCE_BOUNDS_VIEW_EFFECTIVE` (1), takes the same index arguments
 (duplicates allowed), skips a NULL output array and writes nothing on a
-refusal (`_ERR_VIEW` (-10) for an unknown view).
+refusal (`POUNCE_ERR_ARGUMENT` (-7) for an unknown view).
 
 Crossed bounds (`l > u`) are not refused here; the solve reports them, as for
 `CreateIpoptProblem`. The getters for the most recent solve stay readable
@@ -234,6 +234,7 @@ pairs](complementarity.md#declaring-pairs)):
 int     AddPounceComplementarityPair(IpoptProblem, ipindex row, ipindex var);
 int     SetPounceComplementarityPairs(IpoptProblem, ipindex n_pairs,
                                       const ipindex *rows, const ipindex *vars,
+                                      unsigned int flags /* 0 */,
                                       ipindex *bad_index /* may be NULL */);
 Bool    ClearPounceComplementarityPairs(IpoptProblem);
 ipindex GetPounceComplementarityPairCount(IpoptProblem);   /* -1 on NULL */
@@ -242,22 +243,31 @@ Bool    GetPounceComplementarityPairs(IpoptProblem, ipindex *rows, ipindex *vars
 
 `Add` appends; `Set` replaces the set with a batch, all or nothing, and
 writes the batch position of the first refused pair to `bad_index` (`-1` on
-success); `n_pairs = 0` clears. Indices are in the problem's index style,
+success); `n_pairs = 0` clears. `flags` must be 0: as for
+`SetPounceBounds`, no bit is defined yet, and one this library does not know
+is refused with `POUNCE_ERR_FLAGS` (-6, checked after the handle and before
+the count), so a later relaxation is opt-in and an older library never
+ignores it. Indices are in the problem's index style,
 and are read back in it. Each declaration is checked at once, against the
 handle's bounds and the pairs already declared, by the classifier the
 solve's lowering runs, so a pair Python or the `.nl` reader would refuse is
-refused here, and a refused call changes nothing:
+refused here, and a refused call changes nothing. The codes below are in
+check order. `Set` runs the range and already-paired checks over the whole
+batch before any shape check, so a batch with a bad index at pair 3 and a
+bad shape at pair 0 reports `POUNCE_ERR_OUT_OF_RANGE` at 3:
 
 | code | value | meaning |
 |---|---|---|
-| `POUNCE_CC_OK` | 0 | declared |
-| `POUNCE_CC_ERR_NULL` | -1 | NULL handle, or a NULL array with `n_pairs > 0` |
-| `POUNCE_CC_ERR_OUT_OF_RANGE` | -2 | row or variable outside the problem (in its index style) |
-| `POUNCE_CC_ERR_VAR_ALREADY` | -3 | the variable is already in a pair, or twice in the batch |
-| `POUNCE_CC_ERR_ROW_ALREADY` | -4 | the row is already in a pair, or twice in the batch |
-| `POUNCE_CC_ERR_SHAPE` | -5 | not a native shape (boxed or equality row, both sides free, a fixed variable with a free row, ...) |
-| `POUNCE_CC_ERR_COUNT` | -6 | `n_pairs < 0` |
-| `POUNCE_CC_ERR_INTERNAL` | -7 | an internal error caught at the boundary; not a diagnosis of the input |
+| `POUNCE_OK` | 0 | declared |
+| `POUNCE_ERR_NULL` | -1 | NULL handle |
+| `POUNCE_ERR_FLAGS` | -6 | `Set`: `flags` has a bit this library does not define |
+| `POUNCE_ERR_COUNT` | -2 | `Set`: `n_pairs < 0`, or `n_pairs > min(n, m)` (which must repeat a variable or a row) |
+| `POUNCE_ERR_NULL` | -1 | `Set`: a NULL array with `n_pairs > 0` |
+| `POUNCE_ERR_OUT_OF_RANGE` | -3 | row or variable outside the problem (in its index style) |
+| `POUNCE_ERR_VAR_ALREADY_PAIRED` | -20 | the variable is already in a pair, or twice in the batch |
+| `POUNCE_ERR_ROW_ALREADY_PAIRED` | -21 | the row is already in a pair, or twice in the batch |
+| `POUNCE_ERR_SHAPE` | -22 | not a native shape (boxed or equality row, both sides free, a fixed variable with a free row, ...) |
+| `POUNCE_ERR_INTERNAL` | -8 | an internal error caught at the boundary; not a diagnosis of the input |
 
 Pairs persist across solves until cleared or replaced.
 
@@ -282,14 +292,15 @@ pair:
 | `l == u` | none (`F` free) | none | `POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR` (4) |
 
 A negative return is a refusal that changed nothing, checked in this order:
-`POUNCE_COMPLEMENTS_ERR_NULL` (-1); `_ERR_OUT_OF_RANGE` (-2); `_ERR_ROW_NOT_FREE`
-(-5), for any row with a finite bound, **including one whose bound agrees
-with the sign MOI implies** (`g_L = 0` with `x >= 0`: that is a native
-declaration, use `AddPounceComplementarityPair`) and a row this function
-already wrote; `_ERR_VAR_ALREADY_PAIRED` (-3) and `_ERR_ROW_ALREADY_PAIRED`
-(-4), for a variable or row in a declared pair or in **any earlier accepted
-call** of this function, pair or not; `_ERR_VAR_BOUNDS` (-6), NaN or crossed
-variable bounds; and `_ERR_INTERNAL` (-7). The edits and that ledger are
+`POUNCE_ERR_NULL` (-1); `_ERR_OUT_OF_RANGE` (-3); `_ERR_VAR_ALREADY_PAIRED`
+(-20) and `_ERR_ROW_ALREADY_PAIRED` (-21), for a variable or row in a
+declared pair or in **any earlier accepted call** of this function, pair or
+not (so a row this function already wrote reads as already paired);
+`_ERR_ROW_NOT_FREE` (-23), for any other row with a finite bound,
+**including one whose bound agrees with the sign MOI implies** (`g_L = 0`
+with `x >= 0`: that is a native declaration, use
+`AddPounceComplementarityPair`); `_ERR_VAR_BOUNDS` (-24), NaN or crossed
+variable bounds; and `_ERR_INTERNAL` (-8). The edits and that ledger are
 permanent on the handle: `ClearPounceComplementarityPairs` and
 `SetPounceComplementarityPairs` drop pairs, not edits, and do not free a row
 or variable for another call. So after a clear the handle solves a plain
@@ -507,12 +518,12 @@ rows of it) must lie in its cone:
   entries of an off-diagonal position carry that `√2`, and so does the dual
   `z` read back for it.
 - `alpha` is read for `POUNCE_CONE_POW` only and ignored otherwise.
-- `AddCone` returns `POUNCE_QP_ERR_NULL` for a `NULL` handle and
-  `POUNCE_QP_ERR_ARGUMENT` for an unknown kind, a `dim` out of range or an
+- `AddCone` returns `POUNCE_ERR_NULL` for a `NULL` handle and
+  `POUNCE_ERR_ARGUMENT` for an unknown kind, a `dim` out of range or an
   `alpha` outside `(0, 1)` (`NaN` and `±∞` included); nothing is added.
 - At the solve, the blocks must cover exactly `m_ineq` rows, and a PSD block
   cannot be mixed with an exponential or power one (they run on different
-  drivers); either is `POUNCE_QP_ERR_CONES`. SOC mixes with either family.
+  drivers); either is `POUNCE_ERR_CONES`. SOC mixes with either family.
 
 ### Options
 
@@ -535,7 +546,7 @@ range. The names and meanings are the CLI's and Python's.
 | `qp_crossover` | `yes`, `no` | crossover after the IPM |
 
 An option the selected engine would drop is refused at the solve
-(`POUNCE_QP_ERR_OPTIONS`), not ignored:
+(`POUNCE_ERR_OPTIONS`), not ignored:
 
 - under `method=active-set` (no cones), setting `qp_reg`, `qp_hsde` or
   `qp_crossover` at all, to either value;
@@ -549,7 +560,7 @@ An option the selected engine would drop is refused at the solve
 ### PSD screen
 
 Under `method=ipm`, with or without cones, a `P` that is not certified positive
-semidefinite is refused with `POUNCE_QP_ERR_INDEFINITE` (gh#112): the convex
+semidefinite is refused with `POUNCE_ERR_INDEFINITE` (gh#112): the convex
 IPM would return a silently wrong "optimal" at a saddle point.
 
 - With `hessian_inertia=auto` (the default) an empty `P` passes, and any other
@@ -578,7 +589,7 @@ IPM would return a silently wrong "optimal" at a saddle point.
   engine, which solves an indefinite `P` to a first-order point (Python's
   `method="active-set"`; see [Convex Solver](convex-solver.md)).
 - A `P` whose summed duplicate entries overflow to infinity is
-  `POUNCE_QP_ERR_ARGUMENT` at the solve.
+  `POUNCE_ERR_ARGUMENT` at the solve.
 
 ### Solving, statuses and errors
 
@@ -602,13 +613,13 @@ or power cone is present).
 
 | error | value | returned when |
 |---|---|---|
-| `POUNCE_QP_ERR_NULL` | −1 | `NULL` handle (`Solve`, `AddCone`) |
-| `POUNCE_QP_ERR_ARGUMENT` | −2 | `AddCone`: bad kind, `dim` or `alpha`; `Solve`: `P` entries whose sum overflows |
-| `POUNCE_QP_ERR_INCOMPLETE` | −3 | no objective, or `m_eq > 0` / `m_ineq > 0` rows never set |
-| `POUNCE_QP_ERR_CONES` | −4 | the cones do not cover exactly `m_ineq` rows, or PSD mixed with exp/power |
-| `POUNCE_QP_ERR_OPTIONS` | −5 | an option the engine would drop (above) |
-| `POUNCE_QP_ERR_INDEFINITE` | −6 | `method=ipm` and `P` not certified PSD |
-| `POUNCE_QP_ERR_INTERNAL` | −7 | an internal error caught at the boundary |
+| `POUNCE_ERR_NULL` | −1 | `NULL` handle (`Solve`, `AddCone`) |
+| `POUNCE_ERR_ARGUMENT` | −7 | `AddCone`: bad kind, `dim` or `alpha`; `Solve`: `P` entries whose sum overflows |
+| `POUNCE_ERR_INCOMPLETE` | −60 | no objective, or `m_eq > 0` / `m_ineq > 0` rows never set |
+| `POUNCE_ERR_CONES` | −61 | the cones do not cover exactly `m_ineq` rows, or PSD mixed with exp/power |
+| `POUNCE_ERR_OPTIONS` | −62 | an option the engine would drop (above) |
+| `POUNCE_ERR_INDEFINITE` | −63 | `method=ipm` and `P` not certified PSD |
+| `POUNCE_ERR_INTERNAL` | −8 | an internal error caught at the boundary |
 
 The report column is the CLI's convex mapping, so the AMPL `solve_result_num`
 equals the CLI's for the same status (0, 1, 200, 300, 400, 400, 500).
@@ -692,6 +703,73 @@ The same library exports the eight Fortran 77 entry points of Ipopt's
 passed by reference, strings as a buffer plus a trailing length, and the
 option setters return 0 on success and 1 on failure. None of POUNCE's C
 extensions are mirrored there: they are C-only.
+
+## Error codes
+
+Every POUNCE extension reports a refusal from one namespace, `POUNCE_ERR_*`,
+and each value means the same thing whichever function returns it, so a
+wrapper keeps a single code-to-message table and a logged `-3` always means
+"index out of range". Success is `POUNCE_OK` (0). The sections above list
+which codes each function returns.
+
+Every function checks in the same order, so a call with several faults
+reports the same one whichever function it is:
+
+1. the handle (`POUNCE_ERR_NULL`);
+2. `flags` and enum arguments (`_ERR_FLAGS`, `_ERR_ARGUMENT`);
+3. counts (`_ERR_COUNT`), then the arrays they size (`_ERR_NULL`);
+4. per entry, over the **whole batch** in batch order: range, then
+   duplicate or already paired, then NaN (`_ERR_OUT_OF_RANGE`,
+   `_ERR_DUPLICATE`, `_ERR_VAR_ALREADY_PAIRED`, `_ERR_ROW_ALREADY_PAIRED`,
+   `_ERR_NAN`);
+5. per entry, over the whole batch in batch order: what the entry would
+   mean (`_ERR_SHAPE`, `_ERR_ROW_NOT_FREE`, `_ERR_VAR_BOUNDS`,
+   `_ERR_COMPLEMENTS_CLASS`, `_ERR_PAIR_CHANGED`);
+6. state beyond the batch (`_ERR_WORKING_SET`; `PounceQpSolve`'s
+   `_ERR_INCOMPLETE`, `_ERR_CONES`, `_ERR_OPTIONS`, `_ERR_INDEFINITE`).
+
+So an argument fault anywhere in a batch is reported before a semantic
+fault anywhere in it, and `bad_index` names the first entry with the
+earliest-stage fault. `crates/pounce-cinterface/tests/check_order.rs`
+holds each batch function to this.
+
+```c
+const char *PounceErrorString(int code);
+```
+
+`PounceErrorString` returns the message for any `POUNCE_OK` / `POUNCE_ERR_*`
+value, as a static string the caller must not free, and
+`"unknown error code"` for anything else (never `NULL`). Non-negative
+function-specific results, the QP statuses and the
+`AddPounceComplementsConstraint` outcomes, are results rather than errors
+and read as unknown.
+
+| block | code | value | meaning |
+|---|---|---|---|
+| generic | `POUNCE_ERR_NULL` | -1 | NULL handle, or a NULL array the call needed |
+| | `POUNCE_ERR_COUNT` | -2 | count negative, too large, or inconsistent with a NULL index array |
+| | `POUNCE_ERR_OUT_OF_RANGE` | -3 | index outside the problem (in its index style) |
+| | `POUNCE_ERR_DUPLICATE` | -4 | an index given twice where each may appear once |
+| | `POUNCE_ERR_NAN` | -5 | a NaN value |
+| | `POUNCE_ERR_FLAGS` | -6 | `flags` has a bit this library does not define |
+| | `POUNCE_ERR_ARGUMENT` | -7 | an argument outside its domain (unknown view or cone kind, bad cone `dim`/`alpha`, overflowing `P` entries) |
+| | `POUNCE_ERR_INTERNAL` | -8 | internal error or inconsistent handle; nothing changed |
+| pairs | `POUNCE_ERR_VAR_ALREADY_PAIRED` | -20 | variable already in a pair |
+| | `POUNCE_ERR_ROW_ALREADY_PAIRED` | -21 | row already in a pair |
+| | `POUNCE_ERR_SHAPE` | -22 | not a native pair shape |
+| | `POUNCE_ERR_ROW_NOT_FREE` | -23 | a `Complements` row has, or would get, a finite bound |
+| | `POUNCE_ERR_VAR_BOUNDS` | -24 | variable bounds NaN or crossed |
+| bounds | `POUNCE_ERR_PAIR_CHANGED` | -40 | update would change what a declared pair pairs |
+| | `POUNCE_ERR_COMPLEMENTS_CLASS` | -41 | update would move a `Complements` variable to another table row |
+| | `POUNCE_ERR_WORKING_SET` | -42 | update contradicts the staged working set |
+| QP | `POUNCE_ERR_INCOMPLETE` | -60 | no objective, or declared rows never set |
+| | `POUNCE_ERR_CONES` | -61 | cones do not partition the inequality rows |
+| | `POUNCE_ERR_OPTIONS` | -62 | an option the engine would drop |
+| | `POUNCE_ERR_INDEFINITE` | -63 | `method=ipm` and `P` not certified PSD |
+
+Generic codes are -1 to -19 and each function family has its own block of
+20. A new code is appended inside its block, and a released number is never
+reused or renumbered; a new family gets a new block.
 
 ## ABI and versioning
 

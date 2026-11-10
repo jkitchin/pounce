@@ -50,6 +50,7 @@ fn set(prob: IpoptProblem, pairs: &[(Index, Index)]) -> (i32, Index) {
             pairs.len() as Index,
             rows.as_ptr(),
             vars.as_ptr(),
+            0,
             &mut bad,
         )
     };
@@ -79,9 +80,9 @@ fn a_fresh_handle_declares_no_pairs() {
 #[test]
 fn add_declares_one_pair_and_reads_back_in_c_style() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     assert_eq!(declared(p), vec![(0, 1)]);
-    assert_eq!(add(p, 1, 2), POUNCE_CC_OK);
+    assert_eq!(add(p, 1, 2), POUNCE_OK);
     assert_eq!(declared(p), vec![(0, 1), (1, 2)]);
     free(p);
 }
@@ -90,8 +91,8 @@ fn add_declares_one_pair_and_reads_back_in_c_style() {
 fn fortran_style_indices_are_read_and_returned_one_based() {
     let p = create_qpec(1);
     // (row 1, var 2) in Fortran style is (row 0, var 1) 0-based.
-    assert_eq!(add(p, 1, 2), POUNCE_CC_OK);
-    assert_eq!(set(p, &[(1, 2), (2, 3)]), (POUNCE_CC_OK, -1));
+    assert_eq!(add(p, 1, 2), POUNCE_OK);
+    assert_eq!(set(p, &[(1, 2), (2, 3)]), (POUNCE_OK, -1));
     assert_eq!(declared(p), vec![(1, 2), (2, 3)]);
     free(p);
 }
@@ -99,15 +100,15 @@ fn fortran_style_indices_are_read_and_returned_one_based() {
 #[test]
 fn fortran_style_refuses_zero_and_accepts_the_last_index() {
     let p = create_qpec(1);
-    assert_eq!(add(p, 2, 3), POUNCE_CC_OK); // row m, var n: the last ones
+    assert_eq!(add(p, 2, 3), POUNCE_OK); // row m, var n: the last ones
     // error-path: AddPounceComplementarityPair
-    assert_eq!(add(p, 0, 2), POUNCE_CC_ERR_OUT_OF_RANGE); // row 0 is below range
-    assert_eq!(add(p, 1, 0), POUNCE_CC_ERR_OUT_OF_RANGE); // var 0 is below range
-    assert_eq!(add(p, M as Index + 1, 2), POUNCE_CC_ERR_OUT_OF_RANGE);
-    assert_eq!(add(p, 1, N as Index + 1), POUNCE_CC_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, 0, 2), POUNCE_ERR_OUT_OF_RANGE); // row 0 is below range
+    assert_eq!(add(p, 1, 0), POUNCE_ERR_OUT_OF_RANGE); // var 0 is below range
+    assert_eq!(add(p, M as Index + 1, 2), POUNCE_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, 1, N as Index + 1), POUNCE_ERR_OUT_OF_RANGE);
     // `p - 1` on i32::MIN must not overflow.
-    assert_eq!(add(p, Index::MIN, 2), POUNCE_CC_ERR_OUT_OF_RANGE);
-    assert_eq!(add(p, 1, Index::MIN), POUNCE_CC_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, Index::MIN, 2), POUNCE_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, 1, Index::MIN), POUNCE_ERR_OUT_OF_RANGE);
     assert_eq!(declared(p), vec![(2, 3)]);
     free(p);
 }
@@ -115,11 +116,11 @@ fn fortran_style_refuses_zero_and_accepts_the_last_index() {
 #[test]
 fn set_replaces_the_declared_set() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     // Replaces, so redeclaring (0, 1) is not a duplicate of the old set.
-    assert_eq!(set(p, &[(1, 2), (0, 1)]), (POUNCE_CC_OK, -1));
+    assert_eq!(set(p, &[(1, 2), (0, 1)]), (POUNCE_OK, -1));
     assert_eq!(declared(p), vec![(1, 2), (0, 1)]);
-    assert_eq!(set(p, &[(1, 2)]), (POUNCE_CC_OK, -1));
+    assert_eq!(set(p, &[(1, 2)]), (POUNCE_OK, -1));
     assert_eq!(declared(p), vec![(1, 2)]);
     free(p);
 }
@@ -127,8 +128,8 @@ fn set_replaces_the_declared_set() {
 #[test]
 fn add_after_set_appends_and_is_checked_against_the_set() {
     let p = create_qpec(0);
-    assert_eq!(set(p, &[(1, 2)]), (POUNCE_CC_OK, -1));
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(set(p, &[(1, 2)]), (POUNCE_OK, -1));
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     assert_eq!(declared(p), vec![(1, 2), (0, 1)]);
     free(p);
 }
@@ -136,10 +137,11 @@ fn add_after_set_appends_and_is_checked_against_the_set() {
 #[test]
 fn set_with_zero_pairs_clears_and_accepts_null_arrays() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     let mut bad = -42;
-    let code = unsafe { SetPounceComplementarityPairs(p, 0, ptr::null(), ptr::null(), &mut bad) };
-    assert_eq!((code, bad), (POUNCE_CC_OK, -1));
+    let code =
+        unsafe { SetPounceComplementarityPairs(p, 0, ptr::null(), ptr::null(), 0, &mut bad) };
+    assert_eq!((code, bad), (POUNCE_OK, -1));
     assert_eq!(declared(p), vec![]);
     free(p);
 }
@@ -149,15 +151,15 @@ fn set_accepts_a_null_bad_index() {
     let p = create_qpec(0);
     let (rows, vars) = ([0], [1]);
     let code = unsafe {
-        SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), ptr::null_mut())
+        SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), 0, ptr::null_mut())
     };
-    assert_eq!(code, POUNCE_CC_OK);
+    assert_eq!(code, POUNCE_OK);
     // ... and on a refusal too: nothing to write, still a code.
     let (rows, vars) = ([0], [9]);
     let code = unsafe {
-        SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), ptr::null_mut())
+        SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), 0, ptr::null_mut())
     };
-    assert_eq!(code, POUNCE_CC_ERR_OUT_OF_RANGE);
+    assert_eq!(code, POUNCE_ERR_OUT_OF_RANGE);
     assert_eq!(declared(p), vec![(0, 1)]);
     free(p);
 }
@@ -165,11 +167,11 @@ fn set_accepts_a_null_bad_index() {
 #[test]
 fn clear_empties_the_set() {
     let p = create_qpec(0);
-    assert_eq!(set(p, &[(0, 1), (1, 2)]), (POUNCE_CC_OK, -1));
+    assert_eq!(set(p, &[(0, 1), (1, 2)]), (POUNCE_OK, -1));
     assert_eq!(unsafe { ClearPounceComplementarityPairs(p) }, 1);
     assert_eq!(declared(p), vec![]);
     // Clearing frees the variables and rows for a new declaration.
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     free(p);
 }
 
@@ -179,22 +181,22 @@ fn clear_empties_the_set() {
 fn every_lowered_shape_is_accepted() {
     // one-sided: QpecSmall itself (var 1 lower-bounded, row 0 lower side).
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     free(p);
     // one-sided row, upper orientation, with a variable upper bound.
     let p = create(&X_L, &[2.0, INF, INF], &[0.0, -INF], &[INF, 0.5], 0);
     let p2 = create(&[0.0, -INF, -INF], &[2.0, 1.0, 1.0], &G_L, &G_U, 0);
-    assert_eq!(add(p, 1, 1), POUNCE_CC_OK); // x1 >= 0 ⟂ g1 <= 0.5
-    assert_eq!(add(p2, 0, 1), POUNCE_CC_OK); // x1 <= 1 ⟂ g0 >= 0
+    assert_eq!(add(p, 1, 1), POUNCE_OK); // x1 >= 0 ⟂ g1 <= 0.5
+    assert_eq!(add(p2, 0, 1), POUNCE_OK); // x1 <= 1 ⟂ g0 >= 0
     free(p);
     free(p2);
     // one-sided plus a plain bound: var 0 is boxed [0, 2], row 0 one-sided.
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 0), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 0), POUNCE_OK);
     free(p);
     // mixed: var 0 boxed [0, 2] with l < u, row 0 free.
     let p = create(&X_L, &X_U, &[-INF, 0.0], &[INF, INF], 0);
-    assert_eq!(add(p, 0, 0), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 0), POUNCE_OK);
     free(p);
 }
 
@@ -208,11 +210,11 @@ fn null_handle_is_refused_by_every_entry_point() {
     let mut out = [-99; 1];
     unsafe {
         // error-path: AddPounceComplementarityPair
-        assert_eq!(AddPounceComplementarityPair(null, 0, 1), POUNCE_CC_ERR_NULL);
+        assert_eq!(AddPounceComplementarityPair(null, 0, 1), POUNCE_ERR_NULL);
         // error-path: SetPounceComplementarityPairs
         assert_eq!(
-            SetPounceComplementarityPairs(null, 1, rows.as_ptr(), vars.as_ptr(), &mut bad),
-            POUNCE_CC_ERR_NULL
+            SetPounceComplementarityPairs(null, 1, rows.as_ptr(), vars.as_ptr(), 0, &mut bad),
+            POUNCE_ERR_NULL
         );
         assert_eq!(bad, -1);
         // error-path: ClearPounceComplementarityPairs
@@ -231,21 +233,70 @@ fn null_handle_is_refused_by_every_entry_point() {
 #[test]
 fn set_refuses_a_negative_count() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     let (rows, vars) = ([1], [2]);
     let mut bad = -42;
     // error-path: SetPounceComplementarityPairs
     let code =
-        unsafe { SetPounceComplementarityPairs(p, -1, rows.as_ptr(), vars.as_ptr(), &mut bad) };
-    assert_eq!((code, bad), (POUNCE_CC_ERR_COUNT, -1));
+        unsafe { SetPounceComplementarityPairs(p, -1, rows.as_ptr(), vars.as_ptr(), 0, &mut bad) };
+    assert_eq!((code, bad), (POUNCE_ERR_COUNT, -1));
     assert_eq!(declared(p), vec![(0, 1)]);
+    free(p);
+}
+
+/// `flags` is reserved: every bit is refused today, whatever the batch.
+/// Each branch the check sits between is reached: a batch that would
+/// otherwise be accepted (so the refusal is the flag's alone), a clear
+/// (`n_pairs == 0`, which must not clear), a negative count (flags are
+/// checked first) and a NULL handle (the handle is checked first).
+#[test]
+fn set_refuses_every_flag_bit() {
+    let p = create_qpec(0);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
+    let (rows, vars) = ([1], [2]);
+    let mut bad = -42;
+    // error-path: SetPounceComplementarityPairs
+    for bit in 0..u32::BITS {
+        let flags = 1u32 << bit;
+        for n in [1, 0] {
+            bad = -42;
+            let code = unsafe {
+                SetPounceComplementarityPairs(p, n, rows.as_ptr(), vars.as_ptr(), flags, &mut bad)
+            };
+            assert_eq!(
+                (code, bad),
+                (POUNCE_ERR_FLAGS, -1),
+                "bit {bit}, n_pairs {n}"
+            );
+            assert_eq!(declared(p), vec![(0, 1)], "bit {bit} changed the pairs");
+        }
+    }
+    let code =
+        unsafe { SetPounceComplementarityPairs(p, -1, rows.as_ptr(), vars.as_ptr(), 1, &mut bad) };
+    assert_eq!(code, POUNCE_ERR_FLAGS, "flags are checked before the count");
+    let code = unsafe {
+        SetPounceComplementarityPairs(
+            ptr::null_mut(),
+            1,
+            rows.as_ptr(),
+            vars.as_ptr(),
+            1,
+            &mut bad,
+        )
+    };
+    assert_eq!(code, POUNCE_ERR_NULL, "the handle is checked before flags");
+    // The same batch with flags = 0 is accepted: the refusals above were the flag's.
+    let code =
+        unsafe { SetPounceComplementarityPairs(p, 1, rows.as_ptr(), vars.as_ptr(), 0, &mut bad) };
+    assert_eq!((code, bad), (POUNCE_OK, -1));
+    assert_eq!(declared(p), vec![(1, 2)]);
     free(p);
 }
 
 #[test]
 fn set_refuses_null_arrays_with_a_positive_count() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     let a = [1];
     let mut bad = -42;
     // error-path: SetPounceComplementarityPairs
@@ -254,8 +305,8 @@ fn set_refuses_null_arrays_with_a_positive_count() {
         (a.as_ptr(), ptr::null()),
         (ptr::null(), ptr::null()),
     ] {
-        let code = unsafe { SetPounceComplementarityPairs(p, 1, rows, vars, &mut bad) };
-        assert_eq!((code, bad), (POUNCE_CC_ERR_NULL, -1));
+        let code = unsafe { SetPounceComplementarityPairs(p, 1, rows, vars, 0, &mut bad) };
+        assert_eq!((code, bad), (POUNCE_ERR_NULL, -1));
         assert_eq!(declared(p), vec![(0, 1)]);
     }
     free(p);
@@ -264,7 +315,7 @@ fn set_refuses_null_arrays_with_a_positive_count() {
 #[test]
 fn get_refuses_null_arrays_while_pairs_are_declared() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     let mut a = [-99; 1];
     unsafe {
         // error-path: GetPounceComplementarityPairs
@@ -284,11 +335,11 @@ fn get_refuses_null_arrays_while_pairs_are_declared() {
 #[test]
 fn add_refuses_a_variable_out_of_range() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     // error-path: AddPounceComplementarityPair
-    assert_eq!(add(p, 1, N as Index), POUNCE_CC_ERR_OUT_OF_RANGE);
-    assert_eq!(add(p, 1, -1), POUNCE_CC_ERR_OUT_OF_RANGE);
-    assert_eq!(add(p, 1, Index::MAX), POUNCE_CC_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, 1, N as Index), POUNCE_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, 1, -1), POUNCE_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, 1, Index::MAX), POUNCE_ERR_OUT_OF_RANGE);
     assert_eq!(declared(p), vec![(0, 1)]);
     free(p);
 }
@@ -296,11 +347,11 @@ fn add_refuses_a_variable_out_of_range() {
 #[test]
 fn add_refuses_a_row_out_of_range() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     // error-path: AddPounceComplementarityPair
-    assert_eq!(add(p, M as Index, 2), POUNCE_CC_ERR_OUT_OF_RANGE);
-    assert_eq!(add(p, -1, 2), POUNCE_CC_ERR_OUT_OF_RANGE);
-    assert_eq!(add(p, Index::MIN, 2), POUNCE_CC_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, M as Index, 2), POUNCE_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, -1, 2), POUNCE_ERR_OUT_OF_RANGE);
+    assert_eq!(add(p, Index::MIN, 2), POUNCE_ERR_OUT_OF_RANGE);
     assert_eq!(declared(p), vec![(0, 1)]);
     free(p);
 }
@@ -329,9 +380,11 @@ fn a_model_with_no_rows_refuses_every_pair() {
     };
     assert!(!p.is_null());
     // error-path: AddPounceComplementarityPair
-    assert_eq!(add(p, 0, 0), POUNCE_CC_ERR_OUT_OF_RANGE);
-    assert_eq!(set(p, &[(0, 0)]), (POUNCE_CC_ERR_OUT_OF_RANGE, 0));
-    assert_eq!(set(p, &[]), (POUNCE_CC_OK, -1));
+    assert_eq!(add(p, 0, 0), POUNCE_ERR_OUT_OF_RANGE);
+    // With m = 0 no pair fits, so any nonempty batch is a count fault
+    // (n_pairs > min(n, m)), refused before the pair is read.
+    assert_eq!(set(p, &[(0, 0)]), (POUNCE_ERR_COUNT, -1));
+    assert_eq!(set(p, &[]), (POUNCE_OK, -1));
     assert_eq!(declared(p), vec![]);
     free(p);
 }
@@ -339,9 +392,9 @@ fn a_model_with_no_rows_refuses_every_pair() {
 #[test]
 fn add_refuses_a_variable_already_paired_by_an_earlier_add() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     // error-path: AddPounceComplementarityPair
-    assert_eq!(add(p, 1, 1), POUNCE_CC_ERR_VAR_ALREADY);
+    assert_eq!(add(p, 1, 1), POUNCE_ERR_VAR_ALREADY_PAIRED);
     assert_eq!(declared(p), vec![(0, 1)]);
     free(p);
 }
@@ -349,9 +402,9 @@ fn add_refuses_a_variable_already_paired_by_an_earlier_add() {
 #[test]
 fn add_refuses_a_row_already_paired_by_an_earlier_add() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     // error-path: AddPounceComplementarityPair
-    assert_eq!(add(p, 0, 2), POUNCE_CC_ERR_ROW_ALREADY);
+    assert_eq!(add(p, 0, 2), POUNCE_ERR_ROW_ALREADY_PAIRED);
     assert_eq!(declared(p), vec![(0, 1)]);
     free(p);
 }
@@ -359,9 +412,12 @@ fn add_refuses_a_row_already_paired_by_an_earlier_add() {
 #[test]
 fn set_refuses_a_duplicate_variable_inside_the_batch() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     // error-path: SetPounceComplementarityPairs
-    assert_eq!(set(p, &[(1, 2), (0, 2)]), (POUNCE_CC_ERR_VAR_ALREADY, 1));
+    assert_eq!(
+        set(p, &[(1, 2), (0, 2)]),
+        (POUNCE_ERR_VAR_ALREADY_PAIRED, 1)
+    );
     assert_eq!(declared(p), vec![(0, 1)]);
     free(p);
 }
@@ -369,9 +425,12 @@ fn set_refuses_a_duplicate_variable_inside_the_batch() {
 #[test]
 fn set_refuses_a_duplicate_row_inside_the_batch_and_names_the_second() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     // error-path: SetPounceComplementarityPairs
-    assert_eq!(set(p, &[(1, 2), (1, 1)]), (POUNCE_CC_ERR_ROW_ALREADY, 1));
+    assert_eq!(
+        set(p, &[(1, 2), (1, 1)]),
+        (POUNCE_ERR_ROW_ALREADY_PAIRED, 1)
+    );
     assert_eq!(declared(p), vec![(0, 1)]);
     free(p);
 }
@@ -379,24 +438,27 @@ fn set_refuses_a_duplicate_row_inside_the_batch_and_names_the_second() {
 #[test]
 fn set_refuses_out_of_range_and_names_the_pair() {
     let p = create_qpec(0);
-    assert_eq!(add(p, 0, 1), POUNCE_CC_OK);
+    assert_eq!(add(p, 0, 1), POUNCE_OK);
     // error-path: SetPounceComplementarityPairs
-    assert_eq!(set(p, &[(1, 2), (0, 3)]), (POUNCE_CC_ERR_OUT_OF_RANGE, 1));
-    assert_eq!(set(p, &[(2, 1)]), (POUNCE_CC_ERR_OUT_OF_RANGE, 0));
+    assert_eq!(set(p, &[(1, 2), (0, 3)]), (POUNCE_ERR_OUT_OF_RANGE, 1));
+    assert_eq!(set(p, &[(2, 1)]), (POUNCE_ERR_OUT_OF_RANGE, 0));
     assert_eq!(declared(p), vec![(0, 1)]);
     free(p);
 }
 
-/// The refusal order is the classifier's, pair by pair: a duplicate in
-/// pair 1 is reported before an out-of-range index in pair 2, not after
-/// a range pre-pass over the whole batch.
+/// Argument faults are reported in batch order, each pair's checks in
+/// kind order (range, variable, row): the first refused pair is named, not
+/// the first fault of the earliest kind. (Three pairs would exceed
+/// `min(n, m) = 2` here, a count fault; `tests/check_order.rs`.)
 #[test]
 fn set_reports_the_first_refused_pair_in_declaration_order() {
     let p = create_qpec(0);
     assert_eq!(
-        set(p, &[(0, 1), (1, 1), (9, 9)]),
-        (POUNCE_CC_ERR_VAR_ALREADY, 1)
+        set(p, &[(0, 1), (1, 1)]),
+        (POUNCE_ERR_VAR_ALREADY_PAIRED, 1)
     );
+    assert_eq!(set(p, &[(0, 1), (9, 1)]), (POUNCE_ERR_OUT_OF_RANGE, 1));
+    assert_eq!(set(p, &[(9, 1), (1, 1)]), (POUNCE_ERR_OUT_OF_RANGE, 0));
     assert_eq!(declared(p), vec![]);
     free(p);
 }
@@ -404,10 +466,10 @@ fn set_reports_the_first_refused_pair_in_declaration_order() {
 #[test]
 fn set_is_all_or_nothing() {
     let p = create_qpec(0);
-    assert_eq!(set(p, &[(1, 2)]), (POUNCE_CC_OK, -1));
+    assert_eq!(set(p, &[(1, 2)]), (POUNCE_OK, -1));
     // First pair valid, second refused: neither is stored, the old set
     // stays — not replaced by the valid prefix, not emptied.
-    assert_eq!(set(p, &[(0, 1), (1, 7)]), (POUNCE_CC_ERR_OUT_OF_RANGE, 1));
+    assert_eq!(set(p, &[(0, 1), (1, 7)]), (POUNCE_ERR_OUT_OF_RANGE, 1));
     assert_eq!(declared(p), vec![(1, 2)]);
     free(p);
 }
@@ -416,8 +478,11 @@ fn set_is_all_or_nothing() {
 fn fortran_style_set_reports_the_batch_position_zero_based() {
     let p = create_qpec(1);
     // error-path: SetPounceComplementarityPairs
-    assert_eq!(set(p, &[(1, 2), (2, 2)]), (POUNCE_CC_ERR_VAR_ALREADY, 1));
-    assert_eq!(set(p, &[(0, 2)]), (POUNCE_CC_ERR_OUT_OF_RANGE, 0));
+    assert_eq!(
+        set(p, &[(1, 2), (2, 2)]),
+        (POUNCE_ERR_VAR_ALREADY_PAIRED, 1)
+    );
+    assert_eq!(set(p, &[(0, 2)]), (POUNCE_ERR_OUT_OF_RANGE, 0));
     assert_eq!(declared(p), vec![]);
     free(p);
 }
@@ -429,9 +494,9 @@ fn fortran_style_set_reports_the_batch_position_zero_based() {
 /// declared first), and return the code; asserts the set is unchanged.
 fn shape(xl: Number, xu: Number, gl: Number, gu: Number) -> i32 {
     let p = create(&[xl, 0.0, 0.0], &[xu, INF, INF], &[gl, 0.0], &[gu, INF], 0);
-    assert_eq!(add(p, 1, 2), POUNCE_CC_OK);
+    assert_eq!(add(p, 1, 2), POUNCE_OK);
     let code = add(p, 0, 0);
-    if code != POUNCE_CC_OK {
+    if code != POUNCE_OK {
         assert_eq!(declared(p), vec![(1, 2)]);
     }
     free(p);
@@ -441,33 +506,33 @@ fn shape(xl: Number, xu: Number, gl: Number, gu: Number) -> i32 {
 #[test]
 fn shape_refuses_a_boxed_row() {
     // error-path: AddPounceComplementarityPair
-    assert_eq!(shape(0.0, INF, 0.0, 1.0), POUNCE_CC_ERR_SHAPE);
+    assert_eq!(shape(0.0, INF, 0.0, 1.0), POUNCE_ERR_SHAPE);
 }
 
 #[test]
 fn shape_refuses_an_equality_row() {
-    assert_eq!(shape(0.0, INF, 0.0, 0.0), POUNCE_CC_ERR_SHAPE);
+    assert_eq!(shape(0.0, INF, 0.0, 0.0), POUNCE_ERR_SHAPE);
 }
 
 #[test]
 fn shape_refuses_both_sides_free() {
-    assert_eq!(shape(-INF, INF, -INF, INF), POUNCE_CC_ERR_SHAPE);
+    assert_eq!(shape(-INF, INF, -INF, INF), POUNCE_ERR_SHAPE);
 }
 
 #[test]
 fn shape_refuses_a_free_variable_with_a_one_sided_row() {
-    assert_eq!(shape(-INF, INF, 0.0, INF), POUNCE_CC_ERR_SHAPE);
+    assert_eq!(shape(-INF, INF, 0.0, INF), POUNCE_ERR_SHAPE);
 }
 
 #[test]
 fn shape_refuses_a_one_sided_variable_with_a_free_row() {
-    assert_eq!(shape(0.0, INF, -INF, INF), POUNCE_CC_ERR_SHAPE);
+    assert_eq!(shape(0.0, INF, -INF, INF), POUNCE_ERR_SHAPE);
 }
 
 #[test]
 fn shape_refuses_a_fixed_variable_with_a_free_row() {
     // `is_mixed` needs l < u; the MOI helper (S1-I9) maps this to "no pair".
-    assert_eq!(shape(1.0, 1.0, -INF, INF), POUNCE_CC_ERR_SHAPE);
+    assert_eq!(shape(1.0, 1.0, -INF, INF), POUNCE_ERR_SHAPE);
 }
 
 /// The control for the six refusals above: the same helper, a shape that
@@ -475,17 +540,17 @@ fn shape_refuses_a_fixed_variable_with_a_free_row() {
 /// helper.
 #[test]
 fn shape_helper_accepts_a_lowered_shape() {
-    assert_eq!(shape(0.0, 2.0, -INF, INF), POUNCE_CC_OK); // mixed
-    assert_eq!(shape(0.0, INF, 0.0, INF), POUNCE_CC_OK); // one-sided
+    assert_eq!(shape(0.0, 2.0, -INF, INF), POUNCE_OK); // mixed
+    assert_eq!(shape(0.0, INF, 0.0, INF), POUNCE_OK); // one-sided
 }
 
 #[test]
 fn set_refuses_a_shape_and_names_the_pair() {
     // Row 0 boxed [0, 1]: any pair on it is refused.
     let p = create(&X_L, &X_U, &[0.0, 0.0], &[1.0, INF], 0);
-    assert_eq!(add(p, 1, 2), POUNCE_CC_OK);
+    assert_eq!(add(p, 1, 2), POUNCE_OK);
     // error-path: SetPounceComplementarityPairs
-    assert_eq!(set(p, &[(1, 2), (0, 1)]), (POUNCE_CC_ERR_SHAPE, 1));
+    assert_eq!(set(p, &[(1, 2), (0, 1)]), (POUNCE_ERR_SHAPE, 1));
     assert_eq!(declared(p), vec![(1, 2)]);
     free(p);
 }
@@ -500,6 +565,6 @@ fn qpec_bounds_are_the_python_model() {
     assert_eq!(G_U, [INF, INF]);
     assert_eq!(qpec::PAIRS, [(0, 1), (1, 2)]);
     let p = create_qpec(0);
-    assert_eq!(set(p, &qpec::PAIRS), (POUNCE_CC_OK, -1));
+    assert_eq!(set(p, &qpec::PAIRS), (POUNCE_OK, -1));
     free(p);
 }

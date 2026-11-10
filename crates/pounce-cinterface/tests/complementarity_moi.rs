@@ -196,6 +196,49 @@ fn create(xl: Number, xu: Number) -> IpoptProblem {
     create_with_row(xl, xu, -INF, INF)
 }
 
+/// Row 0's bounds in `view` (`POUNCE_BOUNDS_VIEW_USER` / `_EFFECTIVE`):
+/// the direct observation of whether the helper wrote a bound. (A second
+/// call on the row cannot tell: a row the helper used is
+/// `ROW_ALREADY_PAIRED` whether or not it was written, since the
+/// already-used checks come before the row-free check.)
+fn row0(prob: IpoptProblem, view: i32) -> (Number, Number) {
+    let (r, mut gl, mut gu) = ([0 as Index], [Number::NAN], [Number::NAN]);
+    let code = unsafe {
+        GetPounceBounds(
+            prob,
+            0,
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            1,
+            r.as_ptr(),
+            gl.as_mut_ptr(),
+            gu.as_mut_ptr(),
+            view,
+            0,
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(code, POUNCE_OK);
+    (gl[0], gu[0])
+}
+
+/// Row 0 as the solve sees it.
+fn effective_row0(prob: IpoptProblem) -> (Number, Number) {
+    row0(prob, POUNCE_BOUNDS_VIEW_EFFECTIVE)
+}
+
+/// Assert row 0 is still free in both views: nothing was written.
+fn assert_row0_free(prob: IpoptProblem) {
+    for view in [POUNCE_BOUNDS_VIEW_USER, POUNCE_BOUNDS_VIEW_EFFECTIVE] {
+        let (gl, gu) = row0(prob, view);
+        assert!(
+            gl <= -1e19 && gu >= 1e19,
+            "view {view}: row 0 is [{gl}, {gu}]"
+        );
+    }
+}
+
 fn complements(prob: IpoptProblem, row: Index, var: Index) -> i32 {
     unsafe { AddPounceComplementsConstraint(prob, row, var) }
 }
@@ -281,8 +324,8 @@ fn free(prob: IpoptProblem) {
 // ---------------------------------------------------------------------------
 
 /// Row 1 — `x ∈ [0, 2]`, `F = x + y` free: a native mixed pair, the row
-/// left free (a second call on it is `ROW_ALREADY_PAIRED`, not
-/// `ROW_NOT_FREE`, which it would be had a bound been written).
+/// left free (read back through `GetPounceBounds`; a second call on it is
+/// `ROW_ALREADY_PAIRED`).
 ///
 /// Branches: `x = 0, F >= 0` / `0 < x < 2, F = 0` / `x = 2, F <= 0`.
 /// * Target `(1, 1)` (unconstrained optimum, `F = 2`, interior `x`, so the
@@ -306,10 +349,8 @@ fn mixed_row_declares_a_native_mixed_pair_and_leaves_the_row_free() {
     let prob = create(0.0, 2.0);
     assert_eq!(complements(prob, 0, 0), POUNCE_COMPLEMENTS_PAIR_MIXED);
     assert_eq!(declared(prob), vec![(0, 0)]);
-    assert_eq!(
-        complements(prob, 0, 1),
-        POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED
-    );
+    assert_row0_free(prob);
+    assert_eq!(complements(prob, 0, 1), POUNCE_ERR_ROW_ALREADY_PAIRED);
     let s = solve(prob, mixed(1.0, 1.0), [1.0, 0.5]);
     assert_answer(&s, [0.0, 1.0], 1.0, 1.0);
     assert!(s.total_iterations.is_some(), "the driver did not run");
@@ -331,8 +372,8 @@ fn lower(a: Number, b: Number) -> Params {
 
 /// Row 2 — `x >= 1` only, `F = x + y - 4` free: the helper writes
 /// `g_L = 0` (`F >= 0`) and declares the one-sided pair
-/// `(x - 1) · F = 0`. The edit is observable: a second call on the row is
-/// `ROW_NOT_FREE`.
+/// `(x - 1) · F = 0`. The edit is observable in the effective bounds, and
+/// the user bounds keep the free row the caller gave.
 ///
 /// Branches: `x = 1, F >= 0` / `x > 1, F = 0`.
 /// * Target `(2, 5)` (`F = 3 > 0`, so `F >= 0` alone keeps it; the pair
@@ -349,7 +390,9 @@ fn lower_row_writes_f_nonnegative_and_declares_a_one_sided_pair() {
     let prob = create(1.0, INF);
     assert_eq!(complements(prob, 0, 0), POUNCE_COMPLEMENTS_PAIR_LOWER);
     assert_eq!(declared(prob), vec![(0, 0)]);
-    assert_eq!(complements(prob, 0, 1), POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE);
+    assert_eq!(effective_row0(prob), (0.0, INF));
+    assert_eq!(row0(prob, POUNCE_BOUNDS_VIEW_USER), (-INF, INF));
+    assert_eq!(complements(prob, 0, 1), POUNCE_ERR_ROW_ALREADY_PAIRED);
     let s = solve(prob, lower(2.0, 5.0), [2.0, 2.0]);
     assert_answer(&s, [1.0, 5.0], 2.0, 1.0);
     let s = solve(prob, lower(0.0, 0.0), [2.0, 2.0]);
@@ -393,7 +436,7 @@ fn lower_row_equals_the_native_formulation_and_python_to_the_bit() {
         let native = create_with_row(1.0, INF, 0.0, INF);
         assert_eq!(
             unsafe { AddPounceComplementarityPair(native, 0, 0) },
-            POUNCE_CC_OK
+            POUNCE_OK
         );
         let s_moi = solve(moi, lower(a, b), [2.0, 2.0]);
         let s_nat = solve(native, lower(a, b), [2.0, 2.0]);
@@ -418,7 +461,7 @@ fn lower_row_equals_the_native_formulation_and_python_to_the_bit() {
 
 /// Row 3 — `x <= 2` only, `F = x - y + 1` free: the mirror of row 2. The
 /// helper writes `g_U = 0` (`F <= 0`) and declares the one-sided pair
-/// `(2 - x) · F = 0`; a second call on the row is `ROW_NOT_FREE`.
+/// `(2 - x) · F = 0`; the edit is read back from the effective bounds.
 ///
 /// Branches: `x = 2, F <= 0` (`y >= 3`) / `x < 2, F = 0` (`y = x + 1`).
 /// * Target `(1, 5)` (`F = -3 < 0`, so `F <= 0` alone keeps it; the pair
@@ -442,7 +485,8 @@ fn upper_row_writes_f_nonpositive_and_declares_a_one_sided_pair() {
     let prob = create(-INF, 2.0);
     assert_eq!(complements(prob, 0, 0), POUNCE_COMPLEMENTS_PAIR_UPPER);
     assert_eq!(declared(prob), vec![(0, 0)]);
-    assert_eq!(complements(prob, 0, 1), POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE);
+    assert_eq!(effective_row0(prob), (-INF, 0.0));
+    assert_eq!(complements(prob, 0, 1), POUNCE_ERR_ROW_ALREADY_PAIRED);
     let s = solve(prob, upper(1.0, 5.0), [1.0, 1.0]);
     assert_answer(&s, [2.0, 5.0], -2.0, 1.0);
     let s = solve(prob, upper(3.0, 0.0), [1.0, 1.0]);
@@ -451,8 +495,8 @@ fn upper_row_writes_f_nonpositive_and_declares_a_one_sided_pair() {
 }
 
 /// Row 4 — `x` free, `F = x + y - 3` free: the helper fixes the row,
-/// `g_L = g_U = 0` (`F = 0`), and declares no pair; a second call on the
-/// row is `ROW_NOT_FREE`. With no pair the solve is the plain NLP path.
+/// `g_L = g_U = 0` (`F = 0`), and declares no pair; the edit is read back
+/// from the effective bounds. With no pair the solve is the plain NLP path.
 ///
 /// The answer is the projection of the target on `x + y = 3`:
 /// * target `(1, 5)` (`F = 3 > 0`: `F <= 0` would bind, `F >= 0` would
@@ -473,7 +517,8 @@ fn free_variable_fixes_the_row_to_an_equality_and_declares_no_pair() {
         POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR
     );
     assert_eq!(declared(prob), vec![]);
-    assert_eq!(complements(prob, 0, 1), POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE);
+    assert_eq!(effective_row0(prob), (0.0, 0.0));
+    assert_eq!(complements(prob, 0, 1), POUNCE_ERR_ROW_ALREADY_PAIRED);
     let s = solve(prob, free_x(1.0, 5.0), [0.0, 0.0]);
     assert_answer(&s, [-0.5, 3.5], 0.0, 4.5);
     assert_eq!(s.total_iterations, None, "the driver ran without a pair");
@@ -483,8 +528,9 @@ fn free_variable_fixes_the_row_to_an_equality_and_declares_no_pair() {
 }
 
 /// Row 5 — `x` fixed at `1`, `F = x + y - 3` free: nothing is written, no
-/// pair declared. A second call on the row is `ROW_ALREADY_PAIRED` (the
-/// helper remembers the row), not `ROW_NOT_FREE` — so no bound was written.
+/// pair declared, the row left free (read back through `GetPounceBounds`).
+/// A second call on the row is `ROW_ALREADY_PAIRED`: the helper remembers
+/// the row even though it declared nothing.
 ///
 /// With `x = 1` the answer is `(1, b)`, objective 0, on either side of
 /// `F = 0`:
@@ -507,10 +553,8 @@ fn fixed_variable_declares_no_pair_and_leaves_f_free() {
         POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR
     );
     assert_eq!(declared(prob), vec![]);
-    assert_eq!(
-        complements(prob, 0, 1),
-        POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED
-    );
+    assert_row0_free(prob);
+    assert_eq!(complements(prob, 0, 1), POUNCE_ERR_ROW_ALREADY_PAIRED);
     let s = solve(prob, fixed(1.0, 1.0), [1.0, 0.0]);
     assert_answer(&s, [1.0, 1.0], -1.0, 0.0);
     assert_eq!(s.total_iterations, None);
@@ -537,7 +581,7 @@ fn an_edit_keeps_earlier_pairs_valid_and_rebuilds_qpec_small_exactly() {
     let prob = qpec::create(&qpec::X_L, &qpec::X_U, &g_l, &qpec::G_U, 0);
     assert_eq!(
         unsafe { AddPounceComplementarityPair(prob, 0, 1) },
-        POUNCE_CC_OK
+        POUNCE_OK
     );
     assert_eq!(complements(prob, 1, 2), POUNCE_COMPLEMENTS_PAIR_LOWER);
     assert_eq!(declared(prob), vec![(0, 1), (1, 2)]);
@@ -545,8 +589,10 @@ fn an_edit_keeps_earlier_pairs_valid_and_rebuilds_qpec_small_exactly() {
     let vars = [1, 2];
     let mut bad = -42;
     assert_eq!(
-        unsafe { SetPounceComplementarityPairs(prob, 2, rows.as_ptr(), vars.as_ptr(), &mut bad) },
-        POUNCE_CC_OK
+        unsafe {
+            SetPounceComplementarityPairs(prob, 2, rows.as_ptr(), vars.as_ptr(), 0, &mut bad)
+        },
+        POUNCE_OK
     );
     assert_eq!(bad, -1);
 
@@ -554,7 +600,7 @@ fn an_edit_keeps_earlier_pairs_valid_and_rebuilds_qpec_small_exactly() {
     for (r, v) in qpec::PAIRS {
         assert_eq!(
             unsafe { AddPounceComplementarityPair(native, r, v) },
-            POUNCE_CC_OK
+            POUNCE_OK
         );
     }
     let run = |p: IpoptProblem| {
@@ -616,10 +662,7 @@ fn assert_untouched(prob: IpoptProblem) {
 #[test]
 fn null_handle_is_refused() {
     // error-path: AddPounceComplementsConstraint
-    assert_eq!(
-        complements(ptr::null_mut(), 0, 0),
-        POUNCE_COMPLEMENTS_ERR_NULL
-    );
+    assert_eq!(complements(ptr::null_mut(), 0, 0), POUNCE_ERR_NULL);
 }
 
 #[test]
@@ -638,7 +681,7 @@ fn out_of_range_indices_are_refused() {
         let prob = two_row_handle(0);
         assert_eq!(
             complements(prob, row, var),
-            POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE,
+            POUNCE_ERR_OUT_OF_RANGE,
             "({row}, {var})"
         );
         assert_untouched(prob);
@@ -653,7 +696,7 @@ fn fortran_style_indices_are_one_based() {
     for (row, var) in [(0, 2), (2, 0), (3, 2), (2, 4), (Index::MIN, 2)] {
         assert_eq!(
             complements(prob, row, var),
-            POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE,
+            POUNCE_ERR_OUT_OF_RANGE,
             "({row}, {var})"
         );
     }
@@ -684,7 +727,7 @@ fn a_row_with_any_finite_bound_is_refused_as_not_free() {
         assert_eq!(complements(prob, 0, 0), POUNCE_COMPLEMENTS_PAIR_MIXED);
         assert_eq!(
             complements(prob, 1, 1),
-            POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE,
+            POUNCE_ERR_ROW_NOT_FREE,
             "row [{gl}, {gu}]"
         );
         assert_eq!(declared(prob), vec![(0, 0)]);
@@ -693,7 +736,7 @@ fn a_row_with_any_finite_bound_is_refused_as_not_free() {
         if (gl, gu) == (0.0, INF) {
             assert_eq!(
                 unsafe { AddPounceComplementarityPair(prob, 1, 1) },
-                POUNCE_CC_OK
+                POUNCE_OK
             );
         }
         free(prob);
@@ -705,22 +748,16 @@ fn a_variable_already_in_a_pair_is_refused() {
     // error-path: AddPounceComplementsConstraint
     // In a native pair (row 0, x), the helper's mixed one here.
     let prob = two_row_handle(0);
-    assert_eq!(
-        complements(prob, 1, 0),
-        POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED
-    );
+    assert_eq!(complements(prob, 1, 0), POUNCE_ERR_VAR_ALREADY_PAIRED);
     assert_untouched(prob);
     free(prob);
     // In a pair declared natively, not through the helper.
     let prob = qpec::create(&qpec::X_L, &qpec::X_U, &[0.0, -INF], &[INF, INF], 0);
     assert_eq!(
         unsafe { AddPounceComplementarityPair(prob, 0, 1) },
-        POUNCE_CC_OK
+        POUNCE_OK
     );
-    assert_eq!(
-        complements(prob, 1, 1),
-        POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED
-    );
+    assert_eq!(complements(prob, 1, 1), POUNCE_ERR_VAR_ALREADY_PAIRED);
     assert_eq!(declared(prob), vec![(0, 1)]);
     assert_eq!(complements(prob, 1, 2), POUNCE_COMPLEMENTS_PAIR_LOWER);
     free(prob);
@@ -731,22 +768,16 @@ fn a_row_already_in_a_pair_is_refused() {
     // error-path: AddPounceComplementsConstraint
     // The helper's mixed pair leaves row 0 free; reusing it is refused.
     let prob = two_row_handle(0);
-    assert_eq!(
-        complements(prob, 0, 1),
-        POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED
-    );
+    assert_eq!(complements(prob, 0, 1), POUNCE_ERR_ROW_ALREADY_PAIRED);
     assert_untouched(prob);
     free(prob);
     // A native mixed pair on a free row, then the helper on that row.
     let prob = qpec::create(&qpec::X_L, &qpec::X_U, &[-INF, -INF], &[INF, INF], 0);
     assert_eq!(
         unsafe { AddPounceComplementarityPair(prob, 1, 0) },
-        POUNCE_CC_OK
+        POUNCE_OK
     );
-    assert_eq!(
-        complements(prob, 1, 2),
-        POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED
-    );
+    assert_eq!(complements(prob, 1, 2), POUNCE_ERR_ROW_ALREADY_PAIRED);
     assert_eq!(declared(prob), vec![(1, 0)]);
     free(prob);
 }
@@ -762,7 +793,7 @@ fn crossed_or_nan_variable_bounds_are_refused() {
         let prob = qpec::create(&x_l, &x_u, &[-INF, -INF], &[INF, INF], 0);
         assert_eq!(
             complements(prob, 0, 0),
-            POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS,
+            POUNCE_ERR_VAR_BOUNDS,
             "x in [{xl}, {xu}]"
         );
         assert_eq!(declared(prob), vec![]);
@@ -772,38 +803,35 @@ fn crossed_or_nan_variable_bounds_are_refused() {
     }
 }
 
-/// Order of the checks: range, then row free, then variable, then row
-/// already used, then the variable's bounds.
+/// Order of the checks (the C API's shared order, `errors.rs`): range, then
+/// variable already used, then row already used, then row free, then the
+/// variable's bounds.
 #[test]
 fn refusals_are_reported_in_a_fixed_order() {
     // error-path: AddPounceComplementsConstraint
-    // A non-free row and a paired variable: ROW_NOT_FREE.
+    // A non-free row and a paired variable: VAR_ALREADY_PAIRED (an argument
+    // fault, before the row's meaning).
     let prob = qpec::create(&qpec::X_L, &qpec::X_U, &[0.0, 0.0], &[INF, INF], 0);
     assert_eq!(
         unsafe { AddPounceComplementarityPair(prob, 0, 1) },
-        POUNCE_CC_OK
+        POUNCE_OK
     );
-    assert_eq!(complements(prob, 1, 1), POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE);
+    assert_eq!(complements(prob, 1, 2), POUNCE_ERR_ROW_NOT_FREE);
+    assert_eq!(complements(prob, 1, 1), POUNCE_ERR_VAR_ALREADY_PAIRED);
     // Out of range beats not free.
-    assert_eq!(complements(prob, 1, 7), POUNCE_COMPLEMENTS_ERR_OUT_OF_RANGE);
+    assert_eq!(complements(prob, 1, 7), POUNCE_ERR_OUT_OF_RANGE);
     free(prob);
     // A used variable on a used row: VAR_ALREADY_PAIRED.
     let prob = two_row_handle(0);
-    assert_eq!(
-        complements(prob, 0, 0),
-        POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED
-    );
+    assert_eq!(complements(prob, 0, 0), POUNCE_ERR_VAR_ALREADY_PAIRED);
     free(prob);
     // A used row with crossed variable bounds: ROW_ALREADY_PAIRED.
     let x_l = [0.0, 3.0, 0.0];
     let x_u = [2.0, 1.0, INF];
     let prob = qpec::create(&x_l, &x_u, &[-INF, -INF], &[INF, INF], 0);
     assert_eq!(complements(prob, 0, 0), POUNCE_COMPLEMENTS_PAIR_MIXED);
-    assert_eq!(
-        complements(prob, 0, 1),
-        POUNCE_COMPLEMENTS_ERR_ROW_ALREADY_PAIRED
-    );
-    assert_eq!(complements(prob, 1, 1), POUNCE_COMPLEMENTS_ERR_VAR_BOUNDS);
+    assert_eq!(complements(prob, 0, 1), POUNCE_ERR_ROW_ALREADY_PAIRED);
+    assert_eq!(complements(prob, 1, 1), POUNCE_ERR_VAR_BOUNDS);
     free(prob);
 }
 
@@ -823,10 +851,7 @@ fn a_variable_used_by_a_no_pair_call_is_refused_in_a_second_call() {
         complements(prob, 0, 0),
         POUNCE_COMPLEMENTS_ROW_FIXED_NO_PAIR
     );
-    assert_eq!(
-        complements(prob, 1, 0),
-        POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED
-    );
+    assert_eq!(complements(prob, 1, 0), POUNCE_ERR_VAR_ALREADY_PAIRED);
     // Row 1 untouched.
     assert_eq!(complements(prob, 1, 1), POUNCE_COMPLEMENTS_PAIR_LOWER);
     free(prob);
@@ -838,10 +863,7 @@ fn a_variable_used_by_a_no_pair_call_is_refused_in_a_second_call() {
         complements(prob, 0, 0),
         POUNCE_COMPLEMENTS_VAR_FIXED_NO_PAIR
     );
-    assert_eq!(
-        complements(prob, 1, 0),
-        POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED
-    );
+    assert_eq!(complements(prob, 1, 0), POUNCE_ERR_VAR_ALREADY_PAIRED);
     assert_eq!(declared(prob), vec![]);
     free(prob);
 }
@@ -854,15 +876,13 @@ fn clearing_the_pairs_does_not_undo_an_edit_or_free_a_row() {
     assert_eq!(complements(prob, 0, 1), POUNCE_COMPLEMENTS_PAIR_LOWER);
     assert_eq!(unsafe { ClearPounceComplementarityPairs(prob) }, 1);
     assert_eq!(declared(prob), vec![]);
-    assert_eq!(complements(prob, 0, 2), POUNCE_COMPLEMENTS_ERR_ROW_NOT_FREE);
-    assert_eq!(
-        complements(prob, 1, 1),
-        POUNCE_COMPLEMENTS_ERR_VAR_ALREADY_PAIRED
-    );
+    assert_eq!(effective_row0(prob), (0.0, INF), "the clear undid the edit");
+    assert_eq!(complements(prob, 0, 2), POUNCE_ERR_ROW_ALREADY_PAIRED);
+    assert_eq!(complements(prob, 1, 1), POUNCE_ERR_VAR_ALREADY_PAIRED);
     // The edited row still takes the native pair it was lowered to.
     assert_eq!(
         unsafe { AddPounceComplementarityPair(prob, 0, 1) },
-        POUNCE_CC_OK
+        POUNCE_OK
     );
     free(prob);
 }
