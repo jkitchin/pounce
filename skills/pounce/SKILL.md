@@ -1,6 +1,6 @@
 ---
 name: pounce
-description: Install pounce, and inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks how to install or set up pounce or pounce-studio, or asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, pre-flight an AMPL .nl or GAMS .gms file before solving, check or fix a starting point (check-x0), set up a warm start, or solve or interpret a model with complementarity constraints (AMPL complements, Pyomo mpec, MPCC).
+description: Install pounce, and inspect and diagnose pounce solve reports via the pounce-studio CLI. Use when the user asks how to install or set up pounce or pounce-studio, or asks to analyze a pounce.solve-report JSON, diagnose a stuck or non-converging solve, compare two runs, look up a per-iteration column or finding code, pre-flight an AMPL .nl or GAMS .gms file before solving, check or fix a starting point (check-x0), find out what is wrong with a model without solving it (pounce diagnose — contradictory or duplicate rows, domain errors, NaN sources, dependent equations, LICQ/MFCQ and second-order checks at a .sol), set up a warm start, or solve or interpret a model with complementarity constraints (AMPL complements, Pyomo mpec, MPCC).
 ---
 
 # pounce — solver post-mortem and pre-flight
@@ -17,6 +17,7 @@ Use this skill when the user asks any of:
 - "compare these two runs"
 - "what does `inf_pr` mean?"
 - "is this .nl file going to be a problem?"
+- "what is wrong with this model?" / "why is it infeasible?"
 - "what happened in iteration 47?"
 - "how do I install pounce?"
 - "my model has complementarity constraints / is an MPCC"
@@ -136,6 +137,60 @@ row, and derivative scale spread. Run it before the first solve of a
 new model, after any `Invalid_Number_Detected`, and whenever a warm
 start saved no iterations.
 
+### Model doctor (`diagnose`, on the `pounce` binary)
+
+```sh
+pounce diagnose <path.nl> [--json]               # check the model, no solve
+pounce diagnose <path.nl> --sol <result.sol>     # ... and the solution a solve reached
+pounce diagnose <path.nl> --x0-file cand.txt     # ... at a candidate point
+pounce diagnose <path.nl> --extra-point p.txt    # compare rank at another point
+```
+
+Checks the model without solving it and reports findings in
+`pounce.diagnose/v1`. Every finding has a `severity` and a `basis`:
+
+- `proof` and `structural` findings hold at every point;
+- `numerical` findings hold at the named point only;
+- `heuristic` findings are risks, not facts.
+
+Exit code 22 means at least one finding is an error; 0 means none.
+
+**What it reports:**
+- contradictory bounds, rows, and rows that can never hold, proved from
+  the model;
+- duplicate and parallel rows, and bounds written as constraints;
+- unbounded objective directions;
+- operators whose arguments the bounds don't keep in their domain;
+- which operator made a value or derivative NaN/Inf;
+- structural and numerical rank, the smallest sets of dependent
+  equations, and whether that rank holds up (`rank_robustness`);
+- coefficient and Jacobian scale ranges, and Hessian inertia;
+- seeded counterexamples to convexity;
+- everything `check-x0` reports.
+
+**What `--sol` adds:**
+- a KKT audit (stationarity, multiplier signs, complementarity);
+- LICQ, with the dependent active constraints and how far their
+  multipliers can move;
+- MFCQ, with a cancelling witness when it fails;
+- the reduced Hessian (negative curvature means a saddle, not a
+  minimizer).
+
+**When to use it:** run it first on a new model, after
+`Infeasible_Problem_Detected`, `Invalid_Number_Detected` or
+`Restoration_Failed`, and with `--sol` when a "solved" answer looks
+wrong.
+
+**Python and MCP:** `pounce.diagnose("m.nl", sol_file=...)` from
+Python, or the `diagnose_model` MCP tool.
+
+**Reading findings:**
+- Go in severity order.
+- Quote the `basis` when you report a finding.
+- Never present a `numerical` finding as true of the whole model.
+
+Docs: `docs/src/diagnose.md`.
+
 ## Running a fresh solve
 
 `pounce-studio` does the analysis; the `pounce` CLI does the solve.
@@ -218,6 +273,20 @@ pounce-studio summary /path/to/report.json
 The `status` field (`SolveSucceeded`, `MaximumIterationsExceeded`, …)
 and `final_kkt_error` tell you. If the status is not
 `SolveSucceeded`, follow up with `diagnose`.
+
+### "What is wrong with this model?" / "Why is it infeasible?"
+
+```sh
+pounce diagnose model.nl                        # before (or instead of) solving
+pounce diagnose model.nl --sol model.sol        # at the point the solve stopped
+```
+
+Start with the `error` findings whose basis is `proof`. Those are true at
+every point (e.g. `inconsistent_parallel_rows`, `row_cannot_be_satisfied`),
+so the model as written is infeasible or ill-posed. Then the
+`structural`/`numerical` warnings (`dependent_equality_rows`,
+`licq_fails`, `mfcq_fails`) explain degeneracy, slow convergence and
+non-unique multipliers.
 
 ### "Why is this solve stuck?"
 

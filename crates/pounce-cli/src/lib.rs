@@ -11,6 +11,7 @@ pub mod cli;
 pub mod convex_sens;
 pub mod counting_tnlp;
 pub mod debug_repl;
+pub mod diagnose;
 pub mod no_hessian_tnlp;
 // The `.nl` pipeline (reader, AD tape, external functions, FBBT lowering)
 // now lives in the leaf `pounce-nl` crate so the Python bindings can reuse

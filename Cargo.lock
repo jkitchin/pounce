@@ -914,6 +914,8 @@ version = "0.16.0"
 dependencies = [
  "anstream",
  "anstyle",
+ "faer",
+ "feral",
  "nix",
  "pounce-algorithm",
  "pounce-cinterface",

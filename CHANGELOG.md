@@ -10,6 +10,53 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`pounce diagnose`: check a model without solving it (gh#1160, phase 1).**
+  A new CLI subcommand, `pounce.diagnose()` in Python and a
+  `diagnose_model` Studio MCP tool. It reports findings in one schema
+  (`pounce.diagnose/v1`). Each finding has a severity and an evidence
+  basis: `proof`, `structural`, `numerical` at a named point, or
+  `heuristic`. A check that cannot run says why.
+  - *Proved from the model:* crossed bounds; contradictory or duplicate
+    parallel rows; single-variable rows that are really bounds, and that
+    contradict each other or the variable's own bounds; constant rows that
+    cannot hold; unbounded objective directions; rows whose interval
+    enclosure over the box misses their bounds.
+  - *Domain risk:* operators (`log`, `sqrt`, `/`, fractional powers,
+    `acos`, …) whose argument the bounds do not keep inside the operator's
+    domain, reported as certain, possible or at the boundary. Also flags
+    `atan(y/x)` where `x` can be 0.
+  - *At a point:* the operator that turned a value or derivative into
+    NaN/Inf and why. The solver's interior clamp is taken into account.
+    Also reported: structural rank (Dulmage–Mendelsohn over-determined
+    block), numerical rank of the equality Jacobian with
+    inclusion-minimal dependent row sets and their cancelling combination,
+    Jacobian row/column scale spread, and every `check-x0` finding.
+  - *Static ranges:* linear and quadratic coefficients, right-hand sides
+    and finite bounds, with the extremes named. Wide ranges and
+    sentinel-sized finite bounds are flagged.
+  - Exit code 22 when any finding is an error. Docs:
+    `docs/src/diagnose.md`.
+  - *Phase 2, at a solution (`--sol`):*
+    - KKT audit: stationarity, multiplier signs, complementarity, weakly
+      and nearly active constraints. The `.sol` sign conventions are
+      resolved empirically; bound multipliers come from the
+      `ipopt_zL_out` / `ipopt_zU_out` suffixes.
+    - LICQ, with minimal dependent active sets and the range over which
+      non-unique multipliers can move.
+    - MFCQ, via Wolfe's minimum-norm point, with a cancelling witness when
+      it fails and a verified direction when it holds.
+    - The reduced Hessian's second-order condition.
+  - *Phase 2, at any point:*
+    - Rank robustness under a tolerance sweep, row/column equilibration,
+      a second rank method, and other points (`--extra-point`). The second
+      method is the inertia of `[[I, Jᵀ], [J, 0]]` under pounce's sparse
+      LDLᵀ (feral), whose zero count is the rank deficiency.
+    - That inertia count is also the fallback for `numerical_rank` and
+      `licq` when a block is too large for the dense SVD: a count without
+      localization, instead of "unavailable".
+    - Hessian inertia.
+    - Seeded, replayable Jensen counterexamples to the curvature each
+      function's bounds need for a convex problem.
 - **One error namespace for the C API.** Every POUNCE C extension refuses
   with a negative `POUNCE_ERR_*` code whose value means the same thing
   whichever function returns it, and succeeds with `POUNCE_OK` (0), so a

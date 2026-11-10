@@ -61,6 +61,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ._minima import find_minima, MinimaResult
     from .trf import trf_minimize, TRFResult, TRFConfig
     from ._preflight import preflight, PreflightReport
+    from ._diagnose import diagnose, DiagnoseReport
     from ._starts import (
         ProjectionReport,
         RaceCandidate,
@@ -110,6 +111,8 @@ _LAZY = {
     "TRFConfig": "trf",
     "preflight": "_preflight",
     "PreflightReport": "_preflight",
+    "diagnose": "_diagnose",
+    "DiagnoseReport": "_diagnose",
     "ProjectionReport": "_starts",
     "RaceCandidate": "_starts",
     "RaceReport": "_starts",
@@ -148,7 +151,7 @@ _LAZY = {
 # explicit `import pounce.qp`.
 _LAZY_SUBMODULES = frozenset(
     {"_continuation", "_minimize", "_nlp_batch", "_curve_fit", "_minima", "trf",
-     "_preflight", "_starts", "_critical", "qp", "sos", "bvp", "ode"}
+     "_preflight", "_diagnose", "_starts", "_critical", "qp", "sos", "bvp", "ode"}
 )
 
 
@@ -204,6 +207,9 @@ __all__ = [
     # (see docs: initialization.md)
     "preflight",
     "PreflightReport",
+    # Model doctor: check a .nl without solving it (see docs: diagnose.md)
+    "diagnose",
+    "DiagnoseReport",
     "WarmStart",
     "TransferContext",
     "ProblemSignature",

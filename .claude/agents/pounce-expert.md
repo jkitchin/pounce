@@ -118,6 +118,9 @@ and worth reading. Most crates mirror a directory of Ipopt's source tree.
     - `src/main.rs` is the driver.
     - `src/dispatch.rs` holds `solver_selection` classification and routing.
     - `src/cli.rs` holds the flags.
+    - The subcommands `check-x0` (`src/check_x0.rs`), `verify` (`src/verify.rs`) and
+      `diagnose` (`src/diagnose/`, the model doctor) are dispatched in `main.rs` before
+      the solve path.
   - `pounce-py`: the Python extension `pounce._pounce`, built with maturin from
     `python/pyproject.toml`.
   - `pounce-cinterface`: the Ipopt C ABI (`CreateIpoptProblem`/`IpoptSolve`), so cyipopt,
@@ -203,7 +206,17 @@ and worth reading. Most crates mirror a directory of Ipopt's source tree.
    `skills/pounce` skill wraps them. Before a solve, `pounce check-x0 model.nl --json`
    evaluates the model at the starting point and `pounce-studio`'s pre-flight inspects the
    input; together they catch bad starts and inputs. After a solve, `pounce verify`
-   re-checks a returned point.
+   re-checks a returned point. `pounce diagnose model.nl [--sol model.sol]` is the model
+   doctor and needs no solve:
+   - it proves contradictions and unbounded rays from the algebra;
+   - it localizes NaN/Inf to an operator;
+   - it reports structural and numerical rank with minimal dependent sets, and how robust
+     they are;
+   - with `--sol`, it audits KKT, LICQ, MFCQ and the reduced Hessian at the solution;
+   - each finding is tagged with its basis (`proof` / `structural` / `numerical` at a named
+     point / `heuristic`).
+
+   Source: `pounce-cli/src/diagnose/`. Docs: `docs/src/diagnose.md`.
 2. **Run the kill switches first.** Each disables one pounce heuristic. If one flips the
    outcome, that heuristic is the mechanism, established in one run:
 

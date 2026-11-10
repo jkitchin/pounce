@@ -939,6 +939,10 @@ interior clamp will move the point, initial constraint violation,
 derivative scale spread, and the factors automatic scaling will pick
 here.
 
+`check-x0` is also one section of [`pounce diagnose`](diagnose.md), which adds
+the operator behind each NaN/Inf, domain risks over the bounds, and degeneracy
+checks.
+
 ```sh
 pounce check-x0 model.nl              # text report; --json for tools
 pounce check-x0 model.nl --x0-file candidate.txt

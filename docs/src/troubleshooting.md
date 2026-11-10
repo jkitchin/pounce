@@ -34,8 +34,9 @@ walks through adding it.
 | Collocation, optimal-control or PDE-in-time model that is slow per iteration | [`feral_ordering=metis`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
 | Iter count looks fine but seconds-per-iter is dominated by the linear solve on a hard QCQP / banded problem | [`feral_ordering=auto_race`](#feral-ordering-when-the-adaptive-dispatcher-guesses-wrong) |
 | `alpha_pr` halves toward `1/128` while `\|\|d\|\|` grows and the dual residual stalls | [`feral_singular_pivot_floor`](#feral_singular_pivot_floor-a-reduced-hessian-that-collapses-to-singular) |
+| `Infeasible_Problem_Detected`, and you want to know whether the model itself is contradictory | [`pounce diagnose`](diagnose.md): it proves contradictions from the algebra and bounds, and with `--sol` audits the point the solve stopped at |
 | `Infeasible_Problem_Detected` on a model you believe is feasible | [the second-opinion ladder](#the-second-opinion-ladder-what-those-extra-solves-in-your-log-are), then [what POUNCE says about the start](#what-pounce-says-when-it-stops-from-a-degenerate-point) |
-| `Invalid_Number_Detected` with no indication of which number | [what POUNCE says about the start](#what-pounce-says-when-it-stops-from-a-degenerate-point) |
+| `Invalid_Number_Detected` with no indication of which number | [`pounce diagnose`](diagnose.md) names the operator that produced it; then [what POUNCE says about the start](#what-pounce-says-when-it-stops-from-a-degenerate-point) |
 | Fails from the bundled start, solves from a hand-picked one | [conditioning the starting point](initialization.md#conditioning-the-starting-point) |
 
 ---

@@ -59,6 +59,10 @@
       "description": "Preflight a model's starting point before any solve."
     },
     {
+      "name": "diagnose_model",
+      "description": "Check a model without solving it: contradictions, domain risks, dependent equations, scaling."
+    },
+    {
       "name": "suggest_initialization",
       "description": "Preflight a model's starting point and propose concrete fixes."
     },

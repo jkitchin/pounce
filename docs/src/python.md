@@ -95,6 +95,14 @@ Everything else is conditional or optional, on cyipopt's rules:
 and reports what the solver's first iteration will see, under exactly
 these rules.
 
+For a model on disk as an AMPL `.nl`, `pounce.diagnose("model.nl")` runs
+the full model doctor, [`pounce diagnose`](diagnose.md), and returns a
+`DiagnoseReport`. It reports:
+- contradictions proved from the algebra;
+- domain risks and the operator behind each NaN;
+- dependent equations;
+- with `sol_file=`, LICQ, MFCQ and second-order checks at a solution.
+
 ### Verifying convergence / trustworthy duals
 
 `info` carries the final KKT residuals so a consumer can independently
