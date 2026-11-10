@@ -165,3 +165,47 @@ native build artifacts were generated.
 | `pounce-bounds-promotion-minimum.log` | `68c669c60bc0d2a1f3deb1e33ffd3c0c1c786a07dd8c7df2be8f262a861bdfce` |
 | `pounce-bounds-promotion-v015.log` | `da8c570902dfc7025c5d9d189f77f6d65dde581943c3fc6af0ab07d63c22e74f` |
 | `pounce-bounds-promotion-v016.log` | `4db9c428a5e1578dc292923ab0b07b979b0932c630c91798949021717ac8bb65` |
+
+
+## John review follow-up — 2026-11-10
+
+Tested code revision: `326db9982a200ad7517c8712d27ee82b3c68385e`, clean worktree.
+Dependency #1163 is updated to `2f9e1c571cafe019bad0754cd9f763166d390c7e`
+(tested implementation `f4c66b45c8a4429bea911153ecaf6a769f36fef6`). The original
+four bound-update commits were rebased above that dependency. A duplicated
+CHANGELOG entry from Git's automatic merge was removed; range-diff showed no
+other unexpected change to those commits. #1164 remains draft pending #1163.
+
+The shared fix makes crossed paired bounds return INVALID_MODEL before any
+native batch is applied, with no stale result. This PR adds 86 permanent
+assertions for direct/cached invalid attempts with simultaneous ordinary
+variable/row changes, preserved pending sets, unchanged USER/EFFECTIVE bounds,
+recovery to the same or a different class, fresh-model agreement, evaluator
+retention and transient crossed edits repaired before solving. The focused
+bounds suite now has 463 assertions. Index and value buffers use owned dense
+conversions without splatting; range/view inputs exercise the public C calls.
+
+Validation used the same retained native binaries and environments listed above:
+
+| Native | Julia | Scope | Passed |
+|---|---|---|---:|
+| Current `550b1d5e` | 1.10.13 | Full suite | 5,446 |
+| Current `550b1d5e` | 1.13.3 | Full suite | 5,446 |
+| Current, JuMP 1.29 / MOI 1.48 | 1.10.13 | Complementarity and bounds | 1,225 |
+| v0.15.0 | 1.10.13 | Loading/extension/complementarity/bounds fallback | 114 |
+| v0.16.0 | 1.13.3 | Loading/extension/complementarity/bounds fallback | 114 |
+
+Julia formatting, diff checks, documentation consistency and mdBook passed.
+The earlier full older-native measurements retain their original revision;
+the new checks above are focused compatibility runs. No native solver code,
+ABI signature or struct layout changed. No new native build artifacts were
+generated; retained libraries were reused.
+
+| Log under `/private/tmp/` | SHA-256 |
+|---|---|
+| `pounce-john1164-full110.log` | `387a178eb87f33451d9ef342c42dd872ba80d18578c1b1163d23a0dd4fd52128` |
+| `pounce-john1164-full113.log` | `ee85d65366f29626e462d73714f952eb2d710aad133523713e0e72497f9e64b9` |
+| `pounce-john1164-min.log` | `3675f8b4559f4b89f896fb41d3d7bbf0236e43c7d367e58b73f163cdda272554` |
+| `pounce-john1164-v015.log` | `6c99ce78d261eb90ebda1e786cf63644e0365b78a94a6b0f043e97ca379e5827` |
+| `pounce-john1164-v016.log` | `96235f2db2e4bfb2fb569d252f7533678bbf423e41348ebc8acc63828113b05f` |
+| `pounce-john1164-docs.log` | `7a10d85d1c1afc07e9f8f4fab47b447db1488cc3c727c13b30b7a50586570db7` |
