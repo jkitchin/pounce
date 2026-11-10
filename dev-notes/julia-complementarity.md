@@ -191,3 +191,56 @@ PR is separate from these local results.
 | `pounce-complements-cancellation-113.log` | `3a482e937dfe28feca35ac230bd9786d993ff67dc938c3e114c6e86b6860c2b6` |
 | `pounce-complements-cancellation-minimum.log` | `00c5439bc5f6ae6ea44d4bbbe5a6f7fd254060a5db7e085920bbb1df3485050f` |
 | `pounce-complements-cancellation-release.log` | `61c54d7cd127ee2b577376b3b4b9fa12a329225f1367d9786d63db52a606f8be` |
+
+
+## John review follow-up — 2026-11-10
+
+Tested code revision: `f4c66b45c8a4429bea911153ecaf6a769f36fef6`, clean worktree.
+Native source and retained binaries/environments are the same as listed above.
+No native rebuild or new Cargo intermediates were needed.
+
+Crossed bounds on a declared complementarity variable now return INVALID_MODEL
+with an explanatory raw status, no solution and no stale native statistics.
+Preflight runs on every attempt before setup. Correcting the bounds restores
+normal solving. The empty-model reason is preserved; low-level native exceptions
+and ordinary NLP crossed-bound behavior are unchanged.
+
+The review adds 241 permanent assertions (218 invalid-model/recovery checks,
+22 independent primal-status checks and one range/view pair-setter check).
+The reported problem was reproduced on both original PR heads through direct
+and cached models, separate and interval bounds, initially and after a solve.
+On #1163, the permanent crossed-bound tests failed 48 assertions before the
+implementation change; all 218 pass afterward. The initial controlled-result
+probe needed an explicit Cint conversion of the status enum; that test-harness
+correction preceded the clean final runs.
+
+Capability detection is cached from the runtime-selected library during __init__,
+with subprocess checks against actual symbols. Pair buffers use owned dense
+conversion without splatting. The docs explain tol/acceptable_tol independently
+of the native 10*tol polish trigger. CHANGELOG style is aligned. All new-file
+license links resolve; the existing MIT license already names Frederik's additions
+and retains Ipopt attribution, so no licensing change was made.
+
+| Native | Julia | Scope | Passed |
+|---|---|---|---:|
+| Current `550b1d5e` | 1.10.13 | Full suite | 4,983 |
+| Current `550b1d5e` | 1.13.3 | Full suite | 4,983 |
+| Current, JuMP 1.29 / MOI 1.48 | 1.10.13 | Complementarity | 762 |
+| v0.15.0 | 1.10.13 | Core-only loading, both MOI orders, complementarity fallback | 13 |
+| v0.16.0 | 1.13.3 | Core-only loading, both MOI orders, complementarity fallback | 13 |
+
+Julia formatting, diff checks, documentation consistency and mdBook passed.
+Earlier full older-native/ABI/application measurements above retain their original
+revisions; they were not repeated for this narrow Julia review update.
+
+| Log under `/private/tmp/` | SHA-256 |
+|---|---|
+| `pounce-review1163-crossed-before.log` | `6a648d758d4a605cf6724058323b4504ed7a2fd6d66191142d9425f8adaa7a6c` |
+| `pounce-review1164-crossed-before.log` | `7862276970bcc39b31642f9fc2e52c7cabc8caa8e5e9265c2a399d0700a946bb` |
+| `pounce-review1163-red.log` | `7d570213eb1f75912af8204dc7dfc4f8415b1db609aba07bcb5ad01f77323e5d` |
+| `pounce-john1163-full110.log` | `81cd12b36972bab7143c93939e02042d61a6189aa7091d747e717fd911085cd1` |
+| `pounce-john1163-full113.log` | `20652ad35a4382de5398c165b1f3307ac2304ec33505d01fdd8d50c91b3a0702` |
+| `pounce-john1163-min.log` | `d8f7b93d46d7511904b91618a5467e70436663d662d32a088088f6c6332c1207` |
+| `pounce-john1163-v015.log` | `c0772d4200656a570eb1937db7a669cdfe1afb747f463cc5f6e7563572fc9962` |
+| `pounce-john1163-v016.log` | `755ed390dafa8d92f3a5ddcd8a51b60a7b23ec72addfd69b038ec53b526683fa` |
+| `pounce-john1163-docs.log` | `7a10d85d1c1afc07e9f8f4fab47b447db1488cc3c727c13b30b7a50586570db7` |
