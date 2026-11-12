@@ -2651,13 +2651,19 @@ impl ParametricActiveSetSolver {
             return Ok(None);
         };
         let qp_red = pruned.problem(qp);
-        let red = inner(self, &qp_red, opts)?;
+        let mut red = inner(self, &qp_red, opts)?;
         let decisive = match red.status {
             QpStatus::Infeasible => true,
             QpStatus::Optimal | QpStatus::Unbounded => {
                 pruned.dropped_rows_hold(qp, &red.x, opts.feas_tol)
             }
-            status => crate::deadline::cut_off(status),
+            // Cut off: no second solve, but the reduced run's own status (a
+            // per-pass `MaxIter`, a `NumericalFailure`) is no verdict on `qp`.
+            status if crate::deadline::cut_off(status) => {
+                red.status = crate::deadline::cut_off_status();
+                true
+            }
+            _ => false,
         };
         if !decisive {
             spent.add_work(&red.stats);
@@ -7727,6 +7733,111 @@ mod issue1061_time_limit_counts_tests {
             sol.stats
         );
         assert!(sol.stats.used_phase1, "{:?}", sol.stats);
+    }
+}
+
+#[cfg(test)]
+mod cut_off_pass_status_tests {
+    //! A pass cut off by the solve-wide budget is not a verdict, whatever
+    //! status it ended on: a decision point that stops on it reports the
+    //! cut-off status for the whole problem, never the pass's own. Each test
+    //! moves the expiry one deadline check at a time through a whole solve and
+    //! requires `TimeLimit` from every solve the expiry actually reached.
+    use pounce_common::types::{Index, Number};
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+
+    use super::ParametricActiveSetSolver;
+    use crate::{HessianInertia, QpOptions, QpProblem, QpSolver, QpStatus};
+
+    /// Solve `qp` once per expiry point, from the first deadline check until
+    /// the solve finishes inside its check budget; return how many solves
+    /// were cut off. Every one of them must report `TimeLimit`.
+    fn every_cut_off_reports_time_limit(qp: &QpProblem, opts: &QpOptions) -> u64 {
+        for k in 0.. {
+            let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::new()));
+            crate::deadline::expire_after_checks(Some(k));
+            let sol = solver.solve(qp, None, opts);
+            let fired = crate::deadline::expiry_fired();
+            crate::deadline::expire_after_checks(None);
+            if !fired {
+                return k;
+            }
+            let sol = sol.expect("a cancelled solve is a status, not an error");
+            assert_eq!(
+                sol.status,
+                QpStatus::TimeLimit,
+                "cut off at deadline check {k}, the solve reported a pass's own status"
+            );
+        }
+        unreachable!()
+    }
+
+    /// `min -x` subject to `x <= 1` with `H = 0` and a free box: the box
+    /// relaxation the homotopy starts from (`min -x`, `x` free) is
+    /// `Unbounded`, which only says the path cannot start there. With the
+    /// deadline expiring right after it, the box-relaxation arm returned that
+    /// `Unbounded` as the answer for the whole (bounded) problem.
+    #[test]
+    fn a_cut_off_after_an_unbounded_box_relaxation_is_not_an_unbounded_verdict() {
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(1, vec![1], vec![1]));
+        h.set_values(&[0.0]);
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(1, 1, vec![1], vec![1]));
+        a.set_values(&[1.0]);
+        let qp = QpProblem {
+            n: 1,
+            m: 1,
+            h: &h,
+            g: &[-1.0],
+            a: &a,
+            bl: &[-1e20],
+            bu: &[1.0],
+            xl: &[-1e20],
+            xu: &[1e20],
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let opts = QpOptions {
+            use_homotopy: true,
+            ..QpOptions::default()
+        };
+        let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::new()));
+        let sol = solver.solve(&qp, None, &opts).unwrap();
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!((sol.x[0] - 1.0).abs() < 1e-8, "{:?}", sol.x);
+        assert!(every_cut_off_reports_time_limit(&qp, &opts) > 0);
+    }
+
+    /// Two copies of `x0 + x1 = 1` and a general row, so a cold solve runs the
+    /// dependent-equality pre-solve; `max_iter = 1` makes its reduced run end
+    /// on the per-pass `MaxIter`. With the deadline expiring at the check that
+    /// follows, the reduced run was taken as decisive and its `MaxIter`
+    /// returned as the whole solve's status.
+    #[test]
+    fn a_cut_off_after_a_reduced_run_reports_time_limit() {
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(2, vec![1, 2], vec![1, 2]));
+        h.set_values(&[1.0, 1.0]);
+        let irn: Vec<Index> = vec![1, 1, 2, 2, 3, 3];
+        let jcn: Vec<Index> = vec![1, 2, 1, 2, 1, 2];
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(3, 2, irn, jcn));
+        a.set_values(&[1.0, 1.0, 1.0, 1.0, 1.0, -1.0]);
+        let g: [Number; 2] = [-1.0, -2.0];
+        let qp = QpProblem {
+            n: 2,
+            m: 3,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &[1.0, 1.0, -0.25],
+            bu: &[1.0, 1.0, 1e20],
+            xl: &[0.0, 0.0],
+            xu: &[1.0, 1.0],
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let opts = QpOptions {
+            max_iter: 1,
+            ..QpOptions::default()
+        };
+        assert!(every_cut_off_reports_time_limit(&qp, &opts) > 0);
     }
 }
 

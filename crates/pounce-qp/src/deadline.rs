@@ -39,6 +39,9 @@ thread_local! {
     /// this many more times, inside a scope or not. Lets a test cut a solve
     /// off at a chosen point instead of racing a wall clock.
     static EXPIRE_AFTER_CHECKS: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Test-only: whether a check has reported the `EXPIRE_AFTER_CHECKS`
+    /// expiry since it was last armed.
+    static EXPIRY_FIRED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Test-only: make the deadline expire on the `n`-th next check (`None`
@@ -46,6 +49,15 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn expire_after_checks(n: Option<u64>) {
     EXPIRE_AFTER_CHECKS.with(|c| c.set(n));
+    EXPIRY_FIRED.with(|c| c.set(false));
+}
+
+/// Test-only: whether any check has seen the expiry armed by
+/// [`expire_after_checks`] since it was armed — that is, whether the solve
+/// was actually cut off rather than finishing inside its check budget.
+#[cfg(test)]
+pub(crate) fn expiry_fired() -> bool {
+    EXPIRY_FIRED.with(Cell::get)
 }
 
 pub(crate) struct Guard {
@@ -85,6 +97,7 @@ pub(crate) fn expired() -> bool {
     #[cfg(test)]
     if let Some(k) = EXPIRE_AFTER_CHECKS.with(Cell::get) {
         if k == 0 {
+            EXPIRY_FIRED.with(|c| c.set(true));
             return true;
         }
         EXPIRE_AFTER_CHECKS.with(|c| c.set(Some(k - 1)));

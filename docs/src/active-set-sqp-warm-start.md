@@ -455,6 +455,12 @@ same way, with `QpStatus::MaxIter`. It is checked before each pivot, so the
 pivot in progress completes. `None` (the default) leaves only the per-pass
 cap. LP crossover sets both to 1000.
 
+A nested stage that one of these budgets cuts short is not a verdict on the
+problem, whatever status that stage ended on: a homotopy box relaxation that
+came back `Unbounded`, or a reduced-row pass that hit its own `max_iter`, is
+reported as `TimeLimit` (`MaxIter` when the change budget ran out), never as
+its own status.
+
 The `linear_solver_factory` injection mirrors
 `alg_builder.rs::LinearBackendFactory` (line 50) so `pounce-qp`
 remains backend-agnostic: FERAL by default, MA57 when built with the

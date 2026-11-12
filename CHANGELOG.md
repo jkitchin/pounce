@@ -32,7 +32,10 @@ changes.
   every pass of one solve together — homotopy, elastic phase 1 and its
   penalty passes, recovery and seeded retries — which `max_iter` bounds only
   one pass at a time. A solve that spends it stops as on its time limit and
-  reports `MaxIter`. LP crossover sets it to 1000. `QpOptions` is not
+  reports `MaxIter`. Under either budget, a pass cut short is never the
+  answer: the solve reports `TimeLimit` (or `MaxIter` for the change budget),
+  not the truncated pass's own status — such as an `Unbounded` homotopy box
+  relaxation or a reduced run's `NumericalFailure`. LP crossover sets it to 1000. `QpOptions` is not
   `#[non_exhaustive]`, so a struct literal without `..Default::default()`
   must add the field.
 - **Julia: batch bound edits through optional native in-place updates.**
