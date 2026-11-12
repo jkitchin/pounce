@@ -10,6 +10,15 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`minimize` accepts `scipy.optimize.NonlinearConstraint`.** Alongside dict
+  constraints and `LinearConstraint`, so scipy code ports without rewriting
+  constraints. Its two-sided bounds `lb ≤ fun(x) ≤ ub` map directly onto the
+  constraint bounds, where dicts need one constraint per side. A `jac` that
+  returns a scipy-sparse matrix keeps the Jacobian sparse, as for dicts; without
+  a callable `jac` it is finite-differenced, over `finite_diff_jac_sparsity` when
+  given. `hess`, `keep_feasible` and `finite_diff_rel_step` cannot be honored
+  and warn. `find_minima` and `race_starts` accept it too, since they share the
+  constraint handling.
 - **Julia: batch bound edits through optional native in-place updates.**
   Retain immediate result invalidation and pending edits across invalid paired
   bounds; rebuild for complementarity class changes or older libraries.

@@ -40,7 +40,7 @@ from typing import Any
 
 import numpy as np
 from scipy import sparse
-from scipy.optimize import Bounds, LinearConstraint
+from scipy.optimize import Bounds, HessianUpdateStrategy, LinearConstraint, NonlinearConstraint
 from scipy.optimize import OptimizeResult as _ScipyOptimizeResult
 
 from ._pounce import Problem
@@ -478,9 +478,10 @@ class _ConstraintBlock:
 
     Linear blocks (from :class:`scipy.optimize.LinearConstraint`) carry their
     sparse COO triplet directly in ``constant_vals``; the Jacobian value
-    callback simply slices these into its output. Legacy dict blocks fall back
-    to a fully-dense per-row pattern with ``constant_vals=None``; their
-    ``fun`` / ``jac`` get evaluated at solve time.
+    callback simply slices these into its output. Callable blocks (dicts and
+    :class:`scipy.optimize.NonlinearConstraint`) have ``constant_vals=None``;
+    their ``fun`` / ``jac`` get evaluated at solve time, with a dense per-row
+    pattern unless their Jacobian declares a sparse one.
     """
 
     rows: np.ndarray  # 0-indexed within block, length nnz
@@ -498,6 +499,11 @@ class _ConstraintBlock:
     # nonlinear (or linear) dict constraint declare a sparse Jacobian, mirroring
     # cyipopt's detect-by-return-type behavior.
     sparse_jac: bool = False
+    # Finite-differenced block (no callable ``jac``) whose sparsity was declared
+    # up front (``NonlinearConstraint.finite_diff_jac_sparsity``): ``(rows,
+    # cols)`` are that pattern and ``jac_values`` reads the finite-difference
+    # Jacobian at those positions instead of streaming the dense grid.
+    fd_structure: bool = False
     # Pre-assembled ``sparse.coo_array`` for linear blocks. ``g_combined``
     # would otherwise rebuild this from ``(rows, cols, constant_vals)`` on
     # every Ipopt iteration (per-iter waste in the inner loop). ``None`` for
@@ -562,6 +568,84 @@ def _block_from_linear_constraint(lc: LinearConstraint, n: int) -> _ConstraintBl
     )
 
 
+def _block_from_callable(
+    fun: Callable,
+    jac: Callable | None,
+    args: tuple,
+    lb,
+    ub,
+    n: int,
+    x0=None,
+    *,
+    fd_sparsity=None,
+) -> _ConstraintBlock:
+    """Constraint block for ``lb <= fun(x, *args) <= ub`` with an optional
+    explicit ``jac``. Shared by the dict and ``NonlinearConstraint`` forms.
+
+    The row count is probed at ``x0`` when available, not the origin, so a
+    constraint undefined at 0 but defined at a feasible start doesn't fail at
+    build time (L47). A ``jac`` returning a *scipy-sparse* matrix declares that
+    matrix's COO structure, so the Jacobian stays sparse for linear and
+    nonlinear constraints alike — mirroring how cyipopt detects sparsity from
+    the jac's return type. Any sparse format is accepted;
+    ``.tocsr().tocoo()`` gives a deterministic row-major order so build- and
+    solve-time orderings align (Ipopt requires a fixed pattern). Without a
+    ``jac`` the Jacobian is finite-differenced: over the pattern
+    ``fd_sparsity`` when given, else over the dense grid. A dense ``jac``
+    return keeps the dense grid too.
+    """
+    probe = np.zeros(n) if x0 is None else np.asarray(x0, dtype=float).ravel()
+    m_rows = int(_to_array(fun(probe, *args)).size)
+
+    def canonical_structure(S, what):
+        S = sparse.coo_array(S).tocsr().tocoo()
+        if S.shape != (m_rows, n):
+            raise ValueError(
+                f"{what} has shape {S.shape}; expected {(m_rows, n)} "
+                f"(m_rows from the constraint function, n from x)"
+            )
+        return np.asarray(S.row, dtype=np.int64), np.asarray(S.col, dtype=np.int64)
+
+    sparse_jac = False
+    fd_structure = False
+    rows = cols = None
+    if callable(jac):
+        probe_jac = jac(probe, *args)
+        if sparse.issparse(probe_jac):
+            rows, cols = canonical_structure(probe_jac, "constraint Jacobian")
+            sparse_jac = True
+    elif fd_sparsity is not None:
+        rows, cols = canonical_structure(fd_sparsity, "finite_diff_jac_sparsity")
+        fd_structure = True
+    if rows is None:
+        # Dense sparsity pattern: every row may touch every column.
+        rows = np.repeat(np.arange(m_rows, dtype=np.int64), n)
+        cols = np.tile(np.arange(n, dtype=np.int64), m_rows)
+
+    def bound(value, side):
+        try:
+            return np.broadcast_to(np.asarray(value, dtype=np.float64), (m_rows,)).copy()
+        except ValueError:
+            raise ValueError(
+                f"constraint {side} bound has shape {np.shape(value)}; expected a "
+                f"scalar or {m_rows} values (one per constraint row)"
+            ) from None
+
+    return _ConstraintBlock(
+        rows=rows,
+        cols=cols,
+        constant_vals=None,
+        fun=fun,
+        jac=jac if callable(jac) else None,
+        args=args,
+        lb=bound(lb, "lower"),
+        ub=bound(ub, "upper"),
+        n_rows=m_rows,
+        sparse_jac=sparse_jac,
+        fd_structure=fd_structure,
+    )
+
+
 def _block_from_dict(c: dict, n: int, x0=None) -> _ConstraintBlock:
     # Mirror the validation main added to the dict path: clear ValueErrors
     # instead of bare KeyError / cryptic TypeError surfacing later.
@@ -578,56 +662,59 @@ def _block_from_dict(c: dict, n: int, x0=None) -> _ConstraintBlock:
     if not callable(fun):
         # ValueError, not TypeError: the public contract (test_minimize.py).
         raise ValueError("constraint 'fun' must be callable")  # noqa: TRY004
-    ca = tuple(c.get("args", ()))
-    # Probe at the user's x0 when available, not the origin, so a constraint
-    # undefined at 0 but defined at a feasible start doesn't fail at build
-    # time (L47, mirrors the dict path on main).
-    probe = np.zeros(n) if x0 is None else np.asarray(x0, dtype=float).ravel()
-    m_rows = int(_to_array(fun(probe, *ca)).size)
-    jac = c.get("jac")
+    # scipy convention: "eq" is g(x) == 0, "ineq" is g(x) >= 0.
+    ub = 0.0 if kind == "eq" else np.inf
+    return _block_from_callable(
+        fun, c.get("jac"), tuple(c.get("args", ())), 0.0, ub, n, x0
+    )
 
-    # If an explicit jac is supplied and returns a *scipy-sparse* matrix, declare
-    # a sparse Jacobian structure from its COO triplet (canonicalized) instead of
-    # the dense grid — so nonlinear (and linear) dict constraints can be sparse,
-    # mirroring how cyipopt detects sparsity from the jac's return type. Any
-    # sparse format is accepted; ``.tocsr().tocoo()`` gives a deterministic
-    # row-major order so build- and solve-time orderings align (Ipopt requires
-    # a fixed pattern). A dense return (or no jac → finite differences) keeps the
-    # original fully-dense pattern.
-    sparse_jac = False
-    if callable(jac):
-        probe_jac = jac(probe, *ca)
-        if sparse.issparse(probe_jac):
-            Jc = probe_jac.tocsr().tocoo()
-            if Jc.shape != (m_rows, n):
-                raise ValueError(
-                    f"constraint Jacobian has shape {Jc.shape}; expected "
-                    f"{(m_rows, n)} (m_rows from 'fun', n from x)"
-                )
-            rows = np.asarray(Jc.row, dtype=np.int64)
-            cols = np.asarray(Jc.col, dtype=np.int64)
-            sparse_jac = True
-    if not sparse_jac:
-        # Dense sparsity pattern: every row may touch every column.
-        rows = np.repeat(np.arange(m_rows, dtype=np.int64), n)
-        cols = np.tile(np.arange(n, dtype=np.int64), m_rows)
-    if kind == "eq":
-        lb = np.zeros(m_rows)
-        ub = np.zeros(m_rows)
-    else:
-        lb = np.zeros(m_rows)
-        ub = np.full(m_rows, np.inf)
-    return _ConstraintBlock(
-        rows=rows,
-        cols=cols,
-        constant_vals=None,
-        fun=fun,
-        jac=jac,
-        args=ca,
-        lb=lb,
-        ub=ub,
-        n_rows=m_rows,
-        sparse_jac=sparse_jac,
+
+def _block_from_nonlinear_constraint(
+    nc: NonlinearConstraint, n: int, x0=None
+) -> _ConstraintBlock:
+    """Constraint block for ``nc.lb <= nc.fun(x) <= nc.ub``.
+
+    A callable ``jac`` is used as for dicts (sparse when it returns a
+    scipy-sparse matrix); the finite-difference strings ``"2-point"``,
+    ``"3-point"`` and ``"cs"`` mean central finite differences, over
+    ``finite_diff_jac_sparsity`` when given. Options pounce cannot honor warn
+    instead of being dropped silently: an explicit ``hess`` (with nonlinear
+    constraints ``minimize`` uses a limited-memory Lagrangian Hessian),
+    ``keep_feasible`` and ``finite_diff_rel_step``.
+    """
+    if not callable(nc.fun):
+        # ValueError, not TypeError: matches the dict path's public contract.
+        raise ValueError("NonlinearConstraint 'fun' must be callable")  # noqa: TRY004
+    jac = nc.jac
+    if not callable(jac) and jac not in ("2-point", "3-point", "cs"):
+        raise ValueError(
+            f"NonlinearConstraint 'jac' must be callable or one of '2-point', "
+            f"'3-point', 'cs'; got {jac!r}"
+        )
+    ignored = []
+    if nc.hess is not None and not isinstance(nc.hess, HessianUpdateStrategy):
+        ignored.append("'hess' (nonlinear constraints use a limited-memory Hessian)")
+    if np.any(nc.keep_feasible):
+        ignored.append("'keep_feasible'")
+    if nc.finite_diff_rel_step is not None:
+        ignored.append("'finite_diff_rel_step'")
+    if ignored:
+        warnings.warn(
+            "pounce ignores the NonlinearConstraint option(s) "
+            + ", ".join(ignored)
+            + ".",
+            UserWarning,
+            stacklevel=4,
+        )
+    return _block_from_callable(
+        nc.fun,
+        jac if callable(jac) else None,
+        (),
+        nc.lb,
+        nc.ub,
+        n,
+        x0,
+        fd_sparsity=None if callable(jac) else nc.finite_diff_jac_sparsity,
     )
 
 
@@ -637,22 +724,24 @@ def _wrap_constraints(constraints, n: int, x0=None):
     Accepts heterogeneous input:
       - ``None`` or empty sequence: no constraints
       - a single :class:`scipy.optimize.LinearConstraint` (dense or sparse ``A``)
+      - a single :class:`scipy.optimize.NonlinearConstraint`
       - a single legacy dict ``{"type": "eq"|"ineq", "fun": ..., "jac": ..., "args": ...}``
-      - a list mixing both forms
+      - a list mixing these forms
 
     Returns ``(m_total, g_combined, jac_values, cl, cu, jac_rows, jac_cols)``.
     ``(jac_rows, jac_cols)`` declare Ipopt's ``jacobianstructure``; ``jac_values(x)``
     produces values in matching order. LinearConstraint blocks contribute their
-    constant COO triplet; a dict block whose ``jac`` returns a scipy-sparse matrix
-    declares that matrix's COO structure (sparse — for linear or nonlinear
-    constraints alike); dict blocks with a dense (or absent) jac fall back to a
-    fully-dense per-row pattern and evaluate jac on demand. Dict constraints are
-    probed for their output size — and their jac sparsity — at ``x0`` when
-    supplied, not the origin (L47).
+    constant COO triplet; a dict or ``NonlinearConstraint`` block whose ``jac``
+    returns a scipy-sparse matrix declares that matrix's COO structure (sparse —
+    for linear or nonlinear constraints alike); one with a dense (or absent) jac
+    falls back to a fully-dense per-row pattern and evaluates jac on demand,
+    unless a ``NonlinearConstraint`` declares ``finite_diff_jac_sparsity``.
+    Callable constraints are probed for their output size — and their jac
+    sparsity — at ``x0`` when supplied, not the origin (L47).
     """
     if constraints is None:
         return _empty_constraints()
-    if isinstance(constraints, (dict, LinearConstraint)):
+    if isinstance(constraints, (dict, LinearConstraint, NonlinearConstraint)):
         constraints = [constraints]
     elif not constraints:
         return _empty_constraints()
@@ -661,13 +750,16 @@ def _wrap_constraints(constraints, n: int, x0=None):
     for c in constraints:
         if isinstance(c, LinearConstraint):
             blocks.append(_block_from_linear_constraint(c, n))
+        elif isinstance(c, NonlinearConstraint):
+            blocks.append(_block_from_nonlinear_constraint(c, n, x0))
         elif isinstance(c, dict):
             blocks.append(_block_from_dict(c, n, x0))
         else:
             # ValueError, not TypeError: the public contract (test_minimize.py).
             raise ValueError(  # noqa: TRY004
                 f"each constraint must be a dict with 'type' and 'fun', a "
-                f"scipy.optimize.LinearConstraint, or a list mixing those — "
+                f"scipy.optimize.LinearConstraint or NonlinearConstraint, or a "
+                f"list mixing those — "
                 f"got {type(c).__name__}"
             )
 
@@ -743,7 +835,10 @@ def _wrap_constraints(constraints, n: int, x0=None):
                     x,
                     blk.n_rows,
                 )
-                out[start:end] = J.ravel()
+                if blk.fd_structure:
+                    out[start:end] = J[blk.rows, blk.cols]
+                else:
+                    out[start:end] = J.ravel()
         return out
 
     return m_total, g_combined, jac_values, cl, cu, jac_rows, jac_cols
@@ -1105,9 +1200,13 @@ def _any_constraint_without_jac(constraints) -> bool:
     is finite-differenced). Used to decide whether to warn (gh #123, D)."""
     if not constraints:
         return False
-    if isinstance(constraints, (dict, LinearConstraint)):
+    if isinstance(constraints, (dict, LinearConstraint, NonlinearConstraint)):
         constraints = [constraints]
-    return any(isinstance(c, dict) and c.get("jac") is None for c in constraints)
+    return any(
+        (isinstance(c, dict) and c.get("jac") is None)
+        or (isinstance(c, NonlinearConstraint) and not callable(c.jac))
+        for c in constraints
+    )
 
 
 def minimize(
@@ -1117,7 +1216,7 @@ def minimize(
     jac: Callable | bool | None = None,
     hess: Callable | None = None,
     bounds: Sequence | None = None,
-    constraints: Sequence | LinearConstraint | dict | None = None,
+    constraints: Sequence | LinearConstraint | NonlinearConstraint | dict | None = None,
     callback: Callable | None = None,
     warm_start=None,
     **options: Any,
@@ -1530,7 +1629,9 @@ def _prepare_nlp(
     if jac is None:
         fd_targets.append("the objective gradient (pass jac=...)")
     if m > 0 and _any_constraint_without_jac(constraints):
-        fd_targets.append("constraint Jacobian(s) (pass 'jac' in each constraint dict)")
+        fd_targets.append(
+            "constraint Jacobian(s) (pass a callable 'jac' in each constraint)"
+        )
     if fd_targets:
         warnings.warn(
             f"{facade} is approximating "

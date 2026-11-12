@@ -408,6 +408,234 @@ def test_minimize_dict_sparse_jac_position_change_raises():
         jac_values(np.ones(n))
 
 
+# -- scipy.optimize.NonlinearConstraint ---------------------------------------
+
+
+def _ball_constraint_parts():
+    """g(x) = x0^2 + x2^2 on R^3, with its dense and sparse Jacobians."""
+
+    def g(x):
+        return np.array([x[0] ** 2 + x[2] ** 2])
+
+    def jac_dense(x):
+        return np.array([[2 * x[0], 0.0, 2 * x[2]]])
+
+    def jac_sparse(x):
+        return sparse.coo_array(
+            (np.array([2 * x[0], 2 * x[2]]), (np.array([0, 0]), np.array([0, 2]))),
+            shape=(1, 3),
+        )
+
+    return g, jac_dense, jac_sparse
+
+
+def test_wrap_constraints_nonlinear_constraint_sparse_jac_declares_sparse_structure():
+    """A NonlinearConstraint whose ``jac`` returns a scipy-sparse matrix declares
+    the matrix's COO structure, and its two-sided bounds become cl/cu."""
+    from pounce._minimize import _wrap_constraints
+
+    n = 6
+    A = sparse.coo_array(
+        np.array([[1.0, 1.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0, 0.0, 0.0]])
+    )
+    nc = opt.NonlinearConstraint(lambda x: A @ x, [0.0, -1.0], [1.0, np.inf], jac=lambda x: A)
+    m, _, jac_values, cl, cu, jr, jc = _wrap_constraints(nc, n, x0=np.zeros(n))
+
+    assert m == 2
+    np.testing.assert_array_equal(jr, [0, 0, 1, 1])
+    np.testing.assert_array_equal(jc, [0, 1, 2, 3])
+    np.testing.assert_allclose(jac_values(np.arange(n, dtype=float)), [1, 1, 1, 1])
+    np.testing.assert_array_equal(cl, [0.0, -1.0])
+    np.testing.assert_array_equal(cu, [1.0, np.inf])
+
+
+def test_wrap_constraints_nonlinear_constraint_bounds_broadcast_and_validate():
+    from pounce._minimize import _wrap_constraints
+
+    def g(x):
+        return x[:2]
+
+    _, _, _, cl, cu, _, _ = _wrap_constraints(
+        opt.NonlinearConstraint(g, 0.0, 1.0), 3, x0=np.zeros(3)
+    )
+    np.testing.assert_array_equal(cl, [0.0, 0.0])
+    np.testing.assert_array_equal(cu, [1.0, 1.0])
+    with pytest.raises(ValueError, match="one per constraint row"):
+        _wrap_constraints(
+            opt.NonlinearConstraint(g, [0.0, 0.0, 0.0], 1.0), 3, x0=np.zeros(3)
+        )
+
+
+@pytest.mark.parametrize("jac_kind", ["dense", "sparse"])
+def test_minimize_nonlinear_constraint_matches_dict(jac_kind):
+    """A NonlinearConstraint reaches the same point as the equivalent dict."""
+    f, grad, _, _ = _mixture_quadratic()
+    g, jac_dense, jac_sparse = _ball_constraint_parts()
+    jac = jac_dense if jac_kind == "dense" else jac_sparse
+    lc = opt.LinearConstraint(np.array([[1.0, 1.0, 1.0]]), 1.0, 1.0)
+    kw = dict(x0=np.array([0.3, 0.3, 0.4]), jac=grad, tol=1e-9, print_level=0)
+
+    res_dict = pounce.minimize(
+        f,
+        constraints=[lc, {"type": "ineq", "fun": lambda x: g(x) - 0.7, "jac": jac}],
+        **kw,
+    )
+    res_nc = pounce.minimize(
+        f, constraints=[lc, opt.NonlinearConstraint(g, 0.7, np.inf, jac=jac)], **kw
+    )
+
+    assert res_dict.success and res_nc.success
+    assert res_nc.x[0] ** 2 + res_nc.x[2] ** 2 >= 0.7 - 1e-6
+    np.testing.assert_allclose(res_nc.x, res_dict.x, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "target, expected",
+    [
+        ([3.0, 0.0], [2.0, 0.0]),  # outside the annulus: upper bound active
+        ([0.5, 0.0], [1.0, 0.0]),  # inside the hole: lower bound active
+    ],
+)
+def test_minimize_nonlinear_constraint_two_sided(target, expected):
+    """One two-sided NonlinearConstraint, 1 <= x0^2 + x1^2 <= 4, where dicts
+    would need two constraints; each side is active in one case."""
+    target = np.asarray(target)
+    nc = opt.NonlinearConstraint(
+        lambda x: np.array([x @ x]), 1.0, 4.0, jac=lambda x: 2 * x[None, :]
+    )
+    res = pounce.minimize(
+        lambda x: 0.5 * float((x - target) @ (x - target)),
+        x0=np.array([1.5, 0.1]),
+        jac=lambda x: x - target,
+        constraints=nc,
+        tol=1e-9,
+        print_level=0,
+    )
+    assert res.success
+    np.testing.assert_allclose(res.x, expected, atol=1e-6)
+
+
+def test_minimize_nonlinear_constraint_finite_difference_jac_warns():
+    """A NonlinearConstraint without a callable jac (scipy's default "2-point")
+    is finite-differenced and triggers the existing finite-difference warning."""
+    f, grad, _, _ = _mixture_quadratic()
+    g, jac_dense, _ = _ball_constraint_parts()
+    lc = opt.LinearConstraint(np.array([[1.0, 1.0, 1.0]]), 1.0, 1.0)
+    kw = dict(x0=np.array([0.3, 0.3, 0.4]), jac=grad, tol=1e-9, print_level=0)
+
+    with pytest.warns(UserWarning, match="constraint Jacobian"):
+        res_fd = pounce.minimize(
+            f, constraints=[lc, opt.NonlinearConstraint(g, 0.7, np.inf)], **kw
+        )
+    res = pounce.minimize(
+        f, constraints=[lc, opt.NonlinearConstraint(g, 0.7, np.inf, jac=jac_dense)], **kw
+    )
+    assert res_fd.success
+    np.testing.assert_allclose(res_fd.x, res.x, atol=1e-5)
+
+
+def test_wrap_constraints_nonlinear_constraint_finite_diff_jac_sparsity():
+    """``finite_diff_jac_sparsity`` declares the finite-difference pattern; the
+    Jacobian values are read at exactly those positions."""
+    from pounce._minimize import _wrap_constraints
+
+    g, jac_dense, _ = _ball_constraint_parts()
+    nc = opt.NonlinearConstraint(
+        g, 0.7, np.inf, finite_diff_jac_sparsity=np.array([[1, 0, 1]])
+    )
+    x = np.array([0.3, 0.3, 0.4])
+    _, _, jac_values, _, _, jr, jc = _wrap_constraints(nc, 3, x0=x)
+
+    np.testing.assert_array_equal(jr, [0, 0])
+    np.testing.assert_array_equal(jc, [0, 2])
+    np.testing.assert_allclose(jac_values(x), jac_dense(x)[0, [0, 2]], atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "option, match",
+    [
+        ({"hess": lambda x, v: np.zeros((3, 3))}, "'hess'"),
+        ({"keep_feasible": True}, "'keep_feasible'"),
+        ({"finite_diff_rel_step": 1e-6}, "'finite_diff_rel_step'"),
+    ],
+)
+def test_nonlinear_constraint_ignored_options_warn(option, match):
+    from pounce._minimize import _wrap_constraints
+
+    g, jac_dense, _ = _ball_constraint_parts()
+    nc = opt.NonlinearConstraint(g, 0.7, np.inf, jac=jac_dense, **option)
+    with pytest.warns(UserWarning, match=match):
+        _wrap_constraints(nc, 3, x0=np.full(3, 0.3))
+
+
+def test_nonlinear_constraint_default_options_do_not_warn():
+    from pounce._minimize import _wrap_constraints
+
+    g, jac_dense, _ = _ball_constraint_parts()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _wrap_constraints(
+            opt.NonlinearConstraint(g, 0.7, np.inf, jac=jac_dense), 3, x0=np.full(3, 0.3)
+        )
+
+
+def test_nonlinear_constraint_invalid_jac_raises():
+    from pounce._minimize import _wrap_constraints
+
+    g, _, _ = _ball_constraint_parts()
+    with pytest.raises(ValueError, match="'jac' must be callable"):
+        _wrap_constraints(
+            opt.NonlinearConstraint(g, 0.7, np.inf, jac="bogus"), 3, x0=np.full(3, 0.3)
+        )
+
+
+def test_nonlinear_constraint_sparse_jac_pattern_change_raises():
+    from pounce._minimize import _wrap_constraints
+
+    n = 3
+    calls = {"k": 0}
+
+    def jac(x):
+        calls["k"] += 1
+        if calls["k"] == 1:
+            return sparse.coo_array(([1.0], ([0], [0])), shape=(1, n))
+        return sparse.coo_array(([1.0, 1.0], ([0, 0], [0, 1])), shape=(1, n))
+
+    nc = opt.NonlinearConstraint(lambda x: np.array([x[0]]), 0.0, np.inf, jac=jac)
+    _, _, jac_values, _, _, _, _ = _wrap_constraints(nc, n, x0=np.zeros(n))
+    with pytest.raises(ValueError, match="sparsity pattern changed"):
+        jac_values(np.ones(n))
+
+
+def test_minimize_mixed_constraint_forms():
+    """dict, LinearConstraint and NonlinearConstraint mix in one list, and a
+    bare NonlinearConstraint works through scipy's custom-method dispatch."""
+    f, grad, _, _ = _mixture_quadratic()
+    g, _, jac_sparse = _ball_constraint_parts()
+    x0 = np.array([0.3, 0.3, 0.4])
+    mixed = [
+        opt.LinearConstraint(np.array([[1.0, 1.0, 1.0]]), 1.0, 1.0),
+        {"type": "ineq", "fun": lambda x: np.array([x[1]]), "jac": lambda x: np.array([[0.0, 1.0, 0.0]])},
+        opt.NonlinearConstraint(g, 0.7, np.inf, jac=jac_sparse),
+    ]
+    res = pounce.minimize(f, x0=x0, jac=grad, constraints=mixed, tol=1e-9, print_level=0)
+    assert res.success
+    np.testing.assert_allclose(res.x.sum(), 1.0, atol=1e-7)
+    assert res.x[1] >= -1e-7 and g(res.x)[0] >= 0.7 - 1e-6
+
+    res_scipy = opt.minimize(
+        f,
+        x0,
+        jac=grad,
+        method=pounce.minimize,
+        constraints=opt.NonlinearConstraint(
+            lambda x: np.array([x.sum()]), 1.0, 1.0, jac=lambda x: np.ones((1, 3))
+        ),
+        options={"print_level": 0, "tol": 1e-9},
+    )
+    np.testing.assert_allclose(res_scipy.x.sum(), 1.0, atol=1e-6)
+
+
 def test_minimize_dict_dense_jac_still_dense():
     """Regression: a dict jac returning a dense ndarray keeps the dense pattern."""
     from pounce._minimize import _wrap_constraints
