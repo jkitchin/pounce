@@ -3796,8 +3796,8 @@ fn run_convex_qp(
     if let Some(c) = pounce_convex::crossover::take_report() {
         println!(
             "Crossover: {} engine, {}; {} superbasic(s) pushed, {} pivot(s) \
-             (push {}, phase 1 {}, phase 2 {}), {} bound flip(s); KKT error \
-             {:.2e} -> {:.2e}",
+             (push {}, phase 1 {}, phase 2 {}), {} bound flip(s), {} bridge \
+             working-set change(s); KKT error {:.2e} -> {:.2e}",
             c.engine,
             if c.accepted {
                 "vertex accepted"
@@ -3810,6 +3810,7 @@ fn run_convex_qp(
             c.pivots_phase1,
             c.pivots_phase2,
             c.flips,
+            c.bridge_working_set_changes,
             c.kkt_error_before,
             c.kkt_error_after,
         );

@@ -57,8 +57,9 @@ pub enum QpError {
     /// current crate phase (e.g., one-sided inequality constraints
     /// before the working-set machinery lands).
     UnsupportedFeature(String),
-    /// **Internal cancellation signal**: the solve-wide wall-clock
-    /// deadline (`QpOptions::time_limit`) expired inside a routine whose
+    /// **Internal cancellation signal**: a solve-wide budget — the wall-clock
+    /// deadline (`QpOptions::time_limit`) or the working-set change budget
+    /// (`QpOptions::max_working_set_changes`) — ran out inside a routine whose
     /// success value would otherwise be indistinguishable from a real
     /// result — chiefly
     /// [`factorize_with_inertia_control`](crate::solver::ParametricActiveSetSolver),
@@ -71,8 +72,9 @@ pub enum QpError {
     /// label `Optimal`.
     ///
     /// This never escapes the crate. Every [`crate::QpSolver`] entry point
-    /// converts it to the soft `QpStatus::TimeLimit` outcome, so a timeout
-    /// remains a status on a successful solve for callers.
+    /// converts it to the soft `QpStatus::TimeLimit` outcome (`MaxIter` for
+    /// the change budget), so a timeout remains a status on a successful
+    /// solve for callers.
     DeadlineExpired,
 }
 
@@ -112,7 +114,7 @@ impl fmt::Display for QpError {
             }
             QpError::LinearSolverFailure(s) => write!(f, "linear solver failure: {s}"),
             QpError::UnsupportedFeature(s) => write!(f, "unsupported feature: {s}"),
-            QpError::DeadlineExpired => write!(f, "wall-clock deadline expired"),
+            QpError::DeadlineExpired => write!(f, "solve-wide budget expired"),
         }
     }
 }

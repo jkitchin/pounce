@@ -528,6 +528,7 @@ fn attach_engine_reports(
             cd.set_item("pivots_phase1", c.pivots_phase1)?;
             cd.set_item("pivots_phase2", c.pivots_phase2)?;
             cd.set_item("flips", c.flips)?;
+            cd.set_item("bridge_working_set_changes", c.bridge_working_set_changes)?;
             cd.set_item("kkt_error_before", c.kkt_error_before)?;
             cd.set_item("kkt_error_after", c.kkt_error_after)?;
             d.set_item("crossover", cd)?;

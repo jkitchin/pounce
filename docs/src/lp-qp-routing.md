@@ -587,14 +587,30 @@ set `qp_crossover=yes` (pure LPs): it purifies the interior iterate to an
 exact vertex and reads the duals from that basis. The CLI prints one line
 about it at the default print level, right under the `POUNCE (...)` result
 line: `Crossover: simplex engine, vertex accepted; 20 superbasic(s) pushed,
-22 pivot(s) (push 20, phase 1 0, phase 2 2), 1 bound flip(s); KKT error
-1.29e-09 -> 2.84e-14` (engine `simplex` or the `active-set` bridge it falls
-back to, whether the vertex replaced the interior iterate, the structurals
-the interior point left strictly inside their bounds, basis changes by stage,
-and the KKT error before and after). In Rust the same record is
-`pounce_convex::crossover::take_report()`. Still not unique when the
+22 pivot(s) (push 20, phase 1 0, phase 2 2), 1 bound flip(s), 0 bridge
+working-set change(s); KKT error 1.29e-09 -> 2.84e-14`: the engine whose
+vertex was judged last, whether it replaced the interior iterate, the
+structurals the interior point left strictly inside their bounds, the simplex
+basis changes by stage, the active-set bridge's working-set changes, and the
+KKT error before and after. The engine is `simplex`, `active-set` (the bridge),
+or `none` when neither produced a vertex — the simplex broke down and the
+bridge did not converge, or the time limit ran out first. In Rust the same
+record is `pounce_convex::crossover::take_report()`. Still not unique when the
 vertex is degenerate, but a vertex of the dual face, hence stable under
 changes to inactive data.
+
+The vertex replaces the interior iterate only if its KKT error is no worse,
+so a crossover can end `interior point kept`: the answer is then the interior
+one, unchanged. When the simplex breaks down, or its vertex is declined (its
+point or duals, read off an ill-conditioned basis, carry more rounding than
+the interior iterate — typical of rows and columns scaled across many
+decades), crossover runs the `active-set` bridge. After a declined vertex it
+starts from the simplex basis; if that is not accepted either, and after a
+breakdown, it starts from the interior iterate's active set, which may reach a
+different, better-conditioned optimal vertex. Each bridge solve is capped at
+1000 working-set changes in all (checked before each pivot, so the pivot under
+way completes), so a crossover that ends `interior point kept` makes at most
+two capped solves (NETLIB SHARE1B: 1000 changes, about 2 s).
 
 The design and roadmap live in
 [`dev-notes/lp-qp-routing.md`](https://github.com/jkitchin/pounce/blob/main/dev-notes/lp-qp-routing.md).

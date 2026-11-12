@@ -524,7 +524,7 @@ impl ParametricActiveSetSolver {
             }
             match first {
                 Ok(s) if s.status == QpStatus::Optimal => s,
-                Ok(mut s) if s.status == QpStatus::TimeLimit => {
+                Ok(mut s) if crate::deadline::cut_off(s.status) => {
                     s.lambda_g.resize(m, 0.0);
                     s.working.constraints.resize(m, ConsStatus::Inactive);
                     return Ok(Some(s));
@@ -549,7 +549,7 @@ impl ParametricActiveSetSolver {
                             h_reg_holder = Some(h_reg);
                             s
                         }
-                        Ok(mut s) if s.status == QpStatus::TimeLimit => {
+                        Ok(mut s) if crate::deadline::cut_off(s.status) => {
                             s.lambda_g.resize(m, 0.0);
                             s.working.constraints.resize(m, ConsStatus::Inactive);
                             return Ok(Some(s));
@@ -715,7 +715,7 @@ impl ParametricActiveSetSolver {
                     lambda_g,
                     lambda_x,
                     working,
-                    status: QpStatus::TimeLimit,
+                    status: crate::deadline::cut_off_status(),
                     stats: QpStats {
                         n_working_set_changes: n_changes,
                         n_refactor,
@@ -820,6 +820,7 @@ impl ParametricActiveSetSolver {
                             lambda_g[i] = 0.0;
                             tabu_cons[i] = true;
                             n_changes += 1;
+                            crate::deadline::charge_working_set_change();
                         }
                     }
                     let mut repruned_here: u32 = 0;
@@ -834,6 +835,7 @@ impl ParametricActiveSetSolver {
                             }
                             pruned_once[j] = true;
                             n_changes += 1;
+                            crate::deadline::charge_working_set_change();
                         }
                     }
                     if trace {
@@ -1079,6 +1081,7 @@ impl ParametricActiveSetSolver {
                     }
                 }
                 n_changes += 1;
+                crate::deadline::charge_working_set_change();
             }
         }
 

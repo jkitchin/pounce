@@ -36,7 +36,25 @@ pub struct QpOptions {
     /// feasibility/recovery solves, and seeded retries.
     pub time_limit: Option<Duration>,
     pub algorithm: QpAlgorithm,
+    /// Iteration cap of **one pass** of the pivot loop. Each stage a solve
+    /// can reach — homotopy, elastic phase-1 (reduced-row and full-row), its
+    /// penalty-escalation passes, the recovery solve, seeded retries — gets
+    /// its own `max_iter`, so one solve can make several times this many
+    /// working-set changes. [`Self::max_working_set_changes`] caps the whole.
     pub max_iter: u32,
+    /// Solve-wide cap on working-set changes: every change made by every pass
+    /// of one top-level solve (see [`Self::max_iter`] for the passes) counts
+    /// against it, the same changes `QpStats::n_working_set_changes` reports.
+    /// It is checked before each pivot, so the last pivot completes and a rank
+    /// repair inside it may drop several rows at once, passing the cap by a
+    /// few. A solve whose last pivot spends the budget is cut off before the
+    /// check that would confirm optimality, so a solve needing exactly the
+    /// budget reports `MaxIter` too. A solve that runs out stops as it does on
+    /// [`Self::time_limit`] — no pass after it starts, and no truncated pass
+    /// is read as a verdict — and reports `QpStatus::MaxIter`.
+    ///
+    /// `None` (the default): no solve-wide cap; only the per-pass `max_iter`.
+    pub max_working_set_changes: Option<u32>,
     pub feas_tol: Number,
     pub opt_tol: Number,
     /// Maximum number of Schur-complement rank-1 updates before a
@@ -251,6 +269,7 @@ impl Default for QpOptions {
             time_limit: None,
             algorithm: QpAlgorithm::default(),
             max_iter: 200,
+            max_working_set_changes: None,
             feas_tol: 1e-9,
             opt_tol: 1e-9,
             max_schur_updates_before_refactor: 50,

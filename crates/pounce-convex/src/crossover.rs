@@ -15,12 +15,24 @@
 //!
 //! # How
 //!
-//! pounce already has a production, fully-autonomous active-set QP engine
-//! ([`pounce_qp::ParametricActiveSetSolver`]) with an internal add/drop pivot
-//! loop and Bland anti-cycling. Crossover is therefore a *bridge*, not a new
-//! solver: translate the convex standard-form LP into pounce-qp's two-sided
-//! form, seed the working set from the interior iterate's active set, let the
-//! engine purify to the exact vertex, then sign-transform the multipliers back.
+//! Two engines, tried in order, each judged by the never-regress gate below.
+//!
+//! 1. **Revised simplex** (`crate::simplex`): pivots the interior iterate
+//!    to an optimal basis on an unsymmetric LU factor, one variable at a time,
+//!    with Bland's rule through the degeneracy. It accepts or declines in
+//!    milliseconds on the LPs crossover targets.
+//! 2. **Active-set bridge** ([`pounce_qp::ParametricActiveSetSolver`]): the
+//!    convex LP translated into pounce-qp's two-sided form
+//!    ([`crate::active_set::ActiveSetQp`]), purified there, and the
+//!    multipliers sign-transformed back. It runs when the simplex breaks down
+//!    or its vertex is declined. After a decline it starts from the simplex
+//!    basis, pinned (the basis is optimal; what was declined is the point and
+//!    duals read off its factor). If that is not accepted either, or the
+//!    simplex broke down, it starts from the interior iterate's active set,
+//!    and may go through pounce-qp's l1-elastic phase 1 to another optimal
+//!    vertex. Each bridge solve is capped at [`CROSSOVER_MAX_ITER`] (1000)
+//!    working-set changes in all (the pivot under way when the cap is reached
+//!    completes, so a rank repair inside it can pass the cap by a few).
 //!
 //! # Representation bridge
 //!
@@ -60,15 +72,13 @@
 //! `Err`/non-`Optimal`/regressing outcome we return the original solution
 //! unchanged.
 
-use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
-use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_qp::{
-    AntiCyclingChoice, ConsStatus, HessianInertia, ParametricActiveSetSolver,
-    QpOptions as ActiveSetOptions, QpProblem as ActiveSetProblem, QpSolver,
-    QpStatus as ActiveSetStatus, WorkingSet,
+    AntiCyclingChoice, ConsStatus, ParametricActiveSetSolver, QpOptions as ActiveSetOptions,
+    QpSolution as ActiveSetSolution, QpSolver, QpStatus as ActiveSetStatus, WorkingSet,
 };
 
+use crate::active_set::{ActiveSetQp, back_translate};
 use crate::ipm::QpOptions;
 use crate::qp::{QpProblem, QpSolution, QpStatus};
 
@@ -80,27 +90,15 @@ const ACTIVE_Z_TOL: f64 = 1e-7;
 const ACTIVE_S_TOL: f64 = 1e-7;
 /// Slack on the never-regress KKT-error comparison.
 const REGRESS_SLACK: f64 = 1e-9;
-/// Iteration cap for the purifying active-set solve (generous; the pivot loop
-/// terminates well inside this on the LPs crossover targets).
-const CROSSOVER_MAX_ITER: u32 = 1000;
-
-/// Clamp a convex lower-bound value to pounce-qp's `±1e19` free convention.
-fn to_qp_lower(lb: f64) -> f64 {
-    if lb <= NLP_LOWER_BOUND_INF {
-        NLP_LOWER_BOUND_INF
-    } else {
-        lb
-    }
-}
-
-/// Clamp a convex upper-bound value to pounce-qp's `±1e19` free convention.
-fn to_qp_upper(ub: f64) -> f64 {
-    if ub >= NLP_UPPER_BOUND_INF {
-        NLP_UPPER_BOUND_INF
-    } else {
-        ub
-    }
-}
+/// Working-set changes one bridge solve may make: the cap on each of its
+/// passes (`max_iter`) and on all of them together (`max_working_set_changes`).
+/// The whole-solve cap is the bound: an l1-elastic phase 1 makes several passes
+/// — reduced-row and full-row, penalty escalations, a recovery solve — and
+/// with only the per-pass cap NETLIB SHARE1B spent 5 535 changes, 18.7 s over
+/// two solves, on a vertex it then declined. Public so callers and tests that
+/// bound crossover's cost read the cap rather than restate it; at most two
+/// bridge solves run per crossover.
+pub const CROSSOVER_MAX_ITER: u32 = 1000;
 
 /// What crossover did on the last [`maybe_crossover`] call that got past the
 /// gate (gh#990 item 12). Carried out-of-band — the CLI prints a one-line
@@ -108,14 +106,21 @@ fn to_qp_upper(ub: f64) -> f64 {
 /// no `Default`; see [`crate::sigma_verdict`] for the same trade.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrossoverReport {
-    /// `simplex` (the revised-simplex LU-basis engine), `active-set` (the
-    /// pounce-qp bridge it falls back to), or `none` when neither returned a
-    /// usable vertex.
+    /// The engine whose vertex the never-regress gate judged last: `simplex`
+    /// (the revised-simplex LU-basis engine), `active-set` (the pounce-qp
+    /// bridge, after the simplex broke down or its vertex was declined), or
+    /// `none` when no engine produced a vertex: the simplex broke down and
+    /// the bridge did not reach `Optimal`, or the time budget ran out before
+    /// either was judged. `simplex` with `accepted == false` is a declined
+    /// simplex vertex the bridge then found nothing better than.
     pub engine: &'static str,
     /// The purified vertex replaced the interior iterate.
     pub accepted: bool,
-    /// Structurals the interior iterate left strictly inside their bounds
-    /// (simplex only; `0` for the active-set bridge).
+    /// Structurals the interior iterate left strictly inside their bounds.
+    /// This and the pivot and flip counts below are the simplex's, recorded
+    /// whenever the simplex returned a vertex (accepted or declined), and `0`
+    /// after a simplex breakdown; the bridge's work is
+    /// `bridge_working_set_changes`.
     pub superbasics: usize,
     /// Basis changes spent resolving them.
     pub pivots_push: usize,
@@ -123,6 +128,11 @@ pub struct CrossoverReport {
     pub pivots_phase2: usize,
     /// Bound flips.
     pub flips: usize,
+    /// Working-set changes the active-set bridge made, summed over its solves
+    /// (`0` when it did not run). Each solve is capped at
+    /// [`CROSSOVER_MAX_ITER`] changes in all, and at most two run, so this is
+    /// at most twice the cap (plus the overshoot of a final rank repair).
+    pub bridge_working_set_changes: u32,
     /// KKT error of the interior iterate and of the point returned.
     pub kkt_error_before: f64,
     pub kkt_error_after: f64,
@@ -133,6 +143,7 @@ struct Attempt {
     engine: Option<&'static str>,
     accepted: bool,
     stats: Option<crate::simplex::SimplexStats>,
+    bridge_working_set_changes: u32,
 }
 
 thread_local! {
@@ -181,6 +192,7 @@ where
             pivots_phase1: st.pivots_phase1,
             pivots_phase2: st.pivots_phase2,
             flips: st.flips,
+            bridge_working_set_changes: a.bridge_working_set_changes,
             kkt_error_before: orig.kkt_residuals(prob).kkt_error(),
             kkt_error_after: out.kkt_residuals(prob).kkt_error(),
         };
@@ -231,102 +243,75 @@ where
     // The architecturally-correct engine ([`crate::simplex`]) pivots one
     // variable at a time on an unsymmetric LU basis, walking straight through
     // degeneracy with Bland's rule — so it resolves the highly-degenerate NETLIB
-    // GEN vertices (issue #133) that the active-set bridge below stalls on. On
-    // any breakdown it returns `None` and we fall through to the bridge.
+    // GEN vertices (issue #133) that the active-set bridge stalls on from the
+    // interior iterate. On any breakdown it returns `None`.
     ATTEMPT.with(|a| *a.borrow_mut() = Some(Attempt::default()));
     let simplex = crate::simplex::crossover_simplex(prob, &sol, opts);
     if crate::deadline::expired() {
         return sol;
     }
-    if let Some(v) = simplex {
-        ATTEMPT.with(|a| {
-            if let Some(at) = a.borrow_mut().as_mut() {
-                at.stats = Some(v.stats);
-            }
-        });
-        let candidate = QpSolution {
-            status: QpStatus::Optimal,
-            x: v.x,
-            y: v.y,
-            z: v.z,
-            z_lb: v.z_lb,
-            z_ub: v.z_ub,
-            obj: v.obj,
-            iters: sol.iters,
-            iterates: sol.iterates.clone(),
-        };
-        let cand_err = candidate.kkt_residuals(prob).kkt_error();
-        let orig_err = sol.kkt_residuals(prob).kkt_error();
-        if cand_err.is_finite() && cand_err <= orig_err.max(0.0) + REGRESS_SLACK {
+    let basis = match simplex {
+        Some(v) => {
+            let candidate = QpSolution {
+                status: QpStatus::Optimal,
+                x: v.solution.x,
+                y: v.solution.y,
+                z: v.solution.z,
+                z_lb: v.solution.z_lb,
+                z_ub: v.solution.z_ub,
+                obj: v.solution.obj,
+                iters: sol.iters,
+                iterates: sol.iterates.clone(),
+            };
+            let accepted = never_regresses(prob, &candidate, &sol);
             ATTEMPT.with(|a| {
                 if let Some(at) = a.borrow_mut().as_mut() {
                     at.engine = Some("simplex");
-                    at.accepted = true;
+                    at.accepted = accepted;
+                    at.stats = Some(v.solution.stats);
                 }
             });
-            return candidate;
+            if accepted {
+                return candidate;
+            }
+            v.basis
         }
-    }
-
-    // ---- Translate to pounce-qp form (owned locals outlive the borrow) ----
-    // Hessian: pure LP ⇒ empty symmetric triplet of dimension n.
-    let h = SymTMatrix::new(SymTMatrixSpace::new(n as i32, Vec::new(), Vec::new()));
-
-    // Jacobian A_qp = [A_eq ; G], 1-based indices.
-    let nnz = prob.a.len() + prob.g.len();
-    let mut irows = Vec::with_capacity(nnz);
-    let mut jcols = Vec::with_capacity(nnz);
-    let mut vals = Vec::with_capacity(nnz);
-    for t in &prob.a {
-        irows.push((t.row + 1) as i32);
-        jcols.push((t.col + 1) as i32);
-        vals.push(t.val);
-    }
-    for t in &prob.g {
-        irows.push((m_eq + t.row + 1) as i32);
-        jcols.push((t.col + 1) as i32);
-        vals.push(t.val);
-    }
-    let mut a_qp = GenTMatrix::new(GenTMatrixSpace::new(m as i32, n as i32, irows, jcols));
-    a_qp.set_values(&vals);
-
-    // Row bounds: eq rows bl=bu=b; ineq rows bl=−∞, bu=h.
-    let mut bl = Vec::with_capacity(m);
-    let mut bu = Vec::with_capacity(m);
-    for &bk in &prob.b {
-        bl.push(bk);
-        bu.push(bk);
-    }
-    for &hi in &prob.h {
-        bl.push(NLP_LOWER_BOUND_INF);
-        bu.push(to_qp_upper(hi));
-    }
-
-    // Native variable bounds (no-op when the convex problem has none).
-    let mut xl = Vec::with_capacity(n);
-    let mut xu = Vec::with_capacity(n);
-    for i in 0..n {
-        xl.push(to_qp_lower(prob.lb_of(i)));
-        xu.push(to_qp_upper(prob.ub_of(i)));
-    }
-
-    let g_lin = prob.c.clone();
-    let qp = ActiveSetProblem {
-        n,
-        m,
-        h: &h,
-        g: &g_lin,
-        a: &a_qp,
-        bl: &bl,
-        bu: &bu,
-        xl: &xl,
-        xu: &xu,
-        hessian_inertia: HessianInertia::Psd,
+        None => None,
     };
 
-    // ---- Working-set warm-start hint from the interior iterate ----
-    // slacks s_i = h_i − (Gx)_i; a row is hinted active when its IPM dual is
-    // positive and its slack is ~0. Equality rows are always active.
+    let native = ActiveSetQp::from_convex(prob);
+    let qp = native.problem();
+    // ---- Declined vertex, first bridge: the simplex basis, pinned ----
+    // The simplex priced out, so its basis is optimal; what the gate declined
+    // is the point and duals read off its LU factor. The active-set engine
+    // pins the constraints the basis makes active (its nonbasic bounds and
+    // rows, plus every equality row, so the set can exceed `n` and be
+    // dependent), solves its own KKT system for both, and pivots from there.
+    // A pinned KKT that does not factor, or a pinned point outside the
+    // feasibility tolerance, is refused (`None`) rather than sent to
+    // l1-elastic phase 1.
+    if let Some(basis) = basis {
+        let working = native.basis_working_set(&basis, m_eq);
+        let mut solver = ParametricActiveSetSolver::new(make_backend());
+        if let Ok(Some(q)) =
+            solver.solve_with_working_set_if_feasible(&qp, &working, &bridge_options())
+            && let Some(c) = accept_bridge(prob, &q, &sol)
+        {
+            return c;
+        }
+        if crate::deadline::expired() {
+            return sol;
+        }
+        // Not accepted: an optimal basis can still be badly conditioned. The
+        // interior iterate's active set often leads elsewhere — to another
+        // optimal vertex whose multipliers pass — so it is tried next, as
+        // after a breakdown.
+    }
+
+    // ---- Bridge from the interior iterate ----
+    // Working-set hint: slacks s_i = h_i − (Gx)_i; a row is hinted active when
+    // its IPM dual is positive and its slack is ~0. Equality rows are always
+    // active; bounds are left Inactive and the engine pivots them in as needed.
     let mut gx = vec![0.0; m_ineq];
     prob.g_mul(&sol.x, &mut gx);
     let mut constraints = Vec::with_capacity(m);
@@ -341,96 +326,104 @@ where
             constraints.push(ConsStatus::Inactive);
         }
     }
-    // Bounds left Inactive in the hint: the engine pivots them in as needed.
     let working = WorkingSet {
         bounds: vec![pounce_qp::BoundStatus::Inactive; n],
         constraints,
     };
+    // `solve_with_working_set` factorizes the hinted set for a primal. At a
+    // degenerate optimum the hint names more rows than columns; the engine
+    // prunes it to an independent subset, and when the pinned point is
+    // infeasible it recovers through l1-elastic phase 1. That phase is what
+    // finds the better-conditioned vertices, and also what is expensive: its
+    // passes — reduced-row and full-row phase 1, the penalty escalations, the
+    // recovery solve — each get their own `max_iter`. The solve-wide
+    // `max_working_set_changes` in [`bridge_options`] is what bounds the
+    // whole. One solve: a cold retry from the origin goes through the same
+    // phase 1 and, on the declined vertices measured, rescued none this one
+    // missed. After a simplex breakdown the retry is dropped on the same
+    // reasoning, not on a measurement: one fixture reaches a breakdown.
+    let mut solver = ParametricActiveSetSolver::new(make_backend());
+    match solver.solve_with_working_set(&qp, &working, &bridge_options()) {
+        Ok(q) => accept_bridge(prob, &q, &sol).unwrap_or(sol),
+        Err(_) => sol,
+    }
+}
 
-    // ---- Solve (Bland keeps the degenerate pivot loop finite) ----
-    let qopts = ActiveSetOptions {
+/// The settings of every bridge solve. Bland's rule keeps the degenerate
+/// pivot loop finite; [`CROSSOVER_MAX_ITER`] caps both each pass and the
+/// working-set changes of the whole solve; the time limit is what is left of
+/// the caller's.
+fn bridge_options() -> ActiveSetOptions {
+    ActiveSetOptions {
         time_limit: crate::deadline::remaining(),
         anti_cycling: AntiCyclingChoice::Bland,
         max_iter: CROSSOVER_MAX_ITER,
+        max_working_set_changes: Some(CROSSOVER_MAX_ITER),
         ..ActiveSetOptions::default()
-    };
-    // Warm-start hint first: `solve_with_working_set` factorizes the hinted
-    // active set up front to recover a primal, which is fast when the hint is
-    // good. But at a *degenerate* optimum the IPM's active set has linearly-
-    // dependent binding rows (more than `n` of them — the very degeneracy
-    // crossover exists to resolve), so that initial factorization can be
-    // singular and the §4.5 inertia control cannot rescue a rank-deficient
-    // constraint block. Fall back to a fresh COLD solve, whose
-    // `cold_general_initial` only factorizes the (smaller) equality block and
-    // routes an infeasible start through l1-elastic recovery — robust to the
-    // redundant rows that defeat the warm path.
-    let mut warm_solver = ParametricActiveSetSolver::new(make_backend());
-    let warm = warm_solver.solve_with_working_set(&qp, &working, &qopts);
-    let qsol = match warm {
-        Ok(q) if q.status == ActiveSetStatus::Optimal => q,
-        // The purification ran out of budget mid-flight; `sol` is untouched and
-        // still the IPM's answer.
-        Ok(q) if q.status == ActiveSetStatus::TimeLimit => return sol,
-        _ => {
-            if crate::deadline::expired() {
-                return sol;
-            }
-            let mut cold_solver = ParametricActiveSetSolver::new(make_backend());
-            let cold = cold_solver.solve(&qp, None, &qopts);
-            match cold {
-                Ok(q) if q.status == ActiveSetStatus::Optimal => q,
-                _ => return sol,
-            }
+    }
+}
+
+/// Put a bridge solve to the never-regress gate: `Some` with the vertex in
+/// convex coordinates (the sign transform in the module docs) when it is
+/// `Optimal` and passes, `None` otherwise. Records its work, and for an
+/// `Optimal` one the verdict, either way.
+///
+/// The candidate is an exact KKT point of the LP (pounce-qp `Optimal`), so by
+/// LP convexity its objective is globally optimal. The KKT-error gate is the
+/// robust realization of "never return something worse": if the purified
+/// vertex's residuals against the ORIGINAL problem exceed the interior
+/// iterate's (a sign translation / feasibility surprise), keep the original.
+fn accept_bridge(
+    prob: &QpProblem,
+    qsol: &ActiveSetSolution,
+    sol: &QpSolution,
+) -> Option<QpSolution> {
+    ATTEMPT.with(|a| {
+        if let Some(at) = a.borrow_mut().as_mut() {
+            at.bridge_working_set_changes += qsol.stats.n_working_set_changes;
         }
-    };
-
-    // ---- Back-translate (sign transform — see module docs) ----
-    let mut y = vec![0.0; m_eq];
-    y.copy_from_slice(&qsol.lambda_g[..m_eq]);
-    let mut z = vec![0.0; m_ineq];
-    for i in 0..m_ineq {
-        z[i] = qsol.lambda_g[m_eq + i].max(0.0);
+    });
+    if qsol.status != ActiveSetStatus::Optimal {
+        return None;
     }
-    let mut z_lb = vec![0.0; n];
-    let mut z_ub = vec![0.0; n];
-    for i in 0..n {
-        z_lb[i] = qsol.lambda_x[i].max(0.0);
-        z_ub[i] = (-qsol.lambda_x[i]).max(0.0);
-    }
-    // Objective in convex coordinates (½xᵀPx + cᵀx; the Px term is 0 for an LP
-    // but evaluated generally so the recomputation can't silently drift).
-    let mut px = vec![0.0; n];
-    prob.p_mul(&qsol.x, &mut px);
-    let obj = (0..n).map(|i| (0.5 * px[i] + prob.c[i]) * qsol.x[i]).sum();
-
     let candidate = QpSolution {
-        status: QpStatus::Optimal,
-        x: qsol.x,
-        y,
-        z,
-        z_lb,
-        z_ub,
-        obj,
         iters: sol.iters,
         iterates: sol.iterates.clone(),
+        ..back_translate(prob, qsol)
     };
-
-    // ---- Never-regress ----
-    // The candidate is an exact KKT point of the LP (pounce-qp `Optimal`), so by
-    // LP convexity its objective is globally optimal. The KKT-error gate is the
-    // robust realization of "never return something worse": if the purified
-    // vertex's residuals against the ORIGINAL problem exceed the interior
-    // iterate's (a sign translation / feasibility surprise), keep the original.
-    let cand_err = candidate.kkt_residuals(prob).kkt_error();
-    let orig_err = sol.kkt_residuals(prob).kkt_error();
-    let accepted = cand_err.is_finite() && cand_err <= orig_err.max(0.0) + REGRESS_SLACK;
+    let accepted = never_regresses(prob, &candidate, sol);
     ATTEMPT.with(|a| {
         if let Some(at) = a.borrow_mut().as_mut() {
             at.engine = Some("active-set");
             at.accepted = accepted;
         }
     });
-    if accepted { candidate } else { sol }
+    accepted.then_some(candidate)
+}
+
+/// The never-regress gate (module docs): `candidate` may replace the interior
+/// iterate `sol` only when every component of it is finite and its KKT error
+/// against the original problem does not exceed `sol`'s by more than
+/// [`REGRESS_SLACK`]. The finiteness test comes first because the error is a
+/// max of residuals and `f64::max` drops NaN: an all-NaN candidate reads as
+/// zero error. This gate is the verification crossover applies in place of
+/// `verify_status` to what [`back_translate`] returns.
+fn never_regresses(prob: &QpProblem, candidate: &QpSolution, sol: &QpSolution) -> bool {
+    let finite = [
+        &candidate.x,
+        &candidate.y,
+        &candidate.z,
+        &candidate.z_lb,
+        &candidate.z_ub,
+    ]
+    .into_iter()
+    .all(|v| v.iter().all(|c| c.is_finite()));
+    if !finite {
+        return false;
+    }
+    let cand_err = candidate.kkt_residuals(prob).kkt_error();
+    let orig_err = sol.kkt_residuals(prob).kkt_error();
+    cand_err.is_finite() && cand_err <= orig_err.max(0.0) + REGRESS_SLACK
 }
 
 #[cfg(test)]
