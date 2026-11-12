@@ -15,9 +15,17 @@ changes.
   constraints. Its two-sided bounds `lb ≤ fun(x) ≤ ub` map directly onto the
   constraint bounds, where dicts need one constraint per side. A `jac` that
   returns a scipy-sparse matrix keeps the Jacobian sparse, as for dicts; without
-  a callable `jac` it is finite-differenced, over `finite_diff_jac_sparsity` when
-  given. `hess`, `keep_feasible` and `finite_diff_rel_step` cannot be honored
-  and warn. `find_minima` and `race_starts` accept it too, since they share the
+  a callable `jac` it is finite-differenced. `finite_diff_jac_sparsity` then
+  declares the Jacobian's structure but does not reduce the number of
+  evaluations; an entry outside it that is nonzero raises a `ValueError`
+  instead of giving silently wrong derivatives. `hess`, `keep_feasible` and
+  `finite_diff_rel_step` cannot be honored and warn.
+- **`LinearConstraint` and `NonlinearConstraint` with `lb > ub` raise a
+  `ValueError` naming the rows,** instead of reaching the solver and returning
+  `Invalid_Problem_Definition`. A dict constraint whose `"jac"` is not callable
+  (e.g. `"2-point"`) raises a `ValueError` when the problem is built; the solve
+  used to end with `Invalid_Number_Detected`, with the underlying `TypeError`
+  only logged. `find_minima` and `race_starts` accept it too, since they share the
   constraint handling.
 - **Julia: batch bound edits through optional native in-place updates.**
   Retain immediate result invalidation and pending edits across invalid paired

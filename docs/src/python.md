@@ -722,7 +722,7 @@ minimize(fun, x0, args=(), jac=None, hess=None, bounds=None,
 | `jac` | ✅ | callable, **or `jac=True`** (then `fun` returns `(value, gradient)`, cached so the gradient is not recomputed); **omitted → central finite differences** (`eps^(1/3)` step) and a one-time `UserWarning`. Provide one (or use `pounce.jax` / `pounce.torch`) for production. |
 | `hess` | ⚠️ | used when there are no constraints **or all constraints are linear** (the constraint curvature is then zero, so the objective Hessian is the Lagrangian Hessian); with nonlinear constraints the solver falls back to L-BFGS (`hessian_approximation=limited-memory`) |
 | `bounds` | ✅ | a sequence of `(lo, hi)` pairs **or a scipy `Bounds` object**; a `None` element or endpoint means ±∞. A `NaN` bound is rejected (previously it slipped past the reversed-bound check and behaved as "no bound"); use ±∞ / `None` for an unbounded side |
-| `constraints` | ✅ | scipy **dict(s)** `{"type": "eq"\|"ineq", "fun": …, "jac": …}`, **scipy `LinearConstraint` object(s)** (dense or sparse `A`) **or scipy `NonlinearConstraint` object(s)**; multiple are concatenated. A `jac` returning a scipy-sparse matrix keeps the constraint Jacobian sparse; without a callable `jac` it is finite-differenced (over `finite_diff_jac_sparsity`, if a `NonlinearConstraint` gives one) |
+| `constraints` | ✅ | scipy **dict(s)** `{"type": "eq"\|"ineq", "fun": …, "jac": …}`, **scipy `LinearConstraint` object(s)** (dense or sparse `A`) **or scipy `NonlinearConstraint` object(s)**; multiple are concatenated. A `jac` returning a scipy-sparse matrix keeps the constraint Jacobian sparse; without a callable `jac` it is finite-differenced over all columns (a `NonlinearConstraint`'s `finite_diff_jac_sparsity` then declares the Jacobian's structure but does not reduce the work) |
 | `callback` | ✅ | called each iteration; both scipy signatures supported — `callback(xk)` and `callback(intermediate_result)` |
 | `tol` | ✅ | accepted directly (scipy `gtol` / `ftol` / `xtol` are synonyms) |
 | `options` / `**options` | ✅ | pass options as keyword args (legacy `options={…}` dict still works); keys are pounce/Ipopt names, with scipy synonyms mapped: `maxiter`→`max_iter`, `gtol`/`ftol`/`xtol`→`tol`, `disp`→`print_level`, `maxcor`→`limited_memory_max_history` |
@@ -743,7 +743,13 @@ minimize(fun, x0, args=(), jac=None, hess=None, bounds=None,
 - A constraint's Jacobian is **dense unless declared sparse**: return a
   scipy-sparse matrix from its `jac` (dict or `NonlinearConstraint`), pass a
   `LinearConstraint` with a sparse `A`, or give a `NonlinearConstraint` without
-  `jac` a `finite_diff_jac_sparsity`. The pattern must stay fixed during the solve.
+  `jac` a `finite_diff_jac_sparsity`. The pattern must stay fixed during the
+  solve. A `finite_diff_jac_sparsity` only shrinks the declared structure: the
+  finite differences still cost `2n` constraint evaluations, and an entry left
+  out of the pattern that turns out nonzero raises a `ValueError`.
+- A constraint with `lb > ub` in some row raises a `ValueError` naming the rows
+  (`LinearConstraint` and `NonlinearConstraint`); a dict `"jac"` must be
+  callable or omitted.
 - `NonlinearConstraint` options pounce cannot honor warn instead of being
   silently dropped: an explicit `hess` (with nonlinear constraints the solver
   uses L-BFGS), `keep_feasible` and `finite_diff_rel_step`.

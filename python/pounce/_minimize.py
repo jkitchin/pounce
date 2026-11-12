@@ -501,8 +501,9 @@ class _ConstraintBlock:
     sparse_jac: bool = False
     # Finite-differenced block (no callable ``jac``) whose sparsity was declared
     # up front (``NonlinearConstraint.finite_diff_jac_sparsity``): ``(rows,
-    # cols)`` are that pattern and ``jac_values`` reads the finite-difference
-    # Jacobian at those positions instead of streaming the dense grid.
+    # cols)`` are that pattern and ``jac_values`` reads the full
+    # finite-difference Jacobian at those positions instead of streaming the
+    # dense grid, after checking nothing nonzero falls outside it.
     fd_structure: bool = False
     # Pre-assembled ``sparse.coo_array`` for linear blocks. ``g_combined``
     # would otherwise rebuild this from ``(rows, cols, constant_vals)`` on
@@ -548,6 +549,7 @@ def _block_from_linear_constraint(lc: LinearConstraint, n: int) -> _ConstraintBl
     m_rows = int(A.shape[0])
     lb = np.broadcast_to(np.asarray(lc.lb, dtype=np.float64), (m_rows,)).copy()
     ub = np.broadcast_to(np.asarray(lc.ub, dtype=np.float64), (m_rows,)).copy()
+    _check_bound_order(lb, ub)
     rows_i = np.asarray(A.row, dtype=np.int64)
     cols_i = np.asarray(A.col, dtype=np.int64)
     vals_i = np.asarray(A.data, dtype=np.float64)
@@ -566,6 +568,42 @@ def _block_from_linear_constraint(lc: LinearConstraint, n: int) -> _ConstraintBl
         n_rows=m_rows,
         sparse_A=sparse_A,
     )
+
+
+def _check_bound_order(lb: np.ndarray, ub: np.ndarray) -> None:
+    """Raise if a constraint row has ``lb > ub``.
+
+    The solver would only report ``Invalid_Problem_Definition``; naming the
+    rows here is the clearer message.
+    """
+    bad = np.flatnonzero(lb > ub)
+    if bad.size:
+        raise ValueError(
+            f"constraint lower bound exceeds upper bound in row(s) "
+            f"{bad[:5].tolist()}" + (f" and {bad.size - 5} more" if bad.size > 5 else "")
+        )
+
+
+def _check_fd_pattern(J: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> None:
+    """Raise if the dense finite-difference Jacobian ``J`` has a clearly nonzero
+    entry outside the declared ``finite_diff_jac_sparsity`` pattern.
+
+    Only the declared entries are passed to the solver, so a missing nonzero
+    would silently give wrong derivatives. The full ``J`` is computed anyway,
+    which makes the check nearly free. "Clearly nonzero" means above
+    ``1e-6 * max(1, max|J|)``, well above finite-difference noise.
+    """
+    outside = np.ones(J.shape, dtype=bool)
+    outside[rows, cols] = False
+    scale = max(1.0, float(np.max(np.abs(J)))) if J.size else 1.0
+    bad = np.argwhere(outside & (np.abs(J) > 1e-6 * scale))
+    if bad.size:
+        shown = ", ".join(f"({i}, {j})" for i, j in bad[:5])
+        more = f" and {len(bad) - 5} more" if len(bad) > 5 else ""
+        raise ValueError(
+            f"finite_diff_jac_sparsity omits nonzero Jacobian entries at (row, "
+            f"col) {shown}{more}; include every entry that can be nonzero"
+        )
 
 
 def _block_from_callable(
@@ -590,9 +628,15 @@ def _block_from_callable(
     the jac's return type. Any sparse format is accepted;
     ``.tocsr().tocoo()`` gives a deterministic row-major order so build- and
     solve-time orderings align (Ipopt requires a fixed pattern). Without a
-    ``jac`` the Jacobian is finite-differenced: over the pattern
-    ``fd_sparsity`` when given, else over the dense grid. A dense ``jac``
-    return keeps the dense grid too.
+    ``jac`` the Jacobian is finite-differenced over all columns; ``fd_sparsity``
+    then only shrinks the declared structure (and is checked against the
+    finite-difference Jacobian at ``x0``, see ``_check_fd_pattern``), it does
+    not reduce the number of evaluations. A dense ``jac`` return keeps the
+    dense grid.
+
+    Raises:
+        ValueError: if a bound has the wrong shape, ``lb > ub`` in some row,
+            or ``fd_sparsity`` omits an entry that is nonzero at ``x0``.
     """
     probe = np.zeros(n) if x0 is None else np.asarray(x0, dtype=float).ravel()
     m_rows = int(_to_array(fun(probe, *args)).size)
@@ -616,6 +660,9 @@ def _block_from_callable(
             sparse_jac = True
     elif fd_sparsity is not None:
         rows, cols = canonical_structure(fd_sparsity, "finite_diff_jac_sparsity")
+        _check_fd_pattern(
+            _finite_diff_jac(lambda xx: fun(xx, *args), probe, m_rows), rows, cols
+        )
         fd_structure = True
     if rows is None:
         # Dense sparsity pattern: every row may touch every column.
@@ -631,6 +678,8 @@ def _block_from_callable(
                 f"scalar or {m_rows} values (one per constraint row)"
             ) from None
 
+    lb_arr, ub_arr = bound(lb, "lower"), bound(ub, "upper")
+    _check_bound_order(lb_arr, ub_arr)
     return _ConstraintBlock(
         rows=rows,
         cols=cols,
@@ -638,8 +687,8 @@ def _block_from_callable(
         fun=fun,
         jac=jac if callable(jac) else None,
         args=args,
-        lb=bound(lb, "lower"),
-        ub=bound(ub, "upper"),
+        lb=lb_arr,
+        ub=ub_arr,
         n_rows=m_rows,
         sparse_jac=sparse_jac,
         fd_structure=fd_structure,
@@ -662,11 +711,17 @@ def _block_from_dict(c: dict, n: int, x0=None) -> _ConstraintBlock:
     if not callable(fun):
         # ValueError, not TypeError: the public contract (test_minimize.py).
         raise ValueError("constraint 'fun' must be callable")  # noqa: TRY004
+    jac = c.get("jac")
+    if jac is not None and not callable(jac):
+        # Otherwise it would be finite-differenced silently (or, calling it,
+        # end the solve with Invalid_Number_Detected); say so at build time.
+        raise ValueError(
+            f"constraint dict 'jac' must be callable or omitted (finite "
+            f"differences); got {jac!r}"
+        )
     # scipy convention: "eq" is g(x) == 0, "ineq" is g(x) >= 0.
     ub = 0.0 if kind == "eq" else np.inf
-    return _block_from_callable(
-        fun, c.get("jac"), tuple(c.get("args", ())), 0.0, ub, n, x0
-    )
+    return _block_from_callable(fun, jac, tuple(c.get("args", ())), 0.0, ub, n, x0)
 
 
 def _block_from_nonlinear_constraint(
@@ -676,8 +731,10 @@ def _block_from_nonlinear_constraint(
 
     A callable ``jac`` is used as for dicts (sparse when it returns a
     scipy-sparse matrix); the finite-difference strings ``"2-point"``,
-    ``"3-point"`` and ``"cs"`` mean central finite differences, over
-    ``finite_diff_jac_sparsity`` when given. Options pounce cannot honor warn
+    ``"3-point"`` and ``"cs"`` mean central finite differences over all
+    columns; ``finite_diff_jac_sparsity`` then declares the Jacobian's
+    structure (checked against the finite differences, see
+    ``_check_fd_pattern``) without reducing the work. Options pounce cannot honor warn
     instead of being dropped silently: an explicit ``hess`` (with nonlinear
     constraints ``minimize`` uses a limited-memory Lagrangian Hessian),
     ``keep_feasible`` and ``finite_diff_rel_step``.
@@ -836,6 +893,7 @@ def _wrap_constraints(constraints, n: int, x0=None):
                     blk.n_rows,
                 )
                 if blk.fd_structure:
+                    _check_fd_pattern(J, blk.rows, blk.cols)
                     out[start:end] = J[blk.rows, blk.cols]
                 else:
                     out[start:end] = J.ravel()

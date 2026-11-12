@@ -579,6 +579,66 @@ def test_nonlinear_constraint_default_options_do_not_warn():
         )
 
 
+def test_finite_diff_jac_sparsity_missing_entry_raises():
+    """A pattern that leaves out a nonzero entry would give silently wrong
+    derivatives (the solve reported success at the wrong point); it raises."""
+    f = lambda x: (x[0] - 1) ** 2 + (x[1] - 2) ** 2  # noqa: E731
+    nc = opt.NonlinearConstraint(
+        lambda x: np.array([x[0] * x[1]]),
+        -np.inf,
+        0.3,
+        finite_diff_jac_sparsity=np.array([[1, 0]]),  # d/dx1 = x0 omitted
+    )
+    with pytest.raises(ValueError, match=r"omits nonzero Jacobian entries at .*\(0, 1\)"):
+        pounce.minimize(
+            f,
+            np.array([0.5, 0.5]),
+            jac=lambda x: np.array([2 * (x[0] - 1), 2 * (x[1] - 2)]),
+            constraints=nc,
+            print_level=0,
+        )
+
+
+def test_finite_diff_jac_sparsity_entry_nonzero_after_probe_raises():
+    """An omitted entry that is zero at x0 passes the build-time check but is
+    caught when it turns nonzero during the solve."""
+    from pounce._minimize import _wrap_constraints
+
+    nc = opt.NonlinearConstraint(
+        lambda x: np.array([x[0] * x[1]]),
+        -np.inf,
+        0.3,
+        finite_diff_jac_sparsity=np.array([[0, 1]]),  # d/dx0 = x1, zero at x0
+    )
+    _, _, jac_values, _, _, _, jc = _wrap_constraints(nc, 2, x0=np.array([0.5, 0.0]))
+    np.testing.assert_array_equal(jc, [1])
+    with pytest.raises(ValueError, match="omits nonzero Jacobian entries"):
+        jac_values(np.array([0.5, 0.5]))
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        opt.NonlinearConstraint(lambda x: x[:2], [0.0, 2.0], [1.0, 1.0]),
+        opt.LinearConstraint(np.eye(3)[:2], [0.0, 2.0], [1.0, 1.0]),
+    ],
+)
+def test_constraint_lower_bound_above_upper_raises(constraint):
+    from pounce._minimize import _wrap_constraints
+
+    with pytest.raises(ValueError, match=r"lower bound exceeds upper bound in row\(s\) \[1\]"):
+        _wrap_constraints(constraint, 3, x0=np.zeros(3))
+
+
+@pytest.mark.parametrize("jac", ["2-point", True])
+def test_dict_constraint_non_callable_jac_raises(jac):
+    from pounce._minimize import _wrap_constraints
+
+    con = {"type": "ineq", "fun": lambda x: np.array([x[0]]), "jac": jac}
+    with pytest.raises(ValueError, match="'jac' must be callable or omitted"):
+        _wrap_constraints([con], 3, x0=np.zeros(3))
+
+
 def test_nonlinear_constraint_invalid_jac_raises():
     from pounce._minimize import _wrap_constraints
 
