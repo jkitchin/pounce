@@ -308,12 +308,13 @@ by `convex_cli_opts()` in `main.rs`:
 | `qp_equilibrate` | `equilibrate` | yes | Ruiz-equilibrate (direct path only, `qp_hsde=no`) |
 | `qp_crossover` | `crossover` | **no** | LP crossover to an exact vertex (pure LP only) |
 
-`qp_crossover` is **off by default**: the active-set purification is correct
-(never-regress) but currently slow on the degenerate / large NETLIB LPs it
-targets — it regressed the LP suite 3×–800× when on by default — and it does
-not yet reach an exact `Optimal` vertex on the GEN family (issue #133). It
-ships as an opt-in for small, well-behaved LPs that want exact-vertex
-refinement. See the field doc on `QpOptions::crossover`.
+`qp_crossover` is **off by default**. The revised-simplex crossover settles
+most LPs in milliseconds; a vertex the never-regress gate declines goes on to
+the active-set bridge, whose solves are each capped at 1000 working-set
+changes (about 2 s on NETLIB SHARE1B) before it keeps the interior answer. The LP suite
+has not been re-measured with crossover on since the simplex became the primary
+engine (issue #133 history: the bridge alone regressed it 3×–800×). See the
+field doc on `QpOptions::crossover`.
 
 `qp_tau_max` exists because a *static* τ caps every step at a fixed fraction
 of the distance to the boundary, so μ and the residuals fall by a fixed factor

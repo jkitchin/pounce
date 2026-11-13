@@ -429,7 +429,8 @@ pub struct QpOptions {
     pub time_limit: Option<std::time::Duration>, // whole solve; default None
     pub algorithm: QpAlgorithm,          // ParametricActiveSet | …
     pub linear_solver_factory: …,        // injected from pounce-algorithm
-    pub max_iter: usize,
+    pub max_iter: usize,                 // per pass of the pivot loop
+    pub max_working_set_changes: Option<u32>, // whole solve; default None
     pub feas_tol: f64,
     pub opt_tol:  f64,
     pub max_schur_updates_before_refactor: usize,  // default 50, ref §4.2
@@ -444,6 +445,21 @@ homotopy, elastic phase-1, feasibility/recovery solves, and seeded retries.
 Those nested stages share one monotonic deadline rather than restarting the
 duration. Expiration returns `QpStatus::TimeLimit`; an in-flight backend
 factorization completes before the next check.
+
+`max_iter`, by contrast, caps each *pass* of the pivot loop, and every nested
+stage gets its own: an elastic phase-1 that runs reduced-row and full-row
+passes, penalty escalations and a recovery solve can make several times
+`max_iter` working-set changes. `max_working_set_changes` is the whole-solve
+cap, shared across those stages like the deadline and stopping the solve the
+same way, with `QpStatus::MaxIter`. It is checked before each pivot, so the
+pivot in progress completes. `None` (the default) leaves only the per-pass
+cap. LP crossover sets both to 1000.
+
+A nested stage that one of these budgets cuts short is not a verdict on the
+problem, whatever status that stage ended on: a homotopy box relaxation that
+came back `Unbounded`, or a reduced-row pass that hit its own `max_iter`, is
+reported as `TimeLimit` (`MaxIter` when the change budget ran out), never as
+its own status.
 
 The `linear_solver_factory` injection mirrors
 `alg_builder.rs::LinearBackendFactory` (line 50) so `pounce-qp`

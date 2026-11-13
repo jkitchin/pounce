@@ -239,10 +239,16 @@ class QpResult:
     crossover:
         ``None`` unless ``qp_crossover=True`` ran a crossover (it runs on an
         LP — ``P == 0`` — solved to optimality by the IPM). Then a dict:
-        ``engine``, ``accepted`` (whether the vertex replaced the interior
-        point; a rejected vertex leaves the IPM answer), ``superbasics``, the
+        ``engine`` — the engine whose vertex was judged last: ``"simplex"``,
+        ``"active-set"`` (the bridge run when the simplex breaks down or its
+        vertex is declined), or ``"none"`` when neither produced a vertex (the
+        simplex broke down and the bridge did not converge, or the time limit
+        ran out first); ``accepted`` (whether the vertex replaced the interior
+        point; a rejected vertex leaves the IPM answer); ``superbasics``; the
         ``pivots_push`` / ``pivots_phase1`` / ``pivots_phase2`` and ``flips``
-        counts, and ``kkt_error_before`` / ``kkt_error_after``.
+        counts of the simplex; ``bridge_working_set_changes`` (the bridge's
+        work, summed over its solves, each capped at 1000); and
+        ``kkt_error_before`` / ``kkt_error_after``.
     """
 
     status: str

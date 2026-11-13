@@ -12,13 +12,12 @@
 //! How it finds things:
 //!
 //! * **The library.** Cargo builds every crate type of the lib target
-//!   (`["lib", "cdylib"]`) before an integration test runs, into the
-//!   profile directory that also holds `deps/`. This binary lives in
-//!   `<target>/<profile>/deps/`, so the cdylib is
-//!   `current_exe().parent().parent()/libpounce_cinterface.{so,dylib}`.
-//!   That follows `CARGO_TARGET_DIR`, `--release`/`--profile` and
-//!   `--target` without reading any of them. If the file is not there the
-//!   test fails and says so; it never skips for that.
+//!   (`["lib", "cdylib"]`) before an integration test runs. Where it puts
+//!   the cdylib depends on cargo's build-directory layout; [`lib_dir`]
+//!   reads it from this binary's own location, so it follows
+//!   `CARGO_TARGET_DIR`, `--release`/`--profile` and `--target` without
+//!   reading any of them. If the file is not found the test fails and says
+//!   so; it never skips for that.
 //! * **The compiler.** `$CC` if set and non-empty, else `cc`.
 //! * **Running.** The link carries `-Wl,-rpath,<libdir>`, and the run sets
 //!   `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` to `<libdir>` as well.
@@ -83,28 +82,62 @@ fn cdylib_file_name() -> String {
 
 /// The directory holding the cdylib cargo built for this test run.
 ///
-/// `deps/` first: cargo always writes the cdylib there, next to this test
-/// binary, and uplifts it to the profile directory only when the lib is a
-/// root unit. Under `cargo test --workspace` from a clean target it is not
-/// (`pounce-cli` dev-depends on this crate), so only `deps/` has it; the
-/// uplifted file, when there, is a hard link to the same output.
+/// Two build-directory layouts, read from this binary's location:
+///
+/// * **Flat** (cargo through 1.99): this binary is in
+///   `<target>/<profile>/deps/`. Cargo always writes the cdylib to `deps/`
+///   and uplifts it to the profile directory only when the lib is a root
+///   unit. Under `cargo test --workspace` from a clean target it is not
+///   (`pounce-cli` dev-depends on this crate), so only `deps/` has it; the
+///   uplifted file, when there, is a hard link to the same output.
+/// * **Per unit** (cargo 1.100): every unit gets its own
+///   `<target>/<profile>/build/<package>/<hash>/out/`, and this binary is
+///   in one of them. The cdylib is in the lib unit's sibling directory.
+///   When more than one lib unit of this package exists (one per feature
+///   set built into this target directory), the most recently written
+///   cdylib is the one this run's build produced or confirmed.
 fn lib_dir() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
-    let deps = exe.parent().expect("test binary has a parent directory");
-    let profile = deps.parent().expect("deps/ has a parent profile directory");
-    for dir in [deps, profile] {
+    let here = exe.parent().expect("test binary has a parent directory");
+    let up = here
+        .parent()
+        .expect("the test binary's directory has a parent");
+    for dir in [here, up] {
         if dir.join(cdylib_file_name()).is_file() {
             return dir.to_path_buf();
         }
     }
+    // Per-unit layout: `here` is `<package>/<hash>/out`, `up` is
+    // `<package>/<hash>`, and its parent holds every unit of the package.
+    let units = up.parent().filter(|_| here.ends_with("out"));
+    let newest = units.and_then(|units| {
+        std::fs::read_dir(units)
+            .ok()?
+            .filter_map(|unit| {
+                let out = unit.ok()?.path().join("out");
+                let modified = out
+                    .join(cdylib_file_name())
+                    .metadata()
+                    .ok()?
+                    .modified()
+                    .ok()?;
+                Some((modified, out))
+            })
+            .max_by_key(|(modified, _)| *modified)
+            .map(|(_, out)| out)
+    });
+    if let Some(dir) = newest {
+        return dir;
+    }
     panic!(
-        "expected the cdylib cargo builds for integration tests in {} or {}, \
-         but it is in neither (test binary: {}). The lib target must keep \
-         crate-type = [\"lib\", \"cdylib\"]; if this toolchain does not build \
-         the cdylib for tests, build it first (`cargo build -p \
-         pounce-cinterface`) — this test does not skip for a missing library.",
-        deps.display(),
-        profile.display(),
+        "expected the cdylib cargo builds for integration tests in {}, {} or a \
+         sibling unit's out/ directory, but found none (test binary: {}). The \
+         lib target must keep crate-type = [\"lib\", \"cdylib\"]; if this \
+         toolchain does not build the cdylib for tests, build it first (`cargo \
+         build -p pounce-cinterface`) — this test does not skip for a missing \
+         library.",
+        here.display(),
+        up.display(),
         exe.display()
     );
 }

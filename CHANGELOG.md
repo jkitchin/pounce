@@ -27,6 +27,17 @@ changes.
   used to end with `Invalid_Number_Detected`, with the underlying `TypeError`
   only logged. `find_minima` and `race_starts` accept it too, since they share the
   constraint handling.
+- **`pounce-qp`: a whole-solve cap on working-set changes.**
+  `QpOptions::max_working_set_changes` (default `None`) bounds the changes of
+  every pass of one solve together — homotopy, elastic phase 1 and its
+  penalty passes, recovery and seeded retries — which `max_iter` bounds only
+  one pass at a time. A solve that spends it stops as on its time limit and
+  reports `MaxIter`. Under either budget, a pass cut short is never the
+  answer: the solve reports `TimeLimit` (or `MaxIter` for the change budget),
+  not the truncated pass's own status — such as an `Unbounded` homotopy box
+  relaxation or a reduced run's `NumericalFailure`. LP crossover sets it to 1000. `QpOptions` is not
+  `#[non_exhaustive]`, so a struct literal without `..Default::default()`
+  must add the field.
 - **Julia: batch bound edits through optional native in-place updates.**
   Retain immediate result invalidation and pending edits across invalid paired
   bounds; rebuild for complementarity class changes or older libraries.
@@ -236,6 +247,28 @@ changes.
   header's structs to the Rust layout.
 
 ### Fixed
+- **`qp_crossover` bounds what it spends after declining a vertex.** When the
+  LP simplex crossover's vertex failed the never-regress test, crossover ran
+  the active-set fallback from the interior iterate, twice (warm, then cold),
+  each bounded only per pass of its l1-elastic phase 1: NETLIB SHARE1B took
+  18.7 s with `qp_crossover=yes` against 0.02 s without, and kept the
+  interior answer. A declined vertex now goes first to the active-set engine
+  started from the simplex basis, then to one solve from the interior iterate,
+  each capped at 1000 working-set changes in all (checked before each pivot);
+  the cold retry is gone. SHARE1B: 1.9 s, interior answer kept. On 240 random
+  scaled LPs the fallback accepts a vertex on every LP it did before plus
+  three more (12 against 9); on 3 of the 9 it is a different vertex, from the
+  simplex basis, with a higher KKT error that still passes the gate (up to
+  5.6e-8 against 2.1e-8). Every finite simplex vertex accepted before is
+  accepted bit-identically.
+  A simplex vertex that is not finite (NaN, which the never-regress test read
+  as zero error) is now a breakdown handed to the fallback: the fixture
+  `farkas_far_feasible_no_box_c0` now keeps a finite answer on the convex
+  path, where the CLI fell back to the NLP solver. The crossover record (CLI
+  `Crossover:` line, Python `QpResult.crossover`, Rust `take_report()`) gains
+  the bridge's working-set change count, and names `simplex` as the engine of
+  a declined simplex vertex the fallback could not improve on, where it said
+  `none`.
 - **Multipliers reported after a complementarity solve are the model's.**
   In every frontend (C API, Python, CLI `.sol`), a solve with declared pairs
   reported row multipliers that were the solver's split between a row and

@@ -1161,7 +1161,6 @@ impl BacktrackingLineSearch {
     /// `data.trial` so the watchdog `accept-anyway` path can promote
     /// it.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn run_alpha_loop(
         &mut self,
         data: &IpoptDataHandle,

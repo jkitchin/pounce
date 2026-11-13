@@ -703,7 +703,7 @@ impl ParametricActiveSetSolver {
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(
+                return Ok(cut_off_solution(
                     qp,
                     Some(&x),
                     n_refactor,
@@ -733,7 +733,7 @@ impl ParametricActiveSetSolver {
             let delta = self.factorize_with_inertia_control(kkt, &mut rhs, k as i32, qp.n, opts)?;
             n_refactor += 1;
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(
+                return Ok(cut_off_solution(
                     qp,
                     Some(&x),
                     n_refactor,
@@ -766,6 +766,7 @@ impl ParametricActiveSetSolver {
                 if let Some((i_drop, _)) = worst {
                     working.bounds[i_drop] = BoundStatus::Inactive;
                     n_changes += 1;
+                    crate::deadline::charge_working_set_change();
                     continue;
                 }
 
@@ -881,6 +882,7 @@ impl ParametricActiveSetSolver {
                 }
                 working.bounds[i_block] = status;
                 n_changes += 1;
+                crate::deadline::charge_working_set_change();
             }
         }
 
@@ -997,7 +999,7 @@ impl ParametricActiveSetSolver {
         // ---- 4. Active-set inner loop ----
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(
+                return Ok(cut_off_solution(
                     qp,
                     Some(&x),
                     n_refactor,
@@ -1022,7 +1024,7 @@ impl ParametricActiveSetSolver {
                 self.factorize_with_inertia_control(kkt, &mut rhs, (m + k) as i32, qp.n, opts)?;
             n_refactor += 1;
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(
+                return Ok(cut_off_solution(
                     qp,
                     Some(&x),
                     n_refactor,
@@ -1053,6 +1055,7 @@ impl ParametricActiveSetSolver {
                 if let Some((i_drop, _)) = worst {
                     working.bounds[i_drop] = BoundStatus::Inactive;
                     n_changes += 1;
+                    crate::deadline::charge_working_set_change();
                     continue;
                 }
 
@@ -1155,6 +1158,7 @@ impl ParametricActiveSetSolver {
                 }
                 working.bounds[i_block] = status;
                 n_changes += 1;
+                crate::deadline::charge_working_set_change();
             }
         }
 
@@ -1536,7 +1540,7 @@ impl ParametricActiveSetSolver {
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(
+                return Ok(cut_off_solution(
                     qp,
                     Some(&x),
                     n_refactor,
@@ -1684,6 +1688,7 @@ impl ParametricActiveSetSolver {
                             working.constraints[i] = ConsStatus::Inactive;
                             tabu_cons[i] = true;
                             n_changes += 1;
+                            crate::deadline::charge_working_set_change();
                         }
                     }
                     for &i in &active_bounds {
@@ -1691,6 +1696,7 @@ impl ParametricActiveSetSolver {
                             working.bounds[i] = BoundStatus::Inactive;
                             tabu_bounds[i] = true;
                             n_changes += 1;
+                            crate::deadline::charge_working_set_change();
                         }
                     }
                     // The pruned rows are not drops to keep: the pattern
@@ -1701,7 +1707,7 @@ impl ParametricActiveSetSolver {
                 // The deadline fired inside the factorization: a timeout, and
                 // the work done so far is part of it (gh#1061).
                 Err(QpError::DeadlineExpired) => {
-                    return Ok(time_limit_solution(
+                    return Ok(cut_off_solution(
                         qp,
                         Some(&x),
                         n_refactor,
@@ -1725,7 +1731,7 @@ impl ParametricActiveSetSolver {
                 continue;
             }
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(
+                return Ok(cut_off_solution(
                     qp,
                     Some(&x),
                     n_refactor,
@@ -1840,6 +1846,7 @@ impl ParametricActiveSetSolver {
                         );
                     }
                     n_changes += 1;
+                    crate::deadline::charge_working_set_change();
                     continue;
                 }
 
@@ -2104,6 +2111,7 @@ impl ParametricActiveSetSolver {
                     );
                 }
                 n_changes += 1;
+                crate::deadline::charge_working_set_change();
             }
 
             // EXPAND τ growth / hard reset. Per Gill-Murray-
@@ -2643,11 +2651,17 @@ impl ParametricActiveSetSolver {
             return Ok(None);
         };
         let qp_red = pruned.problem(qp);
-        let red = inner(self, &qp_red, opts)?;
+        let mut red = inner(self, &qp_red, opts)?;
         let decisive = match red.status {
-            QpStatus::Infeasible | QpStatus::TimeLimit => true,
+            QpStatus::Infeasible => true,
             QpStatus::Optimal | QpStatus::Unbounded => {
                 pruned.dropped_rows_hold(qp, &red.x, opts.feas_tol)
+            }
+            // Cut off: no second solve, but the reduced run's own status (a
+            // per-pass `MaxIter`, a `NumericalFailure`) is no verdict on `qp`.
+            status if crate::deadline::cut_off(status) => {
+                red.status = crate::deadline::cut_off_status();
+                true
             }
             _ => false,
         };
@@ -2750,8 +2764,8 @@ impl ParametricActiveSetSolver {
             .constraints
             .copy_from_slice(&sol_aug.working.constraints);
         working.bounds.copy_from_slice(&sol_aug.working.bounds[..n]);
-        if sol_aug.status == QpStatus::TimeLimit || crate::deadline::expired() {
-            return Ok(time_limit_solution(
+        if crate::deadline::cut_off(sol_aug.status) {
+            return Ok(cut_off_solution(
                 qp,
                 Some(&x),
                 spent.n_refactor,
@@ -2882,7 +2896,7 @@ impl ParametricActiveSetSolver {
         // feasibility — is allowed to speak to the certificate.
         let (p1_point, p1_verdict) = self.convex_feasibility_seed(qp, opts, &mut spent);
         if crate::deadline::expired() {
-            return Ok(time_limit_solution(
+            return Ok(cut_off_solution(
                 qp,
                 p1_point.as_deref().or(Some(x.as_slice())),
                 spent.n_refactor,
@@ -2941,8 +2955,8 @@ impl ParametricActiveSetSolver {
                 Err(_) => continue,
             };
             spent.add_work(&rec.stats);
-            if rec.status == QpStatus::TimeLimit || crate::deadline::expired() {
-                return Ok(time_limit_solution(
+            if crate::deadline::cut_off(rec.status) {
+                return Ok(cut_off_solution(
                     qp,
                     Some(&rec.x),
                     spent.n_refactor,
@@ -3022,7 +3036,7 @@ impl ParametricActiveSetSolver {
             other => other,
         };
         if crate::deadline::expired() {
-            return Ok(time_limit_solution(
+            return Ok(cut_off_solution(
                 qp,
                 Some(&x),
                 spent.n_refactor,
@@ -3331,7 +3345,7 @@ impl ParametricActiveSetSolver {
             spent.add_work(&sol.stats);
 
             let x = sol.x[..n].to_vec();
-            if sol.status == QpStatus::TimeLimit || crate::deadline::expired() {
+            if crate::deadline::cut_off(sol.status) {
                 return (Some(x), None);
             }
             if !x.iter().all(|v| v.is_finite()) {
@@ -3756,12 +3770,14 @@ impl ParametricActiveSetSolver {
             if !keep_c[i] {
                 working.constraints[i] = ConsStatus::Inactive;
                 *n_changes += 1;
+                crate::deadline::charge_working_set_change();
             }
         }
         for &i in &active_bounds {
             if !keep_b[i] {
                 working.bounds[i] = BoundStatus::Inactive;
                 *n_changes += 1;
+                crate::deadline::charge_working_set_change();
             }
         }
         true
@@ -3966,7 +3982,7 @@ impl ParametricActiveSetSolver {
         }
         'iters: for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(
+                return Ok(cut_off_solution(
                     qp,
                     Some(&x),
                     n_refactor,
@@ -4090,7 +4106,7 @@ impl ParametricActiveSetSolver {
                 schur.solve(&mut self.linsol, &mut rhs)?;
             }
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(
+                return Ok(cut_off_solution(
                     qp,
                     Some(&x),
                     n_refactor,
@@ -4263,6 +4279,7 @@ impl ParametricActiveSetSolver {
                         reset_or_stop!('iters);
                         n_refactor += 1;
                         n_changes += 1;
+                        crate::deadline::charge_working_set_change();
                         prev_was_null_step = false;
                         floor_refactored = false;
                         continue;
@@ -4279,6 +4296,7 @@ impl ParametricActiveSetSolver {
                         n_refactor += 1;
                     }
                     n_changes += 1;
+                    crate::deadline::charge_working_set_change();
                     n_schur_updates += 1;
                     if schur.needs_reset(opts) {
                         reset_or_stop!('iters);
@@ -4503,6 +4521,7 @@ impl ParametricActiveSetSolver {
                     n_refactor += 1;
                 }
                 n_changes += 1;
+                crate::deadline::charge_working_set_change();
                 n_schur_updates += 1;
                 if schur.needs_reset(opts) {
                     reset_or_stop!('iters);
@@ -5748,7 +5767,7 @@ impl QpSolver for ParametricActiveSetSolver {
         ws: Option<&QpWarmStart>,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
-        let _deadline = crate::deadline::enter(opts.time_limit);
+        let _deadline = crate::deadline::enter(opts.time_limit, opts.max_working_set_changes);
         // The second-order pass sits *here*, outside `solve_scoped`, for two
         // reasons. It is the one place every route through the engine — box,
         // equality-only, equality-plus-bounds, general, Schur, elastic,
@@ -5769,7 +5788,7 @@ impl QpSolver for ParametricActiveSetSolver {
         qp_new: &QpProblem,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
-        let _deadline = crate::deadline::enter(opts.time_limit);
+        let _deadline = crate::deadline::enter(opts.time_limit, opts.max_working_set_changes);
         let out = self.solve_parametric_scoped(qp_prev, sol_prev, qp_new, opts);
         let mut out = soften_deadline(qp_new, Some(&sol_prev.x), out);
         // Every route through `solve_parametric_scoped` stamps its own source,
@@ -5793,7 +5812,7 @@ impl QpSolver for ParametricActiveSetSolver {
         working: &crate::working_set::WorkingSet,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
-        let _deadline = crate::deadline::enter(opts.time_limit);
+        let _deadline = crate::deadline::enter(opts.time_limit, opts.max_working_set_changes);
         let out = self.solve_with_working_set_scoped(qp, working, opts);
         soften_deadline(qp, None, out)
     }
@@ -5805,8 +5824,9 @@ impl QpSolver for ParametricActiveSetSolver {
 /// internal caller to handle a timeout instead of consuming a half-finished
 /// result. It is not part of the crate's contract with its callers, though:
 /// a timeout is a *soft* outcome, reported as `QpStatus::TimeLimit` on an
-/// `Ok` solution exactly like `MaxIter`. Every public entry point converts it
-/// here, so the error can never escape.
+/// `Ok` solution exactly like `MaxIter` (and as `MaxIter` itself when the
+/// working-set change budget is what ran out; see [`cut_off_solution`]).
+/// Every public entry point converts it here, so the error can never escape.
 /// Record which route a `solve_parametric` call took on the solution it is
 /// about to return.
 ///
@@ -5828,7 +5848,7 @@ fn soften_deadline(
         // Zero work counts: the cancelled inner solve's counters died with the
         // `Err`, and inventing a number here would be worse than reporting
         // none. `stats.time` still reflects the real budget spent.
-        Err(QpError::DeadlineExpired) => Ok(time_limit_solution(qp, hint, 0, 0, 0, false)),
+        Err(QpError::DeadlineExpired) => Ok(cut_off_solution(qp, hint, 0, 0, 0, false)),
         other => other,
     }
 }
@@ -5842,7 +5862,7 @@ impl ParametricActiveSetSolver {
     ) -> Result<QpSolution, QpError> {
         qp.validate()?;
         if crate::deadline::expired() {
-            return Ok(time_limit_solution(
+            return Ok(cut_off_solution(
                 qp,
                 ws.map(|w| w.x.as_slice()),
                 0,
@@ -5998,7 +6018,7 @@ impl ParametricActiveSetSolver {
     ) -> Result<QpSolution, QpError> {
         if crate::deadline::expired() {
             return Ok(stamp(
-                time_limit_solution(qp_new, Some(&sol_prev.x), 0, 0, 0, false),
+                cut_off_solution(qp_new, Some(&sol_prev.x), 0, 0, 0, false),
                 ParametricSource::Cold,
             ));
         }
@@ -6180,7 +6200,7 @@ impl ParametricActiveSetSolver {
         working: &crate::working_set::WorkingSet,
         opts: &QpOptions,
     ) -> Result<Option<QpSolution>, QpError> {
-        let _deadline = crate::deadline::enter(opts.time_limit);
+        let _deadline = crate::deadline::enter(opts.time_limit, opts.max_working_set_changes);
         self.pin_prunes = false;
         let pinned = self.warm_start_from_working_set(qp, working, opts);
         self.pin_prunes = true;
@@ -6213,7 +6233,7 @@ impl ParametricActiveSetSolver {
         qp.validate()?;
         working.validate_dims(qp.n, qp.m)?;
         if crate::deadline::expired() {
-            return Ok(Err(time_limit_solution(qp, None, 0, 0, 0, false)));
+            return Ok(Err(cut_off_solution(qp, None, 0, 0, 0, false)));
         }
 
         // Make the hint well-formed for `qp` before anything trusts it.
@@ -6424,7 +6444,7 @@ impl ParametricActiveSetSolver {
                 sol.x = x;
                 sol.obj = quad_objective(qp, &sol.x);
                 sol.working = working;
-                sol.status = QpStatus::TimeLimit;
+                sol.status = crate::deadline::cut_off_status();
                 sol.stats.second_order = SecondOrderVerdict::NegativeCurvature;
                 return Ok(sol);
             }
@@ -6443,6 +6463,8 @@ impl ParametricActiveSetSolver {
             };
             let stats_so_far = sol.stats.clone();
             let mut next = self.solve_scoped(qp, Some(&ws), opts)?;
+            // The escape step itself is one working-set change.
+            crate::deadline::charge_working_set_change();
             next.stats.n_working_set_changes += stats_so_far.n_working_set_changes + 1;
             next.stats.n_refactor += stats_so_far.n_refactor;
             next.stats.n_schur_updates += stats_so_far.n_schur_updates;
@@ -6584,12 +6606,14 @@ fn feasible_step_along(
     (alpha, blocker)
 }
 
-/// The soft outcome for a cancelled solve: the best point we have, clamped
-/// into the box so it is at least a usable starting iterate, with
-/// `QpStatus::TimeLimit`.
+/// The soft outcome for a solve cut off by its solve-wide budget: the best
+/// point we have, clamped into the box so it is at least a usable starting
+/// iterate, with the status [`crate::deadline::cut_off_status`] names —
+/// `QpStatus::TimeLimit` for the wall clock, `QpStatus::MaxIter` for the
+/// working-set change budget.
 ///
 /// `n_refactor`, `n_changes` and `n_schur_updates` are the work done before
-/// the deadline hit, `used_phase1` whether elastic mode was running, and
+/// the budget ran out, `used_phase1` whether elastic mode was running, and
 /// `time` comes from the enclosing deadline scope — a solve that spent the
 /// whole budget must not be recorded as having taken no time, nor as having
 /// taken no iterations. `n_changes` used to be dropped here, so a solve that
@@ -6598,7 +6622,7 @@ fn feasible_step_along(
 /// SQP step QP that spent its whole budget in elastic mode doing Schur updates
 /// was logged as "0 Schur updates, phase1=false" (gh#1061) — the one QP the
 /// log exists to explain.
-fn time_limit_solution(
+fn cut_off_solution(
     qp: &QpProblem,
     hint: Option<&[Number]>,
     n_refactor: u32,
@@ -6620,7 +6644,7 @@ fn time_limit_solution(
         lambda_g: vec![0.0; qp.m],
         lambda_x: vec![0.0; qp.n],
         working: WorkingSet::cold(qp.n, qp.m),
-        status: QpStatus::TimeLimit,
+        status: crate::deadline::cut_off_status(),
         stats: QpStats {
             n_working_set_changes: n_changes,
             n_refactor,
@@ -7568,7 +7592,7 @@ mod issue1061_unchecked_rank_tests {
 #[cfg(test)]
 mod issue1061_time_limit_counts_tests {
     //! gh#1061: a step QP that runs out of time is the one the
-    //! `pounce::sqp::qp` log exists to explain, and `time_limit_solution`
+    //! `pounce::sqp::qp` log exists to explain, and `cut_off_solution`
     //! reported it as "0 Schur updates, phase1=false" whatever it had done.
     //! Measured on `WM_CFy`: a cold step QP that spent 600 s in elastic mode,
     //! a third of it in `SchurState::solve`, logged neither.
@@ -7709,6 +7733,111 @@ mod issue1061_time_limit_counts_tests {
             sol.stats
         );
         assert!(sol.stats.used_phase1, "{:?}", sol.stats);
+    }
+}
+
+#[cfg(test)]
+mod cut_off_pass_status_tests {
+    //! A pass cut off by the solve-wide budget is not a verdict, whatever
+    //! status it ended on: a decision point that stops on it reports the
+    //! cut-off status for the whole problem, never the pass's own. Each test
+    //! moves the expiry one deadline check at a time through a whole solve and
+    //! requires `TimeLimit` from every solve the expiry actually reached.
+    use pounce_common::types::{Index, Number};
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+
+    use super::ParametricActiveSetSolver;
+    use crate::{HessianInertia, QpOptions, QpProblem, QpSolver, QpStatus};
+
+    /// Solve `qp` once per expiry point, from the first deadline check until
+    /// the solve finishes inside its check budget; return how many solves
+    /// were cut off. Every one of them must report `TimeLimit`.
+    fn every_cut_off_reports_time_limit(qp: &QpProblem, opts: &QpOptions) -> u64 {
+        for k in 0.. {
+            let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::new()));
+            crate::deadline::expire_after_checks(Some(k));
+            let sol = solver.solve(qp, None, opts);
+            let fired = crate::deadline::expiry_fired();
+            crate::deadline::expire_after_checks(None);
+            if !fired {
+                return k;
+            }
+            let sol = sol.expect("a cancelled solve is a status, not an error");
+            assert_eq!(
+                sol.status,
+                QpStatus::TimeLimit,
+                "cut off at deadline check {k}, the solve reported a pass's own status"
+            );
+        }
+        unreachable!()
+    }
+
+    /// `min -x` subject to `x <= 1` with `H = 0` and a free box: the box
+    /// relaxation the homotopy starts from (`min -x`, `x` free) is
+    /// `Unbounded`, which only says the path cannot start there. With the
+    /// deadline expiring right after it, the box-relaxation arm returned that
+    /// `Unbounded` as the answer for the whole (bounded) problem.
+    #[test]
+    fn a_cut_off_after_an_unbounded_box_relaxation_is_not_an_unbounded_verdict() {
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(1, vec![1], vec![1]));
+        h.set_values(&[0.0]);
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(1, 1, vec![1], vec![1]));
+        a.set_values(&[1.0]);
+        let qp = QpProblem {
+            n: 1,
+            m: 1,
+            h: &h,
+            g: &[-1.0],
+            a: &a,
+            bl: &[-1e20],
+            bu: &[1.0],
+            xl: &[-1e20],
+            xu: &[1e20],
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let opts = QpOptions {
+            use_homotopy: true,
+            ..QpOptions::default()
+        };
+        let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::new()));
+        let sol = solver.solve(&qp, None, &opts).unwrap();
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!((sol.x[0] - 1.0).abs() < 1e-8, "{:?}", sol.x);
+        assert!(every_cut_off_reports_time_limit(&qp, &opts) > 0);
+    }
+
+    /// Two copies of `x0 + x1 = 1` and a general row, so a cold solve runs the
+    /// dependent-equality pre-solve; `max_iter = 1` makes its reduced run end
+    /// on the per-pass `MaxIter`. With the deadline expiring at the check that
+    /// follows, the reduced run was taken as decisive and its `MaxIter`
+    /// returned as the whole solve's status.
+    #[test]
+    fn a_cut_off_after_a_reduced_run_reports_time_limit() {
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(2, vec![1, 2], vec![1, 2]));
+        h.set_values(&[1.0, 1.0]);
+        let irn: Vec<Index> = vec![1, 1, 2, 2, 3, 3];
+        let jcn: Vec<Index> = vec![1, 2, 1, 2, 1, 2];
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(3, 2, irn, jcn));
+        a.set_values(&[1.0, 1.0, 1.0, 1.0, 1.0, -1.0]);
+        let g: [Number; 2] = [-1.0, -2.0];
+        let qp = QpProblem {
+            n: 2,
+            m: 3,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &[1.0, 1.0, -0.25],
+            bu: &[1.0, 1.0, 1e20],
+            xl: &[0.0, 0.0],
+            xu: &[1.0, 1.0],
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let opts = QpOptions {
+            max_iter: 1,
+            ..QpOptions::default()
+        };
+        assert!(every_cut_off_reports_time_limit(&qp, &opts) > 0);
     }
 }
 

@@ -420,6 +420,19 @@ fn trace_summary(
     );
 }
 
+/// A box relaxation cut off by the solve-wide budget, as the answer for the
+/// whole `m`-row problem: its point, with the row multipliers and working set
+/// widened to `m` rows, and the cut-off status. The relaxation's own status
+/// is never the answer — an `Unbounded` relaxation only says the path cannot
+/// start there, and a `NumericalFailure` or a per-pass `MaxIter` speaks for
+/// the relaxation alone.
+fn cut_off_box_relaxation(mut s: QpSolution, m: usize) -> QpSolution {
+    s.status = crate::deadline::cut_off_status();
+    s.lambda_g.resize(m, 0.0);
+    s.working.constraints.resize(m, ConsStatus::Inactive);
+    s
+}
+
 /// Rate of change of a row bound per unit `t` (0 when the bound is infinite).
 fn bound_rate(relaxed: Number, target: Number, is_lower: bool) -> Number {
     let infinite = if is_lower {
@@ -524,10 +537,8 @@ impl ParametricActiveSetSolver {
             }
             match first {
                 Ok(s) if s.status == QpStatus::Optimal => s,
-                Ok(mut s) if s.status == QpStatus::TimeLimit => {
-                    s.lambda_g.resize(m, 0.0);
-                    s.working.constraints.resize(m, ConsStatus::Inactive);
-                    return Ok(Some(s));
+                Ok(s) if crate::deadline::cut_off(s.status) => {
+                    return Ok(Some(cut_off_box_relaxation(s, m)));
                 }
                 _ => {
                     let Some(delta) = path_regularization_delta(qp) else {
@@ -549,10 +560,8 @@ impl ParametricActiveSetSolver {
                             h_reg_holder = Some(h_reg);
                             s
                         }
-                        Ok(mut s) if s.status == QpStatus::TimeLimit => {
-                            s.lambda_g.resize(m, 0.0);
-                            s.working.constraints.resize(m, ConsStatus::Inactive);
-                            return Ok(Some(s));
+                        Ok(s) if crate::deadline::cut_off(s.status) => {
+                            return Ok(Some(cut_off_box_relaxation(s, m)));
                         }
                         _ => return Ok(None),
                     }
@@ -715,7 +724,7 @@ impl ParametricActiveSetSolver {
                     lambda_g,
                     lambda_x,
                     working,
-                    status: QpStatus::TimeLimit,
+                    status: crate::deadline::cut_off_status(),
                     stats: QpStats {
                         n_working_set_changes: n_changes,
                         n_refactor,
@@ -820,6 +829,7 @@ impl ParametricActiveSetSolver {
                             lambda_g[i] = 0.0;
                             tabu_cons[i] = true;
                             n_changes += 1;
+                            crate::deadline::charge_working_set_change();
                         }
                     }
                     let mut repruned_here: u32 = 0;
@@ -834,6 +844,7 @@ impl ParametricActiveSetSolver {
                             }
                             pruned_once[j] = true;
                             n_changes += 1;
+                            crate::deadline::charge_working_set_change();
                         }
                     }
                     if trace {
@@ -1079,6 +1090,7 @@ impl ParametricActiveSetSolver {
                     }
                 }
                 n_changes += 1;
+                crate::deadline::charge_working_set_change();
             }
         }
 

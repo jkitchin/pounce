@@ -140,14 +140,24 @@ enum Step {
     Unbounded,
 }
 
-/// Run the revised-simplex crossover. Returns the exact vertex on success, or
-/// `None` on any breakdown (unbounded direction, factorization failure, or
-/// iteration cap) — the caller then keeps the interior iterate (never-regress).
+/// What the crossover simplex reached once phase 2 priced out.
+pub(crate) struct CrossoverVertex {
+    /// The vertex and its basis duals.
+    pub solution: VertexSolution,
+    /// The final basis as an active-set seed, or `None` when its point is not
+    /// feasible for the problem to the seed's tolerance.
+    pub basis: Option<FeasibleVertex>,
+}
+
+/// Run the revised-simplex crossover. Returns the exact vertex and its basis
+/// on success, or `None` on any breakdown (unbounded direction, factorization
+/// failure, iteration cap, the deadline, or a vertex that could not be read
+/// back finite) — the caller then falls back to the active-set bridge.
 pub(crate) fn crossover_simplex(
     prob: &QpProblem,
     sol: &QpSolution,
     _opts: &QpOptions,
-) -> Option<VertexSolution> {
+) -> Option<CrossoverVertex> {
     if crate::deadline::expired() {
         return None;
     }
@@ -161,7 +171,11 @@ pub(crate) fn crossover_simplex(
     s.push_superbasics()?; // drive interior structurals to bounds / into the basis
     s.run_phase1()?; // clean the residual bound infeasibility (e.g. eq artificials)
     s.run_phase2()?; // optimize to the vertex
-    Some(s.extract(prob))
+    let solution = s.extract(prob)?;
+    Some(CrossoverVertex {
+        solution,
+        basis: feasible_vertex(prob, &s),
+    })
 }
 
 /// Where a variable sits at a basic feasible solution, in a form the
@@ -327,7 +341,9 @@ pub(crate) fn simplex_seed(prob: &QpProblem) -> SeedOutcome {
         if s.run_phase2().is_none() {
             break;
         }
-        let sol = s.extract(prob);
+        let Some(sol) = s.extract(prob) else {
+            break;
+        };
         if let Some(v) = feasible_vertex(prob, &s) {
             optimal = Some(FeasibleVertex {
                 lp_optimum: Some(sol),
@@ -1462,21 +1478,28 @@ impl Simplex {
         }
     }
 
-    /// Map the final basis to the convex problem's primal/dual solution.
-    fn extract(&mut self, prob: &QpProblem) -> VertexSolution {
+    /// Map the final basis to the convex problem's primal/dual solution, or
+    /// `None` when that cannot be done exactly: the basics cannot be
+    /// recomputed from the factor, the dual solve fails, or a value comes out
+    /// non-finite. `Some` is a vertex of the basis, never a stand-in for one.
+    fn extract(&mut self, prob: &QpProblem) -> Option<VertexSolution> {
         let n = self.n;
         // gh#984: after the final pivot `x_B` carries every rank-one update
         // since the last refactor (measured: complementarity `2.8e-8` on a
         // 12-variable transportation LP). Recompute `x_B = B⁻¹(b − N x_N)` so
-        // the vertex is exact. On a refusal keep the running values: they are
-        // what this function returned before.
-        let _ = self.recompute_basics();
+        // the vertex is exact.
+        self.recompute_basics()?;
         let x: Vec<f64> = (0..n).map(|j| self.xval[j]).collect();
 
         // π = B⁻ᵀ c_B (row-space) with the *real* objective.
         let cost = self.cost.clone();
         let cb: Vec<f64> = (0..self.m).map(|slot| cost[self.basis[slot]]).collect();
-        let pi = self.btran(&cb).unwrap_or_else(|| vec![0.0; self.m]);
+        let pi = self.btran(&cb)?;
+        // Checked before the sign clamps below, which would turn a NaN dual
+        // into a zero.
+        if !x.iter().chain(&pi).all(|v| v.is_finite()) {
+            return None;
+        }
 
         // y = −π_eq ; z = −π_ineq (≥ 0).
         let y: Vec<f64> = (0..self.m_eq).map(|i| -pi[i]).collect();
@@ -1490,12 +1513,18 @@ impl Simplex {
                 continue; // basic ⇒ rc ≈ 0
             }
             let rc = self.reduced_cost(j, &pi, &cost);
+            if !rc.is_finite() {
+                return None;
+            }
             z_lb[j] = rc.max(0.0);
             z_ub[j] = (-rc).max(0.0);
         }
 
-        let obj = (0..n).map(|j| prob.c[j] * x[j]).sum();
-        VertexSolution {
+        let obj: f64 = (0..n).map(|j| prob.c[j] * x[j]).sum();
+        if !obj.is_finite() {
+            return None;
+        }
+        Some(VertexSolution {
             stats: self.stats,
             x,
             y,
@@ -1503,7 +1532,7 @@ impl Simplex {
             z_lb,
             z_ub,
             obj,
-        }
+        })
     }
 }
 

@@ -815,17 +815,72 @@ impl ActiveSetQp {
         self.m
     }
 
-    /// The translated variable bounds, in `pounce-qp`'s `±1e19` convention.
+    /// The working set a simplex basis `vertex` induces on this problem: every
+    /// nonbasic structural on its bound, every inequality whose logical is
+    /// nonbasic at its bound, and every equality row (`m_eq` of them, first)
+    /// active.
     ///
-    /// Crate-visible only: a public caller reads the same two slices off
-    /// [`Self::problem`], and one accessor for a thing is enough.
-    pub(crate) fn xl(&self) -> &[f64] {
-        &self.xl
-    }
-
-    /// See [`Self::xl`].
-    pub(crate) fn xu(&self) -> &[f64] {
-        &self.xu
+    /// It comes from the **basis**, not from tolerance-snapping the point:
+    /// exactly `n` nonbasic variables, each on a bound, linearly independent
+    /// because the basis matrix is nonsingular. [`solve_qp_active_set`] seeds
+    /// the engine with it at the simplex's point; [`crate::crossover`] pins it
+    /// for a primal of its own.
+    pub(crate) fn basis_working_set(
+        &self,
+        vertex: &crate::simplex::FeasibleVertex,
+        m_eq: usize,
+    ) -> WorkingSet {
+        use crate::simplex::AtBound;
+        let mut working = WorkingSet::cold(self.n, self.m);
+        for (i, st) in working.bounds.iter_mut().enumerate() {
+            // A variable fixed by equal bounds is `Fixed` regardless of which
+            // side the basis parked it on.
+            let (l, u) = (self.xl[i], self.xu[i]);
+            let fixed = l > NLP_LOWER_BOUND_INF && u < NLP_UPPER_BOUND_INF && l == u;
+            *st = match (fixed, vertex.struct_at[i]) {
+                (true, _) => BoundStatus::Fixed,
+                (false, AtBound::Lower) => BoundStatus::AtLower,
+                (false, AtBound::Upper) => BoundStatus::AtUpper,
+                (false, AtBound::Free) => BoundStatus::Inactive,
+            };
+        }
+        // Row order matches: [`Self::from_convex`] stacks `[A_eq ; G]` in the
+        // same order the simplex builds its rows, so index `i` is the same row.
+        for (i, st) in working.constraints.iter_mut().enumerate() {
+            // Equality rows are ALWAYS active — they are equations, not
+            // one-sided constraints that may or may not bind.
+            //
+            // Deriving their activity from the basis instead (leaving a row
+            // inactive when its logical is basic) is tempting: it makes the
+            // active count come out at exactly `n` and so avoids the
+            // `KKT inertia mismatch: expected 105 …, got 102` that `CVXQP3_S`
+            // otherwise hits. But the premise is false. An equality's logical
+            // is boxed to `[0, 0]`; a *basic* one is simply a degenerate basic
+            // variable sitting at zero, which says nothing about whether the row
+            // is a linear combination of the others. Dropping such a row drops a
+            // real constraint — the ratio test skips `bl == bu` rows, so it
+            // never comes back — and the engine is then free to move in a
+            // direction that violates it. On NETLIB `afiro` that produced a
+            // phantom `Unbounded` verdict on an LP with a finite optimum of
+            // −464.75 (issue #133's regression test caught it).
+            //
+            // More active rows than variables *is* legitimate at a degenerate
+            // vertex; the dependence among them is a rank problem, and
+            // `schur_reset_rank_repaired` in `pounce-qp` is what resolves it —
+            // by pruning to a maximal independent subset with the algebra to
+            // justify each drop, rather than guessing from basis status here.
+            *st = if i < m_eq {
+                ConsStatus::Equality
+            } else {
+                match vertex.row_at[i] {
+                    // Slack `s = h − Gx` nonbasic at its lower bound 0 means
+                    // `Gx = h`: the row sits at its upper bound `bu = h`.
+                    AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
+                    AtBound::Free => ConsStatus::Inactive,
+                }
+            };
+        }
+        working
     }
 }
 
@@ -1037,63 +1092,11 @@ where
         },
         None => None,
     };
-    let seed = vertex.map(|v| {
-        use crate::simplex::AtBound;
-        let mut working = WorkingSet::cold(n, m);
-        for (i, st) in working.bounds.iter_mut().enumerate() {
-            // A variable fixed by equal bounds is `Fixed` regardless of which
-            // side the basis parked it on.
-            let (l, u) = (native.xl()[i], native.xu()[i]);
-            let fixed = l > NLP_LOWER_BOUND_INF && u < NLP_UPPER_BOUND_INF && l == u;
-            *st = match (fixed, v.struct_at[i]) {
-                (true, _) => BoundStatus::Fixed,
-                (false, AtBound::Lower) => BoundStatus::AtLower,
-                (false, AtBound::Upper) => BoundStatus::AtUpper,
-                (false, AtBound::Free) => BoundStatus::Inactive,
-            };
-        }
-        // Row order matches: the translation above stacks `[A_eq ; G]` in the
-        // same order the simplex builds its rows, so index `i` is the same row.
-        for (i, st) in working.constraints.iter_mut().enumerate() {
-            // Equality rows are ALWAYS active — they are equations, not
-            // one-sided constraints that may or may not bind.
-            //
-            // Deriving their activity from the basis instead (leaving a row
-            // inactive when its logical is basic) is tempting: it makes the
-            // active count come out at exactly `n` and so avoids the
-            // `KKT inertia mismatch: expected 105 …, got 102` that `CVXQP3_S`
-            // otherwise hits. But the premise is false. An equality's logical
-            // is boxed to `[0, 0]`; a *basic* one is simply a degenerate basic
-            // variable sitting at zero, which says nothing about whether the row
-            // is a linear combination of the others. Dropping such a row drops a
-            // real constraint — the ratio test skips `bl == bu` rows, so it
-            // never comes back — and the engine is then free to move in a
-            // direction that violates it. On NETLIB `afiro` that produced a
-            // phantom `Unbounded` verdict on an LP with a finite optimum of
-            // −464.75 (issue #133's regression test caught it).
-            //
-            // More active rows than variables *is* legitimate at a degenerate
-            // vertex; the dependence among them is a rank problem, and
-            // `schur_reset_rank_repaired` in `pounce-qp` is what resolves it —
-            // by pruning to a maximal independent subset with the algebra to
-            // justify each drop, rather than guessing from basis status here.
-            *st = if i < m_eq {
-                ConsStatus::Equality
-            } else {
-                match v.row_at[i] {
-                    // Slack `s = h − Gx` nonbasic at its lower bound 0 means
-                    // `Gx = h`: the row sits at its upper bound `bu = h`.
-                    AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
-                    AtBound::Free => ConsStatus::Inactive,
-                }
-            };
-        }
-        QpWarmStart {
-            x: v.x,
-            lambda_g: vec![0.0; m],
-            lambda_x: vec![0.0; n],
-            working,
-        }
+    let seed = vertex.map(|v| QpWarmStart {
+        working: native.basis_working_set(&v, m_eq),
+        x: v.x,
+        lambda_g: vec![0.0; m],
+        lambda_x: vec![0.0; n],
     });
 
     debug_trace(|| {
@@ -1252,7 +1255,10 @@ where
 /// has to restate exactly that (raised in review of gh #769 by @GermanHeim).
 ///
 /// The returned status is a placeholder — [`verify_status`] decides the
-/// verdict, and no caller of this function may skip it.
+/// verdict, and no caller of this function may skip it, with one exception:
+/// LP crossover, whose never-regress gate (`crossover::never_regresses`)
+/// accepts the translated point only when it is finite and its KKT error
+/// against the original problem is no worse than the interior iterate's.
 /// [`back_translate_verified`] is the composition that cannot be
 /// half-applied, and is what most callers want.
 ///
