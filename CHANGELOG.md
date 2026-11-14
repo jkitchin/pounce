@@ -9,6 +9,19 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **`feral_early_assembly` bounds FERAL's memory on wide elimination trees.**
+  The option (environment fallback `POUNCE_FERAL_EARLY_ASSEMBLY`) selects
+  feral's contribution-block assembly scheme (feral#231). The default `off`
+  keeps 0.17.0's behaviour; `wide_parents` folds a wide parent's children into
+  its front as they arrive. A QP with many inequality rows over a few shared
+  variables puts thousands of leaves under one small front: on an 11,144-row
+  QP the solve's peak live heap falls 806 → 401 MiB with the same iterations
+  and bit-identical `x`. Factors are bit-identical under either setting; the
+  cost is 2.6–4.1% of the factorization on some small fronts. FERAL's parallel
+  task-graph driver ignores it. The Python QP path reads the environment
+  variable.
+
 ### Fixed
 - **`minimize` detects a convex LP/QP without `jac` whatever the objective's
   constant term** (gh#1169). The structure probe finite-differenced `fun` twice

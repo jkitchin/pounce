@@ -9242,6 +9242,11 @@ pub fn feral_config_from_options_scoped(
             cfg.ordering_preprocess = p;
         }
     }
+    if let Ok((v, true)) = options.get_string_value("feral_early_assembly", "") {
+        if let Some(e) = pounce_feral::parse_early_assembly(&v) {
+            cfg.early_assembly = e;
+        }
+    }
     // Same explicit-set discipline as `feral_ordering`: `from_env`
     // defaults to ScalingStrategy::Auto (FERAL's current default), so
     // leaving the option unset preserves existing behaviour exactly.
