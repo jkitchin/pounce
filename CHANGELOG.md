@@ -246,6 +246,18 @@ changes.
   symbols, the header's prototypes and the docs to one another, and the
   header's structs to the Rust layout.
 
+### Changed
+- **FERAL 0.23.0: the same results, with less memory in the factor.** FERAL's
+  sequential LDLᵀ drivers store contribution blocks as packed triangles, so a
+  returned factor holds no contribution storage (feral#231). Its
+  threshold-Markowitz sparse LU is faster on near-triangular bases (feral#234).
+  FERAL states that factors and pivots are bit-identical to 0.22. On arm64,
+  the fixture sweep moves 0 of 282 fixture-legs, both at default options and
+  with `solver_selection=qp-active-set`. A pre-release revision of feral#234
+  changed LU pivots, and through the active-set rank probe it took QGFRDXPN
+  from solved to the iteration cap. That revision was reverted before
+  release.
+
 ### Fixed
 - **`qp_crossover` bounds what it spends after declining a vertex.** When the
   LP simplex crossover's vertex failed the never-regress test, crossover ran

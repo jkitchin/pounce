@@ -315,13 +315,32 @@ pounce-cinterface = { path = "crates/pounce-cinterface", version = "0.16.0" }
 # typical model is about 1-2% slower, and 8 models are 11-49% slower at identical
 # iterations (feral#228 discussion).
 #
-# 0.22.0 is the current pin. If you ever need to develop against an unreleased
+# 0.23.0 (feral#231, #234) changes memory and LU bookkeeping, not answers.
+# #231 stores contribution blocks in the sequential LDLᵀ drivers as packed lower
+# triangles, so a returned factor holds no contribution storage. It also adds an
+# opt-in `EarlyAssembly::WideParents`, which pounce does not set, so it runs
+# `Off`. #234 speeds up threshold-Markowitz `SparseLu::factor` on
+# near-triangular bases, and add `SparseLu::refactor_markowitz` for in-place
+# refactors. The simplex and the pounce-qp rank probe still build a fresh
+# `SparseLu` per factor, so they do not use the in-place path. feral states
+# that factors and Markowitz pivots are bit-identical to 0.22. A dedup revision
+# of #234 that changed kernel pivots was caught here before release: under
+# `solver_selection=qp-active-set` QGFRDXPN went from SolveSucceeded/3553 to
+# the iteration cap, and QSCFXM1 from 1942 to 14782 iterations, through the
+# pounce-qp rank probe (gh#1061). It was reverted upstream, and those pivots
+# are pinned there by `tests/lu_markowitz_golden.rs`. The one breaking change
+# is a new `NumericParams::early_assembly` field. pounce builds no
+# `NumericParams` literal, so nothing here changes. Measured against 0.22.0
+# on arm64: the fixture sweep at default options and forced to
+# `solver_selection=qp-active-set` moves 0 of 282 fixture-legs in each.
+#
+# 0.23.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.22.0" }
+feral = { version = "0.23.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
