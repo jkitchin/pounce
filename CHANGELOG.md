@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-14
+
 ### Added
 - **`minimize` accepts `scipy.optimize.NonlinearConstraint`.** Alongside dict
   constraints and `LinearConstraint`, so scipy code ports without rewriting

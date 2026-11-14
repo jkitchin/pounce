@@ -573,7 +573,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "iter-diff"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "serde_json",
 ]
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-algorithm"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-cinterface"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-cli"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-common"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anstyle",
  "anstyle-query",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-convex"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "feral",
  "pounce-common",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-feral"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "feral",
  "pounce-common",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-hsl"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-l1penalty"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
@@ -996,14 +996,14 @@ dependencies = [
 
 [[package]]
 name = "pounce-linalg"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-common",
 ]
 
 [[package]]
 name = "pounce-linsol"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-minima"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-nl"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "libloading",
  "libm",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-nlp"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-common",
  "pounce-linalg",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-observability"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anstyle",
  "anstyle-query",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-presolve"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-common",
  "pounce-nlp",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-py"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "faer",
  "feral",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-qp"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-common",
  "pounce-feral",
@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-restoration"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -1120,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-rs"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-sens-core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "faer",
  "pounce-common",
@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-sensitivity"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-common",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-solve-report"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-studio-core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-studio-pyo3"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-studio-core",
  "pyo3",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "pounce-wasm"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pounce-algorithm",
  "pounce-cli",
