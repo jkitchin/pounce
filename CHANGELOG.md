@@ -350,6 +350,17 @@ changes.
   the true value is still a nonzero subnormal. All are now accurate to a few
   ulps wherever the result is a normal double, and underflow gradually below
   that.
+  The new forms round differently at *every* argument, not only at the
+  edges (`atan''` included, below its overflow threshold), so a model using
+  any of these functions can take a different path. On the 0.17.0
+  benchmarks these are the only moves against 0.16.0: `laptime` (`atan`)
+  756 → 710 iterations, objective +1.6e-6 relative; `cresc100` (`acos`)
+  reaches Optimal at 0.744 instead of the iteration cap, a different point
+  from the reference's 0.568; `cresc132` reports Infeasible, as Ipopt does,
+  in 7 s (0.16.0 reached the same verdict in 0.6 s, then spent ~585 s in
+  second-opinion re-solves, past the benchmark's 300 s limit); `cresc50`
+  still hits the cap; `chebyqad` and `dallas{l,m,s}`
+  solve to the same answers in a few fewer iterations.
 - **`log`, `log10` and `sqrt` second derivatives no longer vanish at large
   arguments.** `log''` and `log10''` read `0` past `|x| ≈ 1.3e154`, `log10'`
   past `|x| ≈ 7.8e307`, and `sqrt''` past `x ≈ 2.6e205`, where each true
