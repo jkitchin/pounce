@@ -44,7 +44,7 @@ uvx --from "pounce-solver[mcp]" pounce-studio-mcp
 ```
 
 (`python -m pounce.studio` is the same entry point.) The extra needs a
-`pounce-solver` release newer than 0.16.0; 0.16.0 and earlier do not
+`pounce-solver` release 0.17.0 or newer; 0.16.0 and earlier do not
 contain `pounce.studio`.
 
 **From a source checkout** — build the extension into a venv and register
