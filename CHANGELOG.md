@@ -247,6 +247,18 @@ changes.
   `make c-api-examples` does the same by hand. A guard holds the exported
   symbols, the header's prototypes and the docs to one another, and the
   header's structs to the Rust layout.
+- **The MCP server ships in `pounce-solver` as the `[mcp]` extra.**
+  `pip install "pounce-solver[mcp]"` (Python 3.10+) installs a
+  `pounce-studio-mcp` script, and `uvx --from "pounce-solver[mcp]"
+  pounce-studio-mcp` runs it with nothing installed. Before this it was a
+  separate package built from `studio/mcp` with a Rust toolchain. The server
+  is now `pounce.studio`, its report analysis is mounted in the wheel's
+  extension as `pounce._pounce.studio`, and it spawns the `pounce` binary the
+  wheel already bundles. `POUNCE_WORKDIR` sets the directory that relative
+  model paths resolve against, since Claude Desktop starts servers in `/`.
+- **A Claude Desktop extension (`.mcpb`).** `make mcpb` builds
+  `dist/pounce-studio-<version>.mcpb` from `studio/mcpb/`. Desktop installs
+  `pounce-solver[mcp]` with uv and asks for a workspace folder.
 
 ### Changed
 - **FERAL 0.23.0: the same results, with less memory in the factor.** FERAL's
@@ -300,20 +312,6 @@ changes.
   and `POUNCE_VERSION` still said `0.1.0` while `GetIpoptVersion` reported
   `0.16.0`; they now equal the crate version, and a test and the release
   guard (`scripts/check-release-consistency.sh`) keep them so.
-- **The MCP server ships in `pounce-solver` as the `[mcp]` extra.**
-  `pip install "pounce-solver[mcp]"` (Python 3.10+) installs a
-  `pounce-studio-mcp` script, and `uvx --from "pounce-solver[mcp]"
-  pounce-studio-mcp` runs it with nothing installed. Before this it was a
-  separate package built from `studio/mcp` with a Rust toolchain. The server
-  is now `pounce.studio`, its report analysis is mounted in the wheel's
-  extension as `pounce._pounce.studio`, and it spawns the `pounce` binary the
-  wheel already bundles. `POUNCE_WORKDIR` sets the directory that relative
-  model paths resolve against, since Claude Desktop starts servers in `/`.
-- **A Claude Desktop extension (`.mcpb`).** `make mcpb` builds
-  `dist/pounce-studio-<version>.mcpb` from `studio/mcpb/`. Desktop installs
-  `pounce-solver[mcp]` with uv and asks for a workspace folder.
-
-### Fixed
 - **The debugger's `quit` ends the solve.** `quit` stopped the solve at the
   current pause, but the terminal pause that follows (and, during
   restoration, the outer solve's pauses) paused again. In `--debug-json`
