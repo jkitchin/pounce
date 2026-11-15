@@ -19,8 +19,14 @@ changes.
   and stopped routing at 1000. The probe now uses a large step, kept inside the
   bounds, with a one-sided stencil at a bound. Central and one-sided stencils
   alike are exact on linear and quadratic functions, so only round-off remains
-  (`~4e-12·|f|`). Both rows now route at offsets up to at least 1e5. Detection
-  with an analytic `jac` is unchanged. Non-quadratic objectives are still
+  (`~1e-15·|f|` in the gradient). The LP test allows for that round-off, per
+  component, from the values each difference combined, and an LP accepted that
+  way must also show no curvature in `fun` along each probe direction, read
+  from values without dividing by a step. Both rows now route at offsets up to
+  at least 1e7, and an LP up to at least 1e9. The cost: curvature smaller than
+  the rounding of `fun` across the probe region now reads as linear, where it
+  read as a QP before (`1e-7·|x|²` on an offset of 1e7). Detection with an
+  analytic `jac` is unchanged. Non-quadratic objectives are still
   rejected by the same gates, and a non-finite probe value now rejects
   explicitly instead of relying on NaN comparisons.
 

@@ -226,7 +226,7 @@ def test_auto_route_probes_objective_once_not_twice():
     # One router in isolation: the unit the shared cache should collapse to.
     # Through the same cache `minimize` uses: since gh #1169 the FD stencils
     # use a power-of-two step, so nested stencils revisit identical points and
-    # the cache dedupes them *within* one router too (162 calls, not 260).
+    # the cache dedupes them *within* one router too (169 calls, not 260).
     f_one, c_one = _counting_quartic()
     classify_and_extract(
         fun=_point_cache(f_one),

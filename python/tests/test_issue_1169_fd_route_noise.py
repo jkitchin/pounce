@@ -26,7 +26,15 @@ import numpy as np
 import pytest
 
 from pounce import minimize
-from pounce._route import _H_GRAD, _H_HESS, _H_STRUCT, _box_diff
+from pounce._route import (
+    _EPS,
+    _H_GRAD,
+    _H_HESS,
+    _H_STRUCT,
+    _box_diff,
+    _flat_along,
+    classify_and_extract,
+)
 
 Q = np.diag([1.0, 2.0, 3.0, 4.0])
 Q_ISSUE_C = np.array([1.2, -0.7, 2.4, -3.1])
@@ -140,6 +148,48 @@ def test_box_diff_narrow_box_falls_back_to_the_old_central_step():
     assert steps == pytest.approx([-_H_GRAD, _H_GRAD], rel=1e-12)
 
 
+@pytest.mark.parametrize(
+    "x, lb, ub, quadratic",
+    [
+        (np.array([0.2, -0.3]), None, None, True),
+        (np.array([1.0, -0.3]), np.array([-1.0, -1.0]), np.array([1.0, 1.0]), True),
+        (np.array([1.0, -0.3]), np.array([-1.0, -1.0]), np.array([1.0, 1.0]), False),
+        (np.array([0.0, 0.0]), np.array([-1e-12, -1.0]), np.array([1e-12, 1.0]), True),
+    ],
+    ids=["central", "one-sided 3-point", "one-sided 2-point", "narrow fallback"],
+)
+@pytest.mark.parametrize("off", [0.0, 1e7, 1e12])
+def test_box_diff_noise_bounds_its_own_error(x, lb, ub, quadratic, off):
+    # The reported bound must cover the actual round-off, and must grow with
+    # |f|: that is what lets the LP gate allow for it.
+    f = lambda y: _C @ y + off  # affine: every branch is exact on it
+    nz = []
+    got = _box_diff(f, x, 0, _H_STRUCT, _H_GRAD, lb, ub, quadratic=quadratic, noise=nz)
+    assert len(nz) == 1
+    assert abs(got - _C[0]) <= nz[0]
+    assert nz[0] >= _EPS * off / 2.0
+
+
+def test_flat_along_affine_with_huge_offset():
+    a, p = np.zeros(4), np.ones(4)
+    assert _flat_along(lambda x: Q_SWEEP_C @ x + 1e12, a, p, 1e-7)
+
+
+def test_flat_along_sees_curvature_the_gradient_allowance_cannot():
+    # f(a)+f(p)-2f(m) = 2c here; at offset 1e9 it is ~7e-6 of rounding.
+    a, p = np.zeros(4), np.ones(4)
+    f = lambda x: 1e-4 * (x @ x) + Q_SWEEP_C @ x + 1e9
+    assert not _flat_along(f, a, p, 1e-7)
+
+
+def test_flat_along_rejects_nonfinite():
+    from pounce._route import _NotConvex
+
+    f = lambda x: np.nan if x[0] > 0.4 else 0.0
+    with pytest.raises(_NotConvex):
+        _flat_along(f, np.zeros(4), np.ones(4), 1e-7)
+
+
 # --- routing verdict ---------------------------------------------------------
 
 
@@ -152,7 +202,7 @@ def test_issue_reproduction_forced_qp_ipm_without_jac():
     np.testing.assert_allclose(res.x, xs, atol=1e-6)
 
 
-@pytest.mark.parametrize("off", [0.0, 1.0, 10.0, 100.0, 1e3, 1e5])
+@pytest.mark.parametrize("off", [0.0, 1.0, 10.0, 100.0, 1e3, 1e5, 1e7])
 @pytest.mark.parametrize("x0", [np.zeros(4), np.ones(4)], ids=["interior", "on-bound"])
 def test_qp_without_jac_routes_whatever_the_offset(off, x0):
     f = lambda x: 0.5 * x @ Q @ x + Q_SWEEP_C @ x + off
@@ -164,10 +214,13 @@ def test_qp_without_jac_routes_whatever_the_offset(off, x0):
     np.testing.assert_allclose(res.x, xs, atol=1e-6)
 
 
-@pytest.mark.parametrize("off", [0.0, 100.0, 1e3, 1e5])
-def test_lp_without_jac_routes_as_an_lp_whatever_the_offset(off):
+@pytest.mark.parametrize("off", [0.0, 100.0, 1e3, 1e5, 1e7, 1e9])
+@pytest.mark.parametrize("x0", [np.zeros(4), np.ones(4)], ids=["interior", "on-bound"])
+def test_lp_without_jac_routes_as_an_lp_whatever_the_offset(off, x0):
+    # 1e7 and up need the gate's round-off allowance: the differenced
+    # gradient's noise there exceeds the fixed 1e-7 tolerance.
     f = lambda x: Q_SWEEP_C @ x + off
-    res = minimize(f, np.zeros(4), bounds=BOX, solver_selection="auto")
+    res = minimize(f, x0, bounds=BOX, solver_selection="auto")
     assert _routed_to(res) == "lp-ipm"
     assert res.fun - off == pytest.approx(
         -np.abs(Q_SWEEP_C).sum(), abs=1e-6 * max(1.0, off)
@@ -206,6 +259,42 @@ def test_nonquadratic_objective_is_not_routed(name):
     assert _routed_to(res) is None, name
     with pytest.raises(ValueError, match="not detected as a convex"):
         minimize(f, np.zeros(4), bounds=BOX, solver_selection="qp-ipm")
+
+
+def _kind(f, jac=None, box=True):
+    lb, ub = (-np.ones(4), np.ones(4)) if box else (None, None)
+    e = classify_and_extract(
+        fun=f,
+        jac=jac,
+        hess=None,
+        lb=lb,
+        ub=ub,
+        m=0,
+        g_combined=None,
+        jac_combined=None,
+        cl=None,
+        cu=None,
+        x0=np.zeros(4),
+    )
+    return None if e is None else e.kind
+
+
+@pytest.mark.parametrize("c, off", [(1e-4, 1e9), (1e-2, 1e9), (1e-2, 1e12)], ids=str)
+@pytest.mark.parametrize("box", [True, False], ids=["box", "unbounded"])
+def test_small_curvature_at_large_offset_is_not_read_as_an_lp(c, off, box):
+    # The round-off allowance is wide enough at these offsets to pass the
+    # curvature in the gradient; the value check must catch it. (1e-2 at
+    # 1e12 reads as an LP without the value check.)
+    f = lambda x: c * (x @ x) + Q_SWEEP_C @ x + off
+    assert _kind(f, box=box) != "lp"
+
+
+def test_allowance_is_not_used_when_jac_is_exact():
+    # Same curvature/offset an FD gradient cannot resolve: with `jac` the
+    # gradient carries no |f| round-off, so the fixed gate sees the QP.
+    c, off = 1e-7, 1e7
+    f = lambda x: c * (x @ x) + Q_SWEEP_C @ x + off
+    assert _kind(f, jac=lambda x: 2 * c * x + Q_SWEEP_C) == "convex_qp"
 
 
 def test_nonfinite_objective_is_not_routed():

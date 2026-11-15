@@ -49,11 +49,21 @@ _H_HESS = _EPS ** (1.0 / 3.0)
 # Hessian) is left, and it shrinks as the step grows. At ``sqrt(eps)`` and
 # ``eps^(1/3)`` the nested Hessian carried ``~2.5e-3·|f|`` of noise, so a QP
 # whose objective merely had a constant offset of 1 failed the Hessian-constancy
-# gate. At 2^-7 the noise is ``~4e-12·|f|``. Anything not quadratic is still
-# caught by the gates: its Hessian still varies between probes, and its fitted
-# model still misses ``fun`` at the held-out points. A power of two keeps
-# ``x ± h`` exact for moderate ``x``.
-_H_STRUCT = 2.0**-7
+# gate. At 2^-2 the gradient carries ``~1e-15·|f|`` and the nested Hessian
+# ``~4e-15·|f|``. Anything not quadratic is still caught by the gates: its
+# Hessian still varies between probes, and its fitted model still misses
+# ``fun`` at the held-out points. The step is the probe region's own scale
+# (``_probe_points`` spreads probes by ``max(1, |x0|)``, or a quarter of the
+# box), so the stencils do not look further than the probes already do, and
+# ``_box_diff`` keeps them in the box. A power of two keeps ``x ± h`` exact
+# for moderate ``x``.
+_H_STRUCT = 2.0**-2
+# Rounding of one ``fun`` value, in units of ``eps·|f|``, assumed by the LP
+# gate's round-off allowance (:func:`_objective_model`). A ``fun`` that rounds
+# worse than this is under-allowed, so it can only fail the LP gate and be
+# fitted as a QP, the pre-gh #1169 behaviour. It can never pass the gate for
+# that reason.
+_F_ULPS = 8.0
 
 
 @dataclass
@@ -161,7 +171,7 @@ def _point_cache(f: Callable | None) -> Callable | None:
     return wrapped
 
 
-def _box_diff(f, x, i, base, floor, lb, ub, *, quadratic):
+def _box_diff(f, x, i, base, floor, lb, ub, *, quadratic, noise=None):
     """Derivative of ``f`` along coordinate ``i`` at ``x``, from a stencil kept
     inside the box ``[lb, ub]`` (gh #1169).
 
@@ -176,7 +186,9 @@ def _box_diff(f, x, i, base, floor, lb, ub, *, quadratic):
     narrow and the stencil is central at ``floor``, as it always was.
 
     Differences are divided by the step *as represented*, so rounding in
-    ``x ± h`` does not enter the quotient."""
+    ``x ± h`` does not enter the quotient. Given a list ``noise``, appends the
+    quotient's round-off bound, ``_F_ULPS·eps·Σ|c_k·f_k| / |Δ|``, computed
+    from the values the stencil combined."""
     scale = max(1.0, abs(float(x[i])))
     h = base * scale
     lo_room = float(x[i] - lb[i]) if lb is not None and np.isfinite(lb[i]) else np.inf
@@ -189,22 +201,34 @@ def _box_diff(f, x, i, base, floor, lb, ub, *, quadratic):
 
     if min(lo_room, hi_room) >= h:
         xp, xm = at(h), at(-h)
-        return (f(xp) - f(xm)) / (xp[i] - xm[i])
-    side = 1.0 if hi_room >= lo_room else -1.0
-    reach = 2.0 if quadratic else 1.0
-    hs = min(h, max(lo_room, hi_room) / reach)
-    if hs < floor * scale:
-        hf = floor * scale
-        xp, xm = at(hf), at(-hf)
-        return (f(xp) - f(xm)) / (xp[i] - xm[i])
-    x1 = at(side * hs)
-    d1 = x1[i] - x[i]
-    if not quadratic:
-        return (f(x1) - f(x)) / d1
-    x2 = at(2.0 * d1)
-    # Exact for a quadratic on the points 0, d1, 2·d1 (all representable
-    # multiples here, since d1 is the represented step).
-    return (-3.0 * f(x) + 4.0 * f(x1) - f(x2)) / (2.0 * d1)
+        terms, denom = ((1.0, xp), (-1.0, xm)), xp[i] - xm[i]
+    else:
+        side = 1.0 if hi_room >= lo_room else -1.0
+        reach = 2.0 if quadratic else 1.0
+        hs = min(h, max(lo_room, hi_room) / reach)
+        if hs < floor * scale:
+            hf = floor * scale
+            xp, xm = at(hf), at(-hf)
+            terms, denom = ((1.0, xp), (-1.0, xm)), xp[i] - xm[i]
+        else:
+            x1 = at(side * hs)
+            d1 = x1[i] - x[i]
+            if not quadratic:
+                terms, denom = ((1.0, x1), (-1.0, x)), d1
+            else:
+                # Exact for a quadratic on the points 0, d1, 2·d1 (all
+                # representable multiples here, since d1 is the represented
+                # step).
+                terms = ((-3.0, x), (4.0, x1), (-1.0, at(2.0 * d1)))
+                denom = 2.0 * d1
+    vals = [(c, f(y)) for c, y in terms]
+    out = sum(c * v for c, v in vals) / denom
+    if noise is not None:
+        # Round-off bound of the quotient, from the values it combined.
+        noise.append(
+            _F_ULPS * _EPS * sum(abs(c) * np.abs(v) for c, v in vals) / abs(denom)
+        )
+    return out
 
 
 def _grad_fn(fun: Callable, jac: Callable | None, lb=None, ub=None) -> Callable:
@@ -221,15 +245,27 @@ def _grad_fn(fun: Callable, jac: Callable | None, lb=None, ub=None) -> Callable:
             raise _NotConvex("objective is not finite at a probe")
         return v
 
+    noise_at: dict = {}
+
     def g(x):
         out = np.empty(x.size)
+        nz: list = []
         for i in range(x.size):
-            out[i] = _box_diff(fval, x, i, _H_STRUCT, _H_GRAD, lb, ub, quadratic=True)
+            out[i] = _box_diff(
+                fval, x, i, _H_STRUCT, _H_GRAD, lb, ub, quadratic=True, noise=nz
+            )
+        noise_at[np.asarray(x, dtype=np.float64).tobytes()] = np.asarray(nz)
         return out
 
+    def noise(x):
+        """Per-component round-off bound of ``g(x)``, which must have run."""
+        return noise_at[np.asarray(x, dtype=np.float64).tobytes()]
+
     # Tag the FD gradient so `_hessian` differences it with a step sized for
-    # a round-off-only error, not for an exact gradient's.
+    # a round-off-only error, not for an exact gradient's, and so the LP gate
+    # can allow for its round-off.
     g.fd_box = (lb, ub)
+    g.noise = noise
     return g
 
 
@@ -300,7 +336,9 @@ def _constraint_jac(g_combined, jac_combined, fd_rows, lb, ub):
                 np.atleast_2d(np.asarray(jac_combined(x), dtype=np.float64)), copy=True
             )
         for i in range(n):
-            out[idx, i] = _box_diff(g_fd, x, i, _H_STRUCT, _H_GRAD, lb, ub, quadratic=True)
+            out[idx, i] = _box_diff(
+                g_fd, x, i, _H_STRUCT, _H_GRAD, lb, ub, quadratic=True
+            )
         return out
 
     J.fd_box = (lb, ub)
@@ -338,6 +376,24 @@ def _probe_points(x0, lb, ub, rng, k=5):
     return pts
 
 
+def _flat_along(fun, a, p, tol0):
+    """No curvature of ``fun`` along ``a → p`` beyond its rounding.
+
+    ``f(a) + f(p) − 2 f(m)`` with ``m`` the midpoint is ``¼ dᵀPd`` for a
+    quadratic and ``0`` for an affine function, whatever the step. ``m`` lies
+    on the segment, so it is inside any box both ends are in. Raises
+    :class:`_NotConvex` on a non-finite value, as the stencils do.
+    """
+    d = p - a
+    fa, fp, fm = (float(fun(y)) for y in (a, p, a + 0.5 * d))
+    if not (np.isfinite(fa) and np.isfinite(fp) and np.isfinite(fm)):
+        raise _NotConvex("objective is not finite at a probe")
+    s = fa + fp - 2.0 * fm
+    allow = 0.25 * tol0 * float(np.sum(np.abs(d)))
+    allow += _F_ULPS * _EPS * (abs(fa) + abs(fp) + 2.0 * abs(fm))
+    return abs(s) <= allow
+
+
 def _objective_model(fun, grad, hess, probes):
     """Fit the objective to ``c·x + d`` (LP) or ``½xᵀPx + c·x + d`` (QP).
 
@@ -351,9 +407,37 @@ def _objective_model(fun, grad, hess, probes):
     g0 = grads[0]
     gscale = max(1.0, float(np.max(np.abs(g0))))
 
-    # Linear objective ⇔ the gradient is the same at every probe.
-    gvar = max(float(np.max(np.abs(gi - g0))) for gi in grads[1:])
-    if gvar <= 1e-7 * gscale:
+    # Linear objective ⇔ the gradient is the same at every probe. A gradient
+    # finite-differenced from ``fun`` (no ``jac``) carries round-off that grows
+    # with ``|f|``, not with the gradient, so a fixed tolerance alone misread
+    # an LP as a QP once ``|f|`` was large (an objective offset of 1e7, gh
+    # #1169). It is allowed for here, per component, from the values each
+    # stencil combined. Curvature hidden inside that allowance changes ``fun``
+    # over the probe region by less than ``fun``'s own rounding there, so no
+    # fit from values could resolve it; the QP fit it fell to before read the
+    # same round-off as its Hessian.
+    #
+    # That allowance is wide: it divides ``fun``'s rounding by the stencil
+    # step, so on its own it would pass curvature that the probe spread can
+    # see. A noise-admitted LP must therefore also have no curvature along
+    # each probe direction ``d = p − anchor``, read from values alone: for a
+    # quadratic ``f(a) + f(p) − 2 f(a + d/2) = ¼ dᵀPd`` exactly, with rounding
+    # of a few ulps of ``|f|`` and no division by a small step. The absolute
+    # term is the exact-gradient gate's own bound on ``|dᵀPd|``, so in the
+    # noise-free limit both tests accept the same objectives. Curvature that
+    # survives both changes ``fun`` along the probe region by less than its
+    # own rounding there.
+    noise = getattr(grad, "noise", None)
+    tol0 = 1e-7 * gscale
+    if noise is None:
+        lin = all(float(np.max(np.abs(gi - g0))) <= tol0 for gi in grads[1:])
+    else:
+        n0 = noise(anchor)
+        lin = all(
+            bool(np.all(np.abs(gi - g0) <= tol0 + noise(p) + n0))
+            for p, gi in zip(probes[1:], grads[1:])
+        ) and all(_flat_along(fun, anchor, p, tol0) for p in probes[1:])
+    if lin:
         c = g0
         d = float(fun(anchor)) - float(c @ anchor)
         return None, c, d
@@ -575,7 +659,9 @@ def _all_constraint_hessians(jac_combined, x, m, n):
             return np.atleast_2d(np.asarray(jac_combined(y), dtype=np.float64))[fd_idx]
 
         for j in range(n):
-            col = _box_diff(J_fd, x, j, _H_STRUCT, _H_HESS, box[0], box[1], quadratic=False)
+            col = _box_diff(
+                J_fd, x, j, _H_STRUCT, _H_HESS, box[0], box[1], quadratic=False
+            )
             for k, i in enumerate(fd_idx):
                 Hs[i][:, j] = col[k]
     return [0.5 * (H + H.T) for H in Hs]
