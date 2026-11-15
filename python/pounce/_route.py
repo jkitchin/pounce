@@ -40,6 +40,30 @@ _EPS = float(np.finfo(np.float64).eps)
 # truncation vs. round-off error.
 _H_GRAD = _EPS**0.5
 _H_HESS = _EPS ** (1.0 / 3.0)
+# Step for every derivative read off ``fun`` alone — the gradient when there is
+# no ``jac``, and the Hessian of that gradient (gh #1169). The optimal-balance
+# steps above minimize truncation + round-off for a *general* function, but the
+# router only has to be accurate on the functions it accepts: a central
+# difference of a linear or quadratic function has **no** truncation error at
+# any step, so only round-off (``~eps·|f|/h``, then ``/h`` again for the nested
+# Hessian) is left, and it shrinks as the step grows. At ``sqrt(eps)`` and
+# ``eps^(1/3)`` the nested Hessian carried ``~2.5e-3·|f|`` of noise, so a QP
+# whose objective merely had a constant offset of 1 failed the Hessian-constancy
+# gate. At 2^-2 the gradient carries ``~1e-15·|f|`` and the nested Hessian
+# ``~4e-15·|f|``. Anything not quadratic is still caught by the gates: its
+# Hessian still varies between probes, and its fitted model still misses
+# ``fun`` at the held-out points. The step is the probe region's own scale
+# (``_probe_points`` spreads probes by ``max(1, |x0|)``, or a quarter of the
+# box), so the stencils do not look further than the probes already do, and
+# ``_box_diff`` keeps them in the box. A power of two keeps ``x ± h`` exact
+# for moderate ``x``.
+_H_STRUCT = 2.0**-2
+# Rounding of one ``fun`` value, in units of ``eps·|f|``, assumed by the LP
+# gate's round-off allowance (:func:`_objective_model`). A ``fun`` that rounds
+# worse than this is under-allowed, so it can only fail the LP gate and be
+# fitted as a QP, the pre-gh #1169 behaviour. It can never pass the gate for
+# that reason.
+_F_ULPS = 8.0
 
 
 @dataclass
@@ -147,42 +171,180 @@ def _point_cache(f: Callable | None) -> Callable | None:
     return wrapped
 
 
-def _grad_fn(fun: Callable, jac: Callable | None) -> Callable:
+def _box_diff(f, x, i, base, floor, lb, ub, *, quadratic, noise=None):
+    """Derivative of ``f`` along coordinate ``i`` at ``x``, from a stencil kept
+    inside the box ``[lb, ub]`` (gh #1169).
+
+    The step is ``base`` scaled by ``max(1, |x_i|)``. With that much room on
+    both sides the stencil is central. Otherwise — a probe clipped onto a
+    bound, which is routine — it is one-sided into the larger room, and still
+    exact on the class the router accepts: three points (exact on a
+    quadratic, ``quadratic=True``, for a gradient of ``fun``) or two (exact on
+    an affine function, for the Hessian of a gradient that is affine when the
+    objective is quadratic). If even the one-sided step would fall below
+    ``floor`` (likewise scaled; the step used before gh #1169), the box is too
+    narrow and the stencil is central at ``floor``, as it always was.
+
+    Differences are divided by the step *as represented*, so rounding in
+    ``x ± h`` does not enter the quotient. Given a list ``noise``, appends the
+    quotient's round-off bound, ``_F_ULPS·eps·Σ|c_k·f_k| / |Δ|``, computed
+    from the values the stencil combined."""
+    scale = max(1.0, abs(float(x[i])))
+    h = base * scale
+    lo_room = float(x[i] - lb[i]) if lb is not None and np.isfinite(lb[i]) else np.inf
+    hi_room = float(ub[i] - x[i]) if ub is not None and np.isfinite(ub[i]) else np.inf
+
+    def at(t):
+        y = x.copy()
+        y[i] += t
+        return y
+
+    if min(lo_room, hi_room) >= h:
+        xp, xm = at(h), at(-h)
+        terms, denom = ((1.0, xp), (-1.0, xm)), xp[i] - xm[i]
+    else:
+        side = 1.0 if hi_room >= lo_room else -1.0
+        reach = 2.0 if quadratic else 1.0
+        hs = min(h, max(lo_room, hi_room) / reach)
+        if hs < floor * scale:
+            hf = floor * scale
+            xp, xm = at(hf), at(-hf)
+            terms, denom = ((1.0, xp), (-1.0, xm)), xp[i] - xm[i]
+        else:
+            x1 = at(side * hs)
+            d1 = x1[i] - x[i]
+            if not quadratic:
+                terms, denom = ((1.0, x1), (-1.0, x)), d1
+            else:
+                # Exact for a quadratic on the points 0, d1, 2·d1 (all
+                # representable multiples here, since d1 is the represented
+                # step).
+                terms = ((-3.0, x), (4.0, x1), (-1.0, at(2.0 * d1)))
+                denom = 2.0 * d1
+    vals = [(c, f(y)) for c, y in terms]
+    out = sum(c * v for c, v in vals) / denom
+    if noise is not None:
+        # Round-off bound of the quotient, from the values it combined.
+        noise.append(
+            _F_ULPS * _EPS * sum(abs(c) * np.abs(v) for c, v in vals) / abs(denom)
+        )
+    return out
+
+
+def _grad_fn(fun: Callable, jac: Callable | None, lb=None, ub=None) -> Callable:
     """Return a gradient callable: the user's ``jac`` if given, else a
     central finite-difference of ``fun`` (central, not forward, because the
-    structure tests want the extra accuracy)."""
+    structure tests want the extra accuracy) with the :data:`_H_STRUCT` step,
+    kept inside the box ``[lb, ub]`` (see :func:`_box_diff`)."""
     if jac is not None:
         return lambda x: np.asarray(jac(x), dtype=np.float64).ravel()
 
+    def fval(x):
+        v = float(fun(x))
+        if not np.isfinite(v):
+            raise _NotConvex("objective is not finite at a probe")
+        return v
+
+    noise_at: dict = {}
+
     def g(x):
         out = np.empty(x.size)
+        nz: list = []
         for i in range(x.size):
-            step = _H_GRAD * max(1.0, abs(x[i]))
-            xp = x.copy()
-            xm = x.copy()
-            xp[i] += step
-            xm[i] -= step
-            out[i] = (float(fun(xp)) - float(fun(xm))) / (2.0 * step)
+            out[i] = _box_diff(
+                fval, x, i, _H_STRUCT, _H_GRAD, lb, ub, quadratic=True, noise=nz
+            )
+        noise_at[np.asarray(x, dtype=np.float64).tobytes()] = np.asarray(nz)
         return out
 
+    def noise(x):
+        """Per-component round-off bound of ``g(x)``, which must have run."""
+        return noise_at[np.asarray(x, dtype=np.float64).tobytes()]
+
+    # Tag the FD gradient so `_hessian` differences it with a step sized for
+    # a round-off-only error, not for an exact gradient's, and so the LP gate
+    # can allow for its round-off.
+    g.fd_box = (lb, ub)
+    g.noise = noise
     return g
 
 
 def _hessian(grad: Callable, x: np.ndarray, hess: Callable | None) -> np.ndarray:
     """Symmetric Hessian at ``x`` — the user's ``hess`` if given, else a
-    central finite-difference of the gradient."""
+    central finite-difference of the gradient.
+
+    When the gradient is itself a finite difference of ``fun`` (no ``jac``),
+    the stencil is :func:`_box_diff`'s with the :data:`_H_STRUCT` step
+    (gh #1169). With an analytic ``jac`` it is exactly as before."""
     if hess is not None:
         return np.asarray(hess(x), dtype=np.float64).reshape(x.size, x.size)
     n = x.size
     H = np.empty((n, n))
+    box = getattr(grad, "fd_box", None)
     for j in range(n):
-        step = _H_HESS * max(1.0, abs(x[j]))
-        xp = x.copy()
-        xm = x.copy()
-        xp[j] += step
-        xm[j] -= step
-        H[:, j] = (grad(xp) - grad(xm)) / (2.0 * step)
+        if box is None:
+            step = _H_HESS * max(1.0, abs(x[j]))
+            xp = x.copy()
+            xm = x.copy()
+            xp[j] += step
+            xm[j] -= step
+            H[:, j] = (grad(xp) - grad(xm)) / (2.0 * step)
+        else:
+            H[:, j] = _box_diff(
+                grad, x, j, _H_STRUCT, _H_HESS, box[0], box[1], quadratic=False
+            )
     return 0.5 * (H + H.T)
+
+
+def _constraint_jac(g_combined, jac_combined, fd_rows, lb, ub):
+    """The router's constraint Jacobian ``x ↦ m×n``.
+
+    ``fd_rows`` marks the rows that have no analytic Jacobian, for which
+    ``jac_combined`` returns the NLP path's finite difference. That one's
+    round-off scales with the row's *value*, so a linear or convex-quadratic
+    constraint with a large constant term read as nonlinear (gh #1169, the
+    constraint half). Those rows are differenced here from ``g_combined``
+    instead, with :func:`_box_diff`'s stencil, exact on quadratics. Rows with
+    an analytic Jacobian are read from ``jac_combined`` as before. With no
+    ``fd_rows``, or none set, ``jac_combined`` is returned unchanged.
+
+    The returned callable carries ``fd_box``, ``fd_idx`` and ``exact`` (the
+    original ``jac_combined``, or ``None`` when every row is differenced),
+    which :func:`_all_constraint_hessians` reads to pick its stencil per row.
+    """
+    if fd_rows is None:
+        return jac_combined
+    fd_rows = np.asarray(fd_rows, dtype=bool)
+    if not fd_rows.any():
+        return jac_combined
+    idx = np.flatnonzero(fd_rows)
+    m = fd_rows.size
+    all_fd = idx.size == m
+
+    def g_fd(x):
+        v = np.asarray(g_combined(x), dtype=np.float64).ravel()[idx]
+        if not np.all(np.isfinite(v)):
+            raise _NotConvex("a constraint is not finite at a probe")
+        return v
+
+    def J(x):
+        n = x.size
+        if all_fd:
+            out = np.zeros((m, n))
+        else:
+            out = np.array(
+                np.atleast_2d(np.asarray(jac_combined(x), dtype=np.float64)), copy=True
+            )
+        for i in range(n):
+            out[idx, i] = _box_diff(
+                g_fd, x, i, _H_STRUCT, _H_GRAD, lb, ub, quadratic=True
+            )
+        return out
+
+    J.fd_box = (lb, ub)
+    J.fd_idx = idx
+    J.exact = None if all_fd else jac_combined
+    return J
 
 
 def _probe_points(x0, lb, ub, rng, k=5):
@@ -214,6 +376,55 @@ def _probe_points(x0, lb, ub, rng, k=5):
     return pts
 
 
+# A ``fun`` whose values across the probe region differ by fewer than this
+# many units of its own rounding (``eps·|f|``) has, in effect, a constant
+# term that hides its shape at double precision. Measured on the gh #1169 QP:
+# it stops routing between offsets 3e11 (``1.7e4`` units) and 1e12
+# (``5.2e3``). Used only to explain a decline, never to route.
+_HIDDEN_ULPS = 1e5
+
+
+def constant_term_hides_structure(fun, x0, lb, ub, seed: int = 0):
+    """``(|f|, spread)`` when ``fun``'s spread over the router's probe points is
+    within :data:`_HIDDEN_ULPS` units of its rounding, else ``None``.
+
+    The probes are the routers' own (same seed) and go through the shared
+    point cache, so this costs at most ``k + 1`` evaluations, at the probe
+    points the routers differenced around without reading. A probe failure or
+    a non-finite value returns ``None``: that decline has another cause.
+    """
+    rng = np.random.default_rng(seed)
+    try:
+        vals = np.array([float(fun(p)) for p in _probe_points(x0, lb, ub, rng)])
+    except Exception:  # noqa: BLE001 — not this cause
+        return None
+    if not np.all(np.isfinite(vals)):
+        return None
+    mag = float(np.max(np.abs(vals)))
+    spread = float(np.max(vals) - np.min(vals))
+    if mag > 0.0 and spread <= _HIDDEN_ULPS * _EPS * mag:
+        return mag, spread
+    return None
+
+
+def _flat_along(fun, a, p, tol0):
+    """No curvature of ``fun`` along ``a → p`` beyond its rounding.
+
+    ``f(a) + f(p) − 2 f(m)`` with ``m`` the midpoint is ``¼ dᵀPd`` for a
+    quadratic and ``0`` for an affine function, whatever the step. ``m`` lies
+    on the segment, so it is inside any box both ends are in. Raises
+    :class:`_NotConvex` on a non-finite value, as the stencils do.
+    """
+    d = p - a
+    fa, fp, fm = (float(fun(y)) for y in (a, p, a + 0.5 * d))
+    if not (np.isfinite(fa) and np.isfinite(fp) and np.isfinite(fm)):
+        raise _NotConvex("objective is not finite at a probe")
+    s = fa + fp - 2.0 * fm
+    allow = 0.25 * tol0 * float(np.sum(np.abs(d)))
+    allow += _F_ULPS * _EPS * (abs(fa) + abs(fp) + 2.0 * abs(fm))
+    return abs(s) <= allow
+
+
 def _objective_model(fun, grad, hess, probes):
     """Fit the objective to ``c·x + d`` (LP) or ``½xᵀPx + c·x + d`` (QP).
 
@@ -227,9 +438,37 @@ def _objective_model(fun, grad, hess, probes):
     g0 = grads[0]
     gscale = max(1.0, float(np.max(np.abs(g0))))
 
-    # Linear objective ⇔ the gradient is the same at every probe.
-    gvar = max(float(np.max(np.abs(gi - g0))) for gi in grads[1:])
-    if gvar <= 1e-7 * gscale:
+    # Linear objective ⇔ the gradient is the same at every probe. A gradient
+    # finite-differenced from ``fun`` (no ``jac``) carries round-off that grows
+    # with ``|f|``, not with the gradient, so a fixed tolerance alone misread
+    # an LP as a QP once ``|f|`` was large (an objective offset of 1e7, gh
+    # #1169). It is allowed for here, per component, from the values each
+    # stencil combined. Curvature hidden inside that allowance changes ``fun``
+    # over the probe region by less than ``fun``'s own rounding there, so no
+    # fit from values could resolve it; the QP fit it fell to before read the
+    # same round-off as its Hessian.
+    #
+    # That allowance is wide: it divides ``fun``'s rounding by the stencil
+    # step, so on its own it would pass curvature that the probe spread can
+    # see. A noise-admitted LP must therefore also have no curvature along
+    # each probe direction ``d = p − anchor``, read from values alone: for a
+    # quadratic ``f(a) + f(p) − 2 f(a + d/2) = ¼ dᵀPd`` exactly, with rounding
+    # of a few ulps of ``|f|`` and no division by a small step. The absolute
+    # term is the exact-gradient gate's own bound on ``|dᵀPd|``, so in the
+    # noise-free limit both tests accept the same objectives. Curvature that
+    # survives both changes ``fun`` along the probe region by less than its
+    # own rounding there.
+    noise = getattr(grad, "noise", None)
+    tol0 = 1e-7 * gscale
+    if noise is None:
+        lin = all(float(np.max(np.abs(gi - g0))) <= tol0 for gi in grads[1:])
+    else:
+        n0 = noise(anchor)
+        lin = all(
+            bool(np.all(np.abs(gi - g0) <= tol0 + noise(p) + n0))
+            for p, gi in zip(probes[1:], grads[1:])
+        ) and all(_flat_along(fun, anchor, p, tol0) for p in probes[1:])
+    if lin:
         c = g0
         d = float(fun(anchor)) - float(c @ anchor)
         return None, c, d
@@ -357,6 +596,7 @@ def classify_and_extract(
     rtol: float = 1e-5,
     seed: int = 0,
     allow_indefinite: bool = False,
+    fd_rows=None,
 ) -> QpExtract | None:
     """Detect an LP/QP behind the callable problem and extract its data.
 
@@ -374,7 +614,8 @@ def classify_and_extract(
     active-set engine controls the *objective's* curvature, not a row's.
     """
     rng = np.random.default_rng(seed)
-    grad = _grad_fn(fun, jac)
+    grad = _grad_fn(fun, jac, lb, ub)
+    jac_combined = _constraint_jac(g_combined, jac_combined, fd_rows, lb, ub)
     try:
         probes = _probe_points(x0, lb, ub, rng)
         P, c, d, psd = _fit_objective(
@@ -419,19 +660,41 @@ def _all_constraint_hessians(jac_combined, x, m, n):
     of constraint row ``i``. (The constraint functions come through the scipy
     facade as opaque callables with no user-supplied Hessian, so this is the
     only way to read a quadratic constraint's curvature.)
+
+    When ``jac_combined`` comes from :func:`_constraint_jac`, its
+    finite-differenced rows are differenced again with :func:`_box_diff`'s
+    stencil (exact on the affine Jacobian of a quadratic row, gh #1169), and
+    rows with an analytic Jacobian keep the step and stencil they always had.
     """
+    box = getattr(jac_combined, "fd_box", None)
+    if box is None:
+        exact, fd_idx = jac_combined, None
+    else:
+        exact, fd_idx = jac_combined.exact, jac_combined.fd_idx
     Hs = [np.empty((n, n)) for _ in range(m)]
-    for j in range(n):
-        step = _H_HESS * max(1.0, abs(x[j]))
-        xp = x.copy()
-        xm = x.copy()
-        xp[j] += step
-        xm[j] -= step
-        Jp = np.atleast_2d(np.asarray(jac_combined(xp), dtype=np.float64))
-        Jm = np.atleast_2d(np.asarray(jac_combined(xm), dtype=np.float64))
-        col = (Jp - Jm) / (2.0 * step)  # shape (m, n): column j of each Hessian
-        for i in range(m):
-            Hs[i][:, j] = col[i]
+    if exact is not None:
+        for j in range(n):
+            step = _H_HESS * max(1.0, abs(x[j]))
+            xp = x.copy()
+            xm = x.copy()
+            xp[j] += step
+            xm[j] -= step
+            Jp = np.atleast_2d(np.asarray(exact(xp), dtype=np.float64))
+            Jm = np.atleast_2d(np.asarray(exact(xm), dtype=np.float64))
+            col = (Jp - Jm) / (2.0 * step)  # shape (m, n): column j of each Hessian
+            for i in range(m):
+                Hs[i][:, j] = col[i]
+    if fd_idx is not None:
+
+        def J_fd(y):
+            return np.atleast_2d(np.asarray(jac_combined(y), dtype=np.float64))[fd_idx]
+
+        for j in range(n):
+            col = _box_diff(
+                J_fd, x, j, _H_STRUCT, _H_HESS, box[0], box[1], quadratic=False
+            )
+            for k, i in enumerate(fd_idx):
+                Hs[i][:, j] = col[k]
     return [0.5 * (H + H.T) for H in Hs]
 
 
@@ -476,6 +739,7 @@ def classify_and_extract_socp(
     x0,
     rtol: float = 1e-5,
     seed: int = 0,
+    fd_rows=None,
 ) -> SocpExtract | None:
     """Detect a convex QCQP behind the callable problem and reformulate it to a
     standard-form SOCP.
@@ -497,7 +761,8 @@ def classify_and_extract_socp(
     """
     n = x0.size
     rng = np.random.default_rng(seed)
-    grad = _grad_fn(fun, jac)
+    grad = _grad_fn(fun, jac, lb, ub)
+    jac_combined = _constraint_jac(g_combined, jac_combined, fd_rows, lb, ub)
     try:
         probes = _probe_points(x0, lb, ub, rng)
         P, c, d, _psd = _fit_objective(fun, grad, hess, probes, rtol)
