@@ -26,7 +26,11 @@ changes.
   at least 1e7, and an LP up to at least 1e9. The cost: curvature smaller than
   the rounding of `fun` across the probe region now reads as linear, where it
   read as a QP before (`1e-7·|x|²` on an offset of 1e7). Detection with an
-  analytic `jac` is unchanged. Non-quadratic objectives are still
+  analytic `jac` is unchanged. Beyond about 1e12 a QP's shape is lost to the
+  rounding of `fun` itself and it stays on the NLP path; `auto` now warns when
+  that is the cause, a forced convex `solver_selection` says so in its error,
+  and both suggest passing `jac` or subtracting the constant
+  (`dev-notes/known-limitations.md`). Non-quadratic objectives are still
   rejected by the same gates, and a non-finite probe value now rejects
   explicitly instead of relying on NaN comparisons.
 

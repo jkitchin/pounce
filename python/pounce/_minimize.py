@@ -44,7 +44,12 @@ from scipy.optimize import Bounds, HessianUpdateStrategy, LinearConstraint, Nonl
 from scipy.optimize import OptimizeResult as _ScipyOptimizeResult
 
 from ._pounce import Problem
-from ._route import _point_cache, classify_and_extract, classify_and_extract_socp
+from ._route import (
+    _point_cache,
+    classify_and_extract,
+    classify_and_extract_socp,
+    constant_term_hides_structure,
+)
 
 
 class _EmptyMapRepr:
@@ -1521,6 +1526,23 @@ def minimize(
         "rtol": route_tol,
         "fd_rows": getattr(jac_combined, "fd_rows", None) if m > 0 else None,
     }
+    def _hidden_hint() -> str:
+        # gh #1169: a large constant term in `fun` rounds away its shape, so
+        # differencing `fun` cannot classify it. Only an objective without
+        # `jac` is read that way; with `jac` the router never differences it.
+        if route_jac is not None:
+            return ""
+        hidden = constant_term_hides_structure(route_kw["fun"], x0, lb, ub)
+        if hidden is None:
+            return ""
+        mag, spread = hidden
+        return (
+            f" The objective is ~{mag:.1e} but varies by only {spread:.1e} "
+            "across the probed region, so its constant term hides its shape at "
+            "double precision and finite differences cannot classify it. "
+            "Subtract the constant from `fun`, or pass `jac`."
+        )
+
     # Options the dedicated convex (LP/QP/SOCP) routers actually honor; the
     # routing key and tolerance are consumed here, not "ignored". Everything
     # else the user passed (e.g. `print_level`, `disp`, `acceptable_tol`) has
@@ -1565,12 +1587,12 @@ def minimize(
         if selection == "lp-ipm" and (extract is None or extract.kind != "lp"):
             raise ValueError(
                 "solver_selection='lp-ipm' but the problem was not detected as "
-                "a linear program (linear objective + linear constraints)"
+                "a linear program (linear objective + linear constraints)" + _hidden_hint()
             )
         if selection == "qp-ipm" and extract is None:
             raise ValueError(
                 "solver_selection='qp-ipm' but the problem was not detected as "
-                "a convex LP/QP (convex-quadratic objective + linear constraints)"
+                "a convex LP/QP (convex-quadratic objective + linear constraints)" + _hidden_hint()
             )
         if selection == "qp-active-set" and extract is None:
             # Matches the CLI, which refuses the selector on a class the QP
@@ -1582,7 +1604,7 @@ def minimize(
                 "detected as an LP/QP with linear constraints (the Hessian may "
                 "be indefinite; the constraints may not be). For the active-set "
                 "SQP outer loop on a general NLP, pass "
-                "algorithm='active-set-sqp' instead."
+                "algorithm='active-set-sqp' instead." + _hidden_hint()
             )
         if extract is not None:
             _warn_convex_dropped_opts(
@@ -1614,10 +1636,19 @@ def minimize(
             raise ValueError(
                 "solver_selection='socp' but the problem was not detected as a "
                 "convex QCQP (convex-quadratic objective and/or constraints, all "
-                "convex, with only linear equalities)"
+                "convex, with only linear equalities)" + _hidden_hint()
             )
         _warn_convex_dropped_opts("convex SOCP")
         return _solve_via_socp(socp, options, objective=route_fun)
+
+    if selection == "auto":
+        hint = _hidden_hint()
+        if hint:
+            warnings.warn(
+                "pounce.minimize did not route this problem to a convex solver "
+                "and is solving it as a general NLP." + hint,
+                stacklevel=2,
+            )
 
     problem, _problem_obj, eval_counters = _prepare_nlp(
         fun=fun,

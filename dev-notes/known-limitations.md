@@ -821,3 +821,67 @@ In `crates/pounce-convex/tests/issue1143_tiny_row_false_unbounded.rs`,
 `DualInfeasible`" there today), `near_constant_infeasible_row_is_primal_infeasible`
 passes with `equilibrate: false` added to its option sets, and both
 `*_satisfied_row_stays_unbounded` tests keep `DualInfeasible`.
+
+---
+
+## Python routing: a large constant term hides an LP/QP from `minimize` (gh#1169)
+
+*Measured on `fix/1169-fd-route-noise`, `python/pounce/_route.py`, the test
+QP `½xᵀdiag(1,2,3,4)x + q·x + off` on `[-1,1]⁴`, no `jac`. Recorded
+2026-11-15.*
+
+### What is wrong
+
+With no `jac`, `minimize(solver_selection="auto")` classifies the objective
+from values of `fun`. Rounding happens inside the user's `fun`, before the
+router sees the value: `0.5·xᵀQx + q·x + 1e12` comes back rounded to about
+`eps·1e12 ≈ 2e-4`, and every difference of `fun` inherits that error at any
+step or stencil. Once the objective's variation across the probe region is a
+few thousand units of that rounding, its shape cannot be read.
+
+| offset | values' spread / `eps·|f|` | routes to |
+|---|---|---|
+| 1e10 | 5.2e5 | `qp-ipm` |
+| 3e11 | 1.7e4 | `qp-ipm` |
+| 1e12 | 5.2e3 | NLP |
+| 1e13 | 5.2e2 | NLP |
+
+The NLP fallback is limited by the same rounding: from `x0 = 1` at 1e12 it
+ends 3.5 above the optimum (~16 ulp of `|f|`).
+
+A second face of the same limit goes the other way. Curvature below the
+rounding across the probe region reads as **linear**: `1e-7·|x|²` at offset
+1e7 routes to `lp-ipm`, and a `1e-3`-scaled copy of the test QP does from
+3e11. The LP gate allows for the differenced gradient's round-off (gh#1169,
+commit 3), and its value check `f(a)+f(p)−2f(mid)` cannot see curvature that
+small either.
+
+The decline is not silent: when `fun`'s spread over the probes is within
+`_HIDDEN_ULPS = 1e5` units of its rounding, `auto` warns and a forced
+`lp-ipm` / `qp-ipm` / `qp-active-set` / `socp` error says so, both naming the
+workaround.
+
+### Workaround
+
+Pass `jac` (the router then never differences `fun`), or subtract the
+constant from `fun`: it changes neither the minimizer nor the multipliers.
+
+### Already considered, not done
+
+Fitting `P` from differences with steps the width of the box, and letting
+the Hessian-constancy gate allow for rounding as the LP gate now does. At
+1e12 the box-width second difference is ~1 against ~1e-4 of rounding, so the
+test QP would route again, but `qp-ipm` would then solve a model whose `P`
+is accurate to only `~eps·|f|/(h²·|P|)` — about 1e-4 relative here, and worse
+as the offset grows — while the result reads as a clean convex solve. The
+limit moves; it does not go away, and at 1e16 (`eps·|f| ≈ 1`) nothing is
+left to fit.
+
+### How to tell whether a fix works
+
+`python/tests/test_issue_1169_fd_route_noise.py`: extend the QP and LP
+offset sweeps past 1e12 and add the `1e-7·|x|²` / 1e7 case to the
+small-curvature test as "must not be an LP". A fix must also keep
+`test_small_curvature_at_large_offset_is_not_read_as_an_lp` and every
+"not routed" test green, and report how accurate the routed `P` is, not only
+that it routed.

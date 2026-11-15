@@ -376,6 +376,37 @@ def _probe_points(x0, lb, ub, rng, k=5):
     return pts
 
 
+# A ``fun`` whose values across the probe region differ by fewer than this
+# many units of its own rounding (``eps·|f|``) has, in effect, a constant
+# term that hides its shape at double precision. Measured on the gh #1169 QP:
+# it stops routing between offsets 3e11 (``1.7e4`` units) and 1e12
+# (``5.2e3``). Used only to explain a decline, never to route.
+_HIDDEN_ULPS = 1e5
+
+
+def constant_term_hides_structure(fun, x0, lb, ub, seed: int = 0):
+    """``(|f|, spread)`` when ``fun``'s spread over the router's probe points is
+    within :data:`_HIDDEN_ULPS` units of its rounding, else ``None``.
+
+    The probes are the routers' own (same seed) and go through the shared
+    point cache, so this costs at most ``k + 1`` evaluations, at the probe
+    points the routers differenced around without reading. A probe failure or
+    a non-finite value returns ``None``: that decline has another cause.
+    """
+    rng = np.random.default_rng(seed)
+    try:
+        vals = np.array([float(fun(p)) for p in _probe_points(x0, lb, ub, rng)])
+    except Exception:  # noqa: BLE001 — not this cause
+        return None
+    if not np.all(np.isfinite(vals)):
+        return None
+    mag = float(np.max(np.abs(vals)))
+    spread = float(np.max(vals) - np.min(vals))
+    if mag > 0.0 and spread <= _HIDDEN_ULPS * _EPS * mag:
+        return mag, spread
+    return None
+
+
 def _flat_along(fun, a, p, tol0):
     """No curvature of ``fun`` along ``a → p`` beyond its rounding.
 

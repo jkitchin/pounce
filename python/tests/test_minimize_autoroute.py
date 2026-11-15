@@ -202,7 +202,11 @@ def test_auto_route_probes_objective_once_not_twice():
     # probe points (identical seed). A shared point-cache (wired in `_minimize`
     # via `_route._point_cache`) makes the second router's probes cache hits, so
     # the routing overhead is one router's worth of `fun` calls, not two.
-    from pounce._route import _point_cache, classify_and_extract
+    from pounce._route import (
+        _point_cache,
+        classify_and_extract,
+        constant_term_hides_structure,
+    )
 
     n = 5
     x0 = np.full(n, 0.3)
@@ -228,8 +232,9 @@ def test_auto_route_probes_objective_once_not_twice():
     # use a power-of-two step, so nested stencils revisit identical points and
     # the cache dedupes them *within* one router too (169 calls, not 260).
     f_one, c_one = _counting_quartic()
+    cached_one = _point_cache(f_one)
     classify_and_extract(
-        fun=_point_cache(f_one),
+        fun=cached_one,
         jac=None,
         hess=None,
         lb=None,
@@ -242,6 +247,12 @@ def test_auto_route_probes_objective_once_not_twice():
         x0=x0,
         rtol=1e-5,
     )
+
+    # A declined `auto` without `jac` then asks whether a constant term hid the
+    # objective's shape (gh #1169). It reads `fun` at the same probe points
+    # through the same cache; the routers difference around those points but
+    # need `fun` *at* only some of them, so this adds those few calls once.
+    constant_term_hides_structure(cached_one, x0, None, None)
 
     routing_overhead = c_auto["n"] - c_nlp["n"]
     # Post-fix the overhead equals a single router's probe count; pre-fix (no

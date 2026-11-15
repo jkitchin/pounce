@@ -470,3 +470,97 @@ def test_nonconvex_or_nonlinear_constraint_without_jac_is_not_routed(name):
         solver_selection="auto",
     )
     assert _routed_to(res) not in ("qp-ipm", "lp-ipm", "socp"), name
+
+
+# --- the limit: a constant term that rounds the shape away -------------------
+#
+# At offset 1e12 the QP's values across the probes differ by ~5e3 units of
+# their own rounding, too few for any difference of `fun` to classify it, so
+# it stays on the NLP path. That decline is explained, not silent. Each test
+# reaches one branch of `_hidden_hint` / `constant_term_hides_structure`.
+
+import warnings  # noqa: E402
+
+from pounce._route import constant_term_hides_structure  # noqa: E402
+
+_HIDDEN = "constant term hides its shape"
+_BIG = 1e12
+
+
+def _qp_big(x):
+    return 0.5 * x @ Q @ x + Q_SWEEP_C @ x + _BIG
+
+
+def _hint_warnings(record):
+    return [w for w in record if _HIDDEN in str(w.message)]
+
+
+def test_auto_warns_when_the_constant_term_hides_the_qp():
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        res = minimize(_qp_big, np.zeros(4), bounds=BOX, solver_selection="auto")
+    assert _routed_to(res) is None  # still the NLP path: the limit itself
+    (w,) = _hint_warnings(rec)
+    assert "Subtract the constant" in str(w.message)
+
+
+def test_forced_qp_ipm_error_explains_the_constant_term():
+    with pytest.raises(ValueError, match=_HIDDEN):
+        minimize(_qp_big, np.zeros(4), bounds=BOX, solver_selection="qp-ipm")
+
+
+@pytest.mark.parametrize("off", [0.0, 1e3, 1e9])
+def test_no_hint_for_a_genuinely_nonquadratic_objective(off):
+    # Declined for its shape, not its constant: no hint, in either message.
+    def f(x):
+        return np.sum(x**4) + Q_SWEEP_C @ x + off
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        minimize(f, np.zeros(4), bounds=BOX, solver_selection="auto")
+    assert not _hint_warnings(rec)
+    with pytest.raises(ValueError) as exc:
+        minimize(f, np.zeros(4), bounds=BOX, solver_selection="qp-ipm")
+    assert _HIDDEN not in str(exc.value)
+
+
+def test_no_hint_when_jac_is_given():
+    # With `jac` the router never differences `fun`, so its rounding is not
+    # why a problem declined.
+    def f(x):
+        return np.sum(x**4) + _BIG
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        minimize(
+            f, np.zeros(4), jac=lambda x: 4 * x**3, bounds=BOX, solver_selection="auto"
+        )
+    assert not _hint_warnings(rec)
+
+
+def test_routed_problem_at_large_offset_gets_no_hint():
+    def f(x):
+        return 0.5 * x @ Q @ x + Q_SWEEP_C @ x + 1e9
+
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        res = minimize(f, np.zeros(4), bounds=BOX, solver_selection="auto")
+    assert _routed_to(res) == "qp-ipm"
+    assert not _hint_warnings(rec)
+
+
+def test_constant_term_hides_structure_branches():
+    lb, ub = -np.ones(4), np.ones(4)
+    x0 = np.zeros(4)
+    mag, spread = constant_term_hides_structure(_qp_big, x0, lb, ub)
+    assert mag >= _BIG and 0.0 < spread < 1e5 * _EPS * mag
+    assert (
+        constant_term_hides_structure(lambda x: _qp_big(x) - _BIG, x0, lb, ub) is None
+    )
+    assert constant_term_hides_structure(lambda x: 0.0, x0, lb, ub) is None
+    assert constant_term_hides_structure(lambda x: np.nan, x0, lb, ub) is None
+
+    def boom(x):
+        raise RuntimeError("domain")
+
+    assert constant_term_hides_structure(boom, x0, lb, ub) is None
