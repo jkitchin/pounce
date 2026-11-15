@@ -202,7 +202,7 @@ def test_auto_route_probes_objective_once_not_twice():
     # probe points (identical seed). A shared point-cache (wired in `_minimize`
     # via `_route._point_cache`) makes the second router's probes cache hits, so
     # the routing overhead is one router's worth of `fun` calls, not two.
-    from pounce._route import classify_and_extract
+    from pounce._route import _point_cache, classify_and_extract
 
     n = 5
     x0 = np.full(n, 0.3)
@@ -224,9 +224,12 @@ def test_auto_route_probes_objective_once_not_twice():
     f_nlp, c_nlp = _counting_quartic()
     minimize(f_nlp, x0, options={"solver_selection": "nlp"})
     # One router in isolation: the unit the shared cache should collapse to.
+    # Through the same cache `minimize` uses: since gh #1169 the FD stencils
+    # use a power-of-two step, so nested stencils revisit identical points and
+    # the cache dedupes them *within* one router too (162 calls, not 260).
     f_one, c_one = _counting_quartic()
     classify_and_extract(
-        fun=f_one,
+        fun=_point_cache(f_one),
         jac=None,
         hess=None,
         lb=None,

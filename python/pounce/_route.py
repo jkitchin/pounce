@@ -40,6 +40,20 @@ _EPS = float(np.finfo(np.float64).eps)
 # truncation vs. round-off error.
 _H_GRAD = _EPS**0.5
 _H_HESS = _EPS ** (1.0 / 3.0)
+# Step for every derivative read off ``fun`` alone — the gradient when there is
+# no ``jac``, and the Hessian of that gradient (gh #1169). The optimal-balance
+# steps above minimize truncation + round-off for a *general* function, but the
+# router only has to be accurate on the functions it accepts: a central
+# difference of a linear or quadratic function has **no** truncation error at
+# any step, so only round-off (``~eps·|f|/h``, then ``/h`` again for the nested
+# Hessian) is left, and it shrinks as the step grows. At ``sqrt(eps)`` and
+# ``eps^(1/3)`` the nested Hessian carried ``~2.5e-3·|f|`` of noise, so a QP
+# whose objective merely had a constant offset of 1 failed the Hessian-constancy
+# gate. At 2^-7 the noise is ``~4e-12·|f|``. Anything not quadratic is still
+# caught by the gates: its Hessian still varies between probes, and its fitted
+# model still misses ``fun`` at the held-out points. A power of two keeps
+# ``x ± h`` exact for moderate ``x``.
+_H_STRUCT = 2.0**-7
 
 
 @dataclass
@@ -147,41 +161,102 @@ def _point_cache(f: Callable | None) -> Callable | None:
     return wrapped
 
 
-def _grad_fn(fun: Callable, jac: Callable | None) -> Callable:
+def _box_diff(f, x, i, base, floor, lb, ub, *, quadratic):
+    """Derivative of ``f`` along coordinate ``i`` at ``x``, from a stencil kept
+    inside the box ``[lb, ub]`` (gh #1169).
+
+    The step is ``base`` scaled by ``max(1, |x_i|)``. With that much room on
+    both sides the stencil is central. Otherwise — a probe clipped onto a
+    bound, which is routine — it is one-sided into the larger room, and still
+    exact on the class the router accepts: three points (exact on a
+    quadratic, ``quadratic=True``, for a gradient of ``fun``) or two (exact on
+    an affine function, for the Hessian of a gradient that is affine when the
+    objective is quadratic). If even the one-sided step would fall below
+    ``floor`` (likewise scaled; the step used before gh #1169), the box is too
+    narrow and the stencil is central at ``floor``, as it always was.
+
+    Differences are divided by the step *as represented*, so rounding in
+    ``x ± h`` does not enter the quotient."""
+    scale = max(1.0, abs(float(x[i])))
+    h = base * scale
+    lo_room = float(x[i] - lb[i]) if lb is not None and np.isfinite(lb[i]) else np.inf
+    hi_room = float(ub[i] - x[i]) if ub is not None and np.isfinite(ub[i]) else np.inf
+
+    def at(t):
+        y = x.copy()
+        y[i] += t
+        return y
+
+    if min(lo_room, hi_room) >= h:
+        xp, xm = at(h), at(-h)
+        return (f(xp) - f(xm)) / (xp[i] - xm[i])
+    side = 1.0 if hi_room >= lo_room else -1.0
+    reach = 2.0 if quadratic else 1.0
+    hs = min(h, max(lo_room, hi_room) / reach)
+    if hs < floor * scale:
+        hf = floor * scale
+        xp, xm = at(hf), at(-hf)
+        return (f(xp) - f(xm)) / (xp[i] - xm[i])
+    x1 = at(side * hs)
+    d1 = x1[i] - x[i]
+    if not quadratic:
+        return (f(x1) - f(x)) / d1
+    x2 = at(2.0 * d1)
+    # Exact for a quadratic on the points 0, d1, 2·d1 (all representable
+    # multiples here, since d1 is the represented step).
+    return (-3.0 * f(x) + 4.0 * f(x1) - f(x2)) / (2.0 * d1)
+
+
+def _grad_fn(fun: Callable, jac: Callable | None, lb=None, ub=None) -> Callable:
     """Return a gradient callable: the user's ``jac`` if given, else a
     central finite-difference of ``fun`` (central, not forward, because the
-    structure tests want the extra accuracy)."""
+    structure tests want the extra accuracy) with the :data:`_H_STRUCT` step,
+    kept inside the box ``[lb, ub]`` (see :func:`_box_diff`)."""
     if jac is not None:
         return lambda x: np.asarray(jac(x), dtype=np.float64).ravel()
+
+    def fval(x):
+        v = float(fun(x))
+        if not np.isfinite(v):
+            raise _NotConvex("objective is not finite at a probe")
+        return v
 
     def g(x):
         out = np.empty(x.size)
         for i in range(x.size):
-            step = _H_GRAD * max(1.0, abs(x[i]))
-            xp = x.copy()
-            xm = x.copy()
-            xp[i] += step
-            xm[i] -= step
-            out[i] = (float(fun(xp)) - float(fun(xm))) / (2.0 * step)
+            out[i] = _box_diff(fval, x, i, _H_STRUCT, _H_GRAD, lb, ub, quadratic=True)
         return out
 
+    # Tag the FD gradient so `_hessian` differences it with a step sized for
+    # a round-off-only error, not for an exact gradient's.
+    g.fd_box = (lb, ub)
     return g
 
 
 def _hessian(grad: Callable, x: np.ndarray, hess: Callable | None) -> np.ndarray:
     """Symmetric Hessian at ``x`` — the user's ``hess`` if given, else a
-    central finite-difference of the gradient."""
+    central finite-difference of the gradient.
+
+    When the gradient is itself a finite difference of ``fun`` (no ``jac``),
+    the stencil is :func:`_box_diff`'s with the :data:`_H_STRUCT` step
+    (gh #1169). With an analytic ``jac`` it is exactly as before."""
     if hess is not None:
         return np.asarray(hess(x), dtype=np.float64).reshape(x.size, x.size)
     n = x.size
     H = np.empty((n, n))
+    box = getattr(grad, "fd_box", None)
     for j in range(n):
-        step = _H_HESS * max(1.0, abs(x[j]))
-        xp = x.copy()
-        xm = x.copy()
-        xp[j] += step
-        xm[j] -= step
-        H[:, j] = (grad(xp) - grad(xm)) / (2.0 * step)
+        if box is None:
+            step = _H_HESS * max(1.0, abs(x[j]))
+            xp = x.copy()
+            xm = x.copy()
+            xp[j] += step
+            xm[j] -= step
+            H[:, j] = (grad(xp) - grad(xm)) / (2.0 * step)
+        else:
+            H[:, j] = _box_diff(
+                grad, x, j, _H_STRUCT, _H_HESS, box[0], box[1], quadratic=False
+            )
     return 0.5 * (H + H.T)
 
 
@@ -374,7 +449,7 @@ def classify_and_extract(
     active-set engine controls the *objective's* curvature, not a row's.
     """
     rng = np.random.default_rng(seed)
-    grad = _grad_fn(fun, jac)
+    grad = _grad_fn(fun, jac, lb, ub)
     try:
         probes = _probe_points(x0, lb, ub, rng)
         P, c, d, psd = _fit_objective(
@@ -497,7 +572,7 @@ def classify_and_extract_socp(
     """
     n = x0.size
     rng = np.random.default_rng(seed)
-    grad = _grad_fn(fun, jac)
+    grad = _grad_fn(fun, jac, lb, ub)
     try:
         probes = _probe_points(x0, lb, ub, rng)
         P, c, d, _psd = _fit_objective(fun, grad, hess, probes, rtol)

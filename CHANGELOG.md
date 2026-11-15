@@ -9,6 +9,21 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+- **`minimize` detects a convex LP/QP without `jac` whatever the objective's
+  constant term** (gh#1169). The structure probe finite-differenced `fun` twice
+  at steps sized for general functions, which left `~2.5e-3·|f|` of round-off
+  in the Hessian. A convex QP whose objective had a constant offset of 1 failed
+  the constancy check: `solver_selection="auto"` fell back to the NLP solver,
+  and a forced `qp-ipm` raised `ValueError`. An LP read as a QP from offset 100
+  and stopped routing at 1000. The probe now uses a large step, kept inside the
+  bounds, with a one-sided stencil at a bound. Central and one-sided stencils
+  alike are exact on linear and quadratic functions, so only round-off remains
+  (`~4e-12·|f|`). Both rows now route at offsets up to at least 1e5. Detection
+  with an analytic `jac` is unchanged. Non-quadratic objectives are still
+  rejected by the same gates, and a non-finite probe value now rejects
+  explicitly instead of relying on NaN comparisons.
+
 ## [0.17.0] - 2026-11-14
 
 ### Added
