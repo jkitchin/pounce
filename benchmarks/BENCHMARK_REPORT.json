@@ -1024,7 +1024,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.005386315317015007,
+    "pounce_obj": 0.00538631531701504,
     "ipopt_obj": 0.005386315317015064,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1222,19 +1222,19 @@
   {
     "name": "cresc100",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_Iterations_Exceeded",
+    "pounce_status": "Optimal",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 135040.67090456668,
+    "pounce_obj": 0.7443587787801336,
     "ipopt_obj": -5.284832597191212e-08,
-    "pounce_solved": false,
+    "pounce_solved": true,
     "ipopt_solved": false
   },
   {
     "name": "cresc132",
     "suite": "Vanderbei",
-    "pounce_status": "Maximum_CpuTime_Exceeded",
+    "pounce_status": "Infeasible_Problem_Detected",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 10.54952840054466,
+    "pounce_obj": -1.4297464582252523e-16,
     "ipopt_obj": -4.447533416283649e-15,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1244,7 +1244,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 0.8718975394994039,
+    "pounce_obj": 0.871897539451396,
     "ipopt_obj": 0.8718975393016776,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -1254,7 +1254,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Maximum_Iterations_Exceeded",
     "ipopt_status": "Infeasible_Problem_Detected",
-    "pounce_obj": 0.8219033858478895,
+    "pounce_obj": 0.01991714306477732,
     "ipopt_obj": -4.6030278911203385e-12,
     "pounce_solved": false,
     "ipopt_solved": false
@@ -1364,7 +1364,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Invalid_Number_Detected",
-    "pounce_obj": -202604.13270974683,
+    "pounce_obj": -202604.1327103764,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -1374,7 +1374,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Invalid_Number_Detected",
-    "pounce_obj": -48198.188841203766,
+    "pounce_obj": -48198.18874942744,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -1384,7 +1384,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Invalid_Number_Detected",
-    "pounce_obj": -32393.225736201395,
+    "pounce_obj": -32393.225736200828,
     "ipopt_obj": null,
     "pounce_solved": true,
     "ipopt_solved": false
@@ -2944,7 +2944,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 6.039580434918652e-25,
+    "pounce_obj": 6.039582830366734e-25,
     "ipopt_obj": 6.039695626711264e-25,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7074,7 +7074,7 @@
     "suite": "Vanderbei",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 12.3119742372624,
+    "pounce_obj": 12.311974237262374,
     "ipopt_obj": 12.31199651151446,
     "pounce_solved": true,
     "ipopt_solved": true
@@ -7804,7 +7804,7 @@
     "suite": "LargeScale",
     "pounce_status": "Optimal",
     "ipopt_status": "Optimal",
-    "pounce_obj": 65.29277391614413,
+    "pounce_obj": 65.29288129811927,
     "ipopt_obj": 65.29467800296965,
     "pounce_solved": true,
     "ipopt_solved": true

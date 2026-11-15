@@ -114,6 +114,19 @@ architectures): rounding-chaotic, so a single run is not a measurement.**
     escalations and the `exact cresc4` count.
   - It spreads `lbfgs cresc4` over 81–222, so neither 222 nor 101 is
     evidence about the change.
+  - **On arm64 this line draws a costly realisation** (0.17.0 release
+    sweep, v0.16.0 → `92a33e6d`, both built on Apple Silicon). `lbfgs
+    cresc4` goes from first-attempt `SolveSucceeded`/105 to a first attempt
+    that ends `Restoration_Failed` at 996, rescued by
+    `start_point_perturbation=1e-2`: 111 iterations, **1107 total**, objective
+    `0.8718975252` → `0.8718975449`. That is the ladder this line left on
+    arm64 under gh#1146 (3200 total there), now back. Same chaos as the x86
+    spread above, not a separate defect, but it is the arm64 cost a user
+    sees. A fix to the underlying sensitivity would show as this line, and
+    the x86 one, holding a first-attempt solve under both `1 ± ε` nudges.
+    The other arm64 moves in that sweep are `exact dallass` 28/`q=0` →
+    27/`q=5` and `lbfgs dallass` `ErrorInStepComputation`/279 →
+    `SolveSucceeded`/162.
   - Perturbing the old `asin″` at its three second-order sites moves
     nothing. The escalations come from the gradient, not from the more
     accurate Hessian term.

@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-14
+
 ### Added
 - **`minimize` accepts `scipy.optimize.NonlinearConstraint`.** Alongside dict
   constraints and `LinearConstraint`, so scipy code ports without rewriting
@@ -245,6 +247,18 @@ changes.
   `make c-api-examples` does the same by hand. A guard holds the exported
   symbols, the header's prototypes and the docs to one another, and the
   header's structs to the Rust layout.
+- **The MCP server ships in `pounce-solver` as the `[mcp]` extra.**
+  `pip install "pounce-solver[mcp]"` (Python 3.10+) installs a
+  `pounce-studio-mcp` script, and `uvx --from "pounce-solver[mcp]"
+  pounce-studio-mcp` runs it with nothing installed. Before this it was a
+  separate package built from `studio/mcp` with a Rust toolchain. The server
+  is now `pounce.studio`, its report analysis is mounted in the wheel's
+  extension as `pounce._pounce.studio`, and it spawns the `pounce` binary the
+  wheel already bundles. `POUNCE_WORKDIR` sets the directory that relative
+  model paths resolve against, since Claude Desktop starts servers in `/`.
+- **A Claude Desktop extension (`.mcpb`).** `make mcpb` builds
+  `dist/pounce-studio-<version>.mcpb` from `studio/mcpb/`. Desktop installs
+  `pounce-solver[mcp]` with uv and asks for a workspace folder.
 
 ### Changed
 - **FERAL 0.23.0: the same results, with less memory in the factor.** FERAL's
@@ -298,20 +312,6 @@ changes.
   and `POUNCE_VERSION` still said `0.1.0` while `GetIpoptVersion` reported
   `0.16.0`; they now equal the crate version, and a test and the release
   guard (`scripts/check-release-consistency.sh`) keep them so.
-- **The MCP server ships in `pounce-solver` as the `[mcp]` extra.**
-  `pip install "pounce-solver[mcp]"` (Python 3.10+) installs a
-  `pounce-studio-mcp` script, and `uvx --from "pounce-solver[mcp]"
-  pounce-studio-mcp` runs it with nothing installed. Before this it was a
-  separate package built from `studio/mcp` with a Rust toolchain. The server
-  is now `pounce.studio`, its report analysis is mounted in the wheel's
-  extension as `pounce._pounce.studio`, and it spawns the `pounce` binary the
-  wheel already bundles. `POUNCE_WORKDIR` sets the directory that relative
-  model paths resolve against, since Claude Desktop starts servers in `/`.
-- **A Claude Desktop extension (`.mcpb`).** `make mcpb` builds
-  `dist/pounce-studio-<version>.mcpb` from `studio/mcpb/`. Desktop installs
-  `pounce-solver[mcp]` with uv and asks for a workspace folder.
-
-### Fixed
 - **The debugger's `quit` ends the solve.** `quit` stopped the solve at the
   current pause, but the terminal pause that follows (and, during
   restoration, the outer solve's pauses) paused again. In `--debug-json`
@@ -348,6 +348,17 @@ changes.
   the true value is still a nonzero subnormal. All are now accurate to a few
   ulps wherever the result is a normal double, and underflow gradually below
   that.
+  The new forms round differently at *every* argument, not only at the
+  edges (`atan''` included, below its overflow threshold), so a model using
+  any of these functions can take a different path. On the 0.17.0
+  benchmarks these are the only moves against 0.16.0: `laptime` (`atan`)
+  756 → 710 iterations, objective +1.6e-6 relative; `cresc100` (`acos`)
+  reaches Optimal at 0.744 instead of the iteration cap, a different point
+  from the reference's 0.568; `cresc132` reports Infeasible, as Ipopt does,
+  in 7 s (0.16.0 reached the same verdict in 0.6 s, then spent ~585 s in
+  second-opinion re-solves, past the benchmark's 300 s limit); `cresc50`
+  still hits the cap; `chebyqad` and `dallas{l,m,s}`
+  solve to the same answers in a few fewer iterations.
 - **`log`, `log10` and `sqrt` second derivatives no longer vanish at large
   arguments.** `log''` and `log10''` read `0` past `|x| ≈ 1.3e154`, `log10'`
   past `|x| ≈ 7.8e307`, and `sqrt''` past `x ≈ 2.6e205`, where each true
