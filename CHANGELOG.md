@@ -25760,7 +25760,8 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/jkitchin/pounce/releases/tag/v0.17.0
 [0.16.0]: https://github.com/jkitchin/pounce/releases/tag/v0.16.0
 [0.15.0]: https://github.com/jkitchin/pounce/releases/tag/v0.15.0
 [0.14.0]: https://github.com/jkitchin/pounce/releases/tag/v0.14.0
