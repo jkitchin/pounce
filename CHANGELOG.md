@@ -24,6 +24,15 @@ changes.
   rejected by the same gates, and a non-finite probe value now rejects
   explicitly instead of relying on NaN comparisons.
 
+  The same held for **constraints without `jac`**, which reached the router
+  through the NLP path's finite difference. A linear constraint with a constant
+  term of 1e5 read as nonlinear, and a convex-quadratic one stopped routing to
+  `socp` from 1e3. The router now differences those rows itself with the same
+  stencils. Rows with an analytic `jac` are read exactly as before, and the NLP
+  solve's own finite differences are unchanged. A constraint that evaluates to
+  NaN at a probe was previously routed to the convex solver; it now stays on
+  the NLP path.
+
 ## [0.17.0] - 2026-11-14
 
 ### Added

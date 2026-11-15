@@ -899,6 +899,18 @@ def _wrap_constraints(constraints, n: int, x0=None):
                     out[start:end] = J.ravel()
         return out
 
+    # Rows whose Jacobian `jac_values` finite-differences (a callable block
+    # with no `jac`). The convex routers difference those rows themselves, with
+    # stencils exact on the linear/quadratic class they accept, instead of
+    # reading this FD, whose round-off scales with the row's value (gh #1169).
+    jac_values.fd_rows = np.concatenate(
+        [
+            np.full(
+                blk.n_rows, blk.constant_vals is None and blk.jac is None, dtype=bool
+            )
+            for blk in blocks
+        ]
+    )
     return m_total, g_combined, jac_values, cl, cu, jac_rows, jac_cols
 
 
@@ -1507,6 +1519,7 @@ def minimize(
         "cu": cu,
         "x0": x0,
         "rtol": route_tol,
+        "fd_rows": getattr(jac_combined, "fd_rows", None) if m > 0 else None,
     }
     # Options the dedicated convex (LP/QP/SOCP) routers actually honor; the
     # routing key and tolerance are consumed here, not "ignored". Everything

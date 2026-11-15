@@ -260,6 +260,55 @@ def _hessian(grad: Callable, x: np.ndarray, hess: Callable | None) -> np.ndarray
     return 0.5 * (H + H.T)
 
 
+def _constraint_jac(g_combined, jac_combined, fd_rows, lb, ub):
+    """The router's constraint Jacobian ``x ↦ m×n``.
+
+    ``fd_rows`` marks the rows that have no analytic Jacobian, for which
+    ``jac_combined`` returns the NLP path's finite difference. That one's
+    round-off scales with the row's *value*, so a linear or convex-quadratic
+    constraint with a large constant term read as nonlinear (gh #1169, the
+    constraint half). Those rows are differenced here from ``g_combined``
+    instead, with :func:`_box_diff`'s stencil, exact on quadratics. Rows with
+    an analytic Jacobian are read from ``jac_combined`` as before. With no
+    ``fd_rows``, or none set, ``jac_combined`` is returned unchanged.
+
+    The returned callable carries ``fd_box``, ``fd_idx`` and ``exact`` (the
+    original ``jac_combined``, or ``None`` when every row is differenced),
+    which :func:`_all_constraint_hessians` reads to pick its stencil per row.
+    """
+    if fd_rows is None:
+        return jac_combined
+    fd_rows = np.asarray(fd_rows, dtype=bool)
+    if not fd_rows.any():
+        return jac_combined
+    idx = np.flatnonzero(fd_rows)
+    m = fd_rows.size
+    all_fd = idx.size == m
+
+    def g_fd(x):
+        v = np.asarray(g_combined(x), dtype=np.float64).ravel()[idx]
+        if not np.all(np.isfinite(v)):
+            raise _NotConvex("a constraint is not finite at a probe")
+        return v
+
+    def J(x):
+        n = x.size
+        if all_fd:
+            out = np.zeros((m, n))
+        else:
+            out = np.array(
+                np.atleast_2d(np.asarray(jac_combined(x), dtype=np.float64)), copy=True
+            )
+        for i in range(n):
+            out[idx, i] = _box_diff(g_fd, x, i, _H_STRUCT, _H_GRAD, lb, ub, quadratic=True)
+        return out
+
+    J.fd_box = (lb, ub)
+    J.fd_idx = idx
+    J.exact = None if all_fd else jac_combined
+    return J
+
+
 def _probe_points(x0, lb, ub, rng, k=5):
     """``x0`` plus ``k`` random in-domain probe points.
 
@@ -432,6 +481,7 @@ def classify_and_extract(
     rtol: float = 1e-5,
     seed: int = 0,
     allow_indefinite: bool = False,
+    fd_rows=None,
 ) -> QpExtract | None:
     """Detect an LP/QP behind the callable problem and extract its data.
 
@@ -450,6 +500,7 @@ def classify_and_extract(
     """
     rng = np.random.default_rng(seed)
     grad = _grad_fn(fun, jac, lb, ub)
+    jac_combined = _constraint_jac(g_combined, jac_combined, fd_rows, lb, ub)
     try:
         probes = _probe_points(x0, lb, ub, rng)
         P, c, d, psd = _fit_objective(
@@ -494,19 +545,39 @@ def _all_constraint_hessians(jac_combined, x, m, n):
     of constraint row ``i``. (The constraint functions come through the scipy
     facade as opaque callables with no user-supplied Hessian, so this is the
     only way to read a quadratic constraint's curvature.)
+
+    When ``jac_combined`` comes from :func:`_constraint_jac`, its
+    finite-differenced rows are differenced again with :func:`_box_diff`'s
+    stencil (exact on the affine Jacobian of a quadratic row, gh #1169), and
+    rows with an analytic Jacobian keep the step and stencil they always had.
     """
+    box = getattr(jac_combined, "fd_box", None)
+    if box is None:
+        exact, fd_idx = jac_combined, None
+    else:
+        exact, fd_idx = jac_combined.exact, jac_combined.fd_idx
     Hs = [np.empty((n, n)) for _ in range(m)]
-    for j in range(n):
-        step = _H_HESS * max(1.0, abs(x[j]))
-        xp = x.copy()
-        xm = x.copy()
-        xp[j] += step
-        xm[j] -= step
-        Jp = np.atleast_2d(np.asarray(jac_combined(xp), dtype=np.float64))
-        Jm = np.atleast_2d(np.asarray(jac_combined(xm), dtype=np.float64))
-        col = (Jp - Jm) / (2.0 * step)  # shape (m, n): column j of each Hessian
-        for i in range(m):
-            Hs[i][:, j] = col[i]
+    if exact is not None:
+        for j in range(n):
+            step = _H_HESS * max(1.0, abs(x[j]))
+            xp = x.copy()
+            xm = x.copy()
+            xp[j] += step
+            xm[j] -= step
+            Jp = np.atleast_2d(np.asarray(exact(xp), dtype=np.float64))
+            Jm = np.atleast_2d(np.asarray(exact(xm), dtype=np.float64))
+            col = (Jp - Jm) / (2.0 * step)  # shape (m, n): column j of each Hessian
+            for i in range(m):
+                Hs[i][:, j] = col[i]
+    if fd_idx is not None:
+
+        def J_fd(y):
+            return np.atleast_2d(np.asarray(jac_combined(y), dtype=np.float64))[fd_idx]
+
+        for j in range(n):
+            col = _box_diff(J_fd, x, j, _H_STRUCT, _H_HESS, box[0], box[1], quadratic=False)
+            for k, i in enumerate(fd_idx):
+                Hs[i][:, j] = col[k]
     return [0.5 * (H + H.T) for H in Hs]
 
 
@@ -551,6 +622,7 @@ def classify_and_extract_socp(
     x0,
     rtol: float = 1e-5,
     seed: int = 0,
+    fd_rows=None,
 ) -> SocpExtract | None:
     """Detect a convex QCQP behind the callable problem and reformulate it to a
     standard-form SOCP.
@@ -573,6 +645,7 @@ def classify_and_extract_socp(
     n = x0.size
     rng = np.random.default_rng(seed)
     grad = _grad_fn(fun, jac, lb, ub)
+    jac_combined = _constraint_jac(g_combined, jac_combined, fd_rows, lb, ub)
     try:
         probes = _probe_points(x0, lb, ub, rng)
         P, c, d, _psd = _fit_objective(fun, grad, hess, probes, rtol)

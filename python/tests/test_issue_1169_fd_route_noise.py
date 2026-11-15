@@ -215,3 +215,169 @@ def test_nonfinite_objective_is_not_routed():
     f = lambda x: 0.5 * x @ Q @ x + (np.nan if x[0] > 0.0 else 0.0)
     with pytest.raises(ValueError, match="not detected as a convex"):
         minimize(f, np.zeros(4), bounds=BOX, solver_selection="qp-ipm")
+
+
+# --- the constraint half: rows with no `jac` --------------------------------
+#
+# A callable constraint with no `jac` reached the router through the NLP
+# path's finite difference (eps^(1/3) step), whose round-off scales with the
+# row's value. A linear row with a large constant term read as nonlinear
+# (offset 1e5), and a convex-quadratic one read as a non-constant Hessian
+# (offset 1e3). The router now differences those rows itself
+# (`_constraint_jac`). Each test below reaches one branch: every row
+# differenced, mixed rows, no differenced rows, and the dangerous direction.
+
+from scipy.optimize import LinearConstraint  # noqa: E402
+
+from pounce._minimize import _wrap_constraints  # noqa: E402
+from pounce._route import _all_constraint_hessians, _constraint_jac  # noqa: E402
+
+_LIN_C = np.array([0.3, -0.2, 0.5, -1.0])
+_OFFSETS = [0.0, 1e3, 1e5, 1e7]
+
+
+def _ball(off, r2=0.3):
+    """x·x ≤ r2 as a scipy ``ineq`` whose value carries a constant ``off``."""
+    return lambda x: (off + r2) - (x @ x + off)
+
+
+def _ball_reference():
+    res = minimize(
+        lambda x: _LIN_C @ x,
+        np.zeros(4),
+        jac=lambda x: _LIN_C,
+        bounds=BOX,
+        constraints=[{"type": "ineq", "fun": _ball(0.0), "jac": lambda x: -2 * x}],
+        solver_selection="auto",
+    )
+    assert _routed_to(res) == "socp"
+    return res.fun
+
+
+@pytest.mark.parametrize("off", _OFFSETS)
+def test_linear_constraint_without_jac_routes_whatever_its_offset(off):
+    f = lambda x: 0.5 * x @ Q @ x + Q_SWEEP_C @ x
+    cons = [{"type": "ineq", "fun": lambda x: (off + 0.5) - (x.sum() + off)}]
+    res = minimize(
+        f,
+        np.zeros(4),
+        jac=lambda x: Q @ x + Q_SWEEP_C,
+        bounds=BOX,
+        constraints=cons,
+        solver_selection="auto",
+    )
+    assert _routed_to(res) == "qp-ipm"
+    ref = minimize(
+        f,
+        np.zeros(4),
+        jac=lambda x: Q @ x + Q_SWEEP_C,
+        bounds=BOX,
+        constraints=[
+            {
+                "type": "ineq",
+                "fun": lambda x: 0.5 - x.sum(),
+                "jac": lambda x: -np.ones(4),
+            }
+        ],
+        solver_selection="auto",
+    )
+    assert res.fun == pytest.approx(ref.fun, abs=1e-7)
+
+
+@pytest.mark.parametrize("off", _OFFSETS)
+def test_quadratic_constraint_without_jac_routes_whatever_its_offset(off):
+    res = minimize(
+        lambda x: _LIN_C @ x,
+        np.zeros(4),
+        jac=lambda x: _LIN_C,
+        bounds=BOX,
+        constraints=[{"type": "ineq", "fun": _ball(off)}],
+        solver_selection="auto",
+    )
+    assert _routed_to(res) == "socp"
+    assert res.fun == pytest.approx(_ball_reference(), abs=1e-6)
+
+
+@pytest.mark.parametrize("which_has_jac", ["linear", "quadratic"])
+def test_mixed_rows_route(which_has_jac):
+    # One row differenced by the router, the other read from its analytic jac.
+    off = 1e5
+    lin = {"type": "ineq", "fun": lambda x: (off + 0.5) - (x.sum() + off)}
+    quad = {"type": "ineq", "fun": _ball(off)}
+    if which_has_jac == "linear":
+        lin["jac"] = lambda x: -np.ones(4)
+    else:
+        quad["jac"] = lambda x: -2 * x
+    res = minimize(
+        lambda x: _LIN_C @ x,
+        np.zeros(4),
+        jac=lambda x: _LIN_C,
+        bounds=BOX,
+        constraints=[lin, quad],
+        solver_selection="auto",
+    )
+    assert _routed_to(res) == "socp"
+
+
+def test_fd_rows_marks_only_callable_rows_without_jac():
+    cons = [
+        LinearConstraint(np.ones((2, 3)), -1.0, 1.0),
+        {"type": "ineq", "fun": lambda x: x[:2], "jac": lambda x: np.eye(3)[:2]},
+        {"type": "eq", "fun": lambda x: x.sum()},
+    ]
+    _, _, jac_values, *_ = _wrap_constraints(cons, 3, np.zeros(3))
+    np.testing.assert_array_equal(
+        jac_values.fd_rows, [False, False, False, False, True]
+    )
+
+
+def test_constraint_jac_is_unchanged_without_fd_rows():
+    J = lambda x: np.eye(2)
+    assert _constraint_jac(None, J, None, None, None) is J
+    assert _constraint_jac(None, J, np.array([False, False]), None, None) is J
+
+
+def test_exact_rows_keep_their_old_hessian_bit_for_bit():
+    # Row 0 analytic, row 1 differenced. Row 0's Hessian must equal what the
+    # unwrapped Jacobian gives, the pre-#1169 computation.
+    def g(x):
+        return np.array([x @ x + 3.0 * x[0], 1e5 - x @ x])
+
+    def jac(x):  # row 1 stands in for the NLP path's FD: deliberately noisy
+        return np.vstack([2 * x + np.array([3.0, 0.0]), -2 * x + 1e-3])
+
+    x = np.array([0.3, -0.4])
+    lb, ub = np.array([-1.0, -1.0]), np.array([1.0, 1.0])
+    Jw = _constraint_jac(g, jac, np.array([False, True]), lb, ub)
+    new = _all_constraint_hessians(Jw, x, 2, 2)
+    old = _all_constraint_hessians(jac, x, 2, 2)
+    np.testing.assert_array_equal(new[0], old[0])
+    np.testing.assert_allclose(new[1], -2 * np.eye(2), rtol=0, atol=1e-8)
+
+
+_BAD_CONSTRAINTS = {
+    # x·x ≥ 0.3: quadratic, but its feasible set is nonconvex.
+    "nonconvex quadratic+offset": {
+        "type": "ineq",
+        "fun": lambda x: (x @ x + 1e3) - (1e3 + 0.3),
+    },
+    "cubic+offset": {
+        "type": "ineq",
+        "fun": lambda x: (1e3 + 0.5) - (x[0] ** 3 + x.sum() + 1e3),
+    },
+    "quadratic equality": {"type": "eq", "fun": lambda x: (1e3 + 0.3) - (x @ x + 1e3)},
+    "nan": {"type": "ineq", "fun": lambda x: np.nan if x[0] > 0.0 else 1.0},
+}
+
+
+@pytest.mark.parametrize("name", list(_BAD_CONSTRAINTS))
+def test_nonconvex_or_nonlinear_constraint_without_jac_is_not_routed(name):
+    res = minimize(
+        lambda x: _LIN_C @ x,
+        np.zeros(4),
+        jac=lambda x: _LIN_C,
+        bounds=BOX,
+        constraints=[_BAD_CONSTRAINTS[name]],
+        solver_selection="auto",
+    )
+    assert _routed_to(res) not in ("qp-ipm", "lp-ipm", "socp"), name
