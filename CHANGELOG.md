@@ -13,7 +13,7 @@ changes.
 - **`feral_early_assembly` bounds FERAL's memory on wide elimination trees.**
   The option (environment fallback `POUNCE_FERAL_EARLY_ASSEMBLY`) selects
   feral's contribution-block assembly scheme (feral#231). The default `off`
-  keeps 0.17.0's behaviour; `wide_parents` folds a wide parent's children into
+  keeps pounce 0.17.0's behaviour; `wide_parents` folds a wide parent's children into
   its front as they arrive. A QP with many inequality rows over a few shared
   variables puts thousands of leaves under one small front: on an 11,144-row
   QP the solve's peak live heap falls 806 → 401 MiB with the same iterations

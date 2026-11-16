@@ -2700,7 +2700,7 @@ embeddings).
 |-------------------------------------|------------------------------|
 | `POUNCE_FERAL_ORDERING`             | `feral_ordering`             |
 | `POUNCE_FERAL_ORDERING_PREPROCESS`  | `feral_ordering_preprocess`  |
-| `POUNCE_FERAL_EARLY_ASSEMBLY`      | `feral_early_assembly`       |
+| `POUNCE_FERAL_EARLY_ASSEMBLY`       | `feral_early_assembly`       |
 | `POUNCE_FERAL_SCALING`              | `feral_scaling`              |
 | `POUNCE_FERAL_PIVTOL`               | `feral_pivtol` (deprecated bare `FERAL_PIVTOL` also accepted) |
 | `POUNCE_FERAL_REFINE`               | `feral_refine`               |

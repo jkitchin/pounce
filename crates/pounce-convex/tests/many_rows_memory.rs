@@ -117,6 +117,10 @@ fn solve(qp: &QpProblem, early_assembly: EarlyAssembly) -> (pounce_convex::QpSol
 #[test]
 fn wide_parents_does_not_hold_every_contribution_block() {
     let qp = problem();
+    // Warm-up, discarded: one-time allocations (rayon's registry, lazy
+    // statics, thread-locals) stay live after the first solve, so without it
+    // they land in whichever measured solve runs first and widen the gap.
+    let _ = solve(&qp, EarlyAssembly::Off);
     let (off, off_peak) = solve(&qp, EarlyAssembly::Off);
     let (wide, wide_peak) = solve(&qp, EarlyAssembly::WideParents);
 
