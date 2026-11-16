@@ -1747,6 +1747,16 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Pounce reads this option only when set explicitly; unset keeps FERAL's Auto. Applies to every fill-reducing method except a caller-supplied permutation. Falls back to the POUNCE_FERAL_ORDERING_PREPROCESS environment variable. The resolved choice is reported as linear_solver.last_ordering_preprocess.",
     )?;
     r.add_string_option(
+        "feral_early_assembly",
+        "Contribution-block assembly scheme for the FERAL backend.",
+        "off",
+        &[
+            ("off", "Hold every child's contribution block until its parent is assembled (the classic multifrontal scheme). Pounce default."),
+            ("wide_parents", "Fold the children of a parent whose blocks outweigh its front twice over into that front as they arrive. Bounds the transient memory of wide elimination trees, such as a QP with many inequality rows over a few shared variables."),
+        ],
+        "Factors are bit-identical under either setting, and FERAL bounds wide_parents' peak live heap at off's plus bookkeeping; its cost is time, 2.6-4.1% of the factorization on small fronts with 1,000-2,600 tiny children. FERAL's parallel task-graph driver ignores it. Pounce reads this option only when set explicitly. Falls back to the POUNCE_FERAL_EARLY_ASSEMBLY environment variable.",
+    )?;
+    r.add_string_option(
         "feral_scaling",
         "Diagonal scaling strategy for the FERAL backend.",
         "auto",

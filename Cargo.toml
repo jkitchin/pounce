@@ -318,8 +318,8 @@ pounce-cinterface = { path = "crates/pounce-cinterface", version = "0.17.0" }
 # 0.23.0 (feral#231, #234) changes memory and LU bookkeeping, not answers.
 # #231 stores contribution blocks in the sequential LDLᵀ drivers as packed lower
 # triangles, so a returned factor holds no contribution storage. It also adds an
-# opt-in `EarlyAssembly::WideParents`, which pounce does not set, so it runs
-# `Off`. #234 speeds up threshold-Markowitz `SparseLu::factor` on
+# opt-in `EarlyAssembly::WideParents`; pounce exposes it as
+# `feral_early_assembly` (default `off`), so it runs `Off` unless asked. #234 speeds up threshold-Markowitz `SparseLu::factor` on
 # near-triangular bases, and add `SparseLu::refactor_markowitz` for in-place
 # refactors. The simplex and the pounce-qp rank probe still build a fresh
 # `SparseLu` per factor, so they do not use the in-place path. feral states
@@ -329,8 +329,8 @@ pounce-cinterface = { path = "crates/pounce-cinterface", version = "0.17.0" }
 # the iteration cap, and QSCFXM1 from 1942 to 14782 iterations, through the
 # pounce-qp rank probe (gh#1061). It was reverted upstream, and those pivots
 # are pinned there by `tests/lu_markowitz_golden.rs`. The one breaking change
-# is a new `NumericParams::early_assembly` field. pounce builds no
-# `NumericParams` literal, so nothing here changes. Measured against 0.22.0
+# is a new `NumericParams::early_assembly` field, which `configure_solver`
+# and the block backend's Schur-tail factorization now set from `FeralConfig`. Measured against 0.22.0
 # on arm64: the fixture sweep at default options and forced to
 # `solver_selection=qp-active-set` moves 0 of 282 fixture-legs in each.
 #

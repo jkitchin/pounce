@@ -30,6 +30,7 @@ use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, RefineOptions, 
 
 /// Re-export so option-aware callers can construct a
 /// [`FeralConfig`] without taking a direct dependency on `feral`.
+pub use feral::EarlyAssembly;
 pub use feral::scaling::ScalingStrategy;
 pub use feral::symbolic::OrderingMethod;
 pub use feral::symbolic::OrderingPreprocess;
@@ -636,6 +637,21 @@ pub struct FeralConfig {
     /// (feral's shape predicate decides). Override via the
     /// `feral_ordering_preprocess` option or `POUNCE_FERAL_ORDERING_PREPROCESS`.
     pub ordering_preprocess: OrderingPreprocess,
+    /// Contribution-block assembly scheme
+    /// ([`feral::NumericParams::early_assembly`], feral#231). Default
+    /// [`EarlyAssembly::Off`] holds every child's block until its parent is
+    /// assembled. [`EarlyAssembly::WideParents`] folds the children of a
+    /// parent whose blocks outweigh its front twice over into that front as
+    /// they arrive: a QP with many inequality rows over a few shared
+    /// variables puts thousands of leaves under one small front, and the
+    /// classic scheme holds all their blocks at once. Factors are
+    /// bit-identical either way, and feral bounds `WideParents`' peak live
+    /// heap at `Off`'s plus bookkeeping; its cost is time (2.6-4.1% of the
+    /// factorization on small fronts under 1,000-2,600 tiny children).
+    /// feral's sequential and Schur drivers honour it; its parallel
+    /// task-graph driver ignores it. Override via the `feral_early_assembly`
+    /// option or `POUNCE_FERAL_EARLY_ASSEMBLY`.
+    pub early_assembly: EarlyAssembly,
     /// Diagonal scaling strategy passed to
     /// [`feral::Solver::with_scaling`]. Default
     /// [`ScalingStrategy::Auto`]: FERAL's adaptive shape-based router
@@ -724,6 +740,7 @@ impl Default for FeralConfig {
             pivtol: 1e-8,
             ordering: OrderingMethod::Auto,
             ordering_preprocess: OrderingPreprocess::Auto,
+            early_assembly: EarlyAssembly::Off,
             scaling: ScalingStrategy::Auto,
             parallel: None,
             min_par_flops: None,
@@ -820,6 +837,11 @@ impl FeralConfig {
                 .as_deref()
                 .and_then(parse_ordering_preprocess)
                 .unwrap_or(OrderingPreprocess::Auto),
+            early_assembly: std::env::var("POUNCE_FERAL_EARLY_ASSEMBLY")
+                .ok()
+                .as_deref()
+                .and_then(parse_early_assembly)
+                .unwrap_or(EarlyAssembly::Off),
             scaling: std::env::var("POUNCE_FERAL_SCALING")
                 .ok()
                 .as_deref()
@@ -976,18 +998,30 @@ pub fn parse_ordering_preprocess(s: &str) -> Option<OrderingPreprocess> {
     }
 }
 
+/// Parse a `feral_early_assembly` tag. `None` for an unrecognized one.
+pub fn parse_early_assembly(s: &str) -> Option<EarlyAssembly> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "off" => Some(EarlyAssembly::Off),
+        "wide_parents" | "wide-parents" => Some(EarlyAssembly::WideParents),
+        _ => None,
+    }
+}
+
 /// Build a configured `feral::Solver` from a [`FeralConfig`]. Extracted from
 /// [`FeralSolverInterface::with_config`] so the Schur backend
 /// ([`crate::schur::FeralSchurSolver`]) configures its per-block solvers
 /// identically (same pivot threshold, cascade-break, parallelism, ordering,
 /// scaling) as the monolithic path.
 pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
+    let mut np = NumericParams {
+        early_assembly: cfg.early_assembly,
+        ..NumericParams::default()
+    };
     // FERAL's parallel-dispatch flop gate (`feral_min_par_flops` option /
     // `POUNCE_FERAL_MIN_PAR_FLOPS` env, resolved into `cfg.min_par_flops`).
     // feral#19, default 10^8. `Some(0)` fires the gate on every multi-child
     // tree ≥ N_PAR_MIN supernodes; `Some(u64::MAX)` rejects all parallel
     // dispatch at the tree level. `None` inherits feral's own default.
-    let mut np = NumericParams::default();
     if let Some(v) = cfg.min_par_flops {
         np.min_parallel_flops = Some(v);
     }
@@ -2859,6 +2893,19 @@ mod tests {
             assert_eq!(parse_ordering_preprocess(tag), Some(expected), "{tag:?}");
         }
         assert_eq!(parse_ordering_preprocess("mc64"), Option::None);
+    }
+
+    #[test]
+    fn parse_early_assembly_accepts_documented_tags() {
+        for (tag, expected) in [
+            ("off", EarlyAssembly::Off),
+            ("OFF", EarlyAssembly::Off),
+            ("wide_parents", EarlyAssembly::WideParents),
+            ("wide-parents", EarlyAssembly::WideParents),
+        ] {
+            assert_eq!(parse_early_assembly(tag), Some(expected), "{tag:?}");
+        }
+        assert_eq!(parse_early_assembly("always"), None);
     }
 
     /// A forced preprocessing choice reaches FERAL and is what the summary

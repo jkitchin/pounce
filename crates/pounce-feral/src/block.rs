@@ -265,6 +265,13 @@ impl FeralBlockSolver {
         }
         let nb = self.border.len();
         let values = &self.values;
+        // The Schur-tail factorization runs on feral's defaults except for
+        // the contribution-block scheme, which is memory, not numerics:
+        // factors are bit-identical under either setting (feral#231).
+        let schur_params = NumericParams {
+            early_assembly: self.cfg.early_assembly,
+            ..NumericParams::default()
+        };
         let t0 = Instant::now();
         // Each block: factor with the border as Schur tail (gives this block's
         // contribution to S), and block-only (gives factors the back-solve can
@@ -276,8 +283,7 @@ impl FeralBlockSolver {
                 let m_full = block_matrix(blk, nb, values, false)?;
                 let sym = blk.sym.as_ref()?;
                 let (f, inertia, mut schur) =
-                    factorize_multifrontal_with_schur(&m_full, sym, &NumericParams::default())
-                        .ok()?;
+                    factorize_multifrontal_with_schur(&m_full, sym, &schur_params).ok()?;
                 // feral factors `D·A·D`, so the Schur block comes back scaled:
                 // `S_scaled[i][j] = d_i · d_j · S[i][j]` over the border's own
                 // scale factors. Congruence leaves the inertia alone, which is
