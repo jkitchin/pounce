@@ -205,6 +205,41 @@ namespace casadi {
     /// trajectory and nothing saying why.
     bool report_needs_iter_history() const { return solve_report_detail_ == "full"; }
 
+    /// Hand one side's metadata dicts to POUNCE (gh#1175).
+    static void forward_metadata(IpoptProblem prob, int target, const char* side,
+                                 const Dict& strings,
+                                 const Dict& integers, const Dict& numerics) {
+      auto refused = [&](const char* kind, const std::string& key, int rc) {
+        casadi_warning(std::string("POUNCE refused ") + side + "_" + kind +
+                       "_md key '" + key + "': " + PounceErrorString(rc) +
+                       "; solving without it.");
+      };
+      for (auto&& kv : integers) {
+        std::vector<casadi_int> v = kv.second.to_int_vector();
+        std::vector<ipindex> w(v.begin(), v.end());
+        int rc = SetPounceIntegerMetaData(
+            prob, target, kv.first.c_str(), static_cast<ipindex>(w.size()),
+            w.empty() ? nullptr : w.data(), 0);
+        if (rc != POUNCE_OK) refused("integer", kv.first, rc);
+      }
+      for (auto&& kv : numerics) {
+        std::vector<double> v = kv.second.to_double_vector();
+        int rc = SetPounceNumericMetaData(
+            prob, target, kv.first.c_str(), static_cast<ipindex>(v.size()),
+            v.empty() ? nullptr : v.data(), 0);
+        if (rc != POUNCE_OK) refused("numeric", kv.first, rc);
+      }
+      for (auto&& kv : strings) {
+        std::vector<std::string> v = kv.second.to_string_vector();
+        std::vector<const char*> p;
+        for (auto&& e : v) p.push_back(e.c_str());
+        int rc = SetPounceStringMetaData(
+            prob, target, kv.first.c_str(), static_cast<ipindex>(p.size()),
+            p.empty() ? nullptr : p.data(), 0);
+        if (rc != POUNCE_OK) refused("string", kv.first, rc);
+      }
+    }
+
     /// Convexification of the Lagrangian Hessian before it reaches the
     /// solver, using CasADi's own `Convexify` (the same code path its ipopt
     /// plugin uses), so `convexify_strategy` means exactly what it means
@@ -212,11 +247,11 @@ namespace casadi {
     bool convexify_ = false;
     ConvexifyData convexify_data_;
 
-    /// Per-variable / per-constraint metadata. CasADi's ipopt plugin
-    /// forwards these to Ipopt's `get_var_con_metadata`; POUNCE's C API has
-    /// no counterpart, so they are accepted (a script that sets them keeps
-    /// working when `ipopt` is swapped for `pounce`), stored, and echoed
-    /// back through `stats()` rather than silently dropped.
+    /// Per-variable / per-constraint metadata, as CasADi's ipopt plugin
+    /// takes it (key -> one value per variable / constraint). Forwarded
+    /// through `SetPounce*MetaData` (gh#1175) — so the integer keys reach a
+    /// `linear_solver=custom` solver in KKT order — and echoed back
+    /// through `stats()`.
     Dict var_string_md_, var_integer_md_, var_numeric_md_;
     Dict con_string_md_, con_integer_md_, con_numeric_md_;
 
@@ -425,9 +460,10 @@ namespace casadi {
         "trajectory, which costs a retained iterate per iteration and is "
         "enabled automatically when you ask for it."}},
       {"var_string_md",
-       {OT_DICT, "String metadata about variables. Accepted for ipopt-plugin "
-                 "compatibility; not forwarded (POUNCE has no metadata "
-                 "channel), echoed back through stats()."}},
+       {OT_DICT, "String metadata about variables: key -> one string per "
+                 "variable. Forwarded to POUNCE (SetPounce*MetaData); integer "
+                 "keys reach a linear_solver=custom solver in KKT row order. "
+                 "Echoed back through stats()."}},
       {"var_integer_md",
        {OT_DICT, "Integer metadata about variables (see var_string_md)"}},
       {"var_numeric_md",
@@ -982,6 +1018,13 @@ namespace casadi {
                        "approximating over all variables.");
       }
     }
+
+    // gh#1175 — variable / constraint metadata. A key POUNCE refuses (wrong
+    // length, NaN) is reported and skipped; the solve goes on without it.
+    forward_metadata(prob, POUNCE_META_VARIABLES, "var", var_string_md_,
+                     var_integer_md_, var_numeric_md_);
+    forward_metadata(prob, POUNCE_META_CONSTRAINTS, "con", con_string_md_,
+                     con_integer_md_, con_numeric_md_);
 
     // Start this solve from the active set the previous one ended on.
     //

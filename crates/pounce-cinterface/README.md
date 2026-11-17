@@ -88,6 +88,18 @@ POUNCE extensions:
   returns it (generic codes -1..-19, then a block of 20 per function
   family), success is `POUNCE_OK`, and `PounceErrorString(code)` returns
   the shared message (a static string; `"unknown error code"` otherwise).
+- Variable / constraint metadata (gh#1175), Ipopt's
+  `get_var_con_metadata`: `SetPounceIntegerMetaData`,
+  `SetPounceNumericMetaData`, `SetPounceStringMetaData`,
+  `ClearPounceMetaData`. One key per call, `n` or `m` values in model
+  order; they follow each variable and constraint through presolve and
+  fixed-variable removal.
+- A custom linear solver (gh#1175): `linear_solver=custom` with
+  `custom_linear_solver_lib` loads a shared library exporting
+  `pounce_linear_solver()`, which returns a `PounceLinearSolver` table of
+  callbacks (see `pounce.h`). It receives the integer metadata keys mapped to
+  KKT row order. Reference implementation:
+  `examples/custom_linear_solver/dense_solver.c`.
 - Declared complementarity pairs (gh#1147): `AddPounceComplementarityPair`,
   `SetPounceComplementarityPairs` (replace, all or nothing),
   `ClearPounceComplementarityPairs`, `GetPounceComplementarityPairCount`,

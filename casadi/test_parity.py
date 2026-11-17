@@ -618,6 +618,44 @@ def test_metadata_options_are_accepted():
           all(st[k] == v for k, v in md.items()))
 
 
+def test_metadata_reaches_a_custom_linear_solver():
+    """gh#1175: `var/con_integer_md` reach a `linear_solver=custom` solver
+    in KKT row order, through CasADi's own metadata options."""
+    import ctypes
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(here, "..", "crates", "pounce-cinterface", "examples",
+                       "custom_linear_solver", "dense_solver.c")
+    inc = os.path.join(here, "..", "crates", "pounce-cinterface", "include")
+    cc = os.environ.get("CC") or "cc"
+    with tempfile.TemporaryDirectory() as d:
+        lib = os.path.join(d, "libdense_solver.so")
+        subprocess.run([cc, "-std=c99", "-O2", "-shared", "-fPIC", "-I", inc,
+                        src, "-o", lib, "-lm"], check=True)
+        probe = ctypes.CDLL(lib)
+        nlp = rosenbrock_nlp()
+        opts = dict(QUIET_POUNCE,
+                    var_integer_md={"block": [1, 2]},
+                    con_integer_md={"block": [7]})
+        opts["pounce"] = {"print_level": 0, "linear_solver": "custom",
+                          "custom_linear_solver_lib": lib}
+        S = ca.nlpsol("S", "pounce", nlp, opts)
+        sol = S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+        layout = (ctypes.c_int * 4)()
+        probe.dense_solver_layout(layout)
+        buf = (ctypes.c_int * 16)()
+        n = probe.dense_solver_metadata(b"block", buf, 16)
+        got = list(buf[:n]) if n >= 0 else None
+        factors = probe.dense_solver_factor_count()
+    check("custom linear solver solves through CasADi",
+          S.stats()["return_status"] == "Solve_Succeeded" and factors > 0,
+          f"status={S.stats()['return_status']} factors={factors} f={float(sol['f'])}")
+    # rows: [x0 x1 | slack(g0) | inequality dual(g0)]
+    check("integer metadata reaches it in KKT order",
+          list(layout) == [2, 1, 0, 1] and got == [1, 2, 7, 7],
+          f"layout={list(layout)} block={got}")
+
+
 def test_iteration_callback_step():
     """`iteration_callback_step` throttles the callback; the trace stays whole."""
     nlp = rosenbrock_nlp()
@@ -1626,6 +1664,7 @@ def main():
         test_convexify_matches_ipopt,
         test_serialization_round_trip,
         test_metadata_options_are_accepted,
+        test_metadata_reaches_a_custom_linear_solver,
         test_iteration_callback_step,
         test_repeated_solves_do_not_concatenate_the_trace,
         test_final_kkt_errors_in_stats,

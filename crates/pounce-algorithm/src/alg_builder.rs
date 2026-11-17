@@ -517,6 +517,12 @@ pub struct AlgorithmBuilder {
     /// sub-solve's differently-shaped KKT system never overwrites it.
     pub inertia_sink:
         Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
+    /// `linear_solver=custom` (gh#1175): when set, every backend this
+    /// builder assembles comes from this solver and the factory passed to
+    /// [`Self::build_with_backend`] / [`Self::build_sqp_with_backend`] is
+    /// not called. The FERAL-specific Schur and block-parallel KKT paths
+    /// stand down, since they would route around it.
+    pub custom_linear_solver: Option<crate::custom_linsol::CustomLinearSolver>,
     /// Shared tally of successful linear-solver quality escalations, handed
     /// to the assembled
     /// [`PdFullSpaceSolver`](crate::kkt::pd_full_space_solver::PdFullSpaceSolver)
@@ -1316,6 +1322,7 @@ impl Default for AlgorithmBuilder {
             kkt_block_min_size: crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
             kkt_schur_summary_sink: None,
             inertia_sink: None,
+            custom_linear_solver: None,
             quality_escalation_counter: None,
         }
     }
@@ -1348,6 +1355,12 @@ impl AlgorithmBuilder {
         self.kkt_blocks_shared = Some(cell);
     }
 
+    /// FERAL is the backend: selected, and not displaced by a custom solver.
+    fn feral_selected(&self) -> bool {
+        matches!(self.linear_solver, LinearSolverChoice::Feral)
+            && self.custom_linear_solver.is_none()
+    }
+
     /// The partition to build with: an installed one first, then the
     /// late-bound cell.
     fn resolved_kkt_blocks(&self) -> Option<(Vec<i32>, pounce_feral::FeralConfig)> {
@@ -1377,7 +1390,14 @@ impl AlgorithmBuilder {
     /// Same as [`Self::build`] but also constructs the
     /// `SymLinearSolver → AugSystemSolver → PdFullSpaceSolver →
     /// PdSearchDirCalc` chain via the supplied `factory`.
-    pub fn build_with_backend(&self, mut factory: LinearBackendFactory) -> AlgorithmBundle {
+    pub fn build_with_backend(&self, factory: LinearBackendFactory) -> AlgorithmBundle {
+        let mut factory = match &self.custom_linear_solver {
+            Some(custom) => {
+                let custom = custom.clone();
+                Box::new(move |_| custom.make_backend()) as LinearBackendFactory
+            }
+            None => factory,
+        };
         let backend = factory(self.linear_solver);
         let make_scaling = || -> Option<Box<dyn pounce_linsol::TSymScalingMethod>> {
             match self.linear_system_scaling {
@@ -1430,7 +1450,7 @@ impl AlgorithmBuilder {
             // Block-parallel KKT path (structured-KKT Phase 5b). Same gates as
             // the Schur arm: feral-specific, and the L-BFGS low-rank wrapper
             // owns the (2,2) block, so this is the exact-Hessian path only.
-            if matches!(self.linear_solver, LinearSolverChoice::Feral) {
+            if self.feral_selected() {
                 let blocks = crate::kkt::BlockAugSystemSolver::new(inner_aug, labels, cfg)
                     .with_min_block_size(self.kkt_block_min_size);
                 Box::new(match self.kkt_schur_summary_sink.clone() {
@@ -1448,7 +1468,7 @@ impl AlgorithmBuilder {
             // when the partition is unsuitable, so a stray hook never breaks a
             // solve; we gate on `linear_solver == Feral` here to avoid silently
             // ignoring a user's explicit MA57 selection.
-            if matches!(self.linear_solver, LinearSolverChoice::Feral) {
+            if self.feral_selected() {
                 let schur = crate::kkt::SchurAugSystemSolver::new(inner_aug, indices, cfg);
                 Box::new(match self.kkt_schur_summary_sink.clone() {
                     Some(sink) => schur.with_summary_sink(sink),
@@ -1521,7 +1541,12 @@ impl AlgorithmBuilder {
         if !matches!(self.algorithm, AlgorithmChoice::ActiveSetSqp) {
             return None;
         }
-        let backend = factory(self.linear_solver);
+        // The QP subproblem KKT is not the interior point's augmented
+        // system, so the custom solver gets no layout or metadata here.
+        let backend = match &self.custom_linear_solver {
+            Some(custom) => custom.without_metadata().make_backend(),
+            None => factory(self.linear_solver),
+        };
         let qp_solver = pounce_qp::ParametricActiveSetSolver::new(backend);
         Some(
             crate::sqp::SqpAlgorithm::new(qp_solver, self.sqp.clone())
@@ -1967,6 +1992,7 @@ mod tests {
                                 crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
                             kkt_schur_summary_sink: None,
                             inertia_sink: None,
+                            custom_linear_solver: None,
                             quality_escalation_counter: None,
                         }
                         .build();

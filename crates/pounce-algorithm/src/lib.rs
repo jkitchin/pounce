@@ -25,6 +25,7 @@ pub mod application;
 pub mod batch;
 pub mod conv_check;
 pub mod crossover;
+pub mod custom_linsol;
 pub mod debug;
 pub mod debug_rank;
 pub mod eq_mult;

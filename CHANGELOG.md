@@ -10,6 +10,21 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **A custom linear solver, from any frontend, and block labels for it**
+  (gh#1175). `linear_solver=custom` with `custom_linear_solver_lib=<path>`
+  loads a shared library that exports `pounce_linear_solver()`, returning a
+  `PounceLinearSolver` table of C callbacks (`pounce.h`): create, structure,
+  factor (with inertia), solve. It serves the interior point, restoration and
+  the SQP's QP subproblems. Crossover stays on FERAL. A library that cannot be
+  loaded refuses the solve with `Invalid_Option`; pounce does not fall back.
+  `custom_linear_solver_options` is passed through to `create()`. The C API
+  gains Ipopt's `get_var_con_metadata`: `SetPounceIntegerMetaData`,
+  `SetPounceNumericMetaData`, `SetPounceStringMetaData` and
+  `ClearPounceMetaData`. Integer keys reach the custom solver mapped to KKT
+  row order `[x | slacks | equality duals | inequality duals]` after
+  fixed-variable removal. The CasADi plugin now forwards
+  `var/con_{integer,numeric,string}_md` instead of only echoing them. The
+  reference solver is `crates/pounce-cinterface/examples/custom_linear_solver/dense_solver.c`.
 - **`feral_early_assembly` bounds FERAL's memory on wide elimination trees.**
   The option (environment fallback `POUNCE_FERAL_EARLY_ASSEMBLY`) selects
   feral's contribution-block assembly scheme (feral#231). The default `off`

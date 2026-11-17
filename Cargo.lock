@@ -873,6 +873,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "faer",
+ "libloading",
  "pounce-common",
  "pounce-convex",
  "pounce-feral",
@@ -893,6 +894,7 @@ dependencies = [
 name = "pounce-cinterface"
 version = "0.17.0"
 dependencies = [
+ "libloading",
  "pounce-algorithm",
  "pounce-common",
  "pounce-convex",

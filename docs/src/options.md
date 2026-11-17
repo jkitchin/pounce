@@ -65,7 +65,9 @@ the time it is read. POUNCE warns about that rather than ignoring it.
 | `tol`           | Overall convergence tolerance on the KKT error.                      |
 | `max_iter`      | Maximum number of outer iterations.                                  |
 | `print_level`   | Console verbosity, 0 (silent) – 12 (maximum debug).                  |
-| `linear_solver` | KKT linear-solver backend: `feral` (default) or `ma57` (needs a `--features ma57` build). Any other registered name is **refused**. See below. |
+| `linear_solver` | KKT linear-solver backend: `feral` (default), `ma57` (needs a `--features ma57` build) or `custom` (your own shared library; see `custom_linear_solver_lib`). Any other registered name is **refused**. See below. |
+| `custom_linear_solver_lib` | With `linear_solver=custom`: path to a shared library exporting `pounce_linear_solver()`, which returns a `PounceLinearSolver` callback table (`pounce.h`). Empty or unloadable refuses the solve with `Invalid_Option`. It receives integer variable/constraint metadata in KKT row order. See [C API: custom linear solver](c-api.md#custom-linear-solver-and-metadata). |
+| `custom_linear_solver_options` | With `linear_solver=custom`: a string passed verbatim to the library's `create()`. Default empty. |
 | `mu_strategy`   | Barrier-parameter update strategy (`monotone` / `adaptive`).         |
 | `solver_selection` | Route LP/convex-QP to the specialized convex IPM. See [LP/QP Routing](lp-qp-routing.md). |
 | `qp_presolve`   | Presolve on the convex LP/QP path, and on the conic (convex QCQP) path with the cone rows protected (`yes` / `no`, default `yes`; off unless asked for in Python `pounce.qp.solve_qp`). See [LP/QP Routing](lp-qp-routing.md#presolve). |
