@@ -198,17 +198,28 @@ fn rungs_spend_what_is_left_of_the_run_not_a_fresh_allowance() {
     // ladder ~0.3 s of it, against the ~`base` seconds a rung run to
     // completion takes. Charged, the run ends near the limit; each rung on a
     // fresh allowance -- the defect -- ran a whole solve past it.
-    let delay = Duration::from_millis(2);
-    let base = {
+    //
+    // The sleep is calibrated, not fixed: `sleep(2 ms)` overshoots by a
+    // platform-dependent amount (a base solve measured 2.6 s on macOS and
+    // 0.95 s on a Linux runner), and the margins below only need `base` to be
+    // large against the ~0.3 s the pause leaves.
+    let measure = |delay: Duration| {
         let mut probe = quiet_app(&[]);
         let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Infeasible { delay }));
         let t0 = Instant::now();
         probe.optimize_tnlp(t);
         t0.elapsed().as_secs_f64()
     };
+    let mut delay = Duration::from_millis(2);
+    let mut base = measure(delay);
+    if base < 1.2 {
+        delay = delay.mul_f64((1.5 / base.max(0.05)).min(20.0));
+        base = measure(delay);
+    }
     assert!(
         base > 1.0,
-        "the fixture no longer takes the time this test is sized for: {base:.3} s"
+        "the fixture no longer takes the time this test is sized for: {base:.3} s \
+         at a {delay:?} sleep per evaluation"
     );
     let limit = base + 0.5;
     let mut app = quiet_app(&[("max_wall_time", limit)]);
