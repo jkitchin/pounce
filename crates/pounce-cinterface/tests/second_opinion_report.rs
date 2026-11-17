@@ -33,8 +33,12 @@
 //! the session path (`IpoptSolverSolve`) does not run it; neither needs its
 //! own branch here.
 //!
-//! The block has no timing field (`SecondOpinionInfo` is rung labels,
-//! statuses and iteration counts), so it is compared whole.
+//! The block's timing fields (`base_wallclock_secs`, `rung_wallclock_secs`,
+//! `total_wallclock_secs`, gh#1176) differ from run to run, so
+//! [`block_at_both_levels`] checks them for consistency -- one entry per rung,
+//! non-negative, summing to the total -- and returns the block without them.
+//! The rest (rung labels, statuses and iteration counts) is deterministic and
+//! is compared whole.
 //! `common/second_opinion_python_reports.json` holds Python's values
 //! (0.16.0 extension built from this branch; `"full"` and `"summary"`
 //! blocks identical).
@@ -385,6 +389,28 @@ fn block_at_both_levels(p: IpoptProblem) -> (Value, Value) {
     let rungs = block["rung_iteration_counts"].as_array().unwrap();
     assert!(!tried.is_empty(), "a written block means a rung ran");
     assert_eq!(rungs.len(), tried.len());
+
+    // Timing (gh#1176): one wall time per rung, adding up to the total.
+    let secs = |v: &Value| v.as_f64().unwrap_or_else(|| panic!("not a number: {v}"));
+    let base_secs = secs(&block["base_wallclock_secs"]);
+    let rung_secs: Vec<f64> = block["rung_wallclock_secs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(secs)
+        .collect();
+    assert_eq!(rung_secs.len(), tried.len(), "one wall time per rung");
+    assert!(base_secs >= 0.0 && rung_secs.iter().all(|&t| t >= 0.0));
+    let total_secs = secs(&block["total_wallclock_secs"]);
+    let sum = base_secs + rung_secs.iter().sum::<f64>();
+    assert!(
+        (total_secs - sum).abs() <= 1e-9 * sum.max(1.0),
+        "{total_secs} vs {sum}"
+    );
+    assert!(
+        block.get("skipped_for_time").is_none(),
+        "no time limit was set, so no rung was skipped"
+    );
     let base = count(&block["base_iteration_count"]);
     let total = count(&block["total_iteration_count"]);
     assert_eq!(total, base + rungs.iter().map(count).sum::<i64>());
@@ -413,6 +439,15 @@ fn block_at_both_levels(p: IpoptProblem) -> (Value, Value) {
                 full["solution"]["status_upstream"].as_str()
             );
         }
+    }
+    let mut block = block;
+    let obj = block.as_object_mut().unwrap();
+    for k in [
+        "base_wallclock_secs",
+        "rung_wallclock_secs",
+        "total_wallclock_secs",
+    ] {
+        obj.remove(k);
     }
     (full, block)
 }

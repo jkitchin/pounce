@@ -369,6 +369,10 @@ pairs, whose driver replaces the ladder.
 | `base_iteration_count` | integer | Iterations the base solve spent. |
 | `rung_iteration_counts` | array of integer | Iterations each rung in `tried` spent, in the same order. |
 | `total_iteration_count` | integer | Base plus every rung: what the solve cost. |
+| `base_wallclock_secs` | float \| omitted | Wall-clock seconds of the base solve, its own `mu_strategy_fallback` re-solve included (gh#1176). Omitted in reports written before the field existed. |
+| `rung_wallclock_secs` | array of float \| omitted | Wall-clock seconds each rung in `tried` took, in the same order. |
+| `total_wallclock_secs` | float \| omitted | Base plus every rung. `statistics.total_wallclock_time_secs` is the reported solve's alone, so on a laddered run this is the number that answers "how long did it take". |
+| `skipped_for_time` | array of string \| omitted | Rungs not run because the caller's `max_wall_time` / `max_cpu_time` was already spent. Omitted when none were. |
 
 ### `complementarity` (object, optional)
 

@@ -92,6 +92,18 @@ pub struct SecondOpinionOutcome {
     /// re-solve ([`SolveStatistics::spent_iteration_count`]). With
     /// [`Self::base_iteration_count`] this is the whole cost of the solve.
     pub rung_iteration_counts: Vec<usize>,
+    /// Wall-clock seconds of the run before the ladder opened: the base
+    /// solve, including its own `mu_strategy_fallback` re-solve (gh#1176).
+    pub base_wallclock_secs: f64,
+    /// Wall-clock seconds each entry of [`Self::tried`] took, same order.
+    /// Each solve's own "Total seconds in POUNCE" covers that solve alone,
+    /// so without these the console ended on the last rung's time and read
+    /// as a fraction of what the run cost (gh#1176: `24.9 s` printed on a
+    /// 174 s run).
+    pub rung_wallclock_secs: Vec<f64>,
+    /// The rungs that were not run because the caller's `max_wall_time` /
+    /// `max_cpu_time` was spent (gh#1176), in ladder order.
+    pub skipped_for_time: Vec<&'static str>,
 }
 
 impl SecondOpinionOutcome {
@@ -105,7 +117,20 @@ impl SecondOpinionOutcome {
             base_iteration_count: self.base_iteration_count,
             rung_iteration_counts: self.rung_iteration_counts.clone(),
             total_iteration_count: self.total_iteration_count(),
+            base_wallclock_secs: Some(self.base_wallclock_secs),
+            rung_wallclock_secs: self.rung_wallclock_secs.clone(),
+            total_wallclock_secs: Some(self.total_wallclock_secs()),
+            skipped_for_time: self
+                .skipped_for_time
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
+    }
+
+    /// Wall-clock seconds of the whole run: the base solve plus every rung.
+    pub fn total_wallclock_secs(&self) -> f64 {
+        self.base_wallclock_secs + self.rung_wallclock_secs.iter().sum::<f64>()
     }
 
     /// Every iteration the solve actually spent: the base solve's plus each
@@ -120,6 +145,7 @@ impl SecondOpinionOutcome {
     /// skips the ladder on its own grounds and still wants one type back.
     pub fn unchanged(status: ApplicationReturnStatus, statistics: SolveStatistics) -> Self {
         let base_iteration_count = statistics.spent_iteration_count().max(0) as usize;
+        let base_wallclock_secs = statistics.total_wallclock_time_secs;
         Self {
             status,
             statistics,
@@ -128,6 +154,9 @@ impl SecondOpinionOutcome {
             base_status: status,
             base_iteration_count,
             rung_iteration_counts: Vec::new(),
+            base_wallclock_secs,
+            rung_wallclock_secs: Vec::new(),
+            skipped_for_time: Vec::new(),
         }
     }
 
@@ -216,6 +245,19 @@ pub fn run_second_opinion_ladder(
         finish!(status, SecondOpinionOutcome::unchanged(status, statistics));
     }
     let restore = OptionSnapshot::take(app);
+    // gh#1176: every rung -- and the square stage -- spends what the caller's
+    // `max_wall_time` / `max_cpu_time` leave of the run, not a fresh
+    // allowance each. The run clock started at the base solve's
+    // `optimize_tnlp`; holding it stops each rung's `optimize_tnlp` from
+    // restarting it, and `charge_next_solve_to_run` writes the remainder as
+    // that rung's limit. Measured on the issue's model with
+    // `max_wall_time=40`: 26 + 21 + 40 + 0 + 25 s = 112 s before this.
+    let budget = RunBudget::take(app);
+    let ladder_wall0 = pounce_common::utils::wallclock_time();
+    let base_wallclock_secs = ladder_wall0 - budget.clock.0;
+    let mut rung_wallclock_secs: Vec<f64> = Vec::new();
+    let mut skipped_for_time: Vec<&'static str> = Vec::new();
+    let mut out_of_time = false;
     // The linear-solver summary follows the same rule as the statistics:
     // every rung's `optimize_tnlp` resets and refills it, so without this the
     // caller kept the original verdict beside the last *rejected* rung's
@@ -255,10 +297,6 @@ pub fn run_second_opinion_ladder(
     // is one exit path, the promoting rung `break`s to it.
     app.set_in_retry_sequence(true);
     for rung in &rungs {
-        report(&format!(
-            "pounce: second opinion — re-solving with {}…",
-            rung.label
-        ));
         // Undo the previous rung before applying this one. The ladder tests
         // one difference from the *baseline* at a time (gh #524), and the
         // baseline includes which knobs the caller left **unset** — writing
@@ -268,6 +306,24 @@ pub fn run_second_opinion_ladder(
         // `mu_strategy` is unset. The snapshot restores set-ness, so this is
         // the true baseline; the rung then sets only its own knob.
         restore.apply(app);
+        if !budget.charge(app) {
+            out_of_time = true;
+            skipped_for_time.extend(rungs[tried.len()..].iter().map(|r| r.label));
+            if square.is_some() {
+                skipped_for_time.push(square_system::SQUARE_SYSTEM_RUNG_LABEL);
+            }
+            report(&format!(
+                "pounce: the run's time limit is spent; not running {} \
+                 (max_wall_time / max_cpu_time cover the whole run, ladder \
+                 included).",
+                skipped_for_time.join(", "),
+            ));
+            break;
+        }
+        report(&format!(
+            "pounce: second opinion — re-solving with {}…",
+            rung.label
+        ));
         for assignment in &rung.assignments {
             let _ = app.options_mut().read_from_str(assignment, true);
         }
@@ -312,7 +368,9 @@ pub fn run_second_opinion_ladder(
             bff_mint,
         ));
 
+        let rung_wall0 = pounce_common::utils::wallclock_time();
         retry_status = app.optimize_tnlp(Rc::clone(&gated));
+        rung_wallclock_secs.push(pounce_common::utils::wallclock_time() - rung_wall0);
         retry_stats = app.statistics();
         tried.push(rung.label);
         rung_iteration_counts.push(retry_stats.spent_iteration_count().max(0) as usize);
@@ -336,7 +394,20 @@ pub fn run_second_opinion_ladder(
     // configuration, and must read the caller's, not the last rung's.
     restore.apply(app);
     let mut square_promoted = false;
-    if let (None, Some(plan)) = (promoted_by, square.as_ref()) {
+    // Charged like a rung. Already listed as skipped if the option rungs ran
+    // the budget out.
+    let square_runs = square.is_some() && promoted_by.is_none() && !out_of_time && {
+        let has_time = budget.charge(app);
+        if !has_time {
+            skipped_for_time.push(square_system::SQUARE_SYSTEM_RUNG_LABEL);
+            report(&format!(
+                "pounce: the run's time limit is spent; not running {}.",
+                square_system::SQUARE_SYSTEM_RUNG_LABEL
+            ));
+        }
+        has_time
+    };
+    if let (None, Some(plan), true) = (promoted_by, square.as_ref(), square_runs) {
         let label = square_system::SQUARE_SYSTEM_RUNG_LABEL;
         // Says only what the probe established: the shape, and `∇f = 0` at
         // the start. "Constant objective" is not known here — it is
@@ -365,6 +436,7 @@ pub fn run_second_opinion_ladder(
             trigger.verdict(),
         ));
         let backend = square_system::default_backend(app.options());
+        let square_wall0 = pounce_common::utils::wallclock_time();
         let out = square_system::run(
             plan,
             &tnlp,
@@ -374,6 +446,7 @@ pub fn run_second_opinion_ladder(
                 capture_iterations: app.iter_history_enabled(),
             },
         );
+        rung_wallclock_secs.push(pounce_common::utils::wallclock_time() - square_wall0);
         tried.push(label);
         rung_iteration_counts.push(out.lm.iterations);
         if out.accepted {
@@ -393,6 +466,7 @@ pub fn run_second_opinion_ladder(
             ));
         }
     }
+    budget.restore(app);
     if promoted_by.is_none() {
         report(&format!(
             "pounce: keeping the original {} verdict; it survived {} \
@@ -402,6 +476,14 @@ pub fn run_second_opinion_ladder(
             tried.join(", "),
         ));
     }
+    let total_wall = base_wallclock_secs + rung_wallclock_secs.iter().sum::<f64>();
+    report(&format!(
+        "pounce: total wall time {total_wall:.3} s ({base_wallclock_secs:.3} s base solve + \
+         {:.3} s over {} re-solve(s)); each \"Total seconds in POUNCE\" above covers \
+         one solve.",
+        total_wall - base_wallclock_secs,
+        rung_wallclock_secs.len(),
+    ));
     // A square-system promotion factored with its own backend and no
     // summary sink, so the summary still describes an interior-point solve;
     // it should be the base solve's, as on a non-promoting ladder, not the
@@ -427,6 +509,54 @@ pub fn run_second_opinion_ladder(
         base_status,
         base_iteration_count,
         rung_iteration_counts,
+        base_wallclock_secs,
+        rung_wallclock_secs,
+        skipped_for_time,
+    }
+}
+
+/// The caller's time limits and run clock as the ladder found them, so each
+/// rung can be charged to the run and everything put back afterwards
+/// (gh#1176).
+struct RunBudget {
+    wall: pounce_common::options_list::OptionEntrySnapshot,
+    cpu: pounce_common::options_list::OptionEntrySnapshot,
+    clock: (f64, f64),
+}
+
+impl RunBudget {
+    fn take(app: &IpoptApplication) -> Self {
+        app.hold_run_clock(true);
+        Self {
+            wall: app.options().snapshot_entry("max_wall_time"),
+            cpu: app.options().snapshot_entry("max_cpu_time"),
+            clock: app.run_clock(),
+        }
+    }
+
+    /// Set the next solve's limits to what is left of the run. `false` when
+    /// a limit the caller set is already spent: the next solve must not run.
+    fn charge(&self, app: &mut IpoptApplication) -> bool {
+        self.put_back(app);
+        let (wall_left, cpu_left) = app.run_time_left();
+        if wall_left.is_some_and(|t| t <= 0.0) || cpu_left.is_some_and(|t| t <= 0.0) {
+            return false;
+        }
+        app.charge_next_solve_to_run(wall_left, cpu_left);
+        true
+    }
+
+    fn put_back(&self, app: &mut IpoptApplication) {
+        app.options_mut()
+            .restore_entry("max_wall_time", self.wall.clone());
+        app.options_mut()
+            .restore_entry("max_cpu_time", self.cpu.clone());
+        app.set_run_clock(self.clock);
+    }
+
+    fn restore(&self, app: &mut IpoptApplication) {
+        self.put_back(app);
+        app.hold_run_clock(false);
     }
 }
 

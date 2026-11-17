@@ -123,7 +123,24 @@ pub struct ConditionerReport {
     /// Adam only: the warm-up bailed on a non-finite gradient and kept the
     /// last good iterate.
     pub stopped_early: bool,
+    /// Jitter only: how many times the displacement was halved before the
+    /// model evaluated finitely at the displaced point (gh#1176). `0` when the
+    /// first draw evaluated, which is every model whose functions are defined
+    /// on the whole box.
+    pub halvings: u32,
+    /// Jitter only: no displacement down to [`MAX_JITTER_HALVINGS`] halvings
+    /// evaluated finitely, so the full first draw was kept -- what the
+    /// conditioner did before it looked at the point at all.
+    pub unevaluable: bool,
 }
+
+/// How many times [`StartConditioner::Jitter`] halves a displacement whose
+/// point the model cannot evaluate before giving up on it (gh#1176).
+///
+/// Ten halvings take the default `1e-2` scale to `~1e-5`, below which the
+/// displaced point is close enough to the start that the rung would only
+/// re-run the solve that already failed.
+pub const MAX_JITTER_HALVINGS: u32 = 10;
 
 /// A [`TNLP`] that conditions the inner model's starting point and forwards
 /// everything else unchanged.
@@ -257,16 +274,108 @@ pub fn violation(g: &[Number], g_l: &[Number], g_u: &[Number], out: &mut [Number
 }
 
 impl ConditionedStartTnlp {
+    /// Displace the start by a seeded draw, then make sure the model can be
+    /// evaluated there, halving the displacement until it can (gh#1176).
+    ///
+    /// Staying inside the box is not enough. A model's functions can be
+    /// undefined inside its own bounds -- a `log` or a fractional power of an
+    /// expression in several variables, which no variable bound can protect --
+    /// and a start the modeller placed carefully inside that domain is easily
+    /// moved out of it by a `1e-2` relative shift. The solve then stops at
+    /// iteration 0 with `Invalid_Number_Detected`, and the ladder rung this
+    /// conditioner exists for is spent without testing anything. Measured on
+    /// gh#1176's catalytic-distillation column: 28 constraint rows NaN at the
+    /// displaced point for each of the four seeds tried, while two halvings
+    /// (`2.5e-3`) evaluate cleanly and the rung runs a real re-solve.
+    ///
+    /// The halving keeps the *direction* of the draw, so the result is still
+    /// the seeded, reproducible point for that seed, only closer; and it is a
+    /// convex combination of two in-bounds points, so it stays in the box. If
+    /// no halving evaluates -- typically a start sitting exactly on a domain
+    /// boundary, where every point between it and the draw is outside -- the
+    /// full draw is kept, which is what the conditioner did before it checked.
+    ///
+    /// The check is made at the conditioned point, before the algorithm's
+    /// `bound_push` moves it into the interior. That push is at most
+    /// `bound_push · max(1, |bound|)` toward the inside of a *box*, and a
+    /// point whose box-interior neighbourhood leaves the domain is rare; this
+    /// is a check against the common failure, not a proof about iteration 0.
     fn apply_jitter(
+        &self,
+        x: &mut [Number],
+        info: &NlpInfo,
+        x_l: &[Number],
+        x_u: &[Number],
+        seed: u64,
+        scale: Number,
+    ) -> ConditionerReport {
+        let (mut report, base) = self.draw_jitter(x, x_l, x_u, seed, scale);
+        if self.evaluates_finitely(x, info) {
+            return report;
+        }
+        let drawn = x.to_vec();
+        let mut factor = 1.0;
+        for k in 1..=MAX_JITTER_HALVINGS {
+            factor *= 0.5;
+            for i in 0..x.len() {
+                x[i] = base[i] + factor * (drawn[i] - base[i]);
+            }
+            if self.evaluates_finitely(x, info) {
+                report.halvings = k;
+                report.max_shift = x
+                    .iter()
+                    .zip(base.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, Number::max);
+                return report;
+            }
+        }
+        x.copy_from_slice(&drawn);
+        report.unevaluable = true;
+        report
+    }
+
+    /// Does the model evaluate to finite numbers at `x`? Objective, its
+    /// gradient, the constraints and the Jacobian values -- the quantities
+    /// iteration 0 needs. A callback that reports failure counts as not
+    /// finite, which is how the solve would read it too.
+    fn evaluates_finitely(&self, x: &[Number], info: &NlpInfo) -> bool {
+        let n = x.len();
+        let m = info.m.max(0) as usize;
+        let nnz = info.nnz_jac_g.max(0) as usize;
+        let mut inner = self.inner.borrow_mut();
+        if !inner.eval_f(x, true).is_some_and(Number::is_finite) {
+            return false;
+        }
+        let mut grad = vec![0.0; n];
+        if !inner.eval_grad_f(x, false, &mut grad) || !grad.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        if m == 0 {
+            return true;
+        }
+        let mut g = vec![0.0; m];
+        if !inner.eval_g(x, false, &mut g) || !g.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let mut jac = vec![0.0; nnz];
+        inner.eval_jac_g(Some(x), false, SparsityRequest::Values { values: &mut jac })
+            && jac.iter().all(|v| v.is_finite())
+    }
+
+    /// The seeded draw itself: sanitise, displace, clip. Returns the report
+    /// and the sanitised point the draw was displaced from.
+    fn draw_jitter(
         &self,
         x: &mut [Number],
         x_l: &[Number],
         x_u: &[Number],
         seed: u64,
         scale: Number,
-    ) -> ConditionerReport {
+    ) -> (ConditionerReport, Vec<Number>) {
         let mut report = ConditionerReport::default();
         let mut state = seed;
+        let mut bases = Vec::with_capacity(x.len());
         for i in 0..x.len() {
             let lo = x_l.get(i).copied().unwrap_or(Number::NEG_INFINITY);
             let hi = x_u.get(i).copied().unwrap_or(Number::INFINITY);
@@ -283,8 +392,9 @@ impl ConditionedStartTnlp {
             let moved = self.clip(base + step, lo, hi);
             report.max_shift = report.max_shift.max((moved - base).abs());
             x[i] = moved;
+            bases.push(base);
         }
-        report
+        (report, bases)
     }
 
     fn apply_adam(
@@ -523,7 +633,7 @@ impl TNLP for ConditionedStartTnlp {
         let raw = x[..n].to_vec();
         let report = match self.conditioner {
             StartConditioner::Jitter { seed, scale } => {
-                self.apply_jitter(&mut x[..n], &x_l, &x_u, seed, scale)
+                self.apply_jitter(&mut x[..n], &info, &x_l, &x_u, seed, scale)
             }
             StartConditioner::Adam(cfg) => {
                 self.apply_adam(&mut x[..n], &info, &x_l, &x_u, &g_l, &g_u, &cfg)
@@ -661,6 +771,10 @@ mod tests {
         init_x: bool,
         /// Count of `eval_f` calls, to show the decorator forwards.
         f_calls: usize,
+        /// The model is undefined (evaluates `NaN`) wherever some `x_i` is
+        /// below this, the way `log` of an expression is -- with no variable
+        /// bound saying so (gh#1176).
+        nan_below: Option<Number>,
     }
 
     impl Toy {
@@ -676,10 +790,15 @@ mod tests {
                 with_constraint: false,
                 init_x: true,
                 f_calls: 0,
+                nan_below: None,
             }
         }
         fn m(&self) -> usize {
             usize::from(self.with_constraint)
+        }
+        fn with_start(mut self, v: Number) -> Self {
+            self.start = vec![v; self.n];
+            self
         }
     }
 
@@ -710,6 +829,11 @@ mod tests {
         }
         fn eval_f(&mut self, x: &[Number], _n: bool) -> Option<Number> {
             self.f_calls += 1;
+            if let Some(t) = self.nan_below
+                && x.iter().any(|v| *v < t)
+            {
+                return Some(Number::NAN);
+            }
             Some(
                 0.5 * x
                     .iter()
@@ -826,6 +950,69 @@ mod tests {
             "shift {} out of scale",
             report.max_shift
         );
+    }
+
+    /// A start one unit inside a domain the model does not declare as a bound
+    /// (`f` is `NaN` wherever any `x_i < 0.999`), displaced at `scale = 1e-2`.
+    fn toy_near_a_domain_edge(n: usize) -> Toy {
+        let mut toy = Toy::new(n);
+        toy.start = vec![1.0; n];
+        toy.nan_below = Some(0.999);
+        toy
+    }
+
+    #[test]
+    fn a_draw_the_model_cannot_evaluate_is_halved_until_it_can() {
+        // gh#1176: the ladder's perturbed-start rung moved a carefully placed
+        // start out of the model's domain and died at iteration 0 with
+        // Invalid_Number_Detected, testing nothing.
+        let seed = 1;
+        // The draw on its own leaves the domain -- otherwise this test is
+        // about nothing. A model with no domain edge gets the full draw.
+        let (full, _) = conditioned(Toy::new(8).with_start(1.0), jitter(seed));
+        assert!(
+            full.iter().any(|v| *v < 0.999),
+            "seed {seed} never leaves the domain: {full:?}"
+        );
+
+        let (x, report) = conditioned(toy_near_a_domain_edge(8), jitter(seed));
+        assert!(x.iter().all(|v| *v >= 0.999), "{x:?}");
+        assert!(report.halvings >= 1, "{report:?}");
+        assert!(!report.unevaluable);
+        // Same direction, shorter: each coordinate is the draw scaled toward
+        // the start by exactly 2^-halvings.
+        let f = 0.5f64.powi(report.halvings as i32);
+        for (a, b) in x.iter().zip(&full) {
+            assert!((a - (1.0 + f * (b - 1.0))).abs() <= 1e-15, "{a} vs {b}");
+        }
+        assert!(x.iter().any(|v| *v != 1.0), "the start did not move at all");
+    }
+
+    #[test]
+    fn a_draw_the_model_can_evaluate_is_kept_bit_for_bit() {
+        // The check must not move a draw that was fine: on every model whose
+        // functions are defined on the whole box the rung is unchanged.
+        let (plain, _) = conditioned(Toy::new(8).with_start(1.0), jitter(1));
+        let mut toy = Toy::new(8).with_start(1.0);
+        toy.nan_below = Some(-1.0); // a domain edge the draw never reaches
+        let (checked, report) = conditioned(toy, jitter(1));
+        assert_eq!(plain, checked);
+        assert_eq!(report.halvings, 0);
+        assert!(!report.unevaluable);
+    }
+
+    #[test]
+    fn a_start_on_the_domain_edge_keeps_the_full_draw() {
+        // Every point between a start exactly on the edge and a draw outside
+        // it is outside too, so no halving helps; the conditioner then does
+        // what it did before it looked, rather than collapsing to the start.
+        let mut toy = Toy::new(8).with_start(0.0);
+        toy.nan_below = Some(0.0);
+        let (x, report) = conditioned(toy, jitter(1));
+        let (full, _) = conditioned(Toy::new(8).with_start(0.0), jitter(1));
+        assert_eq!(x, full);
+        assert!(report.unevaluable);
+        assert_eq!(report.halvings, 0);
     }
 
     #[test]

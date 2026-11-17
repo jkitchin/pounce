@@ -1110,6 +1110,14 @@ pub struct IpoptApplication {
     /// solve's count. Read out into
     /// [`SolveStatistics::quality_escalations`] once the solve returns.
     quality_escalations: Rc<std::cell::Cell<u64>>,
+    /// gh#1176: wall and CPU clock readings at the start of the caller's
+    /// *run*, against which [`Self::run_time_left`] measures `max_wall_time`
+    /// and `max_cpu_time`. Set at the top of every `optimize_tnlp` unless
+    /// [`Self::hold_run_clock`] holds it, which the second-opinion ladder does
+    /// so that its rungs' own `optimize_tnlp` calls spend the base run's
+    /// budget rather than each starting a new one.
+    run_clock: std::cell::Cell<(Number, Number)>,
+    run_clock_held: std::cell::Cell<bool>,
     /// gh#990: the `mu_strategy` value in the option table was written by a
     /// POUNCE frontend (the Python no-`hessian` path pins `monotone`), not by
     /// the caller. See [`Self::mark_mu_strategy_pounce_chosen`].
@@ -1388,6 +1396,11 @@ impl IpoptApplication {
             resto_linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             kkt_blocks_published: Arc::new(Mutex::new(None)),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
+            run_clock: std::cell::Cell::new((
+                pounce_common::utils::wallclock_time(),
+                pounce_common::utils::cpu_time(),
+            )),
+            run_clock_held: std::cell::Cell::new(false),
             mu_strategy_pounce_chosen: false,
             dual_divergence_signature: std::cell::Cell::new(false),
             tiny_step_dual_stall: std::cell::Cell::new(false),
@@ -2261,6 +2274,12 @@ impl IpoptApplication {
         // clears (gh#983 review item 1: `warnings`; `sqp_warm_working_set_applied`)
         // that patched the same leak one field at a time.
         *self.statistics.borrow_mut() = SolveStatistics::new();
+        if !self.run_clock_held.get() {
+            self.run_clock.set((
+                pounce_common::utils::wallclock_time(),
+                pounce_common::utils::cpu_time(),
+            ));
+        }
         // Belongs to the scale audit's re-solve alone, which runs below this
         // entry point (`optimize_constrained`, never `optimize_tnlp`), so no
         // solve that starts here may inherit it. `RetryOptionScope` clears it
@@ -4460,6 +4479,73 @@ impl IpoptApplication {
         }
     }
 
+    /// Hold (or release) the run clock, so that the `optimize_tnlp` calls
+    /// made while it is held are charged to the run that was already under
+    /// way instead of each starting `max_wall_time` / `max_cpu_time` afresh
+    /// (gh#1176). The second-opinion ladder holds it across its rungs.
+    pub fn hold_run_clock(&self, held: bool) {
+        self.run_clock_held.set(held);
+    }
+
+    /// What the caller's `max_wall_time` / `max_cpu_time` leave of the run
+    /// that started at the last unheld `optimize_tnlp`, as `(wall, cpu)`
+    /// seconds; `None` for a limit the caller did not set (gh#1176).
+    ///
+    /// Only a limit the caller *set* is budgeted: the defaults (`1e6`) are
+    /// "no limit", and re-writing one as caller-set would make it look named
+    /// to the code that treats an explicit `max_cpu_time` specially.
+    pub fn run_time_left(&self) -> (Option<Number>, Option<Number>) {
+        let set = |name: &str| {
+            self.options
+                .get_numeric_value(name, "")
+                .ok()
+                .and_then(|(v, found)| found.then_some(v))
+        };
+        let (wall0, cpu0) = self.run_clock.get();
+        (
+            set("max_wall_time").map(|v| v - (pounce_common::utils::wallclock_time() - wall0)),
+            set("max_cpu_time").map(|v| v - (pounce_common::utils::cpu_time() - cpu0)),
+        )
+    }
+
+    /// The run clock's origin, `(wall, cpu)`, for a caller that charges a
+    /// solve to the run with [`Self::charge_next_solve_to_run`] and must put
+    /// the origin back afterwards.
+    pub fn run_clock(&self) -> (Number, Number) {
+        self.run_clock.get()
+    }
+
+    /// Put back a run-clock origin taken with [`Self::run_clock`].
+    pub fn set_run_clock(&self, origin: (Number, Number)) {
+        self.run_clock.set(origin);
+    }
+
+    /// Make the next solve spend only `wall_left` / `cpu_left` (each `None`
+    /// leaves that limit alone): write each as the caller-set limit and
+    /// restart the run clock, so [`Self::run_time_left`] inside that solve
+    /// still measures the *run's* remainder. The caller saves the two option
+    /// entries and the [`Self::run_clock`] origin first and restores both.
+    pub fn charge_next_solve_to_run(
+        &mut self,
+        wall_left: Option<Number>,
+        cpu_left: Option<Number>,
+    ) {
+        if let Some(t) = wall_left {
+            let _ = self
+                .options
+                .set_numeric_value("max_wall_time", t, true, false);
+        }
+        if let Some(t) = cpu_left {
+            let _ = self
+                .options
+                .set_numeric_value("max_cpu_time", t, true, false);
+        }
+        self.run_clock.set((
+            pounce_common::utils::wallclock_time(),
+            pounce_common::utils::cpu_time(),
+        ));
+    }
+
     /// A [`pounce_common::timing::Deadline`] for `max_wall_time` /
     /// `max_cpu_time`, starting now.
     fn solve_deadline(&self) -> pounce_common::timing::Deadline {
@@ -4975,16 +5061,34 @@ impl IpoptApplication {
         // Adaptive and every other value (incl. unset) → Monotone, so the
         // opposite of an explicit "adaptive" is "monotone" and the
         // opposite of anything else is "adaptive".
+        //
+        // The retry spends what the caller's `max_wall_time` / `max_cpu_time`
+        // leave of the run, not a fresh allowance (gh#1176): every solve builds
+        // its own deadline from those options, so without this a timed-out
+        // first attempt's flip ran a second full budget -- and so did every
+        // rung of the second-opinion ladder after it. Nothing left, no retry.
+        let (wall_left, cpu_left) = self.run_time_left();
+        if wall_left.is_some_and(|t| t <= 0.0) || cpu_left.is_some_and(|t| t <= 0.0) {
+            return first_status;
+        }
         let saved_mu_strategy = self.options.snapshot_entry("mu_strategy");
+        let saved_wall = self.options.snapshot_entry("max_wall_time");
+        let saved_cpu = self.options.snapshot_entry("max_cpu_time");
+        let saved_clock = self.run_clock.get();
         let was_adaptive = self.effective_mu_strategy_is_adaptive();
         let flipped = if was_adaptive { "monotone" } else { "adaptive" };
         // Unwind cover only; the normal path restores the same snapshot
         // below. A panic in the retry used to leave the flipped strategy in
         // the option table of an application `ffi_guard` keeps.
-        let mut scope = RetryOptionScope::enter(self, &["mu_strategy"], true);
+        let mut scope = RetryOptionScope::enter(
+            self,
+            &["mu_strategy", "max_wall_time", "max_cpu_time"],
+            true,
+        );
         let _ = scope
             .options
             .set_string_value("mu_strategy", flipped, true, false);
+        scope.charge_next_solve_to_run(wall_left, cpu_left);
         // Floor the *answer*, not just the status (pounce#870).
         //
         // The promote-only-on-`Solve_Succeeded` rule below has always floored
@@ -5050,6 +5154,9 @@ impl IpoptApplication {
         scope
             .options
             .restore_entry("mu_strategy", saved_mu_strategy);
+        scope.options.restore_entry("max_wall_time", saved_wall);
+        scope.options.restore_entry("max_cpu_time", saved_cpu);
+        scope.run_clock.set(saved_clock);
         drop(scope);
         self.statistics.borrow_mut().mu_strategy_fallback = Some(record);
         // A retry the caller's intermediate callback stopped reports the
