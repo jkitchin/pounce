@@ -298,6 +298,11 @@ impl TNLP for PyTnlp {
         } else {
             *req.use_g_scaling = false;
         }
+        if let Some(given) = s.g_scaling_given.as_ref() {
+            if given.len() == req.g_scaling_given.len() {
+                req.g_scaling_given.copy_from_slice(given);
+            }
+        }
         true
     }
 

@@ -96,6 +96,17 @@ pub struct ScalingRequest<'a> {
     pub x_scaling: &'a mut [Number],
     pub use_g_scaling: &'a mut bool,
     pub g_scaling: &'a mut [Number],
+    /// Whether the user gave constraint row `i` a factor. The caller fills
+    /// it with `true`, so a TNLP that leaves it alone says every row in
+    /// `g_scaling` was given, which is what every implementation meant
+    /// before the slice existed. A TNLP that knows a row has no factor
+    /// (an `.nl` row with no `scaling_factor` suffix entry) sets it to
+    /// `false` and still writes a factor into `g_scaling`.
+    ///
+    /// Only `nlp_scaling_untagged_constr=gradient-based` reads it: those
+    /// rows get the gradient-based row factor instead of the one written.
+    /// A pounce addition with no upstream counterpart.
+    pub g_scaling_given: &'a mut [bool],
 }
 
 /// Mode discriminator for the structure / values calls of

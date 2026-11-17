@@ -10,6 +10,27 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`nlp_scaling_untagged_constr` gives user scaling a factor for the rows
+  the user did not scale.** Under `nlp_scaling_method=user-scaling`, the
+  value `gradient-based` gives each constraint row with no user factor the
+  gradient-based row factor, computed row by row from the Jacobian at the
+  starting point after the user's variable scaling. Rows with a user factor
+  and the objective keep theirs. This is the rule WaterTAP's
+  `ipopt-watertap` wrapper applies in Python before calling Ipopt, so a
+  WaterTAP model solved with plain `SolverFactory("pounce")` and the option
+  gets the wrapper's row factors without the wrapper. On
+  `RO_with_energy_recovery` the two runs print identical iteration logs, 3
+  iterations on the square solve and 18 on the optimization. The default
+  `none` keeps today's behavior, and upstream Ipopt has no such option. A row
+  has no user factor when its `.nl` `scaling_factor` entry is missing or
+  zero, or when the model has no `scaling_factor` suffix at all.
+  `TNLP::get_scaling_parameters` reports this through a new
+  `ScalingRequest::g_scaling_given` slice, which the caller fills with
+  `true`, so an existing implementation keeps its meaning. In Python,
+  `Problem.set_problem_scaling` takes `g_scaling_given`, and pyomo-pounce's
+  in-process sensitivity solve passes it from the Suffix, so it scales the
+  same rows the `.nl` path does. `get_problem_scaling` reports NaN for a
+  row installed without a factor.
 - **`feral_early_assembly` bounds FERAL's memory on wide elimination trees.**
   The option (environment fallback `POUNCE_FERAL_EARLY_ASSEMBLY`) selects
   feral's contribution-block assembly scheme (feral#231). The default `off`

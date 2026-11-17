@@ -1074,7 +1074,10 @@ struct IpmScaling {
 ///   all, and [`gradient_row_scale`] gives each row its factor.
 /// * User scaling floors every `g_scaling` entry at
 ///   `nlp_scaling_min_value`, and falls back to no scaling when the TNLP
-///   declines, as the IPM does.
+///   declines, as the IPM does. Under `nlp_scaling_untagged_constr=
+///   gradient-based` a row the TNLP gave no factor gets
+///   [`gradient_row_scale`] of its Jacobian row at the same point, row by
+///   row, and a TNLP that declines leaves every row in that state.
 ///
 /// What is *not* reproduced: a wrapper the application inserts inside
 /// `optimize_tnlp` (the start conditioner, the gh#486 variable-scaling
@@ -1108,23 +1111,68 @@ fn ipm_scaling(
         .ok()
         .and_then(|(v, found)| found.then_some(v))
         .unwrap_or_else(|| "gradient-based".to_string());
+    let max_grad = opt_num(options, "nlp_scaling_max_gradient", 100.0);
+    let constr_target = opt_num(options, "nlp_scaling_constr_target_gradient", 0.0);
+    // Each row's Jacobian ∞-norm at the gradient-based sampling point, with
+    // upstream's `dbl_min` seed for a row with no nonzero.
+    let jac_row_max = || -> Option<Vec<Number>> {
+        let mut vals = vec![0.0; plan.nnz_full];
+        if !tnlp.borrow_mut().eval_jac_g(
+            Some(&plan.x_scaling),
+            true,
+            SparsityRequest::Values { values: &mut vals },
+        ) {
+            return None;
+        }
+        let mut row_max = vec![Number::MIN_POSITIVE; m];
+        for (k, &i) in plan.jac_row_full.iter().enumerate() {
+            row_max[i] = row_max[i].max(vals[k].abs());
+        }
+        Some(row_max)
+    };
     match method.as_str() {
         "none" => unscaled,
         "user-scaling" | "curvature-based" => {
+            let untagged = method == "user-scaling"
+                && options
+                    .get_string_value("nlp_scaling_untagged_constr", "")
+                    .ok()
+                    .and_then(|(v, found)| found.then_some(v))
+                    .is_some_and(|v| v == "gradient-based");
             let mut obj = 1.0;
             let mut use_x = false;
             let mut xs = vec![1.0; plan.n_full];
             let mut use_g = false;
             let mut gs = vec![1.0; m];
+            let mut given = vec![true; m];
             let ok = tnlp.borrow_mut().get_scaling_parameters(ScalingRequest {
                 obj_scaling: &mut obj,
                 use_x_scaling: &mut use_x,
                 x_scaling: &mut xs,
                 use_g_scaling: &mut use_g,
                 g_scaling: &mut gs,
+                g_scaling_given: &mut given,
             });
-            if !ok {
+            if !ok && !untagged {
                 return unscaled;
+            }
+            if !ok {
+                obj = 1.0;
+                use_g = false;
+            }
+            if !use_g {
+                gs = vec![1.0; m];
+                given = vec![!untagged; m];
+            }
+            let mut evals = (0, 0);
+            if given.iter().any(|&g| !g) {
+                evals.1 = 1;
+                if let Some(row_max) = jac_row_max() {
+                    for i in (0..m).filter(|&i| !given[i]) {
+                        gs[i] = gradient_row_scale(row_max[i], max_grad, min_value, constr_target);
+                    }
+                }
+                use_g = true;
             }
             let df = if obj.abs() < min_value {
                 min_value
@@ -1142,13 +1190,11 @@ fn ipm_scaling(
                 computed_obj_scale: 1.0,
                 total_obj_scale: df * user_obj,
                 start_obj_grad_max: Number::NAN,
-                evals: (0, 0),
+                evals,
             }
         }
         _ => {
-            let max_grad = opt_num(options, "nlp_scaling_max_gradient", 100.0);
             let obj_target = opt_num(options, "nlp_scaling_obj_target_gradient", 0.0);
-            let constr_target = opt_num(options, "nlp_scaling_constr_target_gradient", 0.0);
             let x = &plan.x_scaling;
             let mut grad = vec![0.0; plan.n_full];
             let mut df = 1.0;
@@ -1163,26 +1209,14 @@ fn ipm_scaling(
                     df = gradient_obj_scale(gm, max_grad, min_value, obj_target);
                 }
             }
-            let mut vals = vec![0.0; plan.nnz_full];
-            let row_scale = if tnlp.borrow_mut().eval_jac_g(
-                Some(x),
-                true,
-                SparsityRequest::Values { values: &mut vals },
-            ) {
-                let mut row_max = vec![Number::MIN_POSITIVE; m];
-                for (k, &i) in plan.jac_row_full.iter().enumerate() {
-                    row_max[i] = row_max[i].max(vals[k].abs());
-                }
-                if gradient_scaling_fires(&row_max, max_grad, constr_target) {
+            let row_scale = match jac_row_max() {
+                Some(row_max) if gradient_scaling_fires(&row_max, max_grad, constr_target) => {
                     row_max
                         .iter()
                         .map(|&g| gradient_row_scale(g, max_grad, min_value, constr_target))
                         .collect()
-                } else {
-                    vec![1.0; m]
                 }
-            } else {
-                vec![1.0; m]
+                _ => vec![1.0; m],
             };
             IpmScaling {
                 row_scale,

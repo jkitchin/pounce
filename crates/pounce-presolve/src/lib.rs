@@ -2834,6 +2834,7 @@ impl TNLP for PresolveTnlp {
         let m_in = s.info_inner.m as usize;
         // Allocate inner-sized g_scaling and forward.
         let mut inner_g = vec![1.0; m_in];
+        let mut inner_given = vec![true; m_in];
         let mut use_x = false;
         let mut use_g = false;
         let mut obj_scaling = 1.0;
@@ -2848,6 +2849,7 @@ impl TNLP for PresolveTnlp {
                 x_scaling: &mut inner_x,
                 use_g_scaling: &mut use_g,
                 g_scaling: &mut inner_g,
+                g_scaling_given: &mut inner_given,
             });
         if !ok {
             return false;
@@ -2858,6 +2860,7 @@ impl TNLP for PresolveTnlp {
         req.x_scaling.copy_from_slice(&inner_x);
         for (outer, &i_inner) in s.rows_kept.iter().enumerate() {
             req.g_scaling[outer] = inner_g[i_inner];
+            req.g_scaling_given[outer] = inner_given[i_inner];
         }
         true
     }

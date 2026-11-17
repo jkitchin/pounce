@@ -931,7 +931,9 @@ use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_linsol::summary::LinearSolverSummary;
 use pounce_nlp::alg_types::SolverReturn;
 use pounce_nlp::derivative_test::{DerivativeTest, DerivativeTestOptions};
-use pounce_nlp::orig_ipopt_nlp::{ConstObjScaling, OrigIpoptNlp, ScalingMethod};
+use pounce_nlp::orig_ipopt_nlp::{
+    ConstObjScaling, OrigIpoptNlp, ScalingMethod, UntaggedConstrScaling,
+};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -6728,6 +6730,21 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or_else(|| "gradient-based".to_string());
+        // `nlp_scaling_untagged_constr` belongs to `user-scaling` alone:
+        // under `curvature-based` every row already has a computed factor.
+        let untagged_constr = if scaling_method == "user-scaling"
+            && self
+                .options
+                .get_string_value("nlp_scaling_untagged_constr", "")
+                .ok()
+                .and_then(|(v, f)| f.then_some(v))
+                .is_some_and(|v| v == "gradient-based")
+        {
+            UntaggedConstrScaling::GradientBased
+        } else {
+            UntaggedConstrScaling::None
+        };
+        orig_nlp.set_untagged_constr_scaling(untagged_constr);
         let scaling_method = match scaling_method.as_str() {
             "none" => ScalingMethod::None,
             "gradient-based" => ScalingMethod::GradientBased,

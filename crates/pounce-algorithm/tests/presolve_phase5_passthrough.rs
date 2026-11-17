@@ -173,6 +173,7 @@ fn phase5_g_scaling_subsets_to_kept_rows() {
         x_scaling: &mut x_scaling,
         use_g_scaling: &mut use_g,
         g_scaling: &mut g_scaling,
+        g_scaling_given: &mut [true],
     });
     assert!(ok);
     assert!(use_g);

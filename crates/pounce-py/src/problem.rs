@@ -98,6 +98,9 @@ pub(crate) struct UserScaling {
     pub(crate) obj: Number,
     pub(crate) x_scaling: Option<Vec<Number>>,
     pub(crate) g_scaling: Option<Vec<Number>>,
+    /// Which constraint rows the caller gave a factor, `None` for all of
+    /// them (`ScalingRequest::g_scaling_given`).
+    pub(crate) g_scaling_given: Option<Vec<bool>>,
 }
 
 #[pymethods]
@@ -718,16 +721,24 @@ impl PyProblem {
     ///   not finite and positive fails the solve with an explanation.
     /// * `g_scaling` — length-`m` per-constraint factors, or `None`
     ///   to leave constraint scaling off.
+    /// * `g_scaling_given` — length-`m` booleans, `False` for a row the
+    ///   caller gave no factor, or `None` when every row in `g_scaling`
+    ///   was given. Under `nlp_scaling_untagged_constr="gradient-based"`
+    ///   a row marked `False` gets the gradient-based row factor instead
+    ///   of its `g_scaling` entry, the same rule the `.nl` path applies to
+    ///   a row with no `scaling_factor` suffix entry. Otherwise it is not
+    ///   read.
     ///
     /// The scaling only takes effect when `nlp_scaling_method` is set
     /// to `"user-scaling"`. Call once before `solve()`; cleared by
     /// `clear_problem_scaling()`.
-    #[pyo3(signature = (obj_scaling, x_scaling=None, g_scaling=None))]
+    #[pyo3(signature = (obj_scaling, x_scaling=None, g_scaling=None, g_scaling_given=None))]
     fn set_problem_scaling(
         &mut self,
         obj_scaling: Number,
         x_scaling: Option<Py<PyAny>>,
         g_scaling: Option<Py<PyAny>>,
+        g_scaling_given: Option<Vec<bool>>,
     ) -> PyResult<()> {
         let x = x_scaling
             .map(|v| extract_f64_vec(&v, self.n as usize, "x_scaling"))
@@ -735,10 +746,20 @@ impl PyProblem {
         let g = g_scaling
             .map(|v| extract_f64_vec(&v, self.m as usize, "g_scaling"))
             .transpose()?;
+        if let Some(given) = &g_scaling_given {
+            if given.len() != self.m as usize {
+                return Err(PyValueError::new_err(format!(
+                    "g_scaling_given: expected length {}, got {}",
+                    self.m,
+                    given.len()
+                )));
+            }
+        }
         self.user_scaling = Some(UserScaling {
             obj: obj_scaling,
             x_scaling: x,
             g_scaling: g,
+            g_scaling_given,
         });
         Ok(())
     }
@@ -1006,7 +1027,9 @@ impl PyProblem {
 
     /// The user scaling installed by `set_problem_scaling`, as
     /// `(obj_scaling, x_scaling, g_scaling)` with `None` for an axis
-    /// left unscaled, or `None` when no user scaling is installed.
+    /// left unscaled, or `None` when no user scaling is installed. A row
+    /// installed with `g_scaling_given` `False` reads NaN in `g_scaling`,
+    /// since it has no factor of its own.
     fn get_problem_scaling<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyTuple>> {
         self.user_scaling.as_ref().map(|s| {
             let x: PyObject = match &s.x_scaling {
@@ -1014,7 +1037,17 @@ impl PyProblem {
                 None => py.None(),
             };
             let g: PyObject = match &s.g_scaling {
-                Some(v) => v.clone().into_pyarray_bound(py).into_any().unbind(),
+                Some(v) => {
+                    let mut v = v.clone();
+                    if let Some(given) = &s.g_scaling_given {
+                        for (slot, &g) in v.iter_mut().zip(given) {
+                            if !g {
+                                *slot = Number::NAN;
+                            }
+                        }
+                    }
+                    v.into_pyarray_bound(py).into_any().unbind()
+                }
                 None => py.None(),
             };
             PyTuple::new_bound(py, [s.obj.into_py(py), x, g])

@@ -1609,7 +1609,8 @@ impl TNLP for MpccTnlp {
     }
 
     /// The inner model's factors for its own rows; the product rows are
-    /// unscaled.
+    /// unscaled, and count as given so no rule for rows without a factor
+    /// rescales them.
     fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
         let ScalingRequest {
             obj_scaling,
@@ -1617,8 +1618,11 @@ impl TNLP for MpccTnlp {
             x_scaling,
             use_g_scaling,
             g_scaling,
+            g_scaling_given,
         } = req;
         let (inner_g, products) = g_scaling.split_at_mut(self.m_inner.min(g_scaling.len()));
+        let (inner_given, products_given) =
+            g_scaling_given.split_at_mut(self.m_inner.min(g_scaling_given.len()));
         let (inner_x, lifts) = x_scaling.split_at_mut(self.n.min(x_scaling.len()));
         let ok = self
             .inner
@@ -1629,8 +1633,10 @@ impl TNLP for MpccTnlp {
                 x_scaling: inner_x,
                 use_g_scaling,
                 g_scaling: inner_g,
+                g_scaling_given: inner_given,
             });
         products.fill(1.0);
+        products_given.fill(true);
         lifts.fill(1.0);
         ok
     }
@@ -2582,6 +2588,7 @@ mod tests {
             x_scaling: &mut xs,
             use_g_scaling: &mut ug,
             g_scaling: &mut gs,
+            g_scaling_given: &mut [true; 5],
         }));
         assert!(ug);
         assert_eq!(gs, vec![2.0, 3.0, 4.0, 1.0, 1.0]);

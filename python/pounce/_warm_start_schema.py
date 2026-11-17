@@ -96,6 +96,7 @@ MODEL_OPTIONS = (
 _SCALING_OPTIONS = (
     "nlp_scaling_method",
     "nlp_scaling_max_gradient",
+    "nlp_scaling_untagged_constr",
     "obj_scaling_factor",
 )
 

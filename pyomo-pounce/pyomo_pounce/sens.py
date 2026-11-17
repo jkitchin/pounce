@@ -1295,9 +1295,10 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
         warn_if_no_suffix(model)
     scaling = problem_scaling(model, con_names, con_alias, var_names)
     if scaling is not None:
-        obj_scale, g_scale, x_scale = scaling
+        obj_scale, g_scale, x_scale, g_given = scaling
         prob.set_problem_scaling(obj_scale, x_scaling=x_scale,
-                                 g_scaling=g_scale)
+                                 g_scaling=g_scale,
+                                 g_scaling_given=g_given)
     warm = {}
     if _warm_start_requested(options):
         warm = _warm_start_from_suffixes(

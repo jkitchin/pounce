@@ -90,6 +90,9 @@ pub struct ScalingTnlp {
     /// passed upward for the core to apply.
     obj_scaling: Number,
     g_scaling: Option<Vec<Number>>,
+    /// Which rows the inner TNLP gave a factor, passed upward with
+    /// `g_scaling` (see [`ScalingRequest::g_scaling_given`]).
+    g_scaling_given: Vec<bool>,
     /// Column of each Jacobian nonzero, and (row, column) of each
     /// Hessian nonzero, captured on the structure call so the values
     /// call knows which factors to divide by. Zero-based regardless
@@ -228,12 +231,14 @@ pub fn wrap_with_scaling(
     let mut x_scaling = vec![1.0; n];
     let mut use_g = false;
     let mut g_scaling = vec![1.0; m];
+    let mut g_scaling_given = vec![true; m];
     let supplied = inner.borrow_mut().get_scaling_parameters(ScalingRequest {
         obj_scaling: &mut obj_scaling,
         use_x_scaling: &mut use_x,
         x_scaling: &mut x_scaling,
         use_g_scaling: &mut use_g,
         g_scaling: &mut g_scaling,
+        g_scaling_given: &mut g_scaling_given,
     });
     if !supplied || !use_x {
         return Ok(None);
@@ -316,6 +321,7 @@ pub fn wrap_with_scaling(
         } else {
             None
         },
+        g_scaling_given,
         jac_cols: Vec::new(),
         hess_rc: Vec::new(),
         index_offset,
@@ -628,6 +634,9 @@ impl TNLP for ScalingTnlp {
                 *req.use_g_scaling = true;
             }
             _ => *req.use_g_scaling = false,
+        }
+        if self.g_scaling_given.len() == req.g_scaling_given.len() {
+            req.g_scaling_given.copy_from_slice(&self.g_scaling_given);
         }
         true
     }
