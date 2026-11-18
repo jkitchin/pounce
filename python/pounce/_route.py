@@ -746,9 +746,10 @@ def classify_and_extract_socp(
 
     Accepts a linear or convex-quadratic objective, linear equalities, and
     inequality constraints that are each either linear or **convex-quadratic**
-    (a scipy ``ineq`` is ``g(x) ≥ 0``; quadratic ``g`` qualifies only when it is
-    *concave*, so the feasible set is convex). Each convex-quadratic inequality
-    ``½xᵀHx + aᵀx + b ≤ 0`` (``H = −∇²g ⪰ 0``) becomes one second-order cone via
+    (a one-sided quadratic row qualifies when its feasible set is convex:
+    ``g ≥ lo`` — a scipy ``ineq`` — with ``g`` concave, or ``g ≤ hi`` with
+    ``g`` convex; a two-sided quadratic row is rejected, gh #1174). Each
+    convex-quadratic inequality ``½xᵀHx + aᵀx + b ≤ 0`` (``H = −∇²g ⪰ 0``) becomes one second-order cone via
     the same ``s=−(aᵀx+b)`` → ``(s+1, s−1, √2·Fx) ∈ SOC`` reformulation the CLI
     uses (``FᵀF = H``).
 
@@ -799,16 +800,13 @@ def classify_and_extract_socp(
             eq = np.isfinite(lo) and np.isfinite(hi) and lo == hi
 
             if is_quad:
-                has_quadratic = True
                 if eq:
                     raise _NotConvex("a quadratic equality is nonconvex")
                 # The Hessian of a true quadratic is constant across probes;
                 # a varying one means a genuinely nonlinear (cubic+) constraint.
                 if float(np.max(np.abs(Qi - Hs2[i]))) > 1e-4 * max(1.0, qscale):
                     raise _NotConvex("a constraint Hessian is not constant")
-                # scipy ineq is g(x) ≥ lo; convex feasible set ⇔ g concave.
-                # Write g(x) = ½xᵀQx + a_g·x + b_g; the convex form
-                # −(g − lo) ≤ 0 has Hessian H = −Q (must be PSD).
+                # Write g(x) = ½xᵀQx + a_g·x + b_g.
                 a_g = Ji - Qi @ anchor
                 b_g = g0[i] - (0.5 * float(anchor @ Qi @ anchor) + float(a_g @ anchor))
                 # Validate the fitted quadratic against the true g at held-out
@@ -821,16 +819,33 @@ def classify_and_extract_socp(
                         raise _NotConvex(
                             "a constraint does not match its quadratic model"
                         )
-                H = -Qi
+                # Which side of the row binds decides the sign (gh #1174):
+                #   g ≥ lo  ⇔  −(g − lo) ≤ 0, convex iff −Q ⪰ 0;
+                #   g ≤ hi  ⇔    g − hi  ≤ 0, convex iff  Q ⪰ 0 — scipy's
+                #   natural ``NonlinearConstraint(q, -inf, ub)`` spelling.
+                # Both finite with Q ≠ 0 is a band between two quadric level
+                # sets whose far side is nonconvex (an annulus) unless Q is
+                # degenerate enough to make it vacuous. Reject it
+                # conservatively; never read only one side.
+                lo_fin, hi_fin = bool(np.isfinite(lo)), bool(np.isfinite(hi))
+                if lo_fin and hi_fin:
+                    raise _NotConvex(
+                        "a two-sided quadratic constraint has a nonconvex feasible set"
+                    )
+                if not lo_fin and not hi_fin:
+                    continue  # −∞ ≤ g ≤ ∞ constrains nothing
+                has_quadratic = True
+                if lo_fin:
+                    H, a_vec, b_eff = -Qi, -a_g, lo - b_g
+                else:
+                    H, a_vec, b_eff = Qi, a_g, b_g - hi
                 eigh = np.linalg.eigvalsh(H)
                 if float(eigh.min()) < -1e-8 * max(1.0, abs(float(eigh.max()))):
                     raise _NotConvex(
-                        "a constraint is convex-quadratic but its "
-                        "feasible set is nonconvex"
+                        "a constraint is quadratic but its feasible set is nonconvex"
                     )
                 f_rows = _psd_outer_factor(H, n)
-                a_vec = -a_g
-                b_eff = lo - b_g  # −(g − lo) ≤ 0  ⇒  ½xᵀHx + a_vec·x + b_eff ≤ 0
+                # ½xᵀHx + a_vec·x + b_eff ≤ 0
                 soc_blocks.append((f_rows, a_vec, b_eff))
                 continue
 

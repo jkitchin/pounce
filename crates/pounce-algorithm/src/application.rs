@@ -3270,6 +3270,7 @@ impl IpoptApplication {
             "qp_hsde",
             "qp_equilibrate",
             "qp_crossover",
+            "qp_certificate",
         ];
         let name = CONVEX_ONLY.iter().find(|name| {
             crate::unimplemented_options::set_to_a_non_default(
@@ -3286,7 +3287,8 @@ impl IpoptApplication {
              a model that classifies as one); the `qp_*` options themselves are \
              read only there and by `pounce.solve_qp`. From Python, \
              `pounce.solve_qp` drives the engine directly and takes `qp_presolve`, \
-             `qp_reg`, `qp_hsde`, `qp_equilibrate` and `qp_crossover` as keyword \
+             `qp_reg`, `qp_hsde`, `qp_equilibrate`, `qp_crossover` and \
+             `qp_certificate` as keyword \
              arguments (presolve is off there unless asked for). \
              On this path, `solver_selection=qp-active-set` \
              (or `algorithm=active-set-sqp`) is the nearest thing, tuned by the \

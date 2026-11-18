@@ -568,6 +568,28 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          opt-in for small, well-behaved LPs that want exact-vertex refinement. \
          Default no.",
     )?;
+    r.add_string_option(
+        "qp_certificate",
+        "Report the certificate behind an infeasible or unbounded convex LP/QP verdict.",
+        "yes",
+        &[
+            ("yes", "Report it; when the verdict's own ray does not check, re-solve the unreduced model for one (default)."),
+            ("check", "Report and check the verdict's own ray only; never re-solve."),
+            ("no", "Report no certificate."),
+        ],
+        "Convex LP/QP path (`cvx-qp`, `qp-active-set`) on `.nl` input, gh#1181. \
+         On a primal-infeasible or unbounded verdict the JSON report's \
+         `solution.certificate` carries a Farkas ray or a recession direction \
+         in the model's own constraints and variables, checked against the \
+         model independently of the solver, and a `Certificate:` line says \
+         whether it verified. The verdict's own ray is used when it checks \
+         (lifted through presolve when presolve ran). A presolve verdict has \
+         no ray, so under `yes` the unreduced model is re-solved for one: \
+         measured on NETLIB-infeas, 15 of 29 verdicts come from presolve and \
+         the re-solve costs up to ~7 s there (`gosh`). `check` skips that \
+         re-solve and reports an unverified (or no) certificate instead; it \
+         never changes the verdict. Default yes.",
+    )?;
 
     // SQP outer-loop options. Inactive when `algorithm =
     // interior-point`. Defaults mirror `SqpOptions::default()`.

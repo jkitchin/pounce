@@ -16,7 +16,7 @@
 //! plumbing, and are what a caller that already holds a `QpProblem` uses.
 
 use crate::ipm::QpOptions;
-use crate::presolve::{PresolveOutcome, PresolveStats, presolve};
+use crate::presolve::{PresolveOutcome, PresolveStats, presolve_until};
 use crate::qp::{QpProblem, QpSolution, QpStatus};
 use pounce_qp::HessianInertia;
 use std::fmt;
@@ -236,6 +236,23 @@ pub fn solve_presolved<S>(prob: &QpProblem, o: &QpOptions, solve: S) -> (QpSolut
 where
     S: FnOnce(&QpProblem, &QpOptions) -> QpSolution,
 {
+    let (sol, report, _) = solve_presolved_with_ray(prob, o, solve);
+    (sol, report)
+}
+
+/// [`solve_presolved`], plus — when the reduced solve ends `PrimalInfeasible`
+/// — its Farkas ray `(y, z)` lifted to the original rows by
+/// [`crate::presolve::Presolve::postsolve_farkas`], for
+/// [`crate::certificate::certificate_or_resolve`] (gh#1181). `None` on every
+/// other outcome. The solution and report are exactly `solve_presolved`'s.
+pub fn solve_presolved_with_ray<S>(
+    prob: &QpProblem,
+    o: &QpOptions,
+    solve: S,
+) -> (QpSolution, PresolveReport, Option<(Vec<f64>, Vec<f64>)>)
+where
+    S: FnOnce(&QpProblem, &QpOptions) -> QpSolution,
+{
     let t0 = std::time::Instant::now();
     let trivial = |status| QpSolution {
         status,
@@ -248,7 +265,9 @@ where
         iters: 0,
         iterates: Vec::new(),
     };
-    match presolve(prob) {
+    // gh#1182: the fixpoint stops between layers once the caller's budget is
+    // spent, as it does on the CLI path.
+    match presolve_until(prob, o.time_limit.and_then(|l| t0.checked_add(l))) {
         PresolveOutcome::Reduced(ps) => {
             let mut ro = QpOptions {
                 obj_constant: o.obj_constant + ps.obj_offset(),
@@ -263,7 +282,8 @@ where
                 stats: Some(ps.stats()),
                 reason: ps.discarded_infeasibility().map(|t| t.to_string()),
             };
-            (ps.postsolve(&red), report)
+            let ray = (red.status == QpStatus::PrimalInfeasible).then(|| ps.postsolve_farkas(&red));
+            (ps.postsolve(&red), report, ray)
         }
         PresolveOutcome::Infeasible(trigger) => (
             trivial(QpStatus::PrimalInfeasible),
@@ -272,6 +292,7 @@ where
                 stats: None,
                 reason: Some(trigger.to_string()),
             },
+            None,
         ),
         PresolveOutcome::Unbounded => (
             trivial(QpStatus::DualInfeasible),
@@ -280,6 +301,7 @@ where
                 stats: None,
                 reason: Some("a free column with a nonzero objective coefficient".to_string()),
             },
+            None,
         ),
     }
 }

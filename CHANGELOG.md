@@ -41,6 +41,39 @@ changes.
   from it. An improve request becomes a fresh solve.
   `LowRankAugSystemSolver` and restoration's `AugRestoSystemSolver` pass it
   through.
+- **Infeasible and unbounded convex verdicts carry their certificate
+  (gh#1181).** On `primal_infeasible` / `dual_infeasible` the convex LP/QP
+  arm now returns a Farkas ray or a recession direction in the caller's own
+  rows and columns, normalized, with its residuals and a `verified` flag
+  from a check against the original data that reads nothing from the
+  solver. The CLI prints a `Certificate:` line and writes
+  `solution.certificate` (one `lambda` per `.nl` constraint) into the JSON
+  report; Python's `solve_qp` / `solve_socp` return
+  `QpResult.certificate`. A ray found after presolve is lifted by a new
+  objective-free postsolve, `Presolve::postsolve_farkas`: the ordinary one
+  rebuilds multipliers from `Px + c` and from bound activity at the lifted
+  point, and 8 of the 14 presolved NETLIB-infeas rays it lifted failed the
+  check, against 0 of 14 now. A verdict presolve reaches on its own has no
+  ray, so the unreduced model is re-solved for one; that is the feature's
+  cost (up to ~7 s on NETLIB-infeas `gosh`), and the new option
+  `qp_certificate` (`yes` / `check` / `no`, CLI and `solve_qp`) turns it
+  off. No verdict, iteration count or reported point changes. All 29
+  NETLIB-infeas certificates verify, and pass
+  `benchmarks/lp_infeas/check_certificates.py`, which re-checks a report
+  against its `.nl` independently. Not yet on the CLI's conic QCQP arm or
+  in the C API.
+
+  If that re-solve reaches an *optimum* instead, the verdict is not
+  changed but is flagged as contradicted: a warning on the CLI, the JSON
+  report's `solution.certificate_contradicted_by`, and in Python
+  `QpResult.certificate_contradicted_by` plus a `RuntimeWarning`.
+
+  **Rust API:** `pounce_convex::certificate` (`Certificate`,
+  `certificate`, `certificate_or_resolve` returning `CertificateOutcome`),
+  `pipeline::solve_presolved_with_ray`, and
+  `pounce_solve_report::SolutionInfo::{certificate,
+  certificate_contradicted_by}` (new public fields, so a struct literal of
+  `SolutionInfo` needs both set to `None`).
 - **`nlp_scaling_untagged_constr` gives user scaling a factor for the rows
   the user did not scale.** Under `nlp_scaling_method=user-scaling`, the
   value `gradient-based` gives each constraint row with no user factor the
@@ -88,6 +121,99 @@ changes.
   out of bounds, not among a string option's values, or for an unknown
   keyword ran the solve on the option's default. Now it raises, as CasADi's
   `ipopt` plugin does ("Invalid options were detected by Ipopt").
+- **`minimize` reads both sides of a quadratic constraint row when routing
+  to the conic solver** (gh#1174). The convex-QCQP detector treated every
+  quadratic row as `g(x) ≥ lo` and never read `hi`. So scipy's natural
+  `NonlinearConstraint(q, -inf, ub)` with `q` convex failed the convexity
+  test: `solver_selection="socp"` raised and `"auto"` fell back to the NLP
+  solver. A row with only `hi` finite is now read as `g ≤ hi`, which is convex
+  when `q` is. The same flaw also produced a wrong answer that the issue
+  missed. A two-sided row `lo ≤ g ≤ hi` with concave `g` routed to `socp`
+  with `g ≤ hi` silently dropped. `min ‖x‖² s.t. 1 ≤ ‖x‖² ≤ 4` returned
+  `f = 0` with success, where the answer is `1`. Such a row now stays on the
+  NLP path. Under the old code, a concave `q ≤ ub` made `auto` raise
+  "`h` contains NaN or Inf". That row now goes to the NLP solver.
+- **The LP → NLP fallback no longer throws away the more accurate answer
+  (gh#1183).** When the convex arm finishes an LP or convex QP without
+  certifying it, `solver_selection=auto` re-solves it on the NLP arm (gh#535)
+  and used to report the NLP answer whatever it was. On NETLIB WOOD1P and
+  WOODW and MIPLIB leo2 that answer failed an independent check at a relative
+  duality gap of `1.2e-6`, `1.4e-6` and a primal residual of `3.3e-5`, while
+  the discarded convex answer passed at `1.1e-7`, `8.3e-7` and `6.6e-8` in a
+  sixteenth to a third of the iterations. The CLI now measures both answers by
+  their relative KKT residuals (primal, dual, duality gap, primal cone, dual
+  cone, each relative to the terms it is made of) on the declared model and
+  reports the more accurate one, under its own status. Both answers are read
+  against one scale, the larger of the two, so an answer cannot shrink its
+  own residuals by inflating its iterates or multipliers. A tie keeps the NLP
+  answer; a convex answer whose status is a failure never replaces an NLP
+  success; and a convex `NumericalFailure` (the convex arm's own verification
+  refusing its point) never wins. The comparison is printed on stderr and
+  recorded in the JSON report's new `convex_fallback` section, with each
+  arm's wall time; `statistics.total_wallclock_time_secs` is now the whole
+  run's.
+
+  **Visible change:** a model whose convex answer now reports keeps that
+  answer's own status, which is usually `Solved_To_Acceptable_Level` where the
+  NLP answer said `Solve_Succeeded`. AMPL and Pyomo callers see
+  `solve_result_num` go from `0` to `1` (still a success; the exit code stays
+  `0`). Measured with gh#1180 in place: NETLIB PILOT and MIPLIB leo2 now
+  report the convex answer, and MIPLIB neos-4763324-toguru keeps the NLP one.
+  WOOD1P and WOODW no longer reach the fallback at all, because gh#1180's
+  unreduced retry certifies them on the convex arm, and neither do NETLIB
+  GEN/GEN1, the models gh#535 was built for. The measure is
+  `QpSolution::relative_kkt_residuals` in `pounce-convex`.
+- **The convex arm keeps to `max_wall_time` on large LPs, and a spent budget
+  no longer throws its answer away** (gh#1182). Three phases ran outside every
+  deadline check. LP/QP extraction built a dense row vector per constraint,
+  which made it `O(n·m)`. The presolve fixpoint ran all its layers before the
+  solver's deadline opened. The aggregation postsolve scanned every column once
+  per surviving column. On a generated 100 000-column banded LP at
+  `max_wall_time=1`, one thread, the run took 9.7 s before and 2.8 s after.
+  What is left is the first KKT factorization, which a deadline cannot
+  interrupt. Extraction is now linear in the nonzeros and gives bit-identical
+  rows. Presolve stops between layers once the budget is spent and reports it
+  as `stopped by max_wall_time after N layers`. Each layer is a complete
+  reduction, so the smaller reduction is still a sound one. When the convex
+  solve has used up the budget, the gh #535 LP→NLP fallback and the conic
+  path's `NumericalFailure` reroute no longer run. The NLP arm would get no time
+  and stop at iteration 0 with no `x`. The convex iterate is reported instead:
+  a verdict it reached (`Optimal`, `OptimalInaccurate`, a certificate) stands,
+  and `IterationLimit` or `NumericalFailure` becomes
+  `Maximum_WallTimeExceeded`. A convex solve that stalls with budget left
+  still reroutes. The same presolve deadline applies to the Python
+  `pounce.qp.solve_qp` and C API path (`pipeline::solve_presolved`). A convex
+  QCQP whose solve spent the budget skips the gh#1114 polish and reports its
+  conic residuals. **Rust API:** `pounce_convex::presolve::FixpointExit` gains
+  the variant `Deadline`, and `presolve_until(prob, deadline)` is new.
+- **The convex QP interior-point stops where it converges on two
+  Maros–Mészáros models it had slowed down on** (gh#1180). QPILOTNO went from
+  40 iterations to 283 on the NLP path, and POWELL20 from 18 to 121. Both
+  date from gh#984's second pass, which stopped labelling `Optimal` a point
+  whose KKT error was above `tol`. The old fast answers were such points:
+  QPILOTNO's violated two equality rows by `1.6e-4`, and POWELL20's had a
+  primal residual of `3e-5`. Two separate defects then kept the solver from
+  certifying the correct answer:
+  * *QPILOTNO.* Presolve's postsolve recovered an eliminated column at
+    `-2.7e-14` and clamped it to its bound. The column's coefficient of
+    `5.85e6` turned that into a `1.6e-7` violation of two equality rows, so
+    the CLI discarded the convex answer and re-solved from scratch on the NLP
+    path. When the reduced problem was solved to `Optimal` and only the
+    postsolved point fails, the CLI now first re-solves the full model without
+    presolve: 84 iterations in total, with the answer from `cvx-qp`. A
+    `Presolve:` line reports when this happens.
+  * *POWELL20.* Every constraint row is active and there is no strict
+    interior, so the multipliers drift to `1e11`. The stopping test counted
+    each row's complementarity product in full once the row's slack was above
+    rounding level. At those multipliers a slack of `1e-9` already reads as
+    `~1e2`, and the loop ran on until a product happened to read exactly 0.
+    Each product is now judged above its own rounding floor, at half the width
+    the final verdict allows: 121 → 27 iterations, objective `2.2e-11` from
+    the exact optimum.
+
+  On the full 138-problem set no other problem changes status, iteration
+  count or objective. In `scripts/sweep-fixtures.sh` only the two fixtures
+  that pin this change move.
 - **`minimize` detects a convex LP/QP without `jac` whatever the objective's
   constant term** (gh#1169). The structure probe finite-differenced `fun` twice
   at steps sized for general functions, which left `~2.5e-3·|f|` of round-off

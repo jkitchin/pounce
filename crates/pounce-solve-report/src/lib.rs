@@ -111,6 +111,61 @@ pub struct SolveReport {
     /// deserializes unchanged.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub complementarity: Option<ComplementarityInfo>,
+    /// The two candidates of an LP / convex-QP → NLP fallback (gh #535,
+    /// gh #1183), when one ran. `None` on every other solve.
+    ///
+    /// Additive; older `pounce.solve-report/v1` JSON without this field
+    /// deserializes unchanged.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub convex_fallback: Option<ConvexFallbackInfo>,
+}
+
+/// What the LP / convex-QP → NLP fallback compared (gh #1183).
+///
+/// When the convex arm finishes an LP or convex QP without certifying it,
+/// `solver_selection=auto` re-solves the model on the NLP arm (gh #535). The
+/// two answers are then measured by one ruler — the five relative KKT
+/// residuals (primal, dual, duality gap, primal cone, dual cone) of
+/// `pounce_convex::RelativeKktResiduals`, on the model as declared, both read
+/// against one shared `RelativeKktScale` — and the one with the smaller
+/// largest residual is reported. A convex answer whose
+/// own status is a failure never displaces an NLP answer that succeeded. Before gh #1183 the NLP
+/// answer replaced the convex one unconditionally, and on NETLIB WOOD1P /
+/// WOODW and MIPLIB leo2 it was the less accurate of the two.
+///
+/// `solution.engine` names the winner too; this section adds the loser and
+/// both errors, so a reader can see what was discarded and by how much.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConvexFallbackInfo {
+    /// Engine whose answer was reported: `"cvx-qp"`, `"qp-active-set"`,
+    /// `"nlp"`, `"sqp-active-set"` or `"square-lm"`.
+    pub winner: String,
+    /// The engine whose answer was discarded.
+    pub loser: String,
+    /// The convex candidate's relative KKT error
+    /// (`RelativeKktResiduals::max`, declared model, read against the scale
+    /// shared with the NLP candidate).
+    pub convex_kkt_error: Number,
+    /// The convex candidate's status, upstream spelling.
+    pub convex_status: String,
+    /// The convex candidate's iteration count.
+    pub convex_iterations: Index,
+    /// The NLP candidate's KKT error on the same measure. Absent when the NLP
+    /// arm produced no point that maps onto the extracted model.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub nlp_kkt_error: Option<Number>,
+    /// The NLP candidate's status, upstream spelling.
+    pub nlp_status: String,
+    /// The NLP candidate's iteration count.
+    pub nlp_iterations: Index,
+    /// Wall-clock seconds the convex attempt took.
+    #[serde(default)]
+    pub convex_wallclock_time_secs: Number,
+    /// Wall-clock seconds the NLP re-solve took. `statistics`'s
+    /// `total_wallclock_time_secs` is the sum of the two, whichever won;
+    /// `statistics.iteration_count` is the winner's alone.
+    #[serde(default)]
+    pub nlp_wallclock_time_secs: Number,
 }
 
 /// The complementarity driver's record: which formulation answered, every
@@ -671,6 +726,71 @@ pub struct SolutionInfo {
     /// Empty when no sensitivity / reduced-Hessian step ran.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub suffixes: Vec<SolutionSuffix>,
+    /// The certificate behind an infeasible or unbounded verdict of a convex
+    /// engine (gh#1181); absent on every other status and on the NLP arm,
+    /// whose "locally infeasible" is a stationary point of the constraint
+    /// violation and certifies nothing. See [`CertificateInfo`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub certificate: Option<CertificateInfo>,
+    /// Set when the infeasible or unbounded verdict above was **contradicted**:
+    /// the re-solve of the unreduced model, run to find a certificate, reached
+    /// this optimum instead (gh#1181 review). The verdict is not changed — it
+    /// is the first solve's — but it should be treated as doubtful. Absent
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub certificate_contradicted_by: Option<ApplicationReturnStatus>,
+}
+
+/// An infeasibility or unboundedness certificate, normalized to unit
+/// inf-norm and expressed in the model's own constraints and variables
+/// (`pounce_convex::certificate`, gh#1181).
+///
+/// `kind = "primal_infeasible"` is a Farkas certificate: with `lambda[i]`
+/// multiplying constraint `i`'s body (positive on its upper side, negative on
+/// its lower side; free on an equality) and `z_l`, `z_u` the variable-bound
+/// multipliers, `Σᵢ lambda[i]·∇gᵢ − z_l + z_u = 0` up to `residual`, and
+/// `value` — the sum of each multiplier times the bound it is on — is
+/// negative, so no point satisfies the constraints and bounds together.
+///
+/// `kind = "dual_infeasible"` is a recession direction `d`: it keeps every
+/// constraint and bound satisfied along `x + t·d` and drives the objective
+/// (in minimize form: a maximize model's objective is negated) to `−∞`, with
+/// `value = ∇fᵀd < 0`.
+///
+/// `verified` says whether the certificate passed the independent check
+/// against the model as solved; `margin` is the ratio that check reads
+/// (`null` when every residual is exactly zero). A certificate is reported
+/// even when it does not verify — that is how a doubtful verdict shows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CertificateInfo {
+    /// `"primal_infeasible"` or `"dual_infeasible"`.
+    pub kind: String,
+    pub verified: bool,
+    /// `"solve"` (the verdict's own ray, lifted through presolve) or
+    /// `"unreduced_resolve"` (a re-solve without presolve supplied the ray;
+    /// the verdict is still the first solve's).
+    pub source: String,
+    /// Farkas value (primal) or `∇fᵀd` (dual); negative for a certificate.
+    pub value: Number,
+    /// The check's margin; `null` for an exact certificate.
+    #[serde(default)]
+    pub margin: Option<Number>,
+    /// Constraint multipliers, one per constraint (primal only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub lambda: Vec<Number>,
+    /// Lower-bound multipliers, one per variable (primal only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub z_l: Vec<Number>,
+    /// Upper-bound multipliers, one per variable (primal only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub z_u: Vec<Number>,
+    /// Recession direction, one entry per variable (dual only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub d: Vec<Number>,
+    /// Named residuals of the check: `stationarity` and `cone_violation`
+    /// (primal); `hessian`, `equality`, `cone_violation` and
+    /// `bound_violation` (dual).
+    pub residuals: std::collections::BTreeMap<String, Number>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -968,6 +1088,7 @@ pub struct ReportBuilder {
     pub linear_solver: Option<LinearSolverSummaryInfo>,
     pub second_opinion: Option<SecondOpinionInfo>,
     pub complementarity: Option<ComplementarityInfo>,
+    pub convex_fallback: Option<ConvexFallbackInfo>,
 }
 
 impl ReportBuilder {
@@ -1003,11 +1124,14 @@ impl ReportBuilder {
                 x: Vec::new(),
                 lambda: Vec::new(),
                 suffixes: Vec::new(),
+                certificate: None,
+                certificate_contradicted_by: None,
             },
             stats: empty_stats(),
             iterations: Vec::new(),
             linear_solver: None,
             second_opinion: None,
+            convex_fallback: None,
             complementarity: None,
         }
     }
@@ -1135,6 +1259,7 @@ impl ReportBuilder {
             linear_solver: self.linear_solver,
             second_opinion: self.second_opinion,
             complementarity: self.complementarity,
+            convex_fallback: self.convex_fallback,
         }
     }
 }
