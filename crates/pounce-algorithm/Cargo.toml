@@ -41,6 +41,12 @@ tracing.workspace = true
 anstream.workspace = true
 anstyle.workspace = true
 
+# `linear_solver=custom` loads the solver from `custom_linear_solver_lib`
+# (gh#1175). Same gate as pounce-nl's external functions: wasm has no
+# dynamic loader, and `custom_linsol::load` refuses there instead.
+[target.'cfg(any(unix, windows))'.dependencies]
+libloading = "0.8"
+
 [features]
 default = []
 # Enable the HSL MA57 backend. Requires libcoinhsl on the link path.

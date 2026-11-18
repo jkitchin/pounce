@@ -517,6 +517,17 @@ pub struct AlgorithmBuilder {
     /// sub-solve's differently-shaped KKT system never overwrites it.
     pub inertia_sink:
         Option<std::sync::Arc<std::sync::Mutex<pounce_linsol::summary::LinearSolverSummary>>>,
+    /// `linear_solver=custom` (gh#1175): when set, every backend this
+    /// builder assembles comes from this solver and the factory passed to
+    /// [`Self::build_with_backend`] / [`Self::build_sqp_with_backend`] is
+    /// not called. The FERAL-specific Schur and block-parallel KKT paths
+    /// stand down, since they would route around it.
+    pub custom_linear_solver: Option<crate::custom_linsol::CustomLinearSolver>,
+    /// A registered [`LinearSolverProvider`](crate::linear_solver_provider::LinearSolverProvider)
+    /// selected by `linear_solver=<name>`: every augmented-system solver this
+    /// builder assembles comes from it (wrapped as the standard one is), and
+    /// the FERAL-specific Schur and block-parallel KKT paths stand down.
+    pub aug_system_provider: Option<crate::linear_solver_provider::ProviderSelection>,
     /// Shared tally of successful linear-solver quality escalations, handed
     /// to the assembled
     /// [`PdFullSpaceSolver`](crate::kkt::pd_full_space_solver::PdFullSpaceSolver)
@@ -1316,6 +1327,8 @@ impl Default for AlgorithmBuilder {
             kkt_block_min_size: crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
             kkt_schur_summary_sink: None,
             inertia_sink: None,
+            custom_linear_solver: None,
+            aug_system_provider: None,
             quality_escalation_counter: None,
         }
     }
@@ -1348,6 +1361,13 @@ impl AlgorithmBuilder {
         self.kkt_blocks_shared = Some(cell);
     }
 
+    /// FERAL is the backend: selected, and not displaced by a custom solver.
+    fn feral_selected(&self) -> bool {
+        matches!(self.linear_solver, LinearSolverChoice::Feral)
+            && self.custom_linear_solver.is_none()
+            && self.aug_system_provider.is_none()
+    }
+
     /// The partition to build with: an installed one first, then the
     /// late-bound cell.
     fn resolved_kkt_blocks(&self) -> Option<(Vec<i32>, pounce_feral::FeralConfig)> {
@@ -1377,8 +1397,14 @@ impl AlgorithmBuilder {
     /// Same as [`Self::build`] but also constructs the
     /// `SymLinearSolver → AugSystemSolver → PdFullSpaceSolver →
     /// PdSearchDirCalc` chain via the supplied `factory`.
-    pub fn build_with_backend(&self, mut factory: LinearBackendFactory) -> AlgorithmBundle {
-        let backend = factory(self.linear_solver);
+    pub fn build_with_backend(&self, factory: LinearBackendFactory) -> AlgorithmBundle {
+        let mut factory = match &self.custom_linear_solver {
+            Some(custom) => {
+                let custom = custom.clone();
+                Box::new(move |_| custom.make_backend()) as LinearBackendFactory
+            }
+            None => factory,
+        };
         let make_scaling = || -> Option<Box<dyn pounce_linsol::TSymScalingMethod>> {
             match self.linear_system_scaling {
                 LinearSystemScalingChoice::None => None,
@@ -1396,12 +1422,17 @@ impl AlgorithmBuilder {
                 }
             }
         };
-        let linsol = TSymLinearSolver::new(backend, make_scaling(), self.linear_scaling_on_demand);
         let with_inertia_sink = |aug: StdAugSystemSolver| match self.inertia_sink.clone() {
             Some(sink) => aug.with_inertia_sink(sink),
             None => aug,
         };
-        let inner_aug = with_inertia_sink(StdAugSystemSolver::new(linsol));
+        let std_aug = |factory: &mut LinearBackendFactory| {
+            with_inertia_sink(StdAugSystemSolver::new(TSymLinearSolver::new(
+                factory(self.linear_solver),
+                make_scaling(),
+                self.linear_scaling_on_demand,
+            )))
+        };
         // Limited-memory mode publishes the Hessian as a
         // `LowRankUpdateSymMatrix`; wrap the standard solver in the
         // Sherman-Morrison-Woodbury low-rank solver so the augmented
@@ -1411,26 +1442,38 @@ impl AlgorithmBuilder {
             self.hessian_approximation,
             HessianApproxChoice::LimitedMemory
         );
-        let aug_solver: Box<dyn AugSystemSolver> = if is_lbfgs {
+        let aug_solver: Box<dyn AugSystemSolver> = if let Some(sel) =
+            self.aug_system_provider.as_ref()
+        {
+            // A registered provider builds every augmented-system solver;
+            // the low-rank wrapper goes around it as around the standard
+            // one, and the FERAL-only Schur / block paths stand down.
+            let mut provider_aug = || self.provider_aug_solver(sel, &mut factory, &make_scaling);
+            if is_lbfgs {
+                let main = provider_aug();
+                let bypass = provider_aug();
+                Box::new(LowRankAugSystemSolver::with_bypass_solver(main, bypass))
+            } else {
+                provider_aug()
+            }
+        } else if is_lbfgs {
+            let inner_aug = std_aug(&mut factory);
             // A second, independent inner solver for the Hessian-free
             // solves. Both see one W shape each for their whole life, so
             // neither re-runs the backend's symbolic factorization when
             // the other's shape comes round — see
             // `LowRankAugSystemSolver::with_bypass_solver` (gh#730).
-            let bypass_linsol = TSymLinearSolver::new(
-                factory(self.linear_solver),
-                make_scaling(),
-                self.linear_scaling_on_demand,
-            );
+            let bypass_aug = std_aug(&mut factory);
             Box::new(LowRankAugSystemSolver::with_bypass_solver(
                 Box::new(inner_aug),
-                Box::new(with_inertia_sink(StdAugSystemSolver::new(bypass_linsol))),
+                Box::new(bypass_aug),
             ))
         } else if let Some((labels, cfg)) = self.resolved_kkt_blocks() {
+            let inner_aug = std_aug(&mut factory);
             // Block-parallel KKT path (structured-KKT Phase 5b). Same gates as
             // the Schur arm: feral-specific, and the L-BFGS low-rank wrapper
             // owns the (2,2) block, so this is the exact-Hessian path only.
-            if matches!(self.linear_solver, LinearSolverChoice::Feral) {
+            if self.feral_selected() {
                 let blocks = crate::kkt::BlockAugSystemSolver::new(inner_aug, labels, cfg)
                     .with_min_block_size(self.kkt_block_min_size);
                 Box::new(match self.kkt_schur_summary_sink.clone() {
@@ -1441,6 +1484,7 @@ impl AlgorithmBuilder {
                 Box::new(inner_aug)
             }
         } else if let Some((indices, cfg)) = self.kkt_schur.clone() {
+            let inner_aug = std_aug(&mut factory);
             // Block-triangular / Schur KKT path (pounce#180 item 2). Only on the
             // exact-Hessian feral path — the Schur backend is feral-specific,
             // and the L-BFGS low-rank Woodbury wrapper owns the (2,2) block.
@@ -1448,7 +1492,7 @@ impl AlgorithmBuilder {
             // when the partition is unsuitable, so a stray hook never breaks a
             // solve; we gate on `linear_solver == Feral` here to avoid silently
             // ignoring a user's explicit MA57 selection.
-            if matches!(self.linear_solver, LinearSolverChoice::Feral) {
+            if self.feral_selected() {
                 let schur = crate::kkt::SchurAugSystemSolver::new(inner_aug, indices, cfg);
                 Box::new(match self.kkt_schur_summary_sink.clone() {
                     Some(sink) => schur.with_summary_sink(sink),
@@ -1458,8 +1502,9 @@ impl AlgorithmBuilder {
                 Box::new(inner_aug)
             }
         } else {
-            Box::new(inner_aug)
+            Box::new(std_aug(&mut factory))
         };
+
         // Inertia-correction / Jacobian-regularization constants (#191):
         // registered but previously never read. Defaults equal the
         // registered defaults. `perturb_always_cd` goes through the setter
@@ -1505,6 +1550,50 @@ impl AlgorithmBuilder {
         self.build_inner(Some(search_dir))
     }
 
+    /// One augmented-system solver from the selected provider. Its context
+    /// builds standard solvers exactly as [`Self::build_with_backend`] does.
+    /// A provider that fails is reported and replaced by a solver that fails
+    /// every solve: the run stops rather than using another backend.
+    fn provider_aug_solver(
+        &self,
+        sel: &crate::linear_solver_provider::ProviderSelection,
+        factory: &mut LinearBackendFactory,
+        make_scaling: &dyn Fn() -> Option<Box<dyn pounce_linsol::TSymScalingMethod>>,
+    ) -> Box<dyn AugSystemSolver> {
+        let choice = self.linear_solver;
+        let mut default_backend = || factory(choice);
+        let standard = |backend: Box<dyn SparseSymLinearSolverInterface>| {
+            let aug = StdAugSystemSolver::new(TSymLinearSolver::new(
+                backend,
+                make_scaling(),
+                self.linear_scaling_on_demand,
+            ));
+            match self.inertia_sink.clone() {
+                Some(sink) => aug.with_inertia_sink(sink),
+                None => aug,
+            }
+        };
+        let ctx = crate::linear_solver_provider::AugSolverContext {
+            options: &sel.options,
+            prefix: &sel.prefix,
+            metadata: &sel.metadata,
+            default_backend: RefCell::new(&mut default_backend),
+            standard: &standard,
+        };
+        match sel.provider.aug_system_solver(&ctx) {
+            Ok(aug) => aug,
+            Err(e) => {
+                let msg = format!(
+                    "pounce: linear_solver={}: could not build the augmented-system solver: {e}",
+                    sel.provider.name()
+                );
+                eprintln!("{msg}");
+                tracing::error!(target: "pounce::linsol", "{msg}");
+                Box::new(crate::linear_solver_provider::FailedProviderSolver)
+            }
+        }
+    }
+
     /// Phase 5b assembly path for the SQP algorithm. Consults
     /// `self.algorithm`: when `ActiveSetSqp`, constructs an
     /// `SqpAlgorithm` using the supplied backend factory for the
@@ -1521,7 +1610,12 @@ impl AlgorithmBuilder {
         if !matches!(self.algorithm, AlgorithmChoice::ActiveSetSqp) {
             return None;
         }
-        let backend = factory(self.linear_solver);
+        // The QP subproblem KKT is not the interior point's augmented
+        // system, so the custom solver gets no layout or metadata here.
+        let backend = match &self.custom_linear_solver {
+            Some(custom) => custom.without_metadata().make_backend(),
+            None => factory(self.linear_solver),
+        };
         let qp_solver = pounce_qp::ParametricActiveSetSolver::new(backend);
         Some(
             crate::sqp::SqpAlgorithm::new(qp_solver, self.sqp.clone())
@@ -1967,6 +2061,8 @@ mod tests {
                                 crate::kkt::block_aug_system_solver::DEFAULT_MIN_BLOCK_SIZE,
                             kkt_schur_summary_sink: None,
                             inertia_sink: None,
+                            custom_linear_solver: None,
+                            aug_system_provider: None,
                             quality_escalation_counter: None,
                         }
                         .build();

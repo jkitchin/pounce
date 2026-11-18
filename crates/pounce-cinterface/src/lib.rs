@@ -275,6 +275,10 @@ pub struct IpoptProblemInfo {
     /// `Complements` constraints. Never cleared: the bound edits it records
     /// are not undone either.
     pub(crate) complements_used: ComplementsLedger,
+    /// Variable and constraint metadata set by `SetPounce*MetaData`
+    /// (gh#1175), in model order, served to the algorithm through
+    /// `TNLP::get_var_con_metadata`. Empty — the default — declines.
+    pub(crate) metadata: (pounce_nlp::tnlp::MetaData, pounce_nlp::tnlp::MetaData),
 }
 
 /// User-provided NLP scaling stored on the problem until
@@ -492,6 +496,7 @@ pub unsafe extern "C" fn CreateIpoptProblem(
             nonlinear_vars: None,
             complementarity: DeclaredPairs::default(),
             complements_used: ComplementsLedger::default(),
+            metadata: Default::default(),
             last_solve: None,
             pending_working_set: None,
         });
@@ -866,6 +871,7 @@ pub unsafe extern "C" fn IpoptSolve(
                 intermediate_cb: info.intermediate_cb,
                 user_scaling: info.user_scaling.clone(),
                 nonlinear_vars: info.nonlinear_vars.clone(),
+                metadata: info.metadata.clone(),
                 lower_inf,
                 upper_inf,
                 zero_fixed_grad_lag,
@@ -2348,6 +2354,199 @@ pub unsafe extern "C" fn ClearPounceComplementarityPairs(ipopt_problem: IpoptPro
     })
 }
 
+/// [`SetPounceIntegerMetaData`] & co.: the metadata belongs to the
+/// variables (`n` entries).
+pub const POUNCE_META_VARIABLES: c_int = 0;
+/// … to the constraints (`m` entries).
+pub const POUNCE_META_CONSTRAINTS: c_int = 1;
+
+/// No `flags` bit is defined for the metadata setters yet.
+const KNOWN_META_FLAGS: c_uint = 0;
+
+/// The checks every metadata setter shares, in the shared check order:
+/// handle, flags, target, count, then the key. On success, the key and the
+/// handle's metadata for `target`.
+///
+/// # Safety
+/// As for the setters.
+unsafe fn meta_preamble<'a>(
+    ipopt_problem: IpoptProblem,
+    target: c_int,
+    key: *const c_char,
+    len: Index,
+    values_null: bool,
+    flags: c_uint,
+) -> Result<(String, &'a mut pounce_nlp::tnlp::MetaData), c_int> {
+    if ipopt_problem.is_null() {
+        return Err(POUNCE_ERR_NULL);
+    }
+    if flags & !KNOWN_META_FLAGS != 0 {
+        return Err(POUNCE_ERR_FLAGS);
+    }
+    // SAFETY: non-null and valid per the caller's contract.
+    let info = unsafe { &mut *ipopt_problem };
+    let expected = match target {
+        POUNCE_META_VARIABLES => info.n,
+        POUNCE_META_CONSTRAINTS => info.m,
+        _ => return Err(POUNCE_ERR_ARGUMENT),
+    };
+    if len != expected {
+        return Err(POUNCE_ERR_COUNT);
+    }
+    if key.is_null() || (len > 0 && values_null) {
+        return Err(POUNCE_ERR_NULL);
+    }
+    // SAFETY: non-null, NUL-terminated per the contract.
+    let key = unsafe { CStr::from_ptr(key) }
+        .to_string_lossy()
+        .into_owned();
+    if key.is_empty() {
+        return Err(POUNCE_ERR_ARGUMENT);
+    }
+    let meta = if target == POUNCE_META_VARIABLES {
+        &mut info.metadata.0
+    } else {
+        &mut info.metadata.1
+    };
+    Ok((key, meta))
+}
+
+/// Attach integer metadata `key` to the variables (`target ==
+/// POUNCE_META_VARIABLES`, `len == n`) or the constraints
+/// (`POUNCE_META_CONSTRAINTS`, `len == m`), in model order and the
+/// problem's index *positions* (entry `k` belongs to variable/constraint
+/// `k`, whatever the index style). Setting a key again replaces it.
+///
+/// This is Ipopt's `TNLP::get_var_con_metadata`, which the C interface
+/// did not expose (gh#1175). The values follow each variable and
+/// constraint through presolve and fixed-variable removal, and a custom
+/// linear solver (`linear_solver=custom`) receives every integer key in
+/// KKT order through its `set_metadata` callback — the way to hand it
+/// block labels.
+///
+/// Errors, in check order: NULL handle [`POUNCE_ERR_NULL`]; an undefined
+/// `flags` bit [`POUNCE_ERR_FLAGS`]; an unknown `target`
+/// [`POUNCE_ERR_ARGUMENT`]; `len` not `n` / `m` [`POUNCE_ERR_COUNT`]; NULL
+/// `key` or `values` (with `len > 0`) [`POUNCE_ERR_NULL`]; an empty `key`
+/// [`POUNCE_ERR_ARGUMENT`]. A refusal changes nothing.
+///
+/// # Safety
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL; `key` NULL or a
+/// NUL-terminated string; `values` NULL or `len` readable entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SetPounceIntegerMetaData(
+    ipopt_problem: IpoptProblem,
+    target: c_int,
+    key: *const c_char,
+    len: Index,
+    values: *const Index,
+    flags: c_uint,
+) -> c_int {
+    ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
+        match meta_preamble(ipopt_problem, target, key, len, values.is_null(), flags) {
+            Err(code) => code,
+            Ok((key, meta)) => {
+                let v = if len == 0 {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(values, len as usize).to_vec()
+                };
+                meta.integers.insert(key, v);
+                POUNCE_OK
+            }
+        }
+    })
+}
+
+/// [`SetPounceIntegerMetaData`] for real values. A NaN entry is
+/// [`POUNCE_ERR_NAN`], checked after every argument check.
+///
+/// # Safety
+/// As for [`SetPounceIntegerMetaData`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SetPounceNumericMetaData(
+    ipopt_problem: IpoptProblem,
+    target: c_int,
+    key: *const c_char,
+    len: Index,
+    values: *const Number,
+    flags: c_uint,
+) -> c_int {
+    ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
+        match meta_preamble(ipopt_problem, target, key, len, values.is_null(), flags) {
+            Err(code) => code,
+            Ok((key, meta)) => {
+                let v = if len == 0 {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(values, len as usize).to_vec()
+                };
+                if v.iter().any(|x| x.is_nan()) {
+                    return POUNCE_ERR_NAN;
+                }
+                meta.numerics.insert(key, v);
+                POUNCE_OK
+            }
+        }
+    })
+}
+
+/// [`SetPounceIntegerMetaData`] for strings: `values` is `len`
+/// NUL-terminated strings. The key `idx_names` names variables and
+/// constraints in pounce's diagnostics. A NULL entry is
+/// [`POUNCE_ERR_NULL`], checked after every argument check.
+///
+/// # Safety
+/// As for [`SetPounceIntegerMetaData`]; each non-NULL entry of `values`
+/// must be a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn SetPounceStringMetaData(
+    ipopt_problem: IpoptProblem,
+    target: c_int,
+    key: *const c_char,
+    len: Index,
+    values: *const *const c_char,
+    flags: c_uint,
+) -> c_int {
+    ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
+        match meta_preamble(ipopt_problem, target, key, len, values.is_null(), flags) {
+            Err(code) => code,
+            Ok((key, meta)) => {
+                let ptrs: &[*const c_char] = if len == 0 {
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(values, len as usize)
+                };
+                if ptrs.iter().any(|p| p.is_null()) {
+                    return POUNCE_ERR_NULL;
+                }
+                let v = ptrs
+                    .iter()
+                    .map(|&p| CStr::from_ptr(p).to_string_lossy().into_owned())
+                    .collect();
+                meta.strings.insert(key, v);
+                POUNCE_OK
+            }
+        }
+    })
+}
+
+/// Drop every metadata key set on the variables and constraints.
+/// [`POUNCE_ERR_NULL`] on a NULL handle, else [`POUNCE_OK`].
+///
+/// # Safety
+/// `ipopt_problem` must be a valid `IpoptProblem` or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ClearPounceMetaData(ipopt_problem: IpoptProblem) -> c_int {
+    ffi_guard(POUNCE_ERR_INTERNAL, || unsafe {
+        if ipopt_problem.is_null() {
+            return POUNCE_ERR_NULL;
+        }
+        (*ipopt_problem).metadata = Default::default();
+        POUNCE_OK
+    })
+}
+
 /// Number of declared complementarity pairs, or `-1` on a NULL handle.
 ///
 /// # Safety
@@ -3246,6 +3445,8 @@ pub(crate) struct CCallbackTnlp {
     /// Snapshot of the nonlinear-variable subset (gh#624), in the
     /// problem's index style.
     pub(crate) nonlinear_vars: Option<Vec<Index>>,
+    /// Snapshot of the `SetPounce*MetaData` metadata (gh#1175).
+    pub(crate) metadata: (pounce_nlp::tnlp::MetaData, pounce_nlp::tnlp::MetaData),
     /// `nlp_lower_bound_inf` / `nlp_upper_bound_inf` of the solve, for the
     /// violations `GetIpoptCurrentViolations` measures against `x_l` …
     /// `g_u` (a side at or beyond these is absent).
@@ -3277,6 +3478,24 @@ impl TNLP for CCallbackTnlp {
                 IndexStyle::C
             },
         })
+    }
+
+    /// gh#1175 — serve the metadata set by `SetPounce*MetaData`. Declines
+    /// when none was set, as before.
+    fn get_var_con_metadata(
+        &mut self,
+        var: &mut pounce_nlp::tnlp::MetaData,
+        con: &mut pounce_nlp::tnlp::MetaData,
+    ) -> bool {
+        let empty = |m: &pounce_nlp::tnlp::MetaData| {
+            m.strings.is_empty() && m.integers.is_empty() && m.numerics.is_empty()
+        };
+        if empty(&self.metadata.0) && empty(&self.metadata.1) {
+            return false;
+        }
+        *var = self.metadata.0.clone();
+        *con = self.metadata.1.clone();
+        true
     }
 
     /// gh#624 — serve the subset staged by

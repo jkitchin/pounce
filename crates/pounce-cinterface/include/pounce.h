@@ -954,6 +954,130 @@ int GetPounceBounds(
 );
 
 /* ---------------------------------------------------------------------
+ * Variable / constraint metadata (gh#1175)
+ *
+ * Ipopt's TNLP::get_var_con_metadata, for C callers. Each setter attaches
+ * one key to the variables (target POUNCE_META_VARIABLES, len == n) or
+ * the constraints (POUNCE_META_CONSTRAINTS, len == m); entry k belongs to
+ * variable / constraint k whatever the index style. Setting a key again
+ * replaces it. The values follow each variable and constraint through
+ * presolve and fixed-variable removal. A custom linear solver
+ * (linear_solver=custom, below) receives every integer key in KKT order;
+ * the string key "idx_names" names rows in pounce's diagnostics.
+ *
+ * Check order: NULL handle (POUNCE_ERR_NULL), flags (POUNCE_ERR_FLAGS; no
+ * bit is defined, pass 0), target (POUNCE_ERR_ARGUMENT), len
+ * (POUNCE_ERR_COUNT), NULL key or values (POUNCE_ERR_NULL), empty key
+ * (POUNCE_ERR_ARGUMENT), then entries: a NaN (POUNCE_ERR_NAN) or a NULL
+ * string (POUNCE_ERR_NULL). A refusal changes nothing.
+ * ------------------------------------------------------------------- */
+#define POUNCE_META_VARIABLES                  0
+#define POUNCE_META_CONSTRAINTS                1
+
+int SetPounceIntegerMetaData(
+    IpoptProblem   ipopt_problem,
+    int            target,
+    const char    *key,
+    ipindex        len,
+    const ipindex *values,
+    unsigned int   flags
+);
+
+int SetPounceNumericMetaData(
+    IpoptProblem    ipopt_problem,
+    int             target,
+    const char     *key,
+    ipindex         len,
+    const ipnumber *values,
+    unsigned int    flags
+);
+
+int SetPounceStringMetaData(
+    IpoptProblem       ipopt_problem,
+    int                target,
+    const char        *key,
+    ipindex            len,
+    const char *const *values,
+    unsigned int       flags
+);
+
+/** Drop every metadata key. POUNCE_ERR_NULL on a NULL handle. */
+int ClearPounceMetaData(IpoptProblem ipopt_problem);
+
+/* ---------------------------------------------------------------------
+ * Custom linear solver (linear_solver=custom, gh#1175)
+ *
+ * A shared library exporting
+ *
+ *     const PounceLinearSolver* pounce_linear_solver(void);
+ *
+ * supplies the sparse symmetric indefinite solver pounce uses for its KKT
+ * systems. Select it with the options
+ *
+ *     linear_solver                 custom
+ *     custom_linear_solver_lib      /path/to/libmysolver.so
+ *     custom_linear_solver_options  "<passed verbatim to create()>"
+ *
+ * from any frontend (options file, AddIpoptStrOption, CLI, Python, the
+ * CasADi plugin). It serves the interior point, its restoration phase and
+ * the active-set SQP's QP subproblems. The library is loaded once per path
+ * and never unloaded.
+ *
+ * Call sequence per instance: create(options) -> [set_layout] ->
+ * [set_metadata]* -> initialize_structure -> { factor -> solve+ }* ->
+ * destroy. pounce may hold several instances at once (for example the
+ * main system and restoration's).
+ *
+ * The matrix: `dim` rows, `nnz` 1-based triplets (irow[k], jcol[k]) of one
+ * triangle; each entry stands for itself and its mirror. A (row, col) pair
+ * may repeat, and repeated values are summed. The pattern is fixed from
+ * initialize_structure until destroy; factor receives the values in the
+ * same order.
+ *
+ * Layout: on the interior-point systems the rows are ordered
+ * [ x (n_x) | slacks (n_s) | equality duals (n_c) | inequality duals (n_d) ],
+ * after fixed variables are removed. set_layout reports the four sizes and
+ * set_metadata(key, values, dim) hands over each integer metadata key
+ * (SetPounceIntegerMetaData) mapped to that order: an x row takes its
+ * variable's value; a slack, an equality dual and an inequality dual take
+ * their constraint's; a key set on only one side reads -1 on the other's
+ * rows. Neither is called when the system is not that layout (the QP
+ * subproblems) or a key does not have the model's length.
+ *
+ * factor: factorize; when provides_inertia is non-zero, store the number of
+ * negative eigenvalues in *n_neg. With check_inertia non-zero, return
+ * POUNCE_LINSOL_WRONG_INERTIA if it is not expected_neg (pounce also
+ * checks). Return POUNCE_LINSOL_SINGULAR for a singular matrix; any other
+ * non-zero value is fatal.
+ * solve: overwrite `rhs` (nrhs column-major vectors of dim) with the
+ * solutions, using the last factorization.
+ * increase_quality (optional): tighten pivoting and return non-zero, or
+ * return 0 when it cannot.
+ * set_layout / set_metadata / increase_quality may be NULL.
+ * ------------------------------------------------------------------- */
+#define POUNCE_LINEAR_SOLVER_ABI_VERSION       1
+#define POUNCE_LINSOL_SUCCESS                  0
+#define POUNCE_LINSOL_SINGULAR                 1
+#define POUNCE_LINSOL_WRONG_INERTIA            2
+
+typedef struct PounceLinearSolver {
+    unsigned int struct_size;   /* sizeof(PounceLinearSolver) */
+    unsigned int abi_version;   /* POUNCE_LINEAR_SOLVER_ABI_VERSION */
+    const char  *name;          /* for messages; may be NULL */
+    int          provides_inertia;
+    void *(*create)(const char *options);
+    void  (*destroy)(void *state);
+    int   (*set_layout)(void *state, ipindex n_x, ipindex n_s, ipindex n_c, ipindex n_d);
+    int   (*set_metadata)(void *state, const char *key, const ipindex *values, ipindex len);
+    int   (*initialize_structure)(void *state, ipindex dim, ipindex nnz,
+                                  const ipindex *irow, const ipindex *jcol);
+    int   (*factor)(void *state, const ipnumber *values, ipindex nnz,
+                    int check_inertia, ipindex expected_neg, ipindex *n_neg);
+    int   (*solve)(void *state, ipindex dim, ipindex nrhs, ipnumber *rhs);
+    int   (*increase_quality)(void *state);
+} PounceLinearSolver;
+
+/* ---------------------------------------------------------------------
  * Extensible output structs (gh#1147)
  *
  * PounceComplementarityStats, PounceComplementaritySolve,

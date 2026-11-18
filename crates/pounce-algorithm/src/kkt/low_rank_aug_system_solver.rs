@@ -937,6 +937,10 @@ impl AugSystemSolver for LowRankAugSystemSolver {
         }
     }
 
+    fn owns_refinement(&self) -> bool {
+        self.inner.owns_refinement()
+    }
+
     fn increase_quality(&mut self) -> bool {
         // The inner solver drops its cached factor here (it re-pivots at
         // a tighter tolerance), so ours is stale too.

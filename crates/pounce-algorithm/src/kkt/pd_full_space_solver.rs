@@ -799,6 +799,11 @@ impl PdFullSpaceSolver {
         let mut pretend_singular = false;
         let mut pretend_singular_last_time = false;
         let mut improve = improve_solution;
+        // A solver that owns its refinement (a KKT oracle) is solved once and
+        // trusted: refining its step against the unmodified system would undo
+        // the regularization it applied. For the same reason it cannot
+        // "improve" a given solution, so that request becomes a fresh solve.
+        let owns_refinement = self.aug_solver.owns_refinement();
 
         while !done {
             // pounce#244: bail between major KKT steps when the shared time
@@ -814,7 +819,7 @@ impl PdFullSpaceSolver {
             if deadline_exceeded(data) || self.predict_factor_overshoot(data) {
                 return false;
             }
-            let solve_ok = if improve {
+            let solve_ok = if improve && !owns_refinement {
                 true
             } else {
                 let ok = self.solve_once(
@@ -837,7 +842,7 @@ impl PdFullSpaceSolver {
                 return false;
             }
 
-            if allow_inexact {
+            if allow_inexact || owns_refinement {
                 break;
             }
 

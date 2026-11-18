@@ -233,6 +233,7 @@ pub unsafe extern "C" fn IpoptSolverSolve(
                 intermediate_cb: info.problem.intermediate_cb,
                 user_scaling: info.problem.user_scaling.clone(),
                 nonlinear_vars: info.problem.nonlinear_vars.clone(),
+                metadata: info.problem.metadata.clone(),
                 lower_inf,
                 upper_inf,
                 zero_fixed_grad_lag,
