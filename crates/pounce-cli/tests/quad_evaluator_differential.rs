@@ -120,7 +120,12 @@ const REL_TOL: f64 = 1e-12;
 /// The largest relative deviation any fixture actually produces, over every
 /// `g` and `∇g` entry at every probe point. Pinned so that "within
 /// tolerance" stays a measurement rather than a hope.
-const WORST_OBSERVED_REL: f64 = 1e-14;
+///
+/// `1.2e-14`, set by `convex_qp_qpilotno` (gh#1180): its rows mix
+/// coefficients from `2e-6` to `5.85e6` and cancel at the optimum's
+/// neighbourhood, so two summation orders differ by a few ulps of the
+/// terms. Without it the corpus reads under `1e-14`.
+const WORST_OBSERVED_REL: f64 = 2e-14;
 
 /// The worst Hessian disagreement the corpus produces, in representable
 /// doubles. See the module docs: the design note forecast bit-identity here
