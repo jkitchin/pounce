@@ -259,6 +259,113 @@ all. Refusals follow the shared check order and return `POUNCE_ERR_*`.
 reference solver (dense, with exact inertia) that also records what it was
 handed; the crate's `custom_linear_solver.rs` test drives it.
 
+### An augmented-system solver, from Rust
+
+`linear_solver=custom` hands your library the **assembled** matrix: Ipopt's
+sparse-linear-solver level. A structured solver that wants the pieces of the
+system instead — `W`, `D_x`, `δ_x`, `J_c`, `J_d`, `D_c`, `D_d`, `δ_c` — and
+owns regularization, inertia repair and refinement of the system it builds
+from them, sits one level up, at Ipopt's custom `AugSystemSolver`. In POUNCE
+that level is the Rust trait
+`pounce_algorithm::linear_solver_provider::LinearSolverProvider`:
+
+```rust
+use pounce_algorithm::linear_solver_provider::*;
+
+struct Structured;
+
+impl LinearSolverProvider for Structured {
+    fn name(&self) -> &'static str { "structured" }      // linear_solver=structured
+
+    // Typed, bounded options: validated, documented and type-dispatched
+    // (C API, CasADi) like the built-in ones.
+    fn register_options(&self, r: &RegisteredOptions) -> Result<(), SolverException> {
+        r.set_registering_category("Structured Linear Solver");
+        r.add_lower_bounded_number_option("structured_penalty", "Primal penalty per block.",
+                                          0.0, false, 0.0, "")?;
+        Ok(())
+    }
+
+    fn aug_system_solver(&self, ctx: &AugSolverContext<'_>)
+        -> Result<Box<dyn AugSystemSolver>, String> {
+        let (penalty, _) = ctx.options.get_numeric_value("structured_penalty", ctx.prefix)
+            .map_err(|e| e.to_string())?;
+        // ctx.metadata: the KKT layout and the integer var/con metadata in
+        // KKT row order, filled before the first factorization.
+        // ctx.standard(ctx.default_backend()): POUNCE's own StdAugSystemSolver,
+        // for a provider that wraps it.
+        Ok(Box::new(MyAugSystemSolver::new(penalty, ctx.metadata.clone())))
+    }
+}
+
+static STRUCTURED: Structured = Structured;
+
+fn main() {
+    // Before the first IpoptApplication is created.
+    register_linear_solver_provider(&STRUCTURED).unwrap();
+    // ... every frontend linked into this binary now accepts linear_solver=structured
+}
+```
+
+The builder calls `aug_system_solver` everywhere it would otherwise build a
+`StdAugSystemSolver`: on the main path; for both inner solvers of the
+limited-memory low-rank wrapper, which it puts around the provider's solver as
+it does around the standard one; and in restoration, inside
+`AugRestoSystemSolver`, where `ctx.prefix` is `"resto."`. The FERAL-only Schur
+and block-parallel paths stand down. The active-set SQP's QP subproblem is not
+an augmented system and keeps the default backend. Registration is refused
+for a name `linear_solver` already has, or for options that collide with
+registered ones. An `Err` from the provider's `validate` refuses the solve
+with `Invalid_Option`. An `Err` from `aug_system_solver` fails it at the
+first factorization. Neither falls back to FERAL.
+
+**From C and CasADi.** Registration is a Rust call, but the C library needs
+no change to carry it. Build your own `libpounce_cinterface` that re-exports
+the stock one and registers your provider when the library loads, then link
+or load it in place of the stock library (the CasADi plugin loads it by that
+name):
+
+```toml
+[lib]
+name = "pounce_cinterface"
+crate-type = ["cdylib"]
+
+[dependencies]
+pounce-cinterface = "…"   # the version you build against
+pounce-algorithm  = "…"
+structured        = { path = "…" }   # your provider
+```
+
+```rust
+pub use pounce_cinterface::*;   // every C entry point, unchanged
+
+extern "C" fn register() {
+    pounce_algorithm::linear_solver_provider::register_linear_solver_provider(
+        &structured::STRUCTURED,
+    )
+    .expect("register structured");
+}
+// Runs when the library is loaded (Linux/ELF; on macOS use the section
+// "__DATA,__mod_init_func", or the `ctor` crate on either).
+#[used]
+#[unsafe(link_section = ".init_array")]
+static REGISTER: extern "C" fn() = register;
+```
+
+`AddIpoptStrOption(prob, "linear_solver", "structured")` then selects it,
+and your typed options are set with `AddIpoptNumOption` and the like, or
+from a CasADi options dict.
+
+**Owning refinement.** A solver that regularizes or repairs the system it
+factors returns a step that leaves a residual on the rows it changed.
+`PdFullSpaceSolver`'s iterative refinement against the unmodified system
+would undo that change, and when the ratio stalls it would escalate quality
+and treat the system as singular. A solver whose
+`AugSystemSolver::owns_refinement()` returns `true` is solved once per
+request and trusted: there is no residual refinement, and an "improve this
+solution" request becomes a fresh solve. The low-rank and restoration
+wrappers pass the answer through. It defaults to `false`.
+
 ## Sessions
 
 `IpoptCreateSolver` consumes a problem handle (and sets the caller's copy to

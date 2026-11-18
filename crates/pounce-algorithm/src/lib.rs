@@ -46,6 +46,7 @@ pub mod iterate_dump;
 pub mod iterates_vector;
 pub mod kkt;
 pub mod line_search;
+pub mod linear_solver_provider;
 pub mod mpcc;
 pub mod mu;
 pub mod output;

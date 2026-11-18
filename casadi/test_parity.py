@@ -656,6 +656,44 @@ def test_metadata_reaches_a_custom_linear_solver():
           f"layout={list(layout)} block={got}")
 
 
+def test_rejected_option_value_raises():
+    """A value POUNCE rejects is an error, as in CasADi's `ipopt` plugin.
+
+    The plugin used to ignore what `AddIpopt*Option` returned, so an invalid
+    value ran the solve on the option's default (PR #1177 review). Each
+    option type is checked, with a valid control so the check cannot pass
+    because the solve fails for some other reason.
+    """
+    nlp = rosenbrock_nlp()
+    bad = {
+        "string value not in the list": {"mu_strategy": "sideways"},
+        "number below its bound": {"tol": -1.0},
+        "integer below its bound": {"max_iter": -5},
+        "unknown keyword": {"no_such_option_anywhere": 1.0},
+    }
+    for label, extra in bad.items():
+        opts = dict(QUIET_POUNCE)
+        opts["pounce"] = dict(QUIET_POUNCE["pounce"], **extra)
+        try:
+            S = ca.nlpsol("S", "pounce", nlp, opts)
+            S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+            raised, msg = False, ""
+        except RuntimeError as e:
+            raised, msg = True, str(e)
+        key = next(iter(extra))
+        check(f"rejected option raises: {label}",
+              raised and "POUNCE rejected option " + key in msg,
+              msg.splitlines()[-1] if msg else "no exception")
+    opts = dict(QUIET_POUNCE)
+    opts["pounce"] = dict(QUIET_POUNCE["pounce"], mu_strategy="adaptive",
+                          tol=1e-9, max_iter=50)
+    S = ca.nlpsol("S", "pounce", nlp, opts)
+    S(x0=[0.5, 0.5], p=1.5, lbg=-ca.inf, ubg=0)
+    check("accepted values still solve",
+          S.stats()["return_status"] == "Solve_Succeeded",
+          S.stats()["return_status"])
+
+
 def test_iteration_callback_step():
     """`iteration_callback_step` throttles the callback; the trace stays whole."""
     nlp = rosenbrock_nlp()
@@ -1665,6 +1703,7 @@ def main():
         test_serialization_round_trip,
         test_metadata_options_are_accepted,
         test_metadata_reaches_a_custom_linear_solver,
+        test_rejected_option_value_raises,
         test_iteration_callback_step,
         test_repeated_solves_do_not_concatenate_the_trace,
         test_final_kkt_errors_in_stats,

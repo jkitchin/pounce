@@ -2407,6 +2407,16 @@ impl IpoptApplication {
                 .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
             return ApplicationReturnStatus::InvalidOption;
         }
+        if let Some(p) = self.linear_solver_provider()
+            && let Err(e) = p.validate(&self.options)
+        {
+            use pounce_common::journalist::JournalCategory;
+            let msg = format!("pounce: linear_solver={}: {e}\n", p.name());
+            eprint!("{msg}");
+            self.journalist
+                .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
+            return ApplicationReturnStatus::InvalidOption;
+        }
 
         // gh#483 follow-up: an option naming a feature pounce does not
         // implement is refused, not shrugged off. See
@@ -3136,10 +3146,11 @@ impl IpoptApplication {
     /// portable `ipopt.opt` over a build flag would cost more than it buys.
     pub fn unimplemented_linear_solver(&self) -> Option<String> {
         let (v, _) = self.options.get_string_value("linear_solver", "").ok()?;
-        ["feral", "ma57", "custom"]
+        (["feral", "ma57", "custom"]
             .iter()
             .all(|ok| !v.eq_ignore_ascii_case(ok))
-            .then_some(v)
+            && crate::linear_solver_provider::find_provider(&v).is_none())
+        .then_some(v)
     }
 
     /// The message for the first option the caller set that names a
@@ -3541,6 +3552,15 @@ impl IpoptApplication {
         )
     }
 
+    /// The registered [`LinearSolverProvider`](crate::linear_solver_provider::LinearSolverProvider)
+    /// that `linear_solver` names, if any.
+    pub fn linear_solver_provider(
+        &self,
+    ) -> Option<&'static dyn crate::linear_solver_provider::LinearSolverProvider> {
+        let (v, _) = self.options.get_string_value("linear_solver", "").ok()?;
+        crate::linear_solver_provider::find_provider(&v)
+    }
+
     /// The message [`Self::unimplemented_linear_solver`] earns, shared by
     /// every frontend so they cannot drift apart.
     pub fn unimplemented_linear_solver_message(value: &str) -> String {
@@ -3548,9 +3568,10 @@ impl IpoptApplication {
             "pounce: linear_solver={value} is not implemented. pounce provides \
              `feral` (pure-Rust sparse symmetric, the default), `ma57` (HSL, \
              in a `--features ma57` build) and `custom` (a shared library named \
-             by custom_linear_solver_lib); the other names in the option's \
-             list come from the upstream Ipopt registry so an ipopt.opt written \
-             for Ipopt still parses. Selecting one used to run FERAL silently, \
+             by custom_linear_solver_lib), plus any augmented-system solver \
+             the embedding build registered as a LinearSolverProvider; the \
+             other names in the option's list come from the upstream Ipopt \
+             registry so an ipopt.opt written for Ipopt still parses. Selecting one used to run FERAL silently, \
              which makes a backend comparison measure nothing — so it is \
              refused instead. Use linear_solver=feral, ma57 or custom."
         )
@@ -6954,7 +6975,12 @@ impl IpoptApplication {
             // integer metadata in KKT order. Published for every solve (and
             // cleared when there is no custom solver) so a re-solve never
             // reads the previous model's layout.
-            let meta = builder.custom_linear_solver.is_some().then(|| {
+            let wants_meta = builder.custom_linear_solver.is_some()
+                || builder
+                    .aug_system_provider
+                    .as_ref()
+                    .is_some_and(|sel| sel.provider.wants_metadata());
+            let meta = wants_meta.then(|| {
                 let mut var = pounce_nlp::tnlp::MetaData::default();
                 let mut con = pounce_nlp::tnlp::MetaData::default();
                 if !a.tnlp().borrow_mut().get_var_con_metadata(&mut var, &mut con) {
@@ -8124,6 +8150,16 @@ impl IpoptApplication {
         // `optimize_tnlp` before any builder is used; here it only leaves
         // the field unset.
         builder.custom_linear_solver = self.custom_linear_solver().and_then(Result::ok);
+        // A registered augmented-system provider (`linear_solver=<its name>`).
+        // It shares the metadata cell with `custom`: one solve, one layout.
+        builder.aug_system_provider = self.linear_solver_provider().map(|provider| {
+            crate::linear_solver_provider::ProviderSelection {
+                provider,
+                options: self.options.clone(),
+                prefix: String::new(),
+                metadata: Arc::clone(&self.custom_kkt_metadata),
+            }
+        });
 
         // `linear_system_scaling` — symmetric scaling of the augmented
         // KKT matrix before factorization. Port of

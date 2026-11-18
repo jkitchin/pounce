@@ -523,6 +523,11 @@ pub struct AlgorithmBuilder {
     /// not called. The FERAL-specific Schur and block-parallel KKT paths
     /// stand down, since they would route around it.
     pub custom_linear_solver: Option<crate::custom_linsol::CustomLinearSolver>,
+    /// A registered [`LinearSolverProvider`](crate::linear_solver_provider::LinearSolverProvider)
+    /// selected by `linear_solver=<name>`: every augmented-system solver this
+    /// builder assembles comes from it (wrapped as the standard one is), and
+    /// the FERAL-specific Schur and block-parallel KKT paths stand down.
+    pub aug_system_provider: Option<crate::linear_solver_provider::ProviderSelection>,
     /// Shared tally of successful linear-solver quality escalations, handed
     /// to the assembled
     /// [`PdFullSpaceSolver`](crate::kkt::pd_full_space_solver::PdFullSpaceSolver)
@@ -1323,6 +1328,7 @@ impl Default for AlgorithmBuilder {
             kkt_schur_summary_sink: None,
             inertia_sink: None,
             custom_linear_solver: None,
+            aug_system_provider: None,
             quality_escalation_counter: None,
         }
     }
@@ -1359,6 +1365,7 @@ impl AlgorithmBuilder {
     fn feral_selected(&self) -> bool {
         matches!(self.linear_solver, LinearSolverChoice::Feral)
             && self.custom_linear_solver.is_none()
+            && self.aug_system_provider.is_none()
     }
 
     /// The partition to build with: an installed one first, then the
@@ -1398,7 +1405,6 @@ impl AlgorithmBuilder {
             }
             None => factory,
         };
-        let backend = factory(self.linear_solver);
         let make_scaling = || -> Option<Box<dyn pounce_linsol::TSymScalingMethod>> {
             match self.linear_system_scaling {
                 LinearSystemScalingChoice::None => None,
@@ -1416,12 +1422,17 @@ impl AlgorithmBuilder {
                 }
             }
         };
-        let linsol = TSymLinearSolver::new(backend, make_scaling(), self.linear_scaling_on_demand);
         let with_inertia_sink = |aug: StdAugSystemSolver| match self.inertia_sink.clone() {
             Some(sink) => aug.with_inertia_sink(sink),
             None => aug,
         };
-        let inner_aug = with_inertia_sink(StdAugSystemSolver::new(linsol));
+        let std_aug = |factory: &mut LinearBackendFactory| {
+            with_inertia_sink(StdAugSystemSolver::new(TSymLinearSolver::new(
+                factory(self.linear_solver),
+                make_scaling(),
+                self.linear_scaling_on_demand,
+            )))
+        };
         // Limited-memory mode publishes the Hessian as a
         // `LowRankUpdateSymMatrix`; wrap the standard solver in the
         // Sherman-Morrison-Woodbury low-rank solver so the augmented
@@ -1431,22 +1442,34 @@ impl AlgorithmBuilder {
             self.hessian_approximation,
             HessianApproxChoice::LimitedMemory
         );
-        let aug_solver: Box<dyn AugSystemSolver> = if is_lbfgs {
+        let aug_solver: Box<dyn AugSystemSolver> = if let Some(sel) =
+            self.aug_system_provider.as_ref()
+        {
+            // A registered provider builds every augmented-system solver;
+            // the low-rank wrapper goes around it as around the standard
+            // one, and the FERAL-only Schur / block paths stand down.
+            let mut provider_aug = || self.provider_aug_solver(sel, &mut factory, &make_scaling);
+            if is_lbfgs {
+                let main = provider_aug();
+                let bypass = provider_aug();
+                Box::new(LowRankAugSystemSolver::with_bypass_solver(main, bypass))
+            } else {
+                provider_aug()
+            }
+        } else if is_lbfgs {
+            let inner_aug = std_aug(&mut factory);
             // A second, independent inner solver for the Hessian-free
             // solves. Both see one W shape each for their whole life, so
             // neither re-runs the backend's symbolic factorization when
             // the other's shape comes round — see
             // `LowRankAugSystemSolver::with_bypass_solver` (gh#730).
-            let bypass_linsol = TSymLinearSolver::new(
-                factory(self.linear_solver),
-                make_scaling(),
-                self.linear_scaling_on_demand,
-            );
+            let bypass_aug = std_aug(&mut factory);
             Box::new(LowRankAugSystemSolver::with_bypass_solver(
                 Box::new(inner_aug),
-                Box::new(with_inertia_sink(StdAugSystemSolver::new(bypass_linsol))),
+                Box::new(bypass_aug),
             ))
         } else if let Some((labels, cfg)) = self.resolved_kkt_blocks() {
+            let inner_aug = std_aug(&mut factory);
             // Block-parallel KKT path (structured-KKT Phase 5b). Same gates as
             // the Schur arm: feral-specific, and the L-BFGS low-rank wrapper
             // owns the (2,2) block, so this is the exact-Hessian path only.
@@ -1461,6 +1484,7 @@ impl AlgorithmBuilder {
                 Box::new(inner_aug)
             }
         } else if let Some((indices, cfg)) = self.kkt_schur.clone() {
+            let inner_aug = std_aug(&mut factory);
             // Block-triangular / Schur KKT path (pounce#180 item 2). Only on the
             // exact-Hessian feral path — the Schur backend is feral-specific,
             // and the L-BFGS low-rank Woodbury wrapper owns the (2,2) block.
@@ -1478,8 +1502,9 @@ impl AlgorithmBuilder {
                 Box::new(inner_aug)
             }
         } else {
-            Box::new(inner_aug)
+            Box::new(std_aug(&mut factory))
         };
+
         // Inertia-correction / Jacobian-regularization constants (#191):
         // registered but previously never read. Defaults equal the
         // registered defaults. `perturb_always_cd` goes through the setter
@@ -1523,6 +1548,50 @@ impl AlgorithmBuilder {
         search_dir.mehrotra_algorithm = self.mehrotra_algorithm;
         search_dir.fast_step_computation = self.fast_step_computation;
         self.build_inner(Some(search_dir))
+    }
+
+    /// One augmented-system solver from the selected provider. Its context
+    /// builds standard solvers exactly as [`Self::build_with_backend`] does.
+    /// A provider that fails is reported and replaced by a solver that fails
+    /// every solve: the run stops rather than using another backend.
+    fn provider_aug_solver(
+        &self,
+        sel: &crate::linear_solver_provider::ProviderSelection,
+        factory: &mut LinearBackendFactory,
+        make_scaling: &dyn Fn() -> Option<Box<dyn pounce_linsol::TSymScalingMethod>>,
+    ) -> Box<dyn AugSystemSolver> {
+        let choice = self.linear_solver;
+        let mut default_backend = || factory(choice);
+        let standard = |backend: Box<dyn SparseSymLinearSolverInterface>| {
+            let aug = StdAugSystemSolver::new(TSymLinearSolver::new(
+                backend,
+                make_scaling(),
+                self.linear_scaling_on_demand,
+            ));
+            match self.inertia_sink.clone() {
+                Some(sink) => aug.with_inertia_sink(sink),
+                None => aug,
+            }
+        };
+        let ctx = crate::linear_solver_provider::AugSolverContext {
+            options: &sel.options,
+            prefix: &sel.prefix,
+            metadata: &sel.metadata,
+            default_backend: RefCell::new(&mut default_backend),
+            standard: &standard,
+        };
+        match sel.provider.aug_system_solver(&ctx) {
+            Ok(aug) => aug,
+            Err(e) => {
+                let msg = format!(
+                    "pounce: linear_solver={}: could not build the augmented-system solver: {e}",
+                    sel.provider.name()
+                );
+                eprintln!("{msg}");
+                tracing::error!(target: "pounce::linsol", "{msg}");
+                Box::new(crate::linear_solver_provider::FailedProviderSolver)
+            }
+        }
     }
 
     /// Phase 5b assembly path for the SQP algorithm. Consults
@@ -1993,6 +2062,7 @@ mod tests {
                             kkt_schur_summary_sink: None,
                             inertia_sink: None,
                             custom_linear_solver: None,
+                            aug_system_provider: None,
                             quality_escalation_counter: None,
                         }
                         .build();

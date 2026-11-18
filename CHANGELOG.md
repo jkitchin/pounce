@@ -25,6 +25,22 @@ changes.
   fixed-variable removal. The CasADi plugin now forwards
   `var/con_{integer,numeric,string}_md` instead of only echoing them. The
   reference solver is `crates/pounce-cinterface/examples/custom_linear_solver/dense_solver.c`.
+- **An augmented-system solver supplied by the embedding build** (PR #1177
+  review). `pounce_algorithm::linear_solver_provider::LinearSolverProvider` is
+  the counterpart of Ipopt's custom `AugSystemSolver`. It receives the system's
+  pieces rather than the assembled matrix, so a structured KKT solver can own
+  regularization and inertia repair. Register it once with
+  `register_linear_solver_provider` and select it with `linear_solver=<name>`
+  from every frontend linked into the binary. It builds every
+  augmented-system solver: the main path, both low-rank inner solvers, and
+  restoration with prefix `resto.`. It registers its own typed, bounded
+  options. It receives `KktMetadata` on the same terms as `custom`.
+- **`AugSystemSolver::owns_refinement()`**, default `false`. When it returns
+  `true`, `PdFullSpaceSolver` solves once and accepts the step, with no
+  residual refinement against the unmodified system and no quality escalation
+  from it. An improve request becomes a fresh solve.
+  `LowRankAugSystemSolver` and restoration's `AugRestoSystemSolver` pass it
+  through.
 - **`nlp_scaling_untagged_constr` gives user scaling a factor for the rows
   the user did not scale.** Under `nlp_scaling_method=user-scaling`, the
   value `gradient-based` gives each constraint row with no user factor the
@@ -68,6 +84,10 @@ changes.
   variable.
 
 ### Fixed
+- **The CasADi plugin no longer ignores an option POUNCE rejects.** A value
+  out of bounds, not among a string option's values, or for an unknown
+  keyword ran the solve on the option's default. Now it raises, as CasADi's
+  `ipopt` plugin does ("Invalid options were detected by Ipopt").
 - **`minimize` detects a convex LP/QP without `jac` whatever the objective's
   constant term** (gh#1169). The structure probe finite-differenced `fun` twice
   at steps sized for general functions, which left `~2.5e-3·|f|` of round-off

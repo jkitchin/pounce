@@ -966,39 +966,55 @@ namespace casadi {
     // the registry first (gh#634) and fall back to the value's own type
     // only for keywords this build does not register, where POUNCE will
     // report the unknown option itself.
+    //
+    // A value POUNCE refuses (out of bounds, not one of a string option's
+    // values, an unknown keyword) is an error, as it is in CasADi's `ipopt`
+    // plugin ("Invalid options were detected by Ipopt"). Ignoring the
+    // return value let the solve run on the option's default.
+    auto check = [&](Bool ok, const std::string& key, const std::string& shown) {
+      casadi_assert(ok, "POUNCE rejected option " + key + "=" + shown + ": " +
+                        (GetPounceOptionType(prob, key.c_str()) == POUNCE_OPTION_UNKNOWN
+                             ? "POUNCE has no option of that name"
+                             : "not a valid value (out of its bounds, or not one of "
+                               "its listed values)"));
+    };
     for (auto&& op : opts_) {
       const std::string& key = op.first;
       const GenericType& val = op.second;
       switch (GetPounceOptionType(prob, key.c_str())) {
         case POUNCE_OPTION_NUMBER:
-          AddIpoptNumOption(prob, CC(key.c_str()), val.to_double());
+          check(AddIpoptNumOption(prob, CC(key.c_str()), val.to_double()), key,
+                str(val.to_double()));
           continue;
         case POUNCE_OPTION_INTEGER:
-          AddIpoptIntOption(prob, CC(key.c_str()), static_cast<int>(val.to_int()));
+          check(AddIpoptIntOption(prob, CC(key.c_str()), static_cast<int>(val.to_int())), key,
+                str(val.to_int()));
           continue;
         case POUNCE_OPTION_STRING: {
           // A bool is how a Python caller most naturally writes POUNCE's
           // yes/no string options.
           std::string v = val.is_bool() ? (static_cast<bool>(val) ? "yes" : "no")
                                         : val.to_string();
-          AddIpoptStrOption(prob, CC(key.c_str()), CC(v.c_str()));
+          check(AddIpoptStrOption(prob, CC(key.c_str()), CC(v.c_str())), key, "'" + v + "'");
           continue;
         }
         default:
           break;
       }
       if (val.is_double() && !val.is_int()) {
-        AddIpoptNumOption(prob, CC(key.c_str()), val.to_double());
+        check(AddIpoptNumOption(prob, CC(key.c_str()), val.to_double()), key,
+              str(val.to_double()));
       } else if (val.is_int() || val.is_bool()) {
         if (val.is_bool()) {
-          AddIpoptStrOption(prob, CC(key.c_str()),
-                            CC(static_cast<bool>(val) ? "yes" : "no"));
+          std::string v = static_cast<bool>(val) ? "yes" : "no";
+          check(AddIpoptStrOption(prob, CC(key.c_str()), CC(v.c_str())), key, "'" + v + "'");
         } else {
-          AddIpoptIntOption(prob, CC(key.c_str()), static_cast<int>(val.to_int()));
+          check(AddIpoptIntOption(prob, CC(key.c_str()), static_cast<int>(val.to_int())), key,
+                str(val.to_int()));
         }
       } else {
-        { std::string v = val.to_string();
-          AddIpoptStrOption(prob, CC(key.c_str()), CC(v.c_str())); }
+        std::string v = val.to_string();
+        check(AddIpoptStrOption(prob, CC(key.c_str()), CC(v.c_str())), key, "'" + v + "'");
       }
     }
     // gh#624 — hand POUNCE the variables that enter nonlinearly, so the
