@@ -561,9 +561,11 @@ impl QpResiduals {
 /// verifier agrees with the second (gh #1183).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RelativeKktResiduals {
-    /// `max(‖Ax − b‖∞, ‖(Gx − h)⁺‖∞) / (1 + max(‖b‖∞, ‖h‖∞))`.
+    /// `max(‖Ax − b‖∞, ‖(Gx − h)⁺‖∞)`, relative to
+    /// `1 + max(‖b‖∞, ‖h‖∞, ‖Ax‖∞, ‖Gx‖∞)`.
     pub primal: f64,
-    /// `‖Px + c + Aᵀy + Gᵀz − z_lb + z_ub‖∞ / (1 + ‖c‖∞)`.
+    /// `‖Px + c + Aᵀy + Gᵀz − z_lb + z_ub‖∞`, relative to
+    /// `1 + max(‖c‖∞, ‖Px‖∞, ‖Aᵀy‖∞, ‖Gᵀz‖∞, ‖z_lb − z_ub‖∞)`.
     pub dual: f64,
     /// `|p − d| / (1 + |p| + |d|)`, with `p = ½xᵀPx + cᵀx` and
     /// `d = −½xᵀPx − bᵀy − hᵀz + lbᵀz_lb − ubᵀz_ub` (finite bounds only).
@@ -602,13 +604,23 @@ impl QpSolution {
         let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |m, a| m.max(a.abs()));
         let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
 
-        let primal_scale = 1.0 + inf_norm(&prob.b).max(inf_norm(&prob.h));
-        let dual_scale = 1.0 + inf_norm(&prob.c);
-
+        // Each residual is read against the largest of the terms it is a
+        // difference of — the OSQP / Clarabel convention — not against the
+        // data vector alone. The difference matters on a model in epigraph
+        // form, which MIPLIB publishes routinely: leo2 has one unit cost (the
+        // objective variable) and its real costs in an equality row, so
+        // `1 + ‖c‖∞ = 2` would read a stationarity error of `5.5e-3` against
+        // terms of size `1e5`+ as `2.8e-3` relative, while the same residual
+        // read against `‖Aᵀy‖∞` is the `1e-8` it is (gh #1183 review).
         let mut ax = vec![0.0; prob.m_eq()];
         prob.a_mul(x, &mut ax);
         let mut gx = vec![0.0; prob.m_ineq()];
         prob.g_mul(x, &mut gx);
+        let primal_scale = 1.0
+            + inf_norm(&prob.b)
+                .max(inf_norm(&prob.h))
+                .max(inf_norm(&ax))
+                .max(inf_norm(&gx));
         let eq = ax
             .iter()
             .zip(&prob.b)
@@ -634,11 +646,20 @@ impl QpSolution {
 
         let mut px = vec![0.0; n];
         prob.p_mul(x, &mut px);
-        let mut r: Vec<f64> = (0..n)
-            .map(|j| px[j] + prob.c[j] - self.z_lb[j] + self.z_ub[j])
+        let mut aty = vec![0.0; n];
+        prob.at_mul(&self.y, &mut aty);
+        let mut gtz = vec![0.0; n];
+        prob.gt_mul(&self.z, &mut gtz);
+        let zb: Vec<f64> = (0..n).map(|j| self.z_lb[j] - self.z_ub[j]).collect();
+        let r: Vec<f64> = (0..n)
+            .map(|j| px[j] + prob.c[j] + aty[j] + gtz[j] - zb[j])
             .collect();
-        prob.at_mul(&self.y, &mut r);
-        prob.gt_mul(&self.z, &mut r);
+        let dual_scale = 1.0
+            + inf_norm(&prob.c)
+                .max(inf_norm(&px))
+                .max(inf_norm(&aty))
+                .max(inf_norm(&gtz))
+                .max(inf_norm(&zb));
 
         let xpx = dot(&px, x);
         let p_obj = 0.5 * xpx + dot(&prob.c, x);

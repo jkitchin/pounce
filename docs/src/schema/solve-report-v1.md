@@ -410,13 +410,15 @@ or convex QP without certifying it and the model was re-solved on the NLP arm;
 omitted from every other solve. Written by the CLI's `--json-output`.
 
 Both answers are measured by one ruler, the five relative KKT residuals
-(primal, dual, duality gap, primal cone, dual cone, each normalized by the data
-it is a residual of; `pounce_convex::RelativeKktResiduals`), on the model as
-declared, and the one whose largest residual is smaller is reported. A tie
-keeps the NLP answer, and a convex answer whose own status is a failure never
-replaces an NLP answer that succeeded. `solution` is the winner's in full:
-point, status, `engine`, `solve_result_num`. This block is the only record of
-the answer that lost.
+(primal, dual, duality gap, primal cone, dual cone, each relative to the
+largest of the terms it is made of; `pounce_convex::RelativeKktResiduals`), on
+the model as declared, and the one whose largest residual is smaller is
+reported. A tie keeps the NLP answer; a convex answer whose own status is a
+failure never replaces an NLP answer that succeeded; and a convex
+`NumericalFailure` never wins. `solution` is the winner's in full: point,
+status, `engine`, `solve_result_num`, `statistics.iteration_count`. This block
+is the only record of the answer that lost. `statistics.total_wallclock_time_secs`
+is the whole run, both solves.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -428,6 +430,8 @@ the answer that lost.
 | `nlp_kkt_error` | float \| omitted | The NLP answer's largest relative KKT residual; omitted when the NLP arm produced no point that maps onto the model. |
 | `nlp_status` | string | Upstream status name of the NLP answer. |
 | `nlp_iterations` | integer | Iterations the NLP solve spent. |
+| `convex_wallclock_time_secs` | float | Wall-clock seconds of the convex attempt. |
+| `nlp_wallclock_time_secs` | float | Wall-clock seconds of the NLP re-solve. |
 
 ## Detail levels
 

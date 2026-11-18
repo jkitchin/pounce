@@ -455,9 +455,9 @@ pub fn recover_duals(prob: &NlProblem, con_map: &[ConRowMap], y: &[f64], z: &[f6
 /// point reported in the `.sol` convention — `x`, per-`.nl`-constraint duals
 /// `lambda`, and bound multipliers `z_l` / `z_u` (both `≥ 0` in the internal
 /// minimize sense, multiplied by the objective `sign` exactly as the NLP path
-/// reports them) — as a [`QpSolution`] on the extracted `qp`, so it can be
-/// measured by the same [`QpSolution::kkt_residuals_above_floor`] the convex
-/// arm's own verdict is judged on (gh #1183).
+/// reports them) — as a [`QpSolution`] on the extracted `qp`, so the NLP
+/// arm's point can be measured by the same ruler as the convex arm's,
+/// [`QpSolution::relative_kkt_residuals`] (gh #1183).
 ///
 /// A multiplier with the wrong sign for the only side a row (or variable)
 /// has is dropped to zero rather than forced onto a row it does not belong
@@ -466,7 +466,7 @@ pub fn recover_duals(prob: &NlProblem, con_map: &[ConRowMap], y: &[f64], z: &[f6
 /// do not describe this model.
 #[allow(clippy::too_many_arguments)]
 pub fn qp_point_from_nl(
-    prob: &NlProblem,
+    minimize: bool,
     con_map: &[ConRowMap],
     qp: &QpProblem,
     x: &[f64],
@@ -481,7 +481,7 @@ pub fn qp_point_from_nl(
     if z_l.is_some_and(|v| v.len() != qp.n) || z_u.is_some_and(|v| v.len() != qp.n) {
         return None;
     }
-    let sign = if prob.minimize { 1.0 } else { -1.0 };
+    let sign = if minimize { 1.0 } else { -1.0 };
     let mut y = vec![0.0; qp.m_eq()];
     let mut z = vec![0.0; qp.m_ineq()];
     for (m, &lam) in con_map.iter().zip(lambda) {
@@ -2025,7 +2025,7 @@ mod tests {
             let z_u: Vec<f64> = sol.z_ub.iter().map(|z| sign * z).collect();
 
             let back = qp_point_from_nl(
-                &prob,
+                prob.minimize,
                 &con_map,
                 &qp,
                 &sol.x,
@@ -2047,7 +2047,7 @@ mod tests {
             // would produce, must read as a failure on that ruler.
             let flipped: Vec<f64> = lambda.iter().map(|l| -l).collect();
             let bad = qp_point_from_nl(
-                &prob,
+                prob.minimize,
                 &con_map,
                 &qp,
                 &sol.x,

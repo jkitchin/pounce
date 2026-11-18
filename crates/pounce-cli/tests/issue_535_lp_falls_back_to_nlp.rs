@@ -40,9 +40,12 @@
 //! convex point is the more accurate (`2.4e-16` relative against the NLP
 //! arm's `5.5e-13`), so these runs now report the convex answer — still
 //! exactly once. The "one verdict" and "no trace of the discarded attempt"
-//! contracts are therefore checked on both outcomes: `afiro` here for a
-//! convex win, NETLIB `capri` (`lp_capri.nl`) for an NLP win. The ranking
+//! contracts are therefore checked on both outcomes: `afiro` at `tol=1e-20`
+//! for a convex win, NETLIB `israel` (`lp_israel.nl`) at `tol=1e-16` for an
+//! NLP win. The ranking
 //! itself is tested in `issue_1183_fallback_keeps_the_better_answer.rs`.
+//! The `qp_tau=0.99` numerical-failure run still reports the NLP answer: a
+//! convex `NumericalFailure` never wins the comparison.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -185,13 +188,17 @@ fn the_fallback_says_so() {
 /// Exactly one verdict, whichever arm reports. The decision is taken above
 /// both arms' status lines, `.sol` writes and JSON reports, so a rerouted
 /// solve leaves no stray result for a log scraper (or the benchmark harness)
-/// to pick up — not the convex one when the NLP answer reports (`capri`), and
+/// to pick up — not the convex one when the NLP answer reports (`israel`), and
 /// not the NLP one when the convex answer does (`afiro` at `tol=1e-20`,
 /// gh #1183).
 #[test]
 fn a_rerouted_solve_reports_one_status_not_two() {
     for (fixture, args, convex_reports) in [
-        ("lp_capri.nl", vec!["solver_selection=auto"], false),
+        (
+            "lp_israel.nl",
+            vec!["solver_selection=auto", "tol=1e-16"],
+            false,
+        ),
         (
             "lp_afiro.nl",
             vec!["solver_selection=auto", UNREACHABLE_TOL],
@@ -229,12 +236,13 @@ fn a_rerouted_solve_reports_one_status_not_two() {
 /// summary is now held back until the convex path is known to be the one that
 /// reports — a rerouted run's stdout is the NLP solve's and nothing else.
 ///
-/// gh #1183: the check runs on `capri`, where the NLP answer reports; on
+/// gh #1183: the check runs on `israel` at `tol=1e-16`, where the NLP answer
+/// reports (and whose presolve reduces the model, so the line would show); on
 /// `afiro` at `tol=1e-20` the convex answer now reports, and its presolve
 /// summary is flushed with it.
 #[test]
 fn a_rerouted_solve_leaves_no_trace_of_the_discarded_attempt() {
-    let (rerouted, stderr, _) = run_on("lp_capri.nl", &["solver_selection=auto"]);
+    let (rerouted, stderr, _) = run_on("lp_israel.nl", &["solver_selection=auto", "tol=1e-16"]);
     assert!(
         stderr.to_lowercase().contains("did not certify"),
         "precondition: this run must reroute; stderr=\n{stderr}"
@@ -386,11 +394,11 @@ fn an_lp_whose_convex_solve_fails_numerically_is_re_solved_on_the_nlp_path() {
     // a proxy that would fail on a correct reroute and pass on a wrong one
     // the day the convex mapping changes again.
     //
-    // gh #1183: and the route now ends in a comparison rather than a
-    // replacement, so "the engine is nlp" stopped being the assertion — at
-    // this tolerance neither arm certifies and the convex point is the more
-    // accurate. What the reroute must guarantee is that the NLP arm *ran*
-    // and that the report says which of the two answered and why.
+    // gh #1183: the route now ends in a comparison rather than a
+    // replacement, so the report also records both candidates. A convex
+    // `NumericalFailure` is the convex arm refusing its own point and never
+    // wins that comparison, however small its residual (here `5.7e-17`
+    // against the NLP arm's `5.5e-13`), so the NLP arm still answers.
     let fb = report
         .convex_fallback
         .as_ref()
@@ -399,14 +407,12 @@ fn an_lp_whose_convex_solve_fails_numerically_is_re_solved_on_the_nlp_path() {
         fb.convex_status, "Error_In_Step_Computation",
         "the convex candidate must be the numerical failure this test triggers"
     );
-    assert!(
-        fb.nlp_kkt_error.is_some(),
-        "the NLP arm must have run and produced a point; stderr=\n{stderr}"
-    );
     assert_eq!(
-        fb.winner, report.solution.engine,
-        "the report's engine is the comparison's winner"
+        report.solution.engine, "nlp",
+        "the verdict must come from the NLP arm, not from the convex point its \
+         own verification refused; stdout=\n{stdout}\nstderr=\n{stderr}"
     );
+    assert_eq!(fb.winner, "nlp");
 }
 
 /// …and the answer it reroutes to is afiro's optimum. This is the part that

@@ -13,21 +13,25 @@
 //!
 //! One fixture per branch of the rule (`main.rs`, `convex_candidate_wins`):
 //!
-//! | fixture | convex | NLP | reports |
-//! |---|---|---|---|
-//! | `lp_etamacro.nl` (NETLIB ETAMACRO) | `7.6e-11`, acceptable | `1.1e-8`, succeeded | convex |
-//! | `lp_capri.nl` (NETLIB CAPRI) | `7.6e-9`, acceptable | `2.7e-10`, succeeded | NLP — the gh #535 guard |
-//! | `lp_afiro.nl` at `tol=1e-20` | `2.4e-16`, iteration limit | `5.5e-13`, search direction too small | convex, with its own failing status |
+//! | fixture | convex | NLP | reports | decided by |
+//! |---|---|---|---|---|
+//! | `lp_etamacro.nl` (NETLIB ETAMACRO) | `7.6e-11`, acceptable | `1.1e-8`, succeeded | convex | accuracy |
+//! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable | `1.5e-16`, succeeded | NLP | accuracy |
+//! | `lp_israel.nl` at `tol=1e-16` | `2.0e-16`, iteration limit | `5.2e-14`, acceptable | NLP | the status guard |
+//! | `lp_afiro.nl` at `tol=1e-20` | `2.4e-16`, iteration limit | `5.5e-13`, search direction too small | convex, its own failing status | accuracy |
 //!
-//! The margins are a decade or more on purpose (NETLIB SHARE2B also reaches
-//! the fallback, at `4.82e-10` against `4.88e-10`, and is not used). The
-//! remaining branch — a convex answer whose own status is a failure never
-//! displaces an NLP *success* — has no fixture that reaches it and is pinned
-//! by the unit tests beside `convex_candidate_wins`.
+//! The `lp_israel` row is the gh #535 shape — a convex failure against an NLP
+//! success — and it is a test of the guard and nothing else: the convex point
+//! is the more accurate by 250×, so without the guard the convex answer
+//! would report. (NETLIB GEN/GEN1, the models gh #535 was built for, no
+//! longer reach the fallback at all: the convex arm certifies both in 20
+//! iterations.) The fourth branch, a convex `NumericalFailure`, is pinned in
+//! `issue_535_lp_falls_back_to_nlp.rs` on `lp_afiro` with `qp_tau=0.99`.
 //!
-//! Both fixtures were produced by `benchmarks/lp/generate_nl.py` from the
-//! NETLIB MPS files and are the only two of 42 small NETLIB models swept that
-//! reach the fallback with a clear winner. Each takes well under a second.
+//! The margins are a decade or more on purpose; NETLIB CAPRI reaches the
+//! fallback at `3.9e-10` against `2.7e-10` and is not used. `lp_etamacro.nl`
+//! was produced by `benchmarks/lp/generate_nl.py` from the NETLIB MPS file.
+//! Every case takes well under a second.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -143,16 +147,23 @@ fn a_more_accurate_convex_answer_is_kept() {
             ((obj - -755.71521774) / 755.71521774).abs() < 1e-6,
             "{leg:?}: objective {obj}"
         );
+        // The run paid for both solves: its wall time is the sum, and each
+        // arm's share is on the record.
+        assert!(fb.convex_wallclock_time_secs > 0.0 && fb.nlp_wallclock_time_secs > 0.0);
+        let total = r.report.statistics.total_wallclock_time_secs;
+        assert!(
+            (total - (fb.convex_wallclock_time_secs + fb.nlp_wallclock_time_secs)).abs() < 1e-9,
+            "{leg:?}: total {total} is not the sum of {fb:?}"
+        );
     }
 }
 
-/// gh #535's case, and the guard against breaking it: when the NLP answer is
-/// the more accurate, it still reports — and the convex candidate it beat is
-/// recorded, not printed.
+/// The other side of accuracy: when the NLP answer is the more accurate, it
+/// still reports — and the convex candidate it beat is recorded, not printed.
 #[test]
 fn a_more_accurate_nlp_answer_still_reports() {
     for leg in [&[][..], &[LBFGS][..]] {
-        let r = run("lp_capri.nl", leg);
+        let r = run("issue880_sigma_uncertified.nl", leg);
         let fb = r
             .report
             .convex_fallback
@@ -163,9 +174,12 @@ fn a_more_accurate_nlp_answer_still_reports() {
             ("nlp", "cvx-qp"),
             "{leg:?}: {fb:?}"
         );
+        // Both usable, so accuracy decides, and the NLP point is a decade
+        // ahead.
+        assert_eq!(fb.convex_status, "Solved_To_Acceptable_Level", "{leg:?}");
         let nlp = fb.nlp_kkt_error.expect("the NLP arm produced a point");
         assert!(
-            nlp * 10.0 < fb.convex_kkt_error,
+            nlp * 5.0 < fb.convex_kkt_error,
             "{leg:?}: precondition — a clear NLP win; {fb:?}"
         );
         assert_eq!(r.report.solution.engine, "nlp", "{leg:?}");
@@ -184,12 +198,48 @@ fn a_more_accurate_nlp_answer_still_reports() {
             !r.stdout.contains("IPM, pounce-convex"),
             "{leg:?}: the losing convex candidate must not print a verdict"
         );
-        // NETLIB CAPRI's published optimum.
-        let obj = r.report.solution.objective;
+        // The run paid for the convex attempt too.
+        let total = r.report.statistics.total_wallclock_time_secs;
         assert!(
-            ((obj - 2690.0129138) / 2690.0129138).abs() < 1e-6,
-            "{leg:?}: objective {obj}"
+            total >= fb.convex_wallclock_time_secs,
+            "{leg:?}: total {total} omits the convex attempt; {fb:?}"
         );
+    }
+}
+
+/// The gh #535 shape and the status guard: the convex arm runs out of
+/// iterations, the NLP arm succeeds, and the NLP answer reports — even though
+/// the convex point is the more accurate by two orders. A failed convex
+/// answer never turns a successful exit into a failed one. Remove the guard
+/// in `convex_candidate_wins` and this reports `cvx-qp` /
+/// `MaximumIterationsExceeded`.
+#[test]
+fn a_failed_convex_answer_never_displaces_an_nlp_success() {
+    for leg in [&[][..], &[LBFGS][..]] {
+        let mut args = vec!["tol=1e-16"];
+        args.extend_from_slice(leg);
+        let r = run("lp_israel.nl", &args);
+        let fb = r
+            .report
+            .convex_fallback
+            .as_ref()
+            .expect("fallback recorded");
+        assert_eq!(fb.convex_status, "Maximum_Iterations_Exceeded", "{leg:?}");
+        assert_eq!(fb.nlp_status, "Solved_To_Acceptable_Level", "{leg:?}");
+        let nlp = fb.nlp_kkt_error.expect("the NLP arm produced a point");
+        assert!(
+            fb.convex_kkt_error * 10.0 < nlp,
+            "{leg:?}: precondition — the convex point must be the more \
+             accurate, or this test does not isolate the guard; {fb:?}"
+        );
+        assert_eq!(fb.winner, "nlp", "{leg:?}: {fb:?}");
+        assert_eq!(r.report.solution.engine, "nlp", "{leg:?}");
+        assert_eq!(
+            r.report.solution.status,
+            ApplicationReturnStatus::SolvedToAcceptableLevel,
+            "{leg:?}"
+        );
+        assert_eq!(r.code, Some(0), "{leg:?}: the run still exits successfully");
     }
 }
 

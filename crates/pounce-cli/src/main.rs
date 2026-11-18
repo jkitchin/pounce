@@ -1523,7 +1523,8 @@ fn real_main() -> ExitCode {
                     if let Some(declined) = stash {
                         convex_challenger = Some(ConvexChallenger {
                             declined,
-                            prob,
+                            minimize: prob.minimize,
+                            nlp_started: std::time::Instant::now(),
                             class,
                             presolve: presolve_qp,
                             convex_opts,
@@ -2717,19 +2718,6 @@ fn real_main() -> ExitCode {
         }
     }
 
-    // Reduced Hessian: print to stderr (informational), mirroring
-    // upstream sIPOPT's RedHessian / Eigenvalues prints in
-    // `SensReducedHessianCalculator.cpp`.
-    //
-    // A square-system promotion produces neither post-solve output, and says
-    // so here rather than leaving a `Solve_Succeeded` run silently without
-    // the `sens_sol_state_1` block or the reduced Hessian it asked for. Both
-    // are computed inside `on_converged` from the interior-point solver's
-    // converged KKT factorization, and the square-system stage answered from
-    // Levenberg–Marquardt on `c(x) = 0` instead: there is no IPM factor at
-    // its point, and its multipliers are the zero ones `∇f = 0` admits, not
-    // the ones a parametric step would be taken from. Nothing is
-    // substituted for either; the warning is also recorded in the report.
     // ---- gh #1183: the LP / convex-QP → NLP fallback picks the more ----
     // ---- accurate of its two candidates                              ----
     //
@@ -2738,9 +2726,11 @@ fn real_main() -> ExitCode {
     // NETLIB WOOD1P / WOODW and MIPLIB leo2 the discarded convex point was the
     // more accurate one — the NLP arm's `Solve_Succeeded` is judged on Ipopt's
     // scaled criteria and certified a point that fails an unscaled check the
-    // convex candidate passes. So both are measured here by one ruler, the
-    // convex verdict's own (`kkt_residuals_above_floor` on the extracted
-    // model), and the smaller error reports.
+    // convex candidate passes. So both are measured here by one ruler — the
+    // five relative KKT residuals of `RelativeKktResiduals`, on the declared
+    // model — and the smaller error reports, subject to the status guards in
+    // `convex_candidate_wins`. (Not the convex stopping rule's
+    // `kkt_residuals_above_floor`: it ranks WOOD1P / WOODW the wrong way.)
     //
     // This sits after every lift above — presolve, elimination, variable
     // scaling, the maximize sign — so the NLP point measured is exactly the
@@ -2772,7 +2762,7 @@ fn real_main() -> ExitCode {
                     None => (None, None),
                 };
                 pounce_cli::qp_extract::qp_point_from_nl(
-                    &ch.prob,
+                    ch.minimize,
                     &ch.declined.con_map,
                     declared,
                     x,
@@ -2789,10 +2779,29 @@ fn real_main() -> ExitCode {
         let convex_kkt_error = convex_rel.max();
         let convex_wins = convex_candidate_wins(
             convex_kkt_error,
-            convex_status_report(ch.declined.sol.status).1,
+            ch.declined.sol.status,
             nlp_kkt_error,
             nlp_solve_succeeded(status),
         );
+        // The replay needs the parsed problem, which the challenger does not
+        // keep (see its memory note): re-read it now, before anything is
+        // committed. If that fails — the file changed or vanished during the
+        // NLP solve — the NLP answer, already in hand, reports instead.
+        let replay_prob = match (&args.problem, convex_wins) {
+            (ProblemSource::NlFile(path), true) => match nl_reader::read_nl_file(path) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!(
+                        "pounce: warning: could not re-read {} to report the convex \
+                         answer ({e}); reporting the NLP answer instead.",
+                        path.display()
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
+        let convex_wins = replay_prob.is_some();
         let convex_engine = ch.engine();
         let convex_status = qp_status_to_ars(ch.declined.sol.status);
         let (winner, loser) = if convex_wins {
@@ -2821,6 +2830,8 @@ fn real_main() -> ExitCode {
             nlp_kkt_error,
             nlp_status: status.upstream_name().to_string(),
             nlp_iterations: solve_stats.iteration_count,
+            convex_wallclock_time_secs: ch.declined.elapsed,
+            nlp_wallclock_time_secs: ch.nlp_started.elapsed().as_secs_f64(),
         };
         if convex_wins {
             // The NLP verdict is not printed at all: release the deferral the
@@ -2839,8 +2850,9 @@ fn real_main() -> ExitCode {
                 _ => None,
             };
             let mut no_stash = None;
+            let replay_prob = replay_prob.expect("convex_wins implies a re-read problem");
             let code = run_convex_qp(
-                &ch.prob,
+                &replay_prob,
                 ch.class,
                 sol_path.as_deref(),
                 ch.presolve,
@@ -2878,6 +2890,19 @@ fn real_main() -> ExitCode {
         convex_fallback_info = Some(info);
     }
 
+    // Reduced Hessian: print to stderr (informational), mirroring
+    // upstream sIPOPT's RedHessian / Eigenvalues prints in
+    // `SensReducedHessianCalculator.cpp`.
+    //
+    // A square-system promotion produces neither post-solve output, and says
+    // so here rather than leaving a `Solve_Succeeded` run silently without
+    // the `sens_sol_state_1` block or the reduced Hessian it asked for. Both
+    // are computed inside `on_converged` from the interior-point solver's
+    // converged KKT factorization, and the square-system stage answered from
+    // Levenberg–Marquardt on `c(x) = 0` instead: there is no IPM factor at
+    // its point, and its multipliers are the zero ones `∇f = 0` admits, not
+    // the ones a parametric step would be taken from. Nothing is
+    // substituted for either; the warning is also recorded in the report.
     let postopt_withheld = square_system_promoted && (sens_active || wants_red_hessian);
     if postopt_withheld {
         let what = match (sens_active, wants_red_hessian) {
@@ -3048,6 +3073,11 @@ fn real_main() -> ExitCode {
         // iteration count, and the stationarity certificate.
         if let Some(out) = &mpcc_outcome {
             builder.set_complementarity(out.report_info());
+        }
+        if let Some(info) = &convex_fallback_info {
+            // gh #1183 review: the run also paid for the convex attempt the
+            // NLP answer beat; report the whole run's wall time.
+            builder.stats.total_wallclock_time_secs += info.convex_wallclock_time_secs;
         }
         builder.convex_fallback = convex_fallback_info.clone();
 
@@ -3623,9 +3653,22 @@ struct DeclinedQp {
 /// Everything the caller needs to call [`run_convex_qp`] again in replay
 /// mode once the NLP arm has answered (gh #1183): the declined candidate and
 /// the arguments of the first call that the replay must repeat.
+///
+/// **Memory.** This is alive for the whole NLP solve, so it holds only what
+/// the comparison needs: the declared QP, its row map and the convex point
+/// (in `declined`). The parsed `NlProblem` is deliberately *not* kept — it
+/// carries the expression trees and is the largest of the three — and is
+/// re-read from the `.nl` only on the path that needs it, a convex win's
+/// replay. The QP the convex solve was handed (with the `bound_relax_factor`
+/// widening) is dropped at the decline. What remains is roughly one copy of
+/// the LP's matrix next to the NLP arm's own model.
 struct ConvexChallenger {
     declined: Box<DeclinedQp>,
-    prob: nl_reader::NlProblem,
+    /// The `.nl`'s objective sense, the one thing the comparison reads from
+    /// the parsed problem (`qp_extract::qp_point_from_nl`).
+    minimize: bool,
+    /// When the NLP arm took over, for its wall time in the report.
+    nlp_started: std::time::Instant,
     class: pounce_cli::dispatch::ProblemClass,
     presolve: bool,
     convex_opts: pounce_convex::QpOptions,
@@ -3664,13 +3707,25 @@ impl ConvexChallenger {
 /// caller gates on — to buy accuracy the NLP answer already certified to its
 /// own criteria. Every case gh #1183 measured has the convex candidate at
 /// `OptimalInaccurate`, which competes on accuracy alone.
+///
+/// And a convex `NumericalFailure` never wins at all. That status *is* the
+/// convex arm's post-solve verification refusing its own point, so ranking
+/// the point as the better answer would overrule the check that rejected it —
+/// and report an error-shaped status (`Error_In_Step_Computation`, `.sol`
+/// code 500) on a model the NLP arm solved, the gh#724 / gh#986 complaint.
+/// Measured on `lp_afiro` at `tol=1e-20 qp_tau=0.99`: the refused point reads
+/// `5.7e-17` against the NLP arm's `5.5e-13`, and the NLP answer reports.
 fn convex_candidate_wins(
     convex_kkt_error: f64,
-    convex_succeeded: bool,
+    convex_status: pounce_convex::QpStatus,
     nlp_kkt_error: Option<f64>,
     nlp_succeeded: bool,
 ) -> bool {
-    if !convex_kkt_error.is_finite() || (nlp_succeeded && !convex_succeeded) {
+    let convex_succeeded = convex_status_report(convex_status).1;
+    if !convex_kkt_error.is_finite()
+        || convex_status == pounce_convex::QpStatus::NumericalFailure
+        || (nlp_succeeded && !convex_succeeded)
+    {
         return false;
     }
     match nlp_kkt_error {
@@ -4375,7 +4430,13 @@ fn run_convex_qp(
         builder.convex_fallback = arbitration.clone();
         note_integer_relaxation(&mut builder.stats);
         note_derivative_check(&mut builder.stats);
-        builder.stats.total_wallclock_time_secs = elapsed;
+        // gh #1183 review: a replayed answer's run also paid for the NLP solve
+        // it beat; the total is the whole run, each arm's share is in
+        // `convex_fallback`.
+        builder.stats.total_wallclock_time_secs = elapsed
+            + arbitration
+                .as_ref()
+                .map_or(0.0, |a| a.nlp_wallclock_time_secs);
         // Real final KKT residuals (from pounce-convex, computed above), so the
         // harness sees genuine convergence numbers rather than zeros -- the
         // verdict's own measurement (gh#984 review, see `verdict`).
@@ -5556,24 +5617,40 @@ mod lp_nlp_fallback_tests {
 #[cfg(test)]
 mod convex_candidate_tests {
     use super::convex_candidate_wins;
+    use pounce_convex::QpStatus::{IterationLimit, NumericalFailure, OptimalInaccurate};
 
     /// The issue's case: both answers usable, the convex one more accurate
     /// (WOOD1P: `1.1e-7` against `1.2e-6`). It reports.
     #[test]
     fn a_more_accurate_convex_answer_wins() {
-        assert!(convex_candidate_wins(1.1e-7, true, Some(1.2e-6), true));
+        assert!(convex_candidate_wins(
+            1.1e-7,
+            OptimalInaccurate,
+            Some(1.2e-6),
+            true
+        ));
     }
 
     /// gh #535's case: the NLP answer is the more accurate. It still reports.
     #[test]
     fn a_more_accurate_nlp_answer_wins() {
-        assert!(!convex_candidate_wins(7.6e-9, true, Some(2.7e-10), true));
+        assert!(!convex_candidate_wins(
+            7.6e-9,
+            OptimalInaccurate,
+            Some(2.7e-10),
+            true
+        ));
     }
 
     /// A tie keeps the gh #535 behaviour rather than flipping on round-off.
     #[test]
     fn a_tie_keeps_the_nlp_answer() {
-        assert!(!convex_candidate_wins(1e-9, true, Some(1e-9), true));
+        assert!(!convex_candidate_wins(
+            1e-9,
+            OptimalInaccurate,
+            Some(1e-9),
+            true
+        ));
     }
 
     /// The guard: a convex answer whose own status is a failure never
@@ -5581,32 +5658,76 @@ mod convex_candidate_tests {
     /// turn exit 0 into a failure.
     #[test]
     fn a_failed_convex_answer_never_displaces_an_nlp_success() {
-        assert!(!convex_candidate_wins(1e-15, false, Some(1e-7), true));
+        assert!(!convex_candidate_wins(
+            1e-15,
+            IterationLimit,
+            Some(1e-7),
+            true
+        ));
     }
 
     /// Both failed (the toguru shape): accuracy decides, and the winner's own
     /// status is what reports.
     #[test]
     fn when_both_fail_accuracy_decides() {
-        assert!(convex_candidate_wins(2e-16, false, Some(5e-13), false));
-        assert!(!convex_candidate_wins(9.4e-3, false, Some(3.1e-6), false));
+        assert!(convex_candidate_wins(
+            2e-16,
+            IterationLimit,
+            Some(5e-13),
+            false
+        ));
+        assert!(!convex_candidate_wins(
+            9.4e-3,
+            IterationLimit,
+            Some(3.1e-6),
+            false
+        ));
     }
 
     /// No NLP point at all, or one that measures as NaN: anything finite on
     /// the convex side is better than nothing.
     #[test]
     fn a_missing_or_nan_nlp_point_loses_to_a_finite_convex_one() {
-        assert!(convex_candidate_wins(1e-3, false, None, false));
-        assert!(convex_candidate_wins(1e-3, true, Some(f64::NAN), true));
+        assert!(convex_candidate_wins(1e-3, IterationLimit, None, false));
+        assert!(convex_candidate_wins(
+            1e-3,
+            OptimalInaccurate,
+            Some(f64::NAN),
+            true
+        ));
+    }
+
+    /// A convex `NumericalFailure` is the convex arm refusing its own point;
+    /// it never wins, however small its residual and however the NLP arm
+    /// fared (`lp_afiro` at `tol=1e-20 qp_tau=0.99`: `5.7e-17` vs `5.5e-13`).
+    #[test]
+    fn a_convex_numerical_failure_never_wins() {
+        assert!(!convex_candidate_wins(
+            5.7e-17,
+            NumericalFailure,
+            Some(5.5e-13),
+            false
+        ));
+        assert!(!convex_candidate_wins(
+            5.7e-17,
+            NumericalFailure,
+            None,
+            false
+        ));
     }
 
     /// A broken convex point never wins, whatever the NLP side looks like.
     #[test]
     fn a_non_finite_convex_answer_never_wins() {
-        assert!(!convex_candidate_wins(f64::NAN, true, None, false));
+        assert!(!convex_candidate_wins(
+            f64::NAN,
+            OptimalInaccurate,
+            None,
+            false
+        ));
         assert!(!convex_candidate_wins(
             f64::INFINITY,
-            true,
+            OptimalInaccurate,
             Some(1.0),
             false
         ));

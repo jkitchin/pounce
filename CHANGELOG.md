@@ -57,17 +57,28 @@ changes.
   (gh#1183).** When the convex arm finishes an LP or convex QP without
   certifying it, `solver_selection=auto` re-solves it on the NLP arm (gh#535)
   and used to report the NLP answer whatever it was. On NETLIB WOOD1P and
-  WOODW that answer failed an independent check at a relative duality gap of
-  `1.2e-6` and `1.4e-6`, while the discarded convex answer passed at `1.1e-7`
-  and `8.3e-7` in a fifth to a third of the iterations. The CLI now measures both
-  answers by their relative KKT residuals (primal, dual, duality gap, primal
-  cone, dual cone) on the declared model and reports the more accurate one,
-  under its own status. A tie keeps the NLP answer, and a convex answer whose
-  status is a failure never replaces an NLP success. The comparison is
-  printed on stderr and recorded in the JSON report's new `convex_fallback`
-  section. Measured: NETLIB WOOD1P, WOODW, PILOT and ETAMACRO now report the
-  convex answer and CAPRI keeps the NLP one. GEN, the model gh#535 was built
-  for, was not re-measured. The measure is
+  WOODW and MIPLIB leo2 that answer failed an independent check at a relative
+  duality gap of `1.2e-6`, `1.4e-6` and a primal residual of `3.3e-5`, while
+  the discarded convex answer passed at `1.1e-7`, `8.3e-7` and `6.6e-8` in a
+  sixteenth to a third of the iterations. The CLI now measures both answers by
+  their relative KKT residuals (primal, dual, duality gap, primal cone, dual
+  cone, each relative to the terms it is made of) on the declared model and
+  reports the more accurate one, under its own status. A tie keeps the NLP
+  answer; a convex answer whose status is a failure never replaces an NLP
+  success; and a convex `NumericalFailure` (the convex arm's own verification
+  refusing its point) never wins. The comparison is printed on stderr and
+  recorded in the JSON report's new `convex_fallback` section, with each
+  arm's wall time; `statistics.total_wallclock_time_secs` is now the whole
+  run's.
+
+  **Visible change:** a model whose convex answer now reports keeps that
+  answer's own status, which is usually `Solved_To_Acceptable_Level` where the
+  NLP answer said `Solve_Succeeded`. AMPL and Pyomo callers see
+  `solve_result_num` go from `0` to `1` (still a success; the exit code stays
+  `0`). Measured: NETLIB WOOD1P, WOODW, PILOT, ETAMACRO and SHARE2B and MIPLIB
+  leo2 now report the convex answer; MIPLIB neos-4763324-toguru keeps the NLP
+  one. NETLIB GEN/GEN1, the models gh#535 was built for, no longer reach the
+  fallback: the convex arm certifies both. The measure is
   `QpSolution::relative_kkt_residuals` in `pounce-convex`.
 - **`minimize` detects a convex LP/QP without `jac` whatever the objective's
   constant term** (gh#1169). The structure probe finite-differenced `fun` twice

@@ -156,6 +156,14 @@ pub struct ConvexFallbackInfo {
     pub nlp_status: String,
     /// The NLP candidate's iteration count.
     pub nlp_iterations: Index,
+    /// Wall-clock seconds the convex attempt took.
+    #[serde(default)]
+    pub convex_wallclock_time_secs: Number,
+    /// Wall-clock seconds the NLP re-solve took. `statistics`'s
+    /// `total_wallclock_time_secs` is the sum of the two, whichever won;
+    /// `statistics.iteration_count` is the winner's alone.
+    #[serde(default)]
+    pub nlp_wallclock_time_secs: Number,
 }
 
 /// The complementarity driver's record: which formulation answered, every
