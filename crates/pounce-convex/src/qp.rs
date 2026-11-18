@@ -542,6 +542,129 @@ impl QpResiduals {
     }
 }
 
+/// The five **relative** KKT residuals of a point on an orthant / box QP —
+/// the standard set first-order LP/QP solvers and benchmark verifiers judge a
+/// returned point by: primal, dual, duality gap, primal cone, dual cone, each
+/// normalized by the data it is a residual of. See
+/// [`QpSolution::relative_kkt_residuals`].
+///
+/// This is a different measurement from [`QpSolution::kkt_residuals_above_floor`]
+/// on purpose, and the two can rank the same pair of points opposite ways.
+/// That one is the stopping rule's: absolute row residuals, per-product
+/// complementarity, both with a finite-precision floor. This one is a
+/// verifier's: residuals relative to the data, and the duality *gap* — the
+/// sum of the complementarity products — rather than their maximum. On NETLIB
+/// WOOD1P the NLP arm's point has every complementarity product below `2.6e-9`
+/// and an aggregate gap of `1.2e-6` relative; the convex arm's has one row off
+/// by `2.2e-7` absolute and a relative gap of `8e-10`. The first measure
+/// prefers the NLP point, the second the convex one, and an independent
+/// verifier agrees with the second (gh #1183).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelativeKktResiduals {
+    /// `max(‖Ax − b‖∞, ‖(Gx − h)⁺‖∞) / (1 + max(‖b‖∞, ‖h‖∞))`.
+    pub primal: f64,
+    /// `‖Px + c + Aᵀy + Gᵀz − z_lb + z_ub‖∞ / (1 + ‖c‖∞)`.
+    pub dual: f64,
+    /// `|p − d| / (1 + |p| + |d|)`, with `p = ½xᵀPx + cᵀx` and
+    /// `d = −½xᵀPx − bᵀy − hᵀz + lbᵀz_lb − ubᵀz_ub` (finite bounds only).
+    pub gap: f64,
+    /// Variable-box violation `‖(lb − x)⁺, (x − ub)⁺‖∞`, relative like
+    /// [`Self::primal`].
+    pub primal_cone: f64,
+    /// Sign violation of the inequality and bound multipliers,
+    /// `‖(−z)⁺, (−z_lb)⁺, (−z_ub)⁺‖∞`, relative like [`Self::dual`].
+    pub dual_cone: f64,
+}
+
+impl RelativeKktResiduals {
+    /// The largest of the five; the point is "verified" at a tolerance `ε`
+    /// when this is below it.
+    pub fn max(&self) -> f64 {
+        self.primal
+            .max(self.dual)
+            .max(self.gap)
+            .max(self.primal_cone)
+            .max(self.dual_cone)
+    }
+}
+
+impl QpSolution {
+    /// The five relative KKT residuals of this point on `prob`; see
+    /// [`RelativeKktResiduals`]. Orthant / box problems only — a conic
+    /// solve's multipliers live in their cones, not in `z ≥ 0`.
+    ///
+    /// A non-finite entry anywhere makes the corresponding residual `NaN`,
+    /// which a caller ranking points must treat as "worst", not compare.
+    #[allow(clippy::needless_range_loop)]
+    pub fn relative_kkt_residuals(&self, prob: &QpProblem) -> RelativeKktResiduals {
+        let n = prob.n;
+        let x = &self.x;
+        let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |m, a| m.max(a.abs()));
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
+
+        let primal_scale = 1.0 + inf_norm(&prob.b).max(inf_norm(&prob.h));
+        let dual_scale = 1.0 + inf_norm(&prob.c);
+
+        let mut ax = vec![0.0; prob.m_eq()];
+        prob.a_mul(x, &mut ax);
+        let mut gx = vec![0.0; prob.m_ineq()];
+        prob.g_mul(x, &mut gx);
+        let eq = ax
+            .iter()
+            .zip(&prob.b)
+            .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        let ineq = gx
+            .iter()
+            .zip(&prob.h)
+            .fold(0.0_f64, |m, (g, h)| m.max((g - h).max(0.0)));
+
+        let mut cone = 0.0_f64;
+        let mut bound_dual = 0.0;
+        for i in 0..n {
+            let (lb, ub) = (prob.lb_of(i), prob.ub_of(i));
+            if lb > -BOUND_INF {
+                cone = cone.max(lb - x[i]);
+                bound_dual += lb * self.z_lb[i];
+            }
+            if ub < BOUND_INF {
+                cone = cone.max(x[i] - ub);
+                bound_dual -= ub * self.z_ub[i];
+            }
+        }
+
+        let mut px = vec![0.0; n];
+        prob.p_mul(x, &mut px);
+        let mut r: Vec<f64> = (0..n)
+            .map(|j| px[j] + prob.c[j] - self.z_lb[j] + self.z_ub[j])
+            .collect();
+        prob.at_mul(&self.y, &mut r);
+        prob.gt_mul(&self.z, &mut r);
+
+        let xpx = dot(&px, x);
+        let p_obj = 0.5 * xpx + dot(&prob.c, x);
+        let d_obj = -0.5 * xpx - dot(&prob.b, &self.y) - dot(&prob.h, &self.z) + bound_dual;
+
+        let neg = |v: &[f64]| v.iter().fold(0.0_f64, |m, &a| if -a > m { -a } else { m });
+        let dual_cone = neg(&self.z).max(neg(&self.z_lb)).max(neg(&self.z_ub));
+
+        // `fold(max)` drops a NaN; carry it explicitly so a broken point
+        // cannot read as a perfect one.
+        let finite = x.iter().all(|v| v.is_finite())
+            && self.y.iter().all(|v| v.is_finite())
+            && self.z.iter().all(|v| v.is_finite())
+            && self.z_lb.iter().all(|v| v.is_finite())
+            && self.z_ub.iter().all(|v| v.is_finite());
+        let guard = |v: f64| if finite { v } else { f64::NAN };
+        RelativeKktResiduals {
+            primal: guard(eq.max(ineq) / primal_scale),
+            dual: guard(inf_norm(&r) / dual_scale),
+            gap: guard((p_obj - d_obj).abs() / (1.0 + p_obj.abs() + d_obj.abs())),
+            primal_cone: guard(cone.max(0.0) / primal_scale),
+            dual_cone: guard(dual_cone / dual_scale),
+        }
+    }
+}
+
 /// How many times the stopping rule's finite-precision cap the reported (and
 /// adjudicated) residuals are read above; see `kkt_residuals_above_floor`.
 const REPORT_FLOOR_FACTOR: f64 = 4.0;

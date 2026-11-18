@@ -451,6 +451,78 @@ pub fn recover_duals(prob: &NlProblem, con_map: &[ConRowMap], y: &[f64], z: &[f6
         .collect()
 }
 
+/// The inverse of [`recover_duals`] and [`recover_bound_mults`]: express a
+/// point reported in the `.sol` convention — `x`, per-`.nl`-constraint duals
+/// `lambda`, and bound multipliers `z_l` / `z_u` (both `≥ 0` in the internal
+/// minimize sense, multiplied by the objective `sign` exactly as the NLP path
+/// reports them) — as a [`QpSolution`] on the extracted `qp`, so it can be
+/// measured by the same [`QpSolution::kkt_residuals_above_floor`] the convex
+/// arm's own verdict is judged on (gh #1183).
+///
+/// A multiplier with the wrong sign for the only side a row (or variable)
+/// has is dropped to zero rather than forced onto a row it does not belong
+/// to: the stationarity residual then carries it, which is the honest place
+/// for a dual-infeasible multiplier to show. Returns `None` when the lengths
+/// do not describe this model.
+#[allow(clippy::too_many_arguments)]
+pub fn qp_point_from_nl(
+    prob: &NlProblem,
+    con_map: &[ConRowMap],
+    qp: &QpProblem,
+    x: &[f64],
+    lambda: &[f64],
+    z_l: Option<&[f64]>,
+    z_u: Option<&[f64]>,
+    status: pounce_convex::QpStatus,
+) -> Option<QpSolution> {
+    if x.len() != qp.n || lambda.len() != con_map.len() {
+        return None;
+    }
+    if z_l.is_some_and(|v| v.len() != qp.n) || z_u.is_some_and(|v| v.len() != qp.n) {
+        return None;
+    }
+    let sign = if prob.minimize { 1.0 } else { -1.0 };
+    let mut y = vec![0.0; qp.m_eq()];
+    let mut z = vec![0.0; qp.m_ineq()];
+    for (m, &lam) in con_map.iter().zip(lambda) {
+        let v = sign * lam;
+        match *m {
+            ConRowMap::Eq { a_row } => y[a_row] = v,
+            ConRowMap::Ineq { upper, lower } => {
+                if v > 0.0
+                    && let Some(r) = upper
+                {
+                    z[r] = v;
+                } else if v < 0.0
+                    && let Some(r) = lower
+                {
+                    z[r] = -v;
+                }
+            }
+        }
+    }
+    let bound = |v: Option<&[f64]>| -> Vec<f64> {
+        v.map(|v| v.iter().map(|&b| (sign * b).max(0.0)).collect())
+            .unwrap_or_else(|| vec![0.0; qp.n])
+    };
+    let x = x.to_vec();
+    let mut px = vec![0.0; qp.n];
+    qp.p_mul(&x, &mut px);
+    let obj = 0.5 * px.iter().zip(&x).map(|(a, b)| a * b).sum::<f64>()
+        + qp.c.iter().zip(&x).map(|(a, b)| a * b).sum::<f64>();
+    Some(QpSolution {
+        status,
+        x,
+        y,
+        z,
+        z_lb: bound(z_l),
+        z_ub: bound(z_u),
+        obj,
+        iters: 0,
+        iterates: Vec::new(),
+    })
+}
+
 /// The next 0-based row index for a constraint block keyed by its RHS
 /// vector's current length.
 fn next_row(rhs: &[f64]) -> usize {
@@ -1892,6 +1964,104 @@ mod tests {
             "x0={} (expected 3)",
             sol.x[0]
         );
+    }
+
+    /// gh #1183: [`qp_point_from_nl`] inverts [`recover_duals`] and the bound
+    /// multiplier convention, so a point reported in the `.sol` convention
+    /// lands back on the QP multipliers it came from — in both objective
+    /// senses, on every row shape (equality, `≥`, `≤`, range) and with an
+    /// active variable bound.
+    ///
+    ///     opt  x0   s.t.  x0 + x1 = 3,  x0 − x1 ≥ −1,  x0 ≤ 2.6,
+    ///                     0.5 ≤ x1 ≤ 10,  0 ≤ x0 ≤ 2.5,  0 ≤ x1 ≤ 4
+    ///
+    /// `max x0` (and `min −x0`) reach `x = (2.5, 0.5)`: the `x0` upper bound,
+    /// the equality and the range row's lower side active.
+    #[test]
+    fn qp_point_from_nl_inverts_the_sol_convention() {
+        for (minimize, coef) in [(true, -1.0), (false, 1.0)] {
+            let prob = NlProblem {
+                src: None,
+                cse_bodies: Vec::new(),
+                complementarity: Vec::new(),
+                n: 2,
+                m: 4,
+                num_obj: 1,
+                minimize,
+                obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
+                obj_linear: vec![(0, coef)],
+                obj_constant: 0.0,
+                con_nonlinear: vec![NlBody::Tree(Expr::Const(0.0)); 4],
+                con_linear: vec![
+                    vec![(0, 1.0), (1, 1.0)],
+                    vec![(0, 1.0), (1, -1.0)],
+                    vec![(0, 1.0)],
+                    vec![(1, 1.0)],
+                ],
+                x_l: vec![0.0, 0.0],
+                x_u: vec![2.5, 4.0],
+                g_l: vec![3.0, -1.0, -2e19, 0.5],
+                g_u: vec![3.0, 2e19, 2.6, 10.0],
+                x0: vec![0.0, 0.0],
+                lambda0: vec![0.0; 4],
+                suffixes: Default::default(),
+                imported_funcs: Vec::new(),
+                ampl_options: Vec::new(),
+                nl_counts: None,
+                n_discrete: None,
+                var_names: Vec::new(),
+                con_names: Vec::new(),
+            };
+            let (qp, con_map, _) = extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
+            let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
+            assert_eq!(sol.status, QpStatus::Optimal, "minimize={minimize}");
+            assert!((sol.x[0] - 2.5).abs() < 1e-6 && (sol.x[1] - 0.5).abs() < 1e-6);
+
+            // What the NLP arm reports: `.sol` row duals, and bound
+            // multipliers multiplied by the objective sign.
+            let sign = if minimize { 1.0 } else { -1.0 };
+            let lambda = recover_duals(&prob, &con_map, &sol.y, &sol.z);
+            let z_l: Vec<f64> = sol.z_lb.iter().map(|z| sign * z).collect();
+            let z_u: Vec<f64> = sol.z_ub.iter().map(|z| sign * z).collect();
+
+            let back = qp_point_from_nl(
+                &prob,
+                &con_map,
+                &qp,
+                &sol.x,
+                &lambda,
+                Some(&z_l),
+                Some(&z_u),
+                QpStatus::Optimal,
+            )
+            .expect("lengths match");
+            let close = |a: &[f64], b: &[f64]| a.iter().zip(b).all(|(p, q)| (p - q).abs() < 1e-7);
+            assert!(close(&back.y, &sol.y), "y {:?} vs {:?}", back.y, sol.y);
+            assert!(close(&back.z, &sol.z), "z {:?} vs {:?}", back.z, sol.z);
+            assert!(close(&back.z_lb, &sol.z_lb), "minimize={minimize}");
+            assert!(close(&back.z_ub, &sol.z_ub), "minimize={minimize}");
+            // And so it measures as the point it is: verified.
+            let r = back.relative_kkt_residuals(&qp);
+            assert!(r.max() < 1e-7, "minimize={minimize}: {r:?}");
+            // A multiplier with the wrong sign, as a sign-convention slip
+            // would produce, must read as a failure on that ruler.
+            let flipped: Vec<f64> = lambda.iter().map(|l| -l).collect();
+            let bad = qp_point_from_nl(
+                &prob,
+                &con_map,
+                &qp,
+                &sol.x,
+                &flipped,
+                Some(&z_l),
+                Some(&z_u),
+                QpStatus::Optimal,
+            )
+            .expect("lengths match");
+            assert!(
+                bad.relative_kkt_residuals(&qp).max() > 1e-2,
+                "minimize={minimize}"
+            );
+        }
     }
 
     /// Inequality dual sign/magnitude. min x0² s.t. x0 ≥ 1 (a one-sided

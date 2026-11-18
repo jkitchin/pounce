@@ -53,6 +53,22 @@ changes.
   variable.
 
 ### Fixed
+- **The LP → NLP fallback no longer throws away the more accurate answer
+  (gh#1183).** When the convex arm finishes an LP or convex QP without
+  certifying it, `solver_selection=auto` re-solves it on the NLP arm (gh#535)
+  and used to report the NLP answer whatever it was. On NETLIB WOOD1P and
+  WOODW that answer failed an independent check at a relative duality gap of
+  `1.2e-6` and `1.4e-6`, while the discarded convex answer passed at `1.1e-7`
+  and `8.3e-7` in a fifth to a third of the iterations. The CLI now measures both
+  answers by their relative KKT residuals (primal, dual, duality gap, primal
+  cone, dual cone) on the declared model and reports the more accurate one,
+  under its own status. A tie keeps the NLP answer, and a convex answer whose
+  status is a failure never replaces an NLP success. The comparison is
+  printed on stderr and recorded in the JSON report's new `convex_fallback`
+  section. Measured: NETLIB WOOD1P, WOODW, PILOT and ETAMACRO now report the
+  convex answer and CAPRI keeps the NLP one. GEN, the model gh#535 was built
+  for, was not re-measured. The measure is
+  `QpSolution::relative_kkt_residuals` in `pounce-convex`.
 - **`minimize` detects a convex LP/QP without `jac` whatever the objective's
   constant term** (gh#1169). The structure probe finite-differenced `fun` twice
   at steps sized for general functions, which left `~2.5e-3·|f|` of round-off

@@ -111,6 +111,51 @@ pub struct SolveReport {
     /// deserializes unchanged.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub complementarity: Option<ComplementarityInfo>,
+    /// The two candidates of an LP / convex-QP → NLP fallback (gh #535,
+    /// gh #1183), when one ran. `None` on every other solve.
+    ///
+    /// Additive; older `pounce.solve-report/v1` JSON without this field
+    /// deserializes unchanged.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub convex_fallback: Option<ConvexFallbackInfo>,
+}
+
+/// What the LP / convex-QP → NLP fallback compared (gh #1183).
+///
+/// When the convex arm finishes an LP or convex QP without certifying it,
+/// `solver_selection=auto` re-solves the model on the NLP arm (gh #535). The
+/// two answers are then measured by one ruler — the five relative KKT
+/// residuals (primal, dual, duality gap, primal cone, dual cone) of
+/// `pounce_convex::RelativeKktResiduals`, on the model as declared — and the
+/// one with the smaller largest residual is reported. A convex answer whose
+/// own status is a failure never displaces an NLP answer that succeeded. Before gh #1183 the NLP
+/// answer replaced the convex one unconditionally, and on NETLIB WOOD1P /
+/// WOODW and MIPLIB leo2 it was the less accurate of the two.
+///
+/// `solution.engine` names the winner too; this section adds the loser and
+/// both errors, so a reader can see what was discarded and by how much.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConvexFallbackInfo {
+    /// Engine whose answer was reported: `"cvx-qp"`, `"qp-active-set"`,
+    /// `"nlp"`, `"sqp-active-set"` or `"square-lm"`.
+    pub winner: String,
+    /// The engine whose answer was discarded.
+    pub loser: String,
+    /// The convex candidate's relative KKT error
+    /// (`RelativeKktResiduals::max`, declared model).
+    pub convex_kkt_error: Number,
+    /// The convex candidate's status, upstream spelling.
+    pub convex_status: String,
+    /// The convex candidate's iteration count.
+    pub convex_iterations: Index,
+    /// The NLP candidate's KKT error on the same measure. Absent when the NLP
+    /// arm produced no point that maps onto the extracted model.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub nlp_kkt_error: Option<Number>,
+    /// The NLP candidate's status, upstream spelling.
+    pub nlp_status: String,
+    /// The NLP candidate's iteration count.
+    pub nlp_iterations: Index,
 }
 
 /// The complementarity driver's record: which formulation answered, every
@@ -968,6 +1013,7 @@ pub struct ReportBuilder {
     pub linear_solver: Option<LinearSolverSummaryInfo>,
     pub second_opinion: Option<SecondOpinionInfo>,
     pub complementarity: Option<ComplementarityInfo>,
+    pub convex_fallback: Option<ConvexFallbackInfo>,
 }
 
 impl ReportBuilder {
@@ -1008,6 +1054,7 @@ impl ReportBuilder {
             iterations: Vec::new(),
             linear_solver: None,
             second_opinion: None,
+            convex_fallback: None,
             complementarity: None,
         }
     }
@@ -1135,6 +1182,7 @@ impl ReportBuilder {
             linear_solver: self.linear_solver,
             second_opinion: self.second_opinion,
             complementarity: self.complementarity,
+            convex_fallback: self.convex_fallback,
         }
     }
 }

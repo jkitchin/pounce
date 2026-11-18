@@ -33,6 +33,16 @@
 //! failures differ only in which one the convex path happens to hit first, so
 //! the tests here assert the **reroute**, not the failure-mode string that
 //! produced it.
+//!
+//! gh #1183 changed what the reroute *reports*. The convex candidate is no
+//! longer thrown away: both answers are measured on one ruler and the more
+//! accurate one reports. On `afiro` at `tol=1e-20` both arms fail and the
+//! convex point is the more accurate (`2.4e-16` relative against the NLP
+//! arm's `5.5e-13`), so these runs now report the convex answer — still
+//! exactly once. The "one verdict" and "no trace of the discarded attempt"
+//! contracts are therefore checked on both outcomes: `afiro` here for a
+//! convex win, NETLIB `capri` (`lp_capri.nl`) for an NLP win. The ranking
+//! itself is tested in `issue_1183_fallback_keeps_the_better_answer.rs`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -172,17 +182,45 @@ fn the_fallback_says_so() {
     );
 }
 
-/// Exactly one verdict. The decision is taken above the convex status line, the
-/// `.sol` write and the JSON report, so a rerouted solve leaves no stray convex
-/// result for a log scraper (or the benchmark harness) to pick up.
+/// Exactly one verdict, whichever arm reports. The decision is taken above
+/// both arms' status lines, `.sol` writes and JSON reports, so a rerouted
+/// solve leaves no stray result for a log scraper (or the benchmark harness)
+/// to pick up — not the convex one when the NLP answer reports (`capri`), and
+/// not the NLP one when the convex answer does (`afiro` at `tol=1e-20`,
+/// gh #1183).
 #[test]
 fn a_rerouted_solve_reports_one_status_not_two() {
-    let (stdout, stderr, _) = run(&["solver_selection=auto", UNREACHABLE_TOL]);
-    assert!(
-        convex_verdict_lines(&stdout).is_empty(),
-        "a rerouted solve must not also print the convex status line; \
-         stdout=\n{stdout}\nstderr=\n{stderr}"
-    );
+    for (fixture, args, convex_reports) in [
+        ("lp_capri.nl", vec!["solver_selection=auto"], false),
+        (
+            "lp_afiro.nl",
+            vec!["solver_selection=auto", UNREACHABLE_TOL],
+            true,
+        ),
+    ] {
+        let (stdout, stderr, _) = run_on(fixture, &args);
+        assert!(
+            stderr.to_lowercase().contains("did not certify"),
+            "{fixture}: precondition — this run must reroute; stderr=\n{stderr}"
+        );
+        let count = |prefix: &str| stdout.lines().filter(|l| l.starts_with(prefix)).count();
+        assert_eq!(
+            count("EXIT:"),
+            1,
+            "{fixture}: one EXIT line; stdout=\n{stdout}"
+        );
+        assert_eq!(
+            count("Status:"),
+            1,
+            "{fixture}: one Status line; stdout=\n{stdout}"
+        );
+        assert_eq!(
+            convex_verdict_lines(&stdout).len(),
+            usize::from(convex_reports),
+            "{fixture}: the convex status line appears iff the convex answer \
+             reports; stdout=\n{stdout}\nstderr=\n{stderr}"
+        );
+    }
 }
 
 /// …and nothing else from the discarded attempt either. `afiro` reduces under
@@ -190,9 +228,13 @@ fn a_rerouted_solve_reports_one_status_not_two() {
 /// solve, so a rerouted run left one line of a solve that never reported. The
 /// summary is now held back until the convex path is known to be the one that
 /// reports — a rerouted run's stdout is the NLP solve's and nothing else.
+///
+/// gh #1183: the check runs on `capri`, where the NLP answer reports; on
+/// `afiro` at `tol=1e-20` the convex answer now reports, and its presolve
+/// summary is flushed with it.
 #[test]
 fn a_rerouted_solve_leaves_no_trace_of_the_discarded_attempt() {
-    let (rerouted, stderr, _) = run(&["solver_selection=auto", UNREACHABLE_TOL]);
+    let (rerouted, stderr, _) = run_on("lp_capri.nl", &["solver_selection=auto"]);
     assert!(
         stderr.to_lowercase().contains("did not certify"),
         "precondition: this run must reroute; stderr=\n{stderr}"
@@ -204,12 +246,20 @@ fn a_rerouted_solve_leaves_no_trace_of_the_discarded_attempt() {
     );
 
     // The other half: held back, not lost. A convex solve that *does* report
-    // still says what presolve did.
+    // still says what presolve did — directly, and after winning the
+    // gh #1183 comparison.
     let (kept, _, _) = run(&["solver_selection=auto"]);
     assert!(
         kept.contains("Presolve:"),
         "a convex solve that reports must still print its presolve summary; \
          stdout=\n{kept}"
+    );
+    let (won, _, _) = run(&["solver_selection=auto", UNREACHABLE_TOL]);
+    assert_eq!(
+        won.lines().filter(|l| l.starts_with("Presolve:")).count(),
+        1,
+        "a convex answer that wins the comparison prints its presolve summary \
+         once; stdout=\n{won}"
     );
 }
 
@@ -325,20 +375,37 @@ fn an_lp_whose_convex_solve_fails_numerically_is_re_solved_on_the_nlp_path() {
         "an LP the convex path could not verify must reroute, whichever way it \
          failed; stdout=\n{stdout}\nstderr=\n{stderr}"
     );
-    assert!(
-        convex_verdict_lines(&stdout).is_empty(),
-        "the discarded convex attempt must not also report; stdout=\n{stdout}"
+    assert_eq!(
+        stdout.lines().filter(|l| l.starts_with("Status:")).count(),
+        1,
+        "whichever candidate reports, it reports once; stdout=\n{stdout}"
     );
     // gh#986 review: assert the *route*, not a status. The convex failure
     // now maps to `ErrorInStepComputation`, which the NLP arm can also
     // legitimately return, so "the status is not ErrorInStepComputation" was
     // a proxy that would fail on a correct reroute and pass on a wrong one
-    // the day the convex mapping changes again. The report names the engine
-    // that produced the verdict.
+    // the day the convex mapping changes again.
+    //
+    // gh #1183: and the route now ends in a comparison rather than a
+    // replacement, so "the engine is nlp" stopped being the assertion — at
+    // this tolerance neither arm certifies and the convex point is the more
+    // accurate. What the reroute must guarantee is that the NLP arm *ran*
+    // and that the report says which of the two answered and why.
+    let fb = report
+        .convex_fallback
+        .as_ref()
+        .unwrap_or_else(|| panic!("the reroute must record both candidates; stdout=\n{stdout}"));
     assert_eq!(
-        report.solution.engine, "nlp",
-        "the verdict must come from the NLP arm the reroute hands the model \
-         to, not from the discarded convex attempt; stdout=\n{stdout}\nstderr=\n{stderr}"
+        fb.convex_status, "Error_In_Step_Computation",
+        "the convex candidate must be the numerical failure this test triggers"
+    );
+    assert!(
+        fb.nlp_kkt_error.is_some(),
+        "the NLP arm must have run and produced a point; stderr=\n{stderr}"
+    );
+    assert_eq!(
+        fb.winner, report.solution.engine,
+        "the report's engine is the comparison's winner"
     );
 }
 

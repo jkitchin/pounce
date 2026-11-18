@@ -68,7 +68,8 @@ even while the rest of the solver is under churn.
   "iterations":    [ ... ],  // optional, omitted when empty
   "linear_solver": { ... },  // optional, omitted when backend did not report
   "second_opinion": { ... }, // optional, omitted when no ladder ran
-  "complementarity": { ... } // optional, omitted without declared pairs
+  "complementarity": { ... }, // optional, omitted without declared pairs
+  "convex_fallback": { ... }  // optional, omitted unless the LP/QP → NLP fallback ran
 }
 ```
 
@@ -400,6 +401,33 @@ one whose point was reported; `total_iterations` is what the run cost.
 | `natural_residual` | float \| omitted | How complementary the reported point is: the largest `min(|G|, |H|)` over its pairs, in the units of the pair sides. Near `tol` for a point complementary to `tol`; near `sqrt(τ)` for one a relaxed stage left at a nearly biactive pair, even while `max_abs_product` reads `τ` and `certificate.class` reads `S`. Omitted if it could not be evaluated, and on reports written before the field existed. |
 | `polish` | object \| omitted | The branch re-solve of a nearly biactive answer, present when it ran (the answer was feasible and accepted, and its `natural_residual` exceeded `10·tol`). Fields: `taken` (the re-solved point replaced the answer), `residual_before`, `residual_after` (`null` if not measured), `reason` (why it was not taken, else `null`). See [Complementarity Constraints](../complementarity.md). |
 | `polish_threshold` | float \| omitted | The `natural_residual` above which the driver runs the branch re-solve (`10·tol`). A residual at or below it was left alone on purpose. Omitted on reports written before the field existed. |
+
+### `convex_fallback` (object, optional)
+
+The two answers of the LP / convex-QP → NLP fallback (gh#535, gh#1183).
+Present only when, under `solver_selection=auto`, the convex arm finished an LP
+or convex QP without certifying it and the model was re-solved on the NLP arm;
+omitted from every other solve. Written by the CLI's `--json-output`.
+
+Both answers are measured by one ruler, the five relative KKT residuals
+(primal, dual, duality gap, primal cone, dual cone, each normalized by the data
+it is a residual of; `pounce_convex::RelativeKktResiduals`), on the model as
+declared, and the one whose largest residual is smaller is reported. A tie
+keeps the NLP answer, and a convex answer whose own status is a failure never
+replaces an NLP answer that succeeded. `solution` is the winner's in full:
+point, status, `engine`, `solve_result_num`. This block is the only record of
+the answer that lost.
+
+| Field | Type | Notes |
+|---|---|---|
+| `winner` | string | Engine whose answer was reported (`cvx-qp`, `qp-active-set`, `nlp`, `sqp-active-set`, `square-lm`); equals `solution.engine`. |
+| `loser` | string | Engine whose answer was discarded. |
+| `convex_kkt_error` | float | The convex answer's largest relative KKT residual. |
+| `convex_status` | string | Upstream status name of the convex answer. |
+| `convex_iterations` | integer | Iterations the convex solve spent. |
+| `nlp_kkt_error` | float \| omitted | The NLP answer's largest relative KKT residual; omitted when the NLP arm produced no point that maps onto the model. |
+| `nlp_status` | string | Upstream status name of the NLP answer. |
+| `nlp_iterations` | integer | Iterations the NLP solve spent. |
 
 ## Detail levels
 
