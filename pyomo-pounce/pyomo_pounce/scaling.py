@@ -157,8 +157,8 @@ def warn_if_no_suffix(model):
 
 
 def problem_scaling(model, con_names, con_alias, var_names):
-    """Suffix -> `(obj_factor, g_scaling, x_scaling)` for
-    `Problem.set_problem_scaling`.
+    """Suffix -> `(obj_factor, g_scaling, x_scaling, g_scaling_given)`
+    for `Problem.set_problem_scaling`.
 
     Used by the in-process sensitivity path, which hands pounce
     evaluator callbacks rather than an `.nl` file and so has no suffix
@@ -169,8 +169,10 @@ def problem_scaling(model, con_names, con_alias, var_names):
     maps an original constraint's name to the clone name the
     declared-parameter surgery gave it, exactly as in
     `_warm_start_from_suffixes`. Rows and columns the Suffix does not
-    mention stay at 1.0. Returns ``None`` when the model declares no
-    Suffix.
+    mention stay at 1.0, and `g_scaling_given` is ``False`` for those
+    rows, which is how the `.nl` path reports a row with no suffix entry
+    to `nlp_scaling_untagged_constr`. Returns ``None`` when the model
+    declares no Suffix.
 
     Variables are translated here rather than refused (gh #486 stage
     3): the core applies them as a change of variables and every
@@ -191,6 +193,7 @@ def problem_scaling(model, con_names, con_alias, var_names):
     obj_factor, constraints, variables = parsed
     con_row = {name: i for i, name in enumerate(con_names)}
     g_scaling = [1.0] * len(con_names)
+    g_given = [False] * len(con_names)
     for cd, factor in constraints.items():
         # A constraint the writer dropped (trivially satisfied, or
         # absorbed into a bound) has no row to scale; skipping it
@@ -198,6 +201,7 @@ def problem_scaling(model, con_names, con_alias, var_names):
         row = con_row.get(con_alias.get(cd.name, cd.name))
         if row is not None:
             g_scaling[row] = factor
+            g_given[row] = True
 
     var_col = {name: i for i, name in enumerate(var_names)}
     x_scaling = None
@@ -208,4 +212,4 @@ def problem_scaling(model, con_names, con_alias, var_names):
         if x_scaling is None:
             x_scaling = [1.0] * len(var_names)
         x_scaling[col] = factor
-    return obj_factor, g_scaling, x_scaling
+    return obj_factor, g_scaling, x_scaling, g_given
