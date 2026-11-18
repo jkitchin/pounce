@@ -126,8 +126,9 @@ pub struct SolveReport {
 /// `solver_selection=auto` re-solves the model on the NLP arm (gh #535). The
 /// two answers are then measured by one ruler — the five relative KKT
 /// residuals (primal, dual, duality gap, primal cone, dual cone) of
-/// `pounce_convex::RelativeKktResiduals`, on the model as declared — and the
-/// one with the smaller largest residual is reported. A convex answer whose
+/// `pounce_convex::RelativeKktResiduals`, on the model as declared, both read
+/// against one shared `RelativeKktScale` — and the one with the smaller
+/// largest residual is reported. A convex answer whose
 /// own status is a failure never displaces an NLP answer that succeeded. Before gh #1183 the NLP
 /// answer replaced the convex one unconditionally, and on NETLIB WOOD1P /
 /// WOODW and MIPLIB leo2 it was the less accurate of the two.
@@ -142,7 +143,8 @@ pub struct ConvexFallbackInfo {
     /// The engine whose answer was discarded.
     pub loser: String,
     /// The convex candidate's relative KKT error
-    /// (`RelativeKktResiduals::max`, declared model).
+    /// (`RelativeKktResiduals::max`, declared model, read against the scale
+    /// shared with the NLP candidate).
     pub convex_kkt_error: Number,
     /// The convex candidate's status, upstream spelling.
     pub convex_status: String,

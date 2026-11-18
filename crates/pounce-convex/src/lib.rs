@@ -111,7 +111,7 @@ pub use psd_certificate::{
 };
 pub use qp::{
     BoxScreen, NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus,
-    RelativeKktResiduals, Triplet, screen_variable_box,
+    RelativeKktResiduals, RelativeKktScale, Triplet, screen_variable_box,
 };
 pub use report::{certificate_scale, qp_status_to_ars, reported_kkt_residuals};
 pub use sensitivity::{
