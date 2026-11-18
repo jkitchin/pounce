@@ -955,14 +955,16 @@ use std::time::Instant;
 /// user factors at all. The interior-point method and the square-system
 /// stage both resolve the option here.
 pub(crate) fn untagged_constr_scaling(options: &OptionsList) -> UntaggedConstrScaling {
-    let read = |name: &str| {
+    let read_str = |key: &str| {
         options
-            .get_string_value(name, "")
+            .get_string_value(key, "")
             .ok()
             .and_then(|(v, found)| found.then_some(v))
     };
-    let user_scaling = read("nlp_scaling_method").is_some_and(|v| v == "user-scaling");
-    if user_scaling && read("nlp_scaling_untagged_constr").is_some_and(|v| v == "gradient-based") {
+    let user_scaling = read_str("nlp_scaling_method").is_some_and(|v| v == "user-scaling");
+    if user_scaling
+        && read_str("nlp_scaling_untagged_constr").is_some_and(|v| v == "gradient-based")
+    {
         UntaggedConstrScaling::GradientBased
     } else {
         UntaggedConstrScaling::None
