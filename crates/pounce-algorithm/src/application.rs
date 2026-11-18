@@ -931,7 +931,9 @@ use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_linsol::summary::LinearSolverSummary;
 use pounce_nlp::alg_types::SolverReturn;
 use pounce_nlp::derivative_test::{DerivativeTest, DerivativeTestOptions};
-use pounce_nlp::orig_ipopt_nlp::{ConstObjScaling, OrigIpoptNlp, ScalingMethod};
+use pounce_nlp::orig_ipopt_nlp::{
+    ConstObjScaling, OrigIpoptNlp, ScalingMethod, UntaggedConstrScaling,
+};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::{
@@ -946,6 +948,28 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+/// `nlp_scaling_untagged_constr` as the solve will apply it. It belongs to
+/// `nlp_scaling_method=user-scaling` alone: under `curvature-based` every
+/// row already has a computed factor, and the other methods do not read
+/// user factors at all. The interior-point method and the square-system
+/// stage both resolve the option here.
+pub(crate) fn untagged_constr_scaling(options: &OptionsList) -> UntaggedConstrScaling {
+    let read_str = |key: &str| {
+        options
+            .get_string_value(key, "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+    };
+    let user_scaling = read_str("nlp_scaling_method").is_some_and(|v| v == "user-scaling");
+    if user_scaling
+        && read_str("nlp_scaling_untagged_constr").is_some_and(|v| v == "gradient-based")
+    {
+        UntaggedConstrScaling::GradientBased
+    } else {
+        UntaggedConstrScaling::None
+    }
+}
 
 /// Smallest `n + m` at which `algorithm=active-set-sqp` starts from the
 /// interior point; see [`IpoptApplication::sqp_auto_handover`]. The fixture
@@ -3265,6 +3289,7 @@ impl IpoptApplication {
             "qp_hsde",
             "qp_equilibrate",
             "qp_crossover",
+            "qp_certificate",
         ];
         let name = CONVEX_ONLY.iter().find(|name| {
             crate::unimplemented_options::set_to_a_non_default(
@@ -3281,7 +3306,8 @@ impl IpoptApplication {
              a model that classifies as one); the `qp_*` options themselves are \
              read only there and by `pounce.solve_qp`. From Python, \
              `pounce.solve_qp` drives the engine directly and takes `qp_presolve`, \
-             `qp_reg`, `qp_hsde`, `qp_equilibrate` and `qp_crossover` as keyword \
+             `qp_reg`, `qp_hsde`, `qp_equilibrate`, `qp_crossover` and \
+             `qp_certificate` as keyword \
              arguments (presolve is off there unless asked for). \
              On this path, `solver_selection=qp-active-set` \
              (or `algorithm=active-set-sqp`) is the nearest thing, tuned by the \
@@ -6857,6 +6883,7 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or_else(|| "gradient-based".to_string());
+        orig_nlp.set_untagged_constr_scaling(untagged_constr_scaling(&self.options));
         let scaling_method = match scaling_method.as_str() {
             "none" => ScalingMethod::None,
             "gradient-based" => ScalingMethod::GradientBased,

@@ -6391,7 +6391,10 @@ impl TNLP for NlTnlp {
     /// AMPL suffix vectors default to **0** for components the model did
     /// not tag, and 0 is not a usable scale factor. A zero entry is
     /// therefore read as "not tagged" and becomes 1.0, which is what
-    /// "unlisted components are unscaled" means. Per-variable factors
+    /// "unlisted components are unscaled" means. Such a constraint row is
+    /// also cleared in `g_scaling_given`, which
+    /// `nlp_scaling_untagged_constr=gradient-based` reads to give the row
+    /// a gradient-based factor instead. Per-variable factors
     /// are passed straight through: `OrigIpoptNlp` does not model them
     /// and refuses the solve with a message rather than dropping them.
     fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
@@ -6466,17 +6469,30 @@ impl TNLP for NlTnlp {
         } else if computed.is_none() {
             *req.use_x_scaling = false;
         }
+        // A row is given a factor when its suffix entry is nonzero, or when
+        // the curvature scheme computed one for it. The rest are the rows
+        // `nlp_scaling_untagged_constr` scales.
         if let Some(g) = con.filter(|g| g.len() == req.g_scaling.len()) {
-            for (slot, &s) in req.g_scaling.iter_mut().zip(g) {
+            for ((slot, given), &s) in req
+                .g_scaling
+                .iter_mut()
+                .zip(req.g_scaling_given.iter_mut())
+                .zip(g)
+            {
                 if s != 0.0 {
                     *slot = s;
-                } else if computed.is_none() {
-                    *slot = 1.0;
+                    *given = true;
+                } else {
+                    if computed.is_none() {
+                        *slot = 1.0;
+                    }
+                    *given = computed.is_some();
                 }
             }
             *req.use_g_scaling = true;
         } else if computed.is_none() {
             *req.use_g_scaling = false;
+            req.g_scaling_given.fill(false);
         }
         true
     }
@@ -9206,6 +9222,7 @@ S1 2 sens_init_constr
             x_scaling: &mut x,
             use_g_scaling: &mut use_g,
             g_scaling: &mut g,
+            g_scaling_given: &mut [true; 2],
         });
         (ok, obj, use_x, x, use_g, g)
     }
@@ -9276,6 +9293,51 @@ S1 2 sens_init_constr
             g[1], baseline[1],
             "the untagged row keeps the computed one, not 1.0"
         );
+    }
+
+    /// Which rows `tnlp` reports as given a factor, for this fixture's
+    /// two rows.
+    fn given_of(tnlp: &mut NlTnlp) -> Vec<bool> {
+        let (mut obj, mut use_x, mut use_g) = (1.0, false, false);
+        let (mut x, mut g, mut given) = (vec![0.0; 2], vec![0.0; 2], vec![true; 2]);
+        assert!(tnlp.get_scaling_parameters(ScalingRequest {
+            obj_scaling: &mut obj,
+            use_x_scaling: &mut use_x,
+            x_scaling: &mut x,
+            use_g_scaling: &mut use_g,
+            g_scaling: &mut g,
+            g_scaling_given: &mut given,
+        }));
+        given
+    }
+
+    /// A row the `scaling_factor` suffix names is given a factor, and a
+    /// row it leaves at AMPL's default 0 is not, whether the suffix names
+    /// other rows or only the objective. `nlp_scaling_untagged_constr`
+    /// scales exactly the rows reported as not given.
+    #[test]
+    fn a_row_with_no_scaling_factor_entry_is_reported_as_not_given() {
+        let nl = WITH_CON_SUFFIX.to_string() + "S5 1 scaling_factor\n0 10.0\n";
+        let mut t = NlTnlp::new(parse_nl_text(&nl).expect("parse"));
+        assert_eq!(given_of(&mut t), [true, false]);
+
+        let nl = WITH_CON_SUFFIX.to_string() + "S6 1 scaling_factor\n0 100.0\n";
+        let mut t = NlTnlp::new(parse_nl_text(&nl).expect("parse"));
+        assert_eq!(
+            given_of(&mut t),
+            [false, false],
+            "only the objective is tagged"
+        );
+    }
+
+    /// Under curvature-based scaling every row has a computed factor, so
+    /// none is reported as not given.
+    #[test]
+    fn a_curvature_factor_counts_as_given() {
+        let nl = WITH_CON_SUFFIX.to_string() + "S5 1 scaling_factor\n0 7.0\n";
+        let mut t = NlTnlp::new(parse_nl_text(&nl).expect("parse"));
+        assert!(t.enable_curvature_scaling());
+        assert_eq!(given_of(&mut t), [true, true]);
     }
 
     /// No `scaling_factor` suffix ⇒ "the user supplied nothing", the

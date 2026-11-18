@@ -414,7 +414,25 @@ fn on_bounds(orig: &QpProblem, x: &[f64], j: usize) -> (bool, bool) {
 /// full-space stationarity still holds. Here the contract is a valid KKT
 /// point of the original problem, and a nonzero multiplier on a bound the
 /// original never declared would not be one.
-pub(crate) fn postsolve(orig: &QpProblem, plan: &EliminationPlan, red: &QpSolution) -> QpSolution {
+///
+/// With `ray` set (an objective-free lift of a Farkas ray,
+/// `Presolve::postsolve_farkas`), "on a bound" means "the bound is finite",
+/// and a survivor's leftover goes to the column the reduced bound was
+/// transferred from (`x_l_src` / `x_u_src`) rather than to whichever cluster
+/// member the lifted `x` happens to put on a bound — a ray has no point.
+pub(crate) fn postsolve(
+    orig: &QpProblem,
+    plan: &EliminationPlan,
+    red: &QpSolution,
+    ray: bool,
+) -> QpSolution {
+    let on_bounds = |orig: &QpProblem, x: &[f64], j: usize| {
+        if ray {
+            (orig.lb_of(j) > -BOUND_INF, orig.ub_of(j) < BOUND_INF)
+        } else {
+            on_bounds(orig, x, j)
+        }
+    };
     let n = orig.n;
     let m_eq = orig.m_eq();
     let m_ineq = orig.m_ineq();
@@ -450,6 +468,22 @@ pub(crate) fn postsolve(orig: &QpProblem, plan: &EliminationPlan, red: &QpSoluti
     orig.at_mul(&y, &mut grad);
 
     // --- attribute each survivor's leftover ---
+    //
+    // The eliminated columns that hang off each survivor, in ascending column
+    // order — the order the scan below used to find them in by walking all of
+    // `plan.recovery` once per survivor. That walk was `O(kept · n)`, and it
+    // ran outside every deadline check: on a synthetic 200 000-column LP whose
+    // solve was cut off at its first iterate (so nearly every survivor carried
+    // a leftover) this lift alone took 37 s against `max_wall_time = 0.01`
+    // (gh#1182). Built once, it is `O(n)`; the attribution is unchanged.
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (j, rec) in plan.recovery.iter().enumerate() {
+        if let VarRecovery::Affine { rep, coeff, .. } = *rec
+            && coeff != 0.0
+        {
+            members[rep].push(j);
+        }
+    }
     let mut z_lb = vec![0.0; n];
     let mut z_ub = vec![0.0; n];
     let mut moved = false;
@@ -458,19 +492,59 @@ pub(crate) fn postsolve(orig: &QpProblem, plan: &EliminationPlan, red: &QpSoluti
         if leftover.abs() <= LEFTOVER_TOL {
             continue;
         }
+        if ray {
+            // The reduced bound that carries this leftover, and the column
+            // whose declared bound it is.
+            //
+            // Known gap (gh#1181 review): when the provenance is missing, or
+            // names a column that is not `Affine` on this same survivor, the
+            // leftover is dropped here rather than attributed. That is safe,
+            // not silent in effect — the lifted ray then fails the
+            // certificate's independent check, and `certificate_or_resolve`
+            // falls back on the unreduced re-solve — but it costs that
+            // re-solve. No NETLIB-infeas model reaches it (all 14 presolved
+            // lifts verify); a model that does is the fixture to add.
+            let k = plan.vars_kept.iter().position(|&v| v == rep);
+            let src = k.and_then(|k| {
+                if leftover > 0.0 {
+                    plan.x_l_src.get(k)
+                } else {
+                    plan.x_u_src.get(k)
+                }
+                .copied()
+            });
+            match src {
+                // The survivor's own bound (or none at all): the
+                // complementarity pass below reads it.
+                None => continue,
+                Some(s) if s == rep => continue,
+                Some(s) => {
+                    if let Some(VarRecovery::Affine { rep: r, coeff, .. }) = plan.recovery.get(s)
+                        && *r == rep
+                        && *coeff != 0.0
+                    {
+                        let mu = leftover / coeff;
+                        if mu > 0.0 {
+                            z_lb[s] = mu;
+                        } else {
+                            z_ub[s] = -mu;
+                        }
+                        moved = true;
+                    }
+                    continue;
+                }
+            }
+        }
         let (rep_at_lb, rep_at_ub) = on_bounds(orig, &x, rep);
         if (rep_at_lb && leftover > 0.0) || (rep_at_ub && leftover < 0.0) {
             // The survivor's own declared bound carries it; leave it to the
             // complementarity pass below.
             continue;
         }
-        for (j, rec) in plan.recovery.iter().enumerate() {
-            let VarRecovery::Affine { rep: r, coeff, .. } = *rec else {
-                continue;
+        for &j in &members[rep] {
+            let VarRecovery::Affine { coeff, .. } = plan.recovery[j] else {
+                unreachable!("`members` holds affine recoveries only");
             };
-            if r != rep || coeff == 0.0 {
-                continue;
-            }
             let mu = leftover / coeff;
             let (at_lb, at_ub) = on_bounds(orig, &x, j);
             if at_lb && mu > 0.0 {

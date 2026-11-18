@@ -25,6 +25,7 @@ You can configure them independently. Defaults match upstream Ipopt:
 | `nlp_scaling_min_value` | `1e-8` | Floor on computed scale factors — prevents inverting near-zero gradients. |
 | `nlp_scaling_obj_target_gradient` | `0.0` | When `> 0`, *pins* the scaled objective gradient ∞-norm to this value. Overrides the `max_gradient` cutoff. |
 | `nlp_scaling_constr_target_gradient` | `0.0` | Same as above, per constraint row. |
+| `nlp_scaling_untagged_constr` | `none` | Under `user-scaling`, `gradient-based` gives each row with no user factor the gradient-based row factor. See [Rows the user did not scale](#rows-the-user-did-not-scale). |
 | `obj_scaling_factor` | `1.0` | Constant multiplier on the objective, applied after the automatic factor. |
 
 ### `gradient-based` (default)
@@ -236,6 +237,71 @@ pounce falls back to no automatic scaling.
 > `scaling_factor` suffixes, `solver_selection=auto` declines that fast
 > path and uses the general NLP interior-point solver so the scaling is
 > honored; an explicit `solver_selection` is respected and warns.
+
+### Rows the user did not scale
+
+Under `user-scaling`, a constraint row with no factor of its own is
+unscaled, as in upstream Ipopt. `nlp_scaling_untagged_constr=gradient-based`
+gives such a row a factor from its Jacobian instead. pounce adds this
+option, and upstream Ipopt has no counterpart.
+
+A row has no user factor when its `scaling_factor` suffix entry is missing
+or zero, or when the model has no `scaling_factor` suffix at all. For each
+such row pounce takes `m_i`, the largest absolute entry of the row's
+Jacobian at the starting point, after the user's variable factors are
+applied, and sets the row's factor to
+
+```text
+max(nlp_scaling_min_value, nlp_scaling_max_gradient / m_i)   if m_i > nlp_scaling_max_gradient
+1                                                            otherwise
+```
+
+Each row is decided on its own. Unlike `gradient-based`, there is no gate
+that leaves a whole block unscaled when none of its rows is above the
+cutoff. A positive `nlp_scaling_constr_target_gradient` overrides the
+formula as it does for `gradient-based`. Rows with a user factor keep it,
+and the objective keeps its user factor, or 1.
+
+This is the rule WaterTAP's `ipopt-watertap` solver wrapper applies in
+Python, through IDAES's Jacobian scaling, before it calls Ipopt with
+`user-scaling`. So a WaterTAP flowsheet solved with plain
+`SolverFactory("pounce")` gets the same row factors without a wrapper:
+
+```python
+solver = pyo.SolverFactory("pounce")
+solver.solve(m, options={
+    "nlp_scaling_method": "user-scaling",
+    "nlp_scaling_untagged_constr": "gradient-based",
+    "tol": 1e-8,
+    "constr_viol_tol": 1e-8,
+    "acceptable_constr_viol_tol": 1e-8,
+    "bound_relax_factor": 0.0,
+    "honor_original_bounds": "no",
+})
+```
+
+The other four options there are the ones the wrapper sets. On WaterTAP's
+`RO_with_energy_recovery` flowsheet this run and the wrapper's print
+identical iteration logs.
+
+Through `pounce.Problem`, pass `g_scaling_given` to `set_problem_scaling`
+together with `g_scaling`, `False` for each row you did not scale, and read
+it back with `get_problem_scaling_given()`. pyomo-pounce's in-process
+sensitivity solve does this from the `scaling_factor` Suffix, so it scales
+the same rows the `.nl` path does. A Rust `TNLP` sets
+`ScalingRequest::g_scaling_given` to `false` for those rows. A C or Rust
+caller that supplies no scaling at all gets the rule on every row.
+
+A TNLP wrapper that adds rows of its own and wants them left alone answers
+`true`, sets `use_g_scaling`, and marks those rows as given at factor 1,
+whatever its inner model answered, because the core reads the marks only
+from such an answer. The complementarity wrapper does this for its product
+rows, and the l1-penalty wrapper for every row of the penalty problem,
+which it leaves unscaled.
+
+The option does not change routing. An LP or convex QP whose `.nl` carries
+no `scaling_factor` suffix still goes to the convex solver under
+`solver_selection=auto`, and that solver does not apply NLP row scaling.
 
 ### Target-gradient overrides
 

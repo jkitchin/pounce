@@ -1746,6 +1746,7 @@ impl TNLP for LinearEqElimTnlp {
         };
         let mut inner_x = vec![1.0; n_in];
         let mut inner_g = vec![1.0; m_in];
+        let mut inner_given = vec![true; m_in];
         let mut obj_scaling = 1.0;
         let mut use_x = false;
         let mut use_g = false;
@@ -1758,6 +1759,7 @@ impl TNLP for LinearEqElimTnlp {
                 x_scaling: &mut inner_x,
                 use_g_scaling: &mut use_g,
                 g_scaling: &mut inner_g,
+                g_scaling_given: &mut inner_given,
             })
         {
             return false;
@@ -1776,6 +1778,9 @@ impl TNLP for LinearEqElimTnlp {
         for (red, &full) in s.plan.rows_kept.iter().enumerate() {
             if red < req.g_scaling.len() {
                 req.g_scaling[red] = inner_g[full];
+            }
+            if red < req.g_scaling_given.len() {
+                req.g_scaling_given[red] = inner_given[full];
             }
         }
         true

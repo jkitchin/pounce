@@ -226,6 +226,39 @@ class QpResult:
         ``dual_infeasible``; then the inf-norm of the returned ray (``(y, z,
         z_lb, z_ub)`` resp. ``x``). The ray is meaningful only up to positive
         scaling: divide by this to get a unit-norm certificate.
+    certificate:
+        ``None`` unless ``status`` is ``primal_infeasible`` or
+        ``dual_infeasible`` (gh#1181). Then the certificate behind the
+        verdict, normalized to unit inf-norm and checked against *your*
+        problem data -- not the presolved or scaled problem the engine
+        solved -- independently of the solver:
+
+        * ``kind == "primal_infeasible"`` -- a Farkas ray ``y`` (free), ``z``
+          (in the dual cone; ``>= 0`` on an orthant), ``z_lb``, ``z_ub``
+          (``>= 0``, zero on an infinite bound) with
+          ``A^T y + G^T z - z_lb + z_ub = 0`` up to ``residual`` and
+          ``value = b^T y + h^T z - lb^T z_lb + ub^T z_ub < 0``. The bound
+          multipliers are derived from ``(y, z)`` column by column, so they
+          can differ from the ray's ``z_lb``/``z_ub`` above.
+        * ``kind == "dual_infeasible"`` -- a recession direction ``d`` with
+          ``Pd = 0``, ``Ad = 0``, ``Gd <= 0`` (``-Gd`` in the cone), ``d``
+          respecting every finite bound's sign, and ``value = c^T d < 0``;
+          ``hessian_residual``, ``equality_residual``, ``cone_violation`` and
+          ``bound_violation`` measure each condition.
+
+        ``verified`` says whether the check passed: the value is negative
+        beyond its rounding, and ``margin`` -- the relative value over the
+        relative residual, ``inf`` for an exact certificate -- is at least
+        ``1e4``. A certificate that does not verify is still returned, since
+        that is how a doubtful verdict shows. ``source`` is ``"solve"`` (the
+        verdict's own ray, lifted through presolve) or
+        ``"unreduced_resolve"`` (see ``qp_certificate`` on :func:`solve_qp`).
+    certificate_contradicted_by:
+        ``None``, unless the unreduced re-solve that :func:`solve_qp` runs
+        for a certificate reached an optimum (``"optimal"`` or
+        ``"optimal_inaccurate"``) against the infeasible or unbounded
+        verdict. ``status`` is not changed, but the verdict should then be
+        treated as doubtful; a ``RuntimeWarning`` says so too.
     presolve:
         ``None`` unless the solve ran with ``qp_presolve=True``. Then a dict:
         ``outcome`` is ``"reduced"`` (solved the reduced problem and
@@ -265,6 +298,8 @@ class QpResult:
     tau: Optional[float] = None
     kappa: Optional[float] = None
     certificate_scale: Optional[float] = None
+    certificate: Optional[dict] = None
+    certificate_contradicted_by: Optional[str] = None
     presolve: Optional[dict] = None
     crossover: Optional[dict] = None
 
@@ -949,6 +984,8 @@ def _to_result(d: dict) -> QpResult:
         tau=d.get("tau"),
         kappa=d.get("kappa"),
         certificate_scale=d.get("certificate_scale"),
+        certificate=d.get("certificate"),
+        certificate_contradicted_by=d.get("certificate_contradicted_by"),
         presolve=d.get("presolve"),
         crossover=d.get("crossover"),
     )
@@ -1118,6 +1155,7 @@ def solve_qp(
     qp_hsde=None,
     qp_equilibrate=None,
     qp_crossover=None,
+    qp_certificate: Optional[str] = None,
 ) -> QpResult:
     """Solve one convex QP. See the module docstring for the form.
 
@@ -1215,6 +1253,14 @@ def solve_qp(
     ``warm_start=``, ``qp_presolve=True`` and ``qp_crossover=True`` are refused,
     since the warm path solves the unreduced problem and runs no crossover.
 
+    ``qp_certificate`` (``"yes"``, the default; ``"check"``; ``"no"``) is the
+    CLI option of the same name and governs ``QpResult.certificate`` on an
+    infeasible or unbounded verdict: ``"yes"`` reports the certificate and,
+    when the verdict's own ray does not pass the check (a ``qp_presolve=True``
+    verdict reached by presolve itself has no ray), re-solves the unreduced
+    problem for one; ``"check"`` never re-solves; ``"no"`` reports none. It
+    never changes ``status``.
+
     The returned :class:`QpResult` carries the final KKT ``residuals``;
     pass ``collect_iterates=True`` to also capture the per-iteration
     convergence trace in ``result.iterates``.
@@ -1273,6 +1319,7 @@ def solve_qp(
             max_iter=max_iter,
             warm_start=_warm_dict(warm_start),
             collect_iterates=collect_iterates,
+            qp_certificate=qp_certificate,
             method=method,
             tau=tau,
             tau_max=tau_max,

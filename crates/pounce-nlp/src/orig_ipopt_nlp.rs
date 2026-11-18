@@ -131,6 +131,22 @@ pub enum ScalingMethod {
     UserScaling,
 }
 
+/// What `nlp_scaling_method=user-scaling` does with a constraint row the
+/// user gave no factor (`nlp_scaling_untagged_constr`). A pounce addition
+/// with no upstream counterpart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UntaggedConstrScaling {
+    /// The row keeps the factor the TNLP wrote for it, 1 for an `.nl` row
+    /// with no `scaling_factor` entry. Upstream's behavior and the default.
+    #[default]
+    None,
+    /// The row gets the factor [`gradient_row_scale`] gives it, from the
+    /// row's Jacobian ∞-norm at the starting point in the coordinates the
+    /// algorithm sees, so after any per-variable scaling. This is the rule
+    /// WaterTAP's `ipopt-watertap` wrapper applies before calling Ipopt.
+    GradientBased,
+}
+
 /// The objective scale `df` gradient-based scaling picks from
 /// `‖∇f(x₀)‖_∞`.
 ///
@@ -212,6 +228,65 @@ pub fn gradient_scaling_fires(
     constr_target_gradient > 0.0 || row_max.iter().any(|&v| v > max_gradient)
 }
 
+/// The factor `user-scaling` gives each constraint row, in `g` order, from
+/// what [`crate::tnlp::TNLP::get_scaling_parameters`] answered.
+///
+/// `supplied` is the callback's return value. A TNLP that returned `false`,
+/// or set no `g_scaling`, gave no row a factor, whatever `given` holds.
+/// Otherwise every row keeps its `g_scaling` entry, floored at `min_value`,
+/// except that under [`UntaggedConstrScaling::GradientBased`] a row whose
+/// `given` entry is `false` gets [`gradient_row_scale`] of its `row_max`
+/// entry instead. Under that rule a TNLP that gave no row a factor has every
+/// row scaled this way. `row_max` is called only when some row needs it, and
+/// when it returns `None` those rows keep the factor written, or 1.
+///
+/// The interior-point method and the square-system stage both take their
+/// row factors from here, so the two cannot disagree on a model.
+#[allow(clippy::too_many_arguments)]
+pub fn user_row_scale(
+    supplied: bool,
+    use_g_scaling: bool,
+    g_scaling: &[Number],
+    given: &[bool],
+    rule: UntaggedConstrScaling,
+    row_max: impl FnOnce() -> Option<Vec<Number>>,
+    max_gradient: Number,
+    min_value: Number,
+    constr_target_gradient: Number,
+) -> Vec<Number> {
+    let has_factors = supplied && use_g_scaling;
+    let mut out: Vec<Number> = g_scaling
+        .iter()
+        .map(|&s| {
+            if !has_factors {
+                1.0
+            } else if s < min_value {
+                min_value
+            } else {
+                s
+            }
+        })
+        .collect();
+    if rule == UntaggedConstrScaling::GradientBased {
+        let without: Vec<usize> = (0..out.len())
+            .filter(|&i| !has_factors || !given.get(i).copied().unwrap_or(true))
+            .collect();
+        if !without.is_empty() {
+            if let Some(row_max) = row_max() {
+                for i in without {
+                    out[i] = gradient_row_scale(
+                        row_max[i],
+                        max_gradient,
+                        min_value,
+                        constr_target_gradient,
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Concrete `IpoptNlp` over a `TNLPAdapter`. Mirrors upstream
 /// `Ipopt::OrigIpoptNLP`.
 pub struct OrigIpoptNlp {
@@ -280,6 +355,8 @@ pub struct OrigIpoptNlp {
     /// reads this via [`Self::user_x_scaling_rejected`] and fails the
     /// solve with `InvalidOption` instead.
     x_scaling_rejected: Cell<bool>,
+    /// `nlp_scaling_untagged_constr`, read by [`Self::scale_user_supplied`].
+    untagged_constr: Cell<UntaggedConstrScaling>,
 
     // ----- vector / matrix spaces (shared via Rc) -----
     x_space: Rc<DenseVectorSpace>,
@@ -754,6 +831,7 @@ impl OrigIpoptNlp {
             honor_original_bounds: Cell::new(false),
             variable_scaling,
             x_scaling_rejected: Cell::new(false),
+            untagged_constr: Cell::new(UntaggedConstrScaling::None),
             x_space,
             c_space,
             d_space,
@@ -1250,7 +1328,14 @@ impl OrigIpoptNlp {
                 );
             }
             ScalingMethod::UserScaling => {
-                let applied = self.scale_user_supplied(&cls, user_obj_factor, min_value);
+                let applied = self.scale_user_supplied(
+                    &cls,
+                    &full_x,
+                    user_obj_factor,
+                    max_gradient,
+                    min_value,
+                    constr_target_gradient,
+                );
                 if !applied {
                     // TNLP declined to supply scaling — fall through to
                     // no automatic scaling (matches upstream's behavior
@@ -1284,7 +1369,6 @@ impl OrigIpoptNlp {
         constr_target_gradient: Number,
     ) {
         let n_full_x = cls.n_full_x as usize;
-        let n_full_g = cls.n_full_g as usize;
 
         // ---- Objective gradient scale ----
         let mut full_grad_f = vec![0.0; n_full_x];
@@ -1320,10 +1404,49 @@ impl OrigIpoptNlp {
         self.obj_scale_factor.set(df * user_obj_factor);
 
         // ---- Constraint Jacobian row-max scaling ----
-        if cls.n_full_g == 0 {
+        let Some((c_row_max, d_row_max)) = self.jacobian_row_max(cls, full_x) else {
             *self.c_scale.borrow_mut() = None;
             *self.d_scale.borrow_mut() = None;
             return;
+        };
+        let n_c = cls.n_c as usize;
+        let n_d = cls.n_d as usize;
+
+        let row_max_to_scale = |row_max: Number| -> Number {
+            gradient_row_scale(row_max, max_gradient, min_value, constr_target_gradient)
+        };
+        let any_row_above = |rows: &[Number]| -> bool {
+            gradient_scaling_fires(rows, max_gradient, constr_target_gradient)
+        };
+
+        if n_c > 0 && any_row_above(&c_row_max) {
+            let dc: Vec<Number> = c_row_max.iter().map(|&v| row_max_to_scale(v)).collect();
+            *self.c_scale.borrow_mut() = Some(dc);
+        } else {
+            *self.c_scale.borrow_mut() = None;
+        }
+
+        if n_d > 0 && any_row_above(&d_row_max) {
+            let dd: Vec<Number> = d_row_max.iter().map(|&v| row_max_to_scale(v)).collect();
+            *self.d_scale.borrow_mut() = Some(dd);
+        } else {
+            *self.d_scale.borrow_mut() = None;
+        }
+    }
+
+    /// Each constraint row's Jacobian ∞-norm at `full_x`, split into the
+    /// equality rows `c` and the inequality rows `d`, or `None` when the
+    /// model has no rows or the Jacobian cannot be evaluated there. A row
+    /// with no nonzero reads `f64::MIN_POSITIVE`, upstream's `dbl_min`
+    /// seed, which [`gradient_row_scale`] maps to 1.
+    fn jacobian_row_max(
+        &self,
+        cls: &BoundClassification,
+        full_x: &[Number],
+    ) -> Option<(Vec<Number>, Vec<Number>)> {
+        let n_full_g = cls.n_full_g as usize;
+        if n_full_g == 0 {
+            return None;
         }
         // Evaluate full Jacobian once at x.
         let mut full_jac_vals = vec![0.0; self.nnz_jac_g_full as usize];
@@ -1339,9 +1462,7 @@ impl OrigIpoptNlp {
             )
         };
         if !jac_ok {
-            *self.c_scale.borrow_mut() = None;
-            *self.d_scale.borrow_mut() = None;
-            return;
+            return None;
         }
         // Recover row indices from the sparsity structure.
         let mut full_irow = vec![0 as Index; self.nnz_jac_g_full as usize];
@@ -1396,34 +1517,20 @@ impl OrigIpoptNlp {
                 }
             }
         }
-
-        let row_max_to_scale = |row_max: Number| -> Number {
-            gradient_row_scale(row_max, max_gradient, min_value, constr_target_gradient)
-        };
-        let any_row_above = |rows: &[Number]| -> bool {
-            gradient_scaling_fires(rows, max_gradient, constr_target_gradient)
-        };
-
-        if n_c > 0 && any_row_above(&c_row_max) {
-            let dc: Vec<Number> = c_row_max.iter().map(|&v| row_max_to_scale(v)).collect();
-            *self.c_scale.borrow_mut() = Some(dc);
-        } else {
-            *self.c_scale.borrow_mut() = None;
-        }
-
-        if n_d > 0 && any_row_above(&d_row_max) {
-            let dd: Vec<Number> = d_row_max.iter().map(|&v| row_max_to_scale(v)).collect();
-            *self.d_scale.borrow_mut() = Some(dd);
-        } else {
-            *self.d_scale.borrow_mut() = None;
-        }
+        Some((c_row_max, d_row_max))
     }
 
     /// User-supplied scaling pathway: call `TNLP::get_scaling_parameters`
     /// and translate the user's `obj_scaling` and `g_scaling` arrays
     /// into the algorithm-side `obj_scale_factor`, `c_scale`, `d_scale`.
-    /// Returns `true` if the TNLP supplied scaling (matches upstream's
-    /// `GetScalingParameters` return-value contract).
+    /// Returns `true` if any scaling was installed: the TNLP supplied some,
+    /// or `nlp_scaling_untagged_constr=gradient-based` computed row factors
+    /// for a TNLP that supplied none. `false` matches upstream's
+    /// `GetScalingParameters` return-value contract.
+    ///
+    /// The row factors come from [`user_row_scale`], with the Jacobian
+    /// sampled at `full_x`. The objective is never scaled by
+    /// `nlp_scaling_untagged_constr`.
     ///
     /// `OrigIpoptNlp` does not model per-variable rescaling (that would
     /// require transforming `eval_grad_f`, `eval_jac_*`, and `eval_h` in
@@ -1438,8 +1545,11 @@ impl OrigIpoptNlp {
     fn scale_user_supplied(
         &self,
         cls: &BoundClassification,
+        full_x: &[Number],
         user_obj_factor: Number,
+        max_gradient: Number,
         min_value: Number,
+        constr_target_gradient: Number,
     ) -> bool {
         let n_full_x = cls.n_full_x as usize;
         let n_full_g = cls.n_full_g as usize;
@@ -1448,6 +1558,7 @@ impl OrigIpoptNlp {
         let mut x_scaling = vec![1.0; n_full_x];
         let mut use_g_scaling = false;
         let mut g_scaling = vec![1.0; n_full_g];
+        let mut g_scaling_given = vec![true; n_full_g];
         let ok = {
             let a = self.adapter.borrow();
             let mut t = a.tnlp().borrow_mut();
@@ -1457,10 +1568,18 @@ impl OrigIpoptNlp {
                 x_scaling: &mut x_scaling,
                 use_g_scaling: &mut use_g_scaling,
                 g_scaling: &mut g_scaling,
+                g_scaling_given: &mut g_scaling_given,
             })
         };
-        if !ok {
+        let rule = self.untagged_constr.get();
+        if !ok && rule == UntaggedConstrScaling::None {
             return false;
+        }
+        if !ok {
+            // Nothing was supplied, so the objective keeps the user's
+            // constant alone and no variable is rescaled.
+            obj_scaling = 1.0;
+            use_x_scaling = false;
         }
 
         // Objective: user's obj_scaling combined with the constant
@@ -1474,38 +1593,48 @@ impl OrigIpoptNlp {
         }
         self.obj_scale_factor.set(df * user_obj_factor);
 
-        // Constraint vector: split user g_scaling into c_scale / d_scale.
-        if use_g_scaling && g_scaling.len() == n_full_g {
-            let n_c = cls.n_c as usize;
-            let n_d = cls.n_d as usize;
-            let mut dc = vec![1.0; n_c];
+        // Constraint factors over `g`, then split into c_scale / d_scale.
+        // The Jacobian sample is the one gradient-based scaling takes.
+        let n_c = cls.n_c as usize;
+        let n_d = cls.n_d as usize;
+        let row_max = || {
+            let (c_row_max, d_row_max) = self.jacobian_row_max(cls, full_x)?;
+            let mut g_row_max = vec![Number::MIN_POSITIVE; n_full_g];
             for (c_idx, &g_idx) in cls.c_map.iter().enumerate() {
-                let s = g_scaling[g_idx as usize];
-                dc[c_idx] = if s < min_value { min_value } else { s };
+                g_row_max[g_idx as usize] = c_row_max[c_idx];
             }
-            let mut dd = vec![1.0; n_d];
             for (d_idx, &g_idx) in cls.d_map.iter().enumerate() {
-                let s = g_scaling[g_idx as usize];
-                dd[d_idx] = if s < min_value { min_value } else { s };
+                g_row_max[g_idx as usize] = d_row_max[d_idx];
             }
-            // Only install the vectors when not all-ones (matches the
-            // `Option::None ↔ identity` convention used elsewhere).
-            let nontrivial_c = dc.iter().any(|&s| s != 1.0);
-            *self.c_scale.borrow_mut() = if nontrivial_c && n_c > 0 {
-                Some(dc)
-            } else {
-                None
-            };
-            let nontrivial_d = dd.iter().any(|&s| s != 1.0);
-            *self.d_scale.borrow_mut() = if nontrivial_d && n_d > 0 {
-                Some(dd)
-            } else {
-                None
-            };
+            Some(g_row_max)
+        };
+        let g_scale = user_row_scale(
+            ok,
+            use_g_scaling && g_scaling.len() == n_full_g,
+            &g_scaling,
+            &g_scaling_given,
+            rule,
+            row_max,
+            max_gradient,
+            min_value,
+            constr_target_gradient,
+        );
+        let dc: Vec<Number> = cls.c_map.iter().map(|&g| g_scale[g as usize]).collect();
+        let dd: Vec<Number> = cls.d_map.iter().map(|&g| g_scale[g as usize]).collect();
+        // Only install the vectors when not all-ones (matches the
+        // `Option::None ↔ identity` convention used elsewhere).
+        let nontrivial_c = dc.iter().any(|&s| s != 1.0);
+        *self.c_scale.borrow_mut() = if nontrivial_c && n_c > 0 {
+            Some(dc)
         } else {
-            *self.c_scale.borrow_mut() = None;
-            *self.d_scale.borrow_mut() = None;
-        }
+            None
+        };
+        let nontrivial_d = dd.iter().any(|&s| s != 1.0);
+        *self.d_scale.borrow_mut() = if nontrivial_d && n_d > 0 {
+            Some(dd)
+        } else {
+            None
+        };
         // Per-variable factors are not modeled. Flag a request that
         // would actually change the problem so the driver can refuse
         // loudly; an all-ones vector asks for nothing and is accepted.
@@ -1607,6 +1736,13 @@ impl OrigIpoptNlp {
     /// to project back onto.
     pub fn set_honor_original_bounds(&self, on: bool) {
         self.honor_original_bounds.set(on);
+    }
+
+    /// Select `nlp_scaling_untagged_constr`. Called before
+    /// [`Self::determine_scaling_from_starting_point`], which is where it
+    /// is read, and only under `nlp_scaling_method=user-scaling`.
+    pub fn set_untagged_constr_scaling(&self, rule: UntaggedConstrScaling) {
+        self.untagged_constr.set(rule);
     }
 
     /// The full-x handed to `TNLP::finalize_solution`: [`Self::lift_x_to_full`],

@@ -335,6 +335,7 @@ fn objective_and_constraint_scaling_pass_through() {
         x_scaling: &mut xs,
         use_g_scaling: &mut ug,
         g_scaling: &mut gs,
+        g_scaling_given: &mut [true],
     }));
     assert!(!ux, "the wrapper consumed the variable factors itself");
     assert!(ug, "constraint factors still reach the core");

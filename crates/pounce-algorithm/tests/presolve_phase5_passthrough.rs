@@ -10,10 +10,12 @@
 //!     the user's downstream consumers see inner-row indexing.
 
 use pounce_common::types::{Index, Number};
+use pounce_nlp::orig_ipopt_nlp::{ScalingMethod, UntaggedConstrScaling};
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, MetaData, NlpInfo, ScalingRequest,
     Solution, SparsityRequest, StartingPoint, TNLP,
 };
+use pounce_nlp::{IpoptNlp, NoScaling, OrigIpoptNlp, TNLPAdapter};
 use pounce_presolve::{PresolveOptions, PresolveTnlp};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -173,6 +175,7 @@ fn phase5_g_scaling_subsets_to_kept_rows() {
         x_scaling: &mut x_scaling,
         use_g_scaling: &mut use_g,
         g_scaling: &mut g_scaling,
+        g_scaling_given: &mut [true],
     });
     assert!(ok);
     assert!(use_g);
@@ -199,4 +202,123 @@ fn phase5_finalize_metadata_expands_back_to_inner_rows() {
         &vec!["only-kept".to_string(), String::new()]
     );
     assert_eq!(inner_seen.numerics.get("dual").unwrap(), &vec![42.0, 0.0]);
+}
+
+/// [`WithMetaScaling`] with its rows swapped and the kept row steepened:
+/// row 0 is `spread`, `x0 - x1` in `[-10, 10]`, which presolve drops as
+/// redundant on the unit box, and row 1 is `200 x0 + 200 x1 = 200`, which
+/// it keeps. Row 0 is given factor 4. Row 1 has none and writes 3.
+struct DroppedFirst;
+
+impl TNLP for DroppedFirst {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 2,
+            nnz_jac_g: 4,
+            nnz_h_lag: 2,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&[0.0, 0.0]);
+        b.x_u.copy_from_slice(&[1.0, 1.0]);
+        b.g_l.copy_from_slice(&[-10.0, 200.0]);
+        b.g_u.copy_from_slice(&[10.0, 200.0]);
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&[0.5, 0.5]);
+        true
+    }
+    fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        types.fill(Linearity::Linear);
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        Some((x[0] - 0.3).powi(2) + (x[1] - 0.3).powi(2))
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = 2.0 * (x[0] - 0.3);
+        g[1] = 2.0 * (x[1] - 0.3);
+        true
+    }
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[0] - x[1];
+        g[1] = 200.0 * x[0] + 200.0 * x[1];
+        true
+    }
+    fn eval_jac_g(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 0, 1, 1]);
+                jcol.copy_from_slice(&[0, 1, 0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values.copy_from_slice(&[1.0, -1.0, 200.0, 200.0]);
+            }
+        }
+        true
+    }
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1]);
+                jcol.copy_from_slice(&[0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values[0] = 2.0 * obj_factor;
+                values[1] = 2.0 * obj_factor;
+            }
+        }
+        true
+    }
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        *req.use_g_scaling = true;
+        req.g_scaling.copy_from_slice(&[4.0, 3.0]);
+        req.g_scaling_given.copy_from_slice(&[true, false]);
+        true
+    }
+    fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+/// The row factor the core installs on the one row presolve keeps.
+fn kept_row_factor(rule: UntaggedConstrScaling) -> Number {
+    let mut p = PresolveTnlp::new(
+        Rc::new(RefCell::new(DroppedFirst)) as Rc<RefCell<dyn TNLP>>,
+        PresolveOptions {
+            enabled: true,
+            ..PresolveOptions::defaults()
+        },
+    );
+    assert_eq!(p.get_nlp_info().expect("dims").m, 1, "spread is dropped");
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(p));
+    let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).expect("adapter")));
+    let mut nlp = OrigIpoptNlp::new(adapter, Rc::new(NoScaling)).expect("nlp");
+    nlp.set_untagged_constr_scaling(rule);
+    nlp.determine_scaling_from_starting_point(ScalingMethod::UserScaling, 100.0, 1e-8, 0.0, 0.0);
+    nlp.c_scale_vec().map_or(1.0, |c| c[0])
+}
+
+/// The flags follow the rows presolve keeps. The kept row is the model's
+/// row 1, which has no factor, so the rule gives it 100 / 200 = 0.5.
+/// Reading the dropped row's flag in its place would give it that row's
+/// factor, 4. Without the rule it keeps the 3 it wrote.
+#[test]
+fn phase5_the_kept_row_after_a_dropped_row_gets_its_own_flag() {
+    assert_eq!(kept_row_factor(UntaggedConstrScaling::GradientBased), 0.5);
+    assert_eq!(kept_row_factor(UntaggedConstrScaling::None), 3.0);
 }

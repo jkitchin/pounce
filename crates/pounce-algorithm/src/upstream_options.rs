@@ -525,6 +525,28 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          opt-in for small, well-behaved LPs that want exact-vertex refinement. \
          Default no.",
     )?;
+    r.add_string_option(
+        "qp_certificate",
+        "Report the certificate behind an infeasible or unbounded convex LP/QP verdict.",
+        "yes",
+        &[
+            ("yes", "Report it; when the verdict's own ray does not check, re-solve the unreduced model for one (default)."),
+            ("check", "Report and check the verdict's own ray only; never re-solve."),
+            ("no", "Report no certificate."),
+        ],
+        "Convex LP/QP path (`cvx-qp`, `qp-active-set`) on `.nl` input, gh#1181. \
+         On a primal-infeasible or unbounded verdict the JSON report's \
+         `solution.certificate` carries a Farkas ray or a recession direction \
+         in the model's own constraints and variables, checked against the \
+         model independently of the solver, and a `Certificate:` line says \
+         whether it verified. The verdict's own ray is used when it checks \
+         (lifted through presolve when presolve ran). A presolve verdict has \
+         no ray, so under `yes` the unreduced model is re-solved for one: \
+         measured on NETLIB-infeas, 15 of 29 verdicts come from presolve and \
+         the re-solve costs up to ~7 s there (`gosh`). `check` skips that \
+         re-solve and reports an unverified (or no) certificate instead; it \
+         never changes the verdict. Default yes.",
+    )?;
 
     // SQP outer-loop options. Inactive when `algorithm =
     // interior-point`. Defaults mirror `SqpOptions::default()`.
@@ -1133,6 +1155,7 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     r.add_lower_bounded_number_option("nlp_scaling_max_gradient", "Maximum gradient after NLP scaling.", 0.0, true, 100.0, "This is the gradient scaling cut-off. If the maximum gradient is above this value, then gradient based scaling will be performed. Scaling parameters are calculated to scale the maximum gradient back to this value. (This is g_max in Section 3.8 of the implementation paper.) Note: This option is only used if \"nlp_scaling_method\" is chosen as \"gradient-based\".")?;
     r.add_lower_bounded_number_option("nlp_scaling_obj_target_gradient", "Target value for objective function gradient size.", 0.0, false, 0.0, "If a positive number is chosen, the scaling factor for the objective function is computed so that the gradient has the max norm of the given size at the starting point. This overrides nlp_scaling_max_gradient for the objective function.")?;
     r.add_lower_bounded_number_option("nlp_scaling_constr_target_gradient", "Target value for constraint function gradient size.", 0.0, false, 0.0, "If a positive number is chosen, the scaling factors for the constraint functions are computed so that the gradient has the max norm of the given size at the starting point. This overrides nlp_scaling_max_gradient for the constraint functions.")?;
+    r.add_string_option("nlp_scaling_untagged_constr", "What user-scaling does with a constraint row the user gave no scaling factor.", "none", &[("none", "the row keeps factor 1, as upstream Ipopt does"), ("gradient-based", "DEVIATION FROM UPSTREAM: the row gets the factor gradient-based scaling would give it")], "DELIBERATE DEVIATION FROM UPSTREAM IPOPT: a pounce addition with no upstream counterpart, read only when nlp_scaling_method is user-scaling. Under none, a constraint row with no user factor (an .nl row with no scaling_factor suffix entry, or a model with no scaling_factor suffix at all) is unscaled, which is upstream's behavior. Under gradient-based, each such row gets max(nlp_scaling_min_value, nlp_scaling_max_gradient / m_i) when m_i > nlp_scaling_max_gradient and 1 otherwise, m_i being the row's largest Jacobian entry in absolute value at the starting point after the user's variable scaling is applied; a positive nlp_scaling_constr_target_gradient overrides that as it does for gradient-based scaling. Each row is decided on its own, with no per-block gate. Rows with a user factor keep it, and the objective keeps its user factor or 1. This is the scaling WaterTAP's ipopt-watertap wrapper computes in Python before calling Ipopt, so a WaterTAP model solved with plain SolverFactory('pounce') and this option gets the same row factors without the wrapper.")?;
     r.add_lower_bounded_number_option("nlp_scaling_min_value", "Minimum value of gradient-based scaling values.", 0.0, false, 1e-8, "This is the lower bound for the scaling factors computed by gradient-based scaling method. If some derivatives of some functions are huge, the scaling factors will otherwise become very small, and the (unscaled) final constraint violation, for example, might then be significant. Note: This option is only used if \"nlp_scaling_method\" is chosen as \"gradient-based\".")?;
 
     // ===== IpoptAlgorithm::RegisterOptions (Algorithm/IpIpoptAlg.cpp) =====

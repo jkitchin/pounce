@@ -40,6 +40,7 @@ pub mod active_set_session;
 pub mod activity;
 pub(crate) mod aggregate;
 pub mod batch;
+pub mod certificate;
 pub mod cones;
 pub mod convex_presolve_session;
 pub(crate) mod correctors;
@@ -73,6 +74,10 @@ pub use batch::{
     solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_multi_rhs,
     solve_qp_multi_rhs_parallel,
 };
+pub use certificate::{
+    Certificate, CertificateOutcome, CertificateSource, FarkasCertificate, RecessionCertificate,
+    certificate, certificate_or_resolve,
+};
 pub use cones::ConeSpec;
 pub use convex_presolve_session::ConvexPresolveSession;
 pub use ipm::{
@@ -105,8 +110,8 @@ pub use psd_certificate::{
     psd_band,
 };
 pub use qp::{
-    BoxScreen, NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus, Triplet,
-    screen_variable_box,
+    BoxScreen, NEG_INF, POS_INF, QpIterate, QpProblem, QpResiduals, QpSolution, QpStatus,
+    RelativeKktResiduals, Triplet, screen_variable_box,
 };
 pub use report::{certificate_scale, qp_status_to_ars, reported_kkt_residuals};
 pub use sensitivity::{
