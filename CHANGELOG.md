@@ -100,7 +100,16 @@ changes.
   `x0` (`min sin(3x) s.t. x² ≤ 4` from `x = 0.1` now reaches `-π/6`, `f = -1`).
   A step QP whose factorization cannot be repaired ends
   `Search_Direction_Becomes_Too_Small` with the iterate instead of
-  `Internal_Error` with `x = null`.
+  `Internal_Error` with `x = null`. The filter also takes Ipopt's tiny-step
+  rule and `Compare_le` round-off slack, so a round-off step that only
+  carries the final multipliers is no longer refused, and an exact-Hessian
+  step that goes uphill from a feasible point is re-solved on a convexified
+  model, which gives a descent direction. On the Vanderbei CUTE set under
+  `algorithm=active-set-sqp`, measured before those last two refinements,
+  the change raised successes from 519 to 558 (exact Hessian) and 511 to 536
+  (limited-memory), and `Internal_Error` exits fell from 23 to 2 and 26 to 3. Some runs that used to succeed only by accepting
+  an uphill step now take longer or stop; they are listed, with
+  measurements, in `dev-notes/known-limitations.md`.
 - **`minimize` reads both sides of a quadratic constraint row when routing
   to the conic solver** (gh#1174). The convex-QCQP detector treated every
   quadratic row as `g(x) ≥ lo` and never read `hi`. So scipy's natural
