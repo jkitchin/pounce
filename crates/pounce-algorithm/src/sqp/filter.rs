@@ -220,14 +220,20 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         for (xt, (&xi, &pi)) in x_trial.iter_mut().zip(x.iter().zip(p.iter())) {
             *xt = xi + alpha * pi;
         }
-        // A trial that rounds to the current iterate is not a step, and
-        // every shorter one rounds there too, so the search has failed. Without
-        // this the `10·ε·|φ|` slack below accepts it as an f-type step (it
-        // changes nothing, so it "decreases" `φ` by zero within round-off) and
-        // the outer loop repeats it until its budget runs out: `jit1_node`
-        // (limited-memory) reached the interior point's objective by iteration
-        // 40, then took 160 identical steps of `‖αp‖ ≈ 2e-19` (gh#1173).
-        if x_trial == x {
+        // A *backtracked* trial that rounds to the current iterate is not a
+        // step, and every shorter one rounds there too, so the search has
+        // failed. Without this the `10·ε·|φ|` slack below accepts it as an
+        // f-type step (it changes nothing, so it "decreases" `φ` by zero
+        // within round-off) and the outer loop repeats it until its budget
+        // runs out: `jit1_node` (limited-memory) reached the interior point's
+        // objective by iteration 40, then took 160 identical steps of
+        // `‖αp‖ ≈ 2e-19` (gh#1173).
+        //
+        // The full step is exempt. A QP step that is exactly zero at `α = 1`
+        // still moves the multipliers to the QP's, which is how an SQP
+        // finishes on a model whose primal is already optimal
+        // (`issue_986_sqp_working_set_fixed_vars` converges that way).
+        if alpha < 1.0 && x_trial == x {
             break;
         }
         let f_trial = nlp.eval_f(&x_trial);
