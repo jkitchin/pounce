@@ -909,6 +909,10 @@ fn real_main() -> ExitCode {
     // Phase 1 is that an explicit forcing value (e.g. `--solver=lp`)
     // that does not match the detected class is rejected with a clear
     // message, instead of being silently ignored.
+    //
+    // gh #1183: a convex LP / QP candidate the gh #535 fallback declined, held
+    // until the NLP arm has answered so the two can be compared.
+    let mut convex_challenger: Option<ConvexChallenger> = None;
     {
         use pounce_cli::dispatch::{ProblemClass, SolverChoice, SolverSelection, resolve_solver};
         let sel_str = app
@@ -1446,7 +1450,14 @@ fn real_main() -> ExitCode {
                     // certificate and declined it (gh #535, `auto` only — see
                     // `lp_nlp_fallback`). It printed no verdict and wrote no
                     // `.sol`/JSON, so control falls out of this whole block to
-                    // the NLP solve below, which owns the one verdict.
+                    // the NLP solve below. gh #1183: the declined candidate
+                    // lands in `stash`, and the NLP arm's answer is weighed
+                    // against it before either verdict is printed.
+                    let use_active_set = matches!(choice, SolverChoice::QpActiveSet);
+                    let presolve_qp = presolve_on && !convex_can_serve_sens;
+                    let console = convex_console(&app, json_dbg);
+                    let sens_may_decline = matches!(selection, SolverSelection::Auto);
+                    let mut stash: Option<Box<DeclinedQp>> = None;
                     if let Some(code) = run_convex_qp(
                         &prob,
                         class,
@@ -1484,16 +1495,16 @@ fn real_main() -> ExitCode {
                         // sensitivity run is a real option and a separate
                         // change, and it needs a fixture that reaches the
                         // active-set question.
-                        presolve_on && !convex_can_serve_sens,
+                        presolve_qp,
                         json_cfg,
                         debug_hook.as_ref(),
                         args.ampl,
                         convex_opts,
                         bound_relax,
-                        matches!(choice, SolverChoice::QpActiveSet),
+                        use_active_set,
                         engine_overrides,
                         lp_nlp_fallback,
-                        convex_console(&app, json_dbg),
+                        console,
                         convex_can_serve_sens
                             .then(|| nl_suffixes.as_ref())
                             .flatten(),
@@ -1503,9 +1514,27 @@ fn real_main() -> ExitCode {
                         // engine, and silently answering from a different one
                         // would hide that — so there the step is skipped with a
                         // warning, exactly as it was before this path existed.
-                        matches!(selection, SolverSelection::Auto),
+                        sens_may_decline,
+                        None,
+                        &mut stash,
                     ) {
                         return code;
+                    }
+                    if let Some(declined) = stash {
+                        convex_challenger = Some(ConvexChallenger {
+                            declined,
+                            minimize: prob.minimize,
+                            nlp_started: std::time::Instant::now(),
+                            class,
+                            presolve: presolve_qp,
+                            convex_opts,
+                            bound_relax,
+                            use_active_set,
+                            engine_overrides,
+                            console,
+                            serve_sens: convex_can_serve_sens,
+                            sens_may_decline,
+                        });
                     }
                 }
                 // Reaching here means the convex attempt declined and the NLP
@@ -2010,6 +2039,12 @@ fn real_main() -> ExitCode {
     // there is exactly one release below. Deferring per pass left the
     // counter at 1 after a resolve, so the run printed no verdict at all.
     app.defer_end_verdict();
+    // gh #1183: with a declined convex candidate pending, not even the ladder
+    // may print the verdict -- which candidate reports is decided only once
+    // the NLP point is final, below. This second deferral is released there.
+    if convex_challenger.is_some() {
+        app.defer_end_verdict();
+    }
     // gh#1009: the active-set SQP outer loop (`optimize_sqp_tnlp`) never
     // installs the debug hook — only the filter-IPM consumes it — so
     // `--debug*` here would print the "debugger enabled" banner and then run
@@ -2319,23 +2354,6 @@ fn real_main() -> ExitCode {
     if nl_dual_sign < 0.0 {
         solve_stats.final_objective = -solve_stats.final_objective;
         solve_stats.final_scaled_objective = -solve_stats.final_scaled_objective;
-        if !json_dbg
-            && app
-                .options()
-                .get_integer_value("print_level", "")
-                .map(|(v, _found)| v >= 1)
-                .unwrap_or(true)
-        {
-            println!();
-            println!(
-                "Objective in the model's declared sense (maximize): {}",
-                pounce_solve_report::console::fmt_ipopt(solve_stats.final_objective),
-            );
-            println!(
-                "  (the table above is the internal minimization's value, as Ipopt reports it;"
-            );
-            println!("   the .sol duals and the JSON report use the declared sense)");
-        }
     }
 
     // The machine-readable verdict, printed exactly once per run, after every
@@ -2362,14 +2380,18 @@ fn real_main() -> ExitCode {
     // Gated like the banners it disambiguates: `print_level >= 1` (at 0 the
     // console is silent by request), and never under `--json-debug`, whose
     // stdout is a pure protocol channel.
-    if !json_dbg
-        && app
-            .options()
-            .get_integer_value("print_level", "")
-            .map(|(v, _found)| v >= 1)
-            .unwrap_or(true)
-    {
-        println!("Status: {}", status.upstream_name());
+    //
+    // The maximize note above and this line both live in `print_nlp_trailer`,
+    // which a pending gh #1183 convex candidate holds back until the NLP
+    // answer is known to be the one that reports.
+    if convex_challenger.is_none() {
+        print_nlp_trailer(
+            &app,
+            json_dbg,
+            nl_dual_sign,
+            solve_stats.final_objective,
+            status,
+        );
     }
 
     // `solve_stats` was snapshotted right after the solve loop and updated
@@ -2696,6 +2718,178 @@ fn real_main() -> ExitCode {
         }
     }
 
+    // ---- gh #1183: the LP / convex-QP → NLP fallback picks the more ----
+    // ---- accurate of its two candidates                              ----
+    //
+    // gh #535 re-solves an LP (or convex QP) the convex arm could not certify
+    // on the NLP arm, and used to report the NLP answer whatever it was. On
+    // NETLIB WOOD1P / WOODW and MIPLIB leo2 the discarded convex point was the
+    // more accurate one — the NLP arm's `Solve_Succeeded` is judged on Ipopt's
+    // scaled criteria and certified a point that fails an unscaled check the
+    // convex candidate passes. So both are measured here by one ruler — the
+    // five relative KKT residuals of `RelativeKktResiduals`, on the declared
+    // model — and the smaller error reports, subject to the status guards in
+    // `convex_candidate_wins`. (Not the convex stopping rule's
+    // `kkt_residuals_above_floor`: it ranks WOOD1P / WOODW the wrong way.)
+    //
+    // This sits after every lift above — presolve, elimination, variable
+    // scaling, the maximize sign — so the NLP point measured is exactly the
+    // one the `.sol` and JSON would carry, and before anything below writes
+    // either. The NLP arm's `EXIT:` / `Status:` lines were held back for it
+    // (the extra `defer_end_verdict` at the solve, `print_nlp_trailer`).
+    let mut convex_fallback_info: Option<pounce_cli::solve_report::ConvexFallbackInfo> = None;
+    if let Some(mut ch) = convex_challenger.take() {
+        let nlp_engine = if square_system_promoted {
+            "square-lm"
+        } else if app.answer_from_active_set_sqp() {
+            "sqp-active-set"
+        } else {
+            "nlp"
+        };
+        // gh #1183: both points on one ruler — the five relative residuals
+        // an independent verifier judges a point by (`RelativeKktResiduals`),
+        // on the declared model. Not the convex stopping rule's
+        // `kkt_residuals_above_floor`: that one reads rows absolutely and
+        // complementarity per product, and on NETLIB WOOD1P / WOODW it ranks
+        // the pair the opposite way to the verifier (see the type's docs).
+        let declared = &ch.declined.declared;
+        let nlp_rel = {
+            let point = nominal_capture.borrow();
+            let mults = bound_mult_capture.borrow();
+            point.as_ref().and_then(|(x, lambda)| {
+                let (z_l, z_u) = match mults.as_ref() {
+                    Some((l, u)) => (Some(l.as_slice()), Some(u.as_slice())),
+                    None => (None, None),
+                };
+                pounce_cli::qp_extract::qp_point_from_nl(
+                    ch.minimize,
+                    &ch.declined.con_map,
+                    declared,
+                    x,
+                    lambda,
+                    z_l,
+                    z_u,
+                    pounce_convex::QpStatus::OptimalInaccurate,
+                )
+            })
+        }
+        .map(|p| p.relative_kkt_residuals(declared));
+        let convex_rel = ch.declined.sol.relative_kkt_residuals(declared);
+        let nlp_kkt_error = nlp_rel.map(|r| r.max());
+        let convex_kkt_error = convex_rel.max();
+        let convex_wins = convex_candidate_wins(
+            convex_kkt_error,
+            ch.declined.sol.status,
+            nlp_kkt_error,
+            nlp_solve_succeeded(status),
+        );
+        // The replay needs the parsed problem, which the challenger does not
+        // keep (see its memory note): re-read it now, before anything is
+        // committed. If that fails — the file changed or vanished during the
+        // NLP solve — the NLP answer, already in hand, reports instead.
+        let replay_prob = match (&args.problem, convex_wins) {
+            (ProblemSource::NlFile(path), true) => match nl_reader::read_nl_file(path) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!(
+                        "pounce: warning: could not re-read {} to report the convex \
+                         answer ({e}); reporting the NLP answer instead.",
+                        path.display()
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
+        let convex_wins = replay_prob.is_some();
+        let convex_engine = ch.engine();
+        let convex_status = qp_status_to_ars(ch.declined.sol.status);
+        let (winner, loser) = if convex_wins {
+            (convex_engine, nlp_engine)
+        } else {
+            (nlp_engine, convex_engine)
+        };
+        let nlp_err_text =
+            nlp_kkt_error.map_or_else(|| "no point to measure".to_string(), |e| format!("{e:.2e}"));
+        eprintln!(
+            "pounce: note: LP/QP fallback (gh #1183): convex ({convex_engine}) answer \
+             relative KKT error {convex_kkt_error:.2e} ({}, {} iterations), NLP ({nlp_engine}) \
+             answer {nlp_err_text} ({}, {} iterations); reporting the {} answer.",
+            convex_status.upstream_name(),
+            ch.declined.sol.iters,
+            status.upstream_name(),
+            solve_stats.iteration_count,
+            if convex_wins { "convex" } else { "NLP" },
+        );
+        let info = pounce_cli::solve_report::ConvexFallbackInfo {
+            winner: winner.to_string(),
+            loser: loser.to_string(),
+            convex_kkt_error,
+            convex_status: convex_status.upstream_name().to_string(),
+            convex_iterations: ch.declined.sol.iters as _,
+            nlp_kkt_error,
+            nlp_status: status.upstream_name().to_string(),
+            nlp_iterations: solve_stats.iteration_count,
+            convex_wallclock_time_secs: ch.declined.elapsed,
+            nlp_wallclock_time_secs: ch.nlp_started.elapsed().as_secs_f64(),
+        };
+        if convex_wins {
+            // The NLP verdict is not printed at all: release the deferral the
+            // solve took for this decision without printing what it held.
+            let _ = app.release_end_verdict();
+            ch.declined.arbitration = Some(info);
+            let json_cfg = match (&args.json_output, &args.problem) {
+                (Some(p), ProblemSource::NlFile(path)) => Some((
+                    p.as_path(),
+                    args.json_detail,
+                    InputDescriptor::NlFile {
+                        path: path.clone(),
+                        size_bytes: std::fs::metadata(path).ok().map(|m| m.len()),
+                    },
+                )),
+                _ => None,
+            };
+            let mut no_stash = None;
+            let replay_prob = replay_prob.expect("convex_wins implies a re-read problem");
+            let code = run_convex_qp(
+                &replay_prob,
+                ch.class,
+                sol_path.as_deref(),
+                ch.presolve,
+                json_cfg,
+                None,
+                args.ampl,
+                ch.convex_opts,
+                ch.bound_relax,
+                ch.use_active_set,
+                ch.engine_overrides,
+                false,
+                ch.console,
+                ch.serve_sens.then_some(nl_suffixes.as_ref()).flatten(),
+                ch.sens_may_decline,
+                Some(ch.declined),
+                &mut no_stash,
+            );
+            if let Some(diag) = diagnostics_handle.as_ref() {
+                write_diagnostics_manifest(diag, &problem_desc, convex_status);
+            }
+            // A replay cannot decline (the gate is skipped), and its
+            // extraction succeeded once already on this very model.
+            return code.unwrap_or_else(|| ExitCode::from(2));
+        }
+        if app.release_end_verdict() {
+            app.print_end_verdict(status);
+        }
+        print_nlp_trailer(
+            &app,
+            json_dbg,
+            nl_dual_sign,
+            solve_stats.final_objective,
+            status,
+        );
+        convex_fallback_info = Some(info);
+    }
+
     // Reduced Hessian: print to stderr (informational), mirroring
     // upstream sIPOPT's RedHessian / Eigenvalues prints in
     // `SensReducedHessianCalculator.cpp`.
@@ -2880,6 +3074,12 @@ fn real_main() -> ExitCode {
         if let Some(out) = &mpcc_outcome {
             builder.set_complementarity(out.report_info());
         }
+        if let Some(info) = &convex_fallback_info {
+            // gh #1183 review: the run also paid for the convex attempt the
+            // NLP answer beat; report the whole run's wall time.
+            builder.stats.total_wallclock_time_secs += info.convex_wallclock_time_secs;
+        }
+        builder.convex_fallback = convex_fallback_info.clone();
 
         // `Full` detail carries the suffix blocks: the sensitivity
         // result and, when computed, the reduced Hessian (packed as
@@ -3245,6 +3445,39 @@ fn max_iter_explicitly_set(app: &IpoptApplication) -> bool {
     )
 }
 
+/// The NLP arm's last console lines: the maximize note (the objective in the
+/// model's declared sense) and the machine-readable `Status:` line. Gated on
+/// `print_level >= 1` and never under `--json-debug`; see the call site for why
+/// each exists. Factored out so a pending gh #1183 convex candidate can hold
+/// them back until the NLP answer is known to be the one that reports.
+fn print_nlp_trailer(
+    app: &IpoptApplication,
+    json_dbg: bool,
+    nl_dual_sign: f64,
+    final_objective: f64,
+    status: ApplicationReturnStatus,
+) {
+    if json_dbg
+        || !app
+            .options()
+            .get_integer_value("print_level", "")
+            .map(|(v, _found)| v >= 1)
+            .unwrap_or(true)
+    {
+        return;
+    }
+    if nl_dual_sign < 0.0 {
+        println!();
+        println!(
+            "Objective in the model's declared sense (maximize): {}",
+            pounce_solve_report::console::fmt_ipopt(final_objective),
+        );
+        println!("  (the table above is the internal minimization's value, as Ipopt reports it;");
+        println!("   the .sol duals and the JSON report use the declared sense)");
+    }
+    println!("Status: {}", status.upstream_name());
+}
+
 /// Map a convex-solver status onto the AMPL `.sol` terminal line: the message,
 /// whether the solve is treated as a success (drives the exit code), and the
 /// `solve_result_num`. AMPL convention: 0 solved, 100–199 solved with a
@@ -3489,6 +3722,122 @@ fn charge_wall_budget(
     }
 }
 
+/// A convex LP / QP candidate the gh #535 fallback declined, kept so the
+/// caller can weigh it against the NLP arm's answer (gh #1183).
+///
+/// Before gh #1183 the decline threw the candidate away and the NLP answer
+/// was reported whatever it was. On NETLIB WOOD1P / WOODW and MIPLIB leo2 the
+/// discarded convex point was the more accurate of the two (`9.1e-8` against
+/// the NLP arm's `1.2e-6` on WOOD1P, measured independently on the MPS data),
+/// and took a fifth of the iterations — pounce held a verifiable answer and
+/// swapped it for one that failed verification. So the decline now keeps
+/// everything [`run_convex_qp`] needs to report the candidate later as if it
+/// had never declined it: the postsolved point, the extracted model and row
+/// map (for measuring the NLP point on the same ruler), and the parts of the
+/// console record the decline held back.
+struct DeclinedQp {
+    sol: pounce_convex::QpSolution,
+    /// The extracted model **as declared** — without the `bound_relax_factor`
+    /// widening the convex solve was handed. Both candidates are measured on
+    /// it: it is the caller's model, it is the one the NLP fallback solves
+    /// (it pins `bound_relax_factor=0` when unset), and it is what an
+    /// independent verifier checks against. Same rows and columns as the
+    /// solved model, so `con_map` indexes it too.
+    declared: pounce_convex::QpProblem,
+    con_map: Vec<pounce_cli::qp_extract::ConRowMap>,
+    presolve_log: Vec<String>,
+    elapsed: f64,
+    timing: Rc<pounce_common::timing::ConvexTimingStatistics>,
+    crossover: Option<pounce_convex::crossover::CrossoverReport>,
+    second_order_refused: bool,
+    /// Filled in by the caller before a replay, for the JSON report.
+    arbitration: Option<pounce_cli::solve_report::ConvexFallbackInfo>,
+}
+
+/// Everything the caller needs to call [`run_convex_qp`] again in replay
+/// mode once the NLP arm has answered (gh #1183): the declined candidate and
+/// the arguments of the first call that the replay must repeat.
+///
+/// **Memory.** This is alive for the whole NLP solve, so it holds only what
+/// the comparison needs: the declared QP, its row map and the convex point
+/// (in `declined`). The parsed `NlProblem` is deliberately *not* kept — it
+/// carries the expression trees and is the largest of the three — and is
+/// re-read from the `.nl` only on the path that needs it, a convex win's
+/// replay. The QP the convex solve was handed (with the `bound_relax_factor`
+/// widening) is dropped at the decline. What remains is roughly one copy of
+/// the LP's matrix next to the NLP arm's own model.
+struct ConvexChallenger {
+    declined: Box<DeclinedQp>,
+    /// The `.nl`'s objective sense, the one thing the comparison reads from
+    /// the parsed problem (`qp_extract::qp_point_from_nl`).
+    minimize: bool,
+    /// When the NLP arm took over, for its wall time in the report.
+    nlp_started: std::time::Instant,
+    class: pounce_cli::dispatch::ProblemClass,
+    presolve: bool,
+    convex_opts: pounce_convex::QpOptions,
+    bound_relax: pounce_cli::qp_extract::BoundRelax,
+    use_active_set: bool,
+    engine_overrides: pounce_convex::ActiveSetOverrides,
+    console: ConvexConsole,
+    serve_sens: bool,
+    sens_may_decline: bool,
+}
+
+impl ConvexChallenger {
+    fn engine(&self) -> &'static str {
+        if self.use_active_set {
+            "qp-active-set"
+        } else {
+            "cvx-qp"
+        }
+    }
+}
+
+/// gh #1183: which of the two candidates of an LP / convex-QP → NLP fallback
+/// to report. Both errors are `RelativeKktResiduals::max` on the declared
+/// model; `nlp_kkt_error` is `None` when the NLP arm produced no point that
+/// maps onto it.
+///
+/// The convex candidate wins only when it is *strictly* more accurate: a tie,
+/// or a convex error that is not a finite number, keeps the gh #535 behaviour
+/// of reporting the NLP answer. A missing NLP point loses to any finite convex
+/// error — there is nothing to report in its place.
+///
+/// One guard on top of accuracy: a convex candidate whose own status is a
+/// failure (`IterationLimit`, `NumericalFailure`) never displaces an NLP
+/// answer the CLI counts as a success. The swap would turn a successful exit
+/// into a failed one — the `.sol`'s `solve_result_num` and the exit code a
+/// caller gates on — to buy accuracy the NLP answer already certified to its
+/// own criteria. Every case gh #1183 measured has the convex candidate at
+/// `OptimalInaccurate`, which competes on accuracy alone.
+///
+/// And a convex `NumericalFailure` never wins at all. That status *is* the
+/// convex arm's post-solve verification refusing its own point, so ranking
+/// the point as the better answer would overrule the check that rejected it —
+/// and report an error-shaped status (`Error_In_Step_Computation`, `.sol`
+/// code 500) on a model the NLP arm solved, the gh#724 / gh#986 complaint.
+/// Measured on `lp_afiro` at `tol=1e-20 qp_tau=0.99`: the refused point reads
+/// `5.7e-17` against the NLP arm's `5.5e-13`, and the NLP answer reports.
+fn convex_candidate_wins(
+    convex_kkt_error: f64,
+    convex_status: pounce_convex::QpStatus,
+    nlp_kkt_error: Option<f64>,
+    nlp_succeeded: bool,
+) -> bool {
+    let convex_succeeded = convex_status_report(convex_status).1;
+    if !convex_kkt_error.is_finite()
+        || convex_status == pounce_convex::QpStatus::NumericalFailure
+        || (nlp_succeeded && !convex_succeeded)
+    {
+        return false;
+    }
+    match nlp_kkt_error {
+        Some(e) if !e.is_nan() => convex_kkt_error < e,
+        _ => true,
+    }
+}
+
 /// Solve a classified LP / convex-QP `.nl` problem through the
 /// specialized `pounce-convex` interior-point method, write a `.sol`,
 /// and return the process exit code. This is the LP/QP dispatch target
@@ -3535,9 +3884,20 @@ fn run_convex_qp(
     // May an inexpressible pin hand the whole model back to the NLP path?
     // True under `auto`, false under an explicit convex `solver_selection`.
     sens_may_decline: bool,
+    // gh #1183: a candidate this driver declined earlier in the run and the
+    // caller has now chosen to report. The solve is skipped and the stashed
+    // one reported exactly as it would have been.
+    replay: Option<Box<DeclinedQp>>,
+    // gh #1183: where a declined candidate is kept for the caller to weigh
+    // against the NLP arm's answer. Written only when the LP→NLP fallback
+    // fires (not on a sensitivity-pin decline, which solved nothing).
+    stash: &mut Option<Box<DeclinedQp>>,
 ) -> Option<ExitCode> {
-    pounce_convex::crossover::clear_report();
-    let _ = pounce_convex::active_set::take_second_order_refusal();
+    let replay = replay.map(|r| *r);
+    if replay.is_none() {
+        pounce_convex::crossover::clear_report();
+        let _ = pounce_convex::active_set::take_second_order_refusal();
+    }
     let t0 = std::time::Instant::now();
     use pounce_convex::HessianInertia;
     use pounce_convex::active_set::solve_qp_active_set_inertia;
@@ -3559,8 +3919,17 @@ fn run_convex_qp(
     // built (it costs nothing when the detailed timers are off) and the sink
     // is always installed, so `pounce-linsol` can charge the factorization and
     // back-solve rows from several crates below this driver.
-    let timing = Rc::new(pounce_common::timing::ConvexTimingStatistics::new());
-    timing.set_detailed_enabled(console.collect_timing);
+    // A replay reuses the declined attempt's timers, so the rows report the
+    // solve that is being reported; `overall_alg` accumulates, and was ended
+    // at the decline, so the NLP arm's time between is not charged to it.
+    let timing = match &replay {
+        Some(r) => Rc::clone(&r.timing),
+        None => {
+            let t = Rc::new(pounce_common::timing::ConvexTimingStatistics::new());
+            t.set_detailed_enabled(console.collect_timing);
+            t
+        }
+    };
     timing.overall_alg.start();
     let _timing_scope = pounce_common::timing::ConvexTimingScope::open(&timing);
 
@@ -3702,14 +4071,26 @@ fn run_convex_qp(
     // discarded" is a cleaner contract than "nothing except one line". Flushed
     // below, immediately after the fallback check.
     let mut presolve_log: Vec<String> = Vec::new();
+    // What a replay carries over besides the point itself: the declined
+    // attempt's wall clock, its crossover report and its second-order flag.
+    type Replayed = (f64, Option<pounce_convex::crossover::CrossoverReport>, bool);
+    let mut replayed: Option<Replayed> = None;
+    let mut arbitration: Option<pounce_cli::solve_report::ConvexFallbackInfo> = None;
     // gh#1181: a reduced solve's Farkas ray, lifted to the extracted rows by
     // the objective-free postsolve, for the certificate below.
     let mut farkas_lift: Option<(Vec<f64>, Vec<f64>)> = None;
     // Did a presolved IPM solve reach `Optimal` on the reduced problem? Read by
     // the gh#1180 retry below: if postsolve then breaks the point, the full
     // model is worth one solve before the whole convex attempt is discarded.
+    // Never set on a gh #1183 replay, which solves nothing, so the retry
+    // cannot fire there either.
     let mut reduced_was_optimal = false;
-    let sol = if qp_opts.max_iter == 0 {
+    let sol = if let Some(r) = replay {
+        presolve_log = r.presolve_log;
+        replayed = Some((r.elapsed, r.crossover, r.second_order_refused));
+        arbitration = r.arbitration;
+        r.sol
+    } else if qp_opts.max_iter == 0 {
         // AMPL/Ipopt semantics: `max_iter=0` takes no iterations and so
         // cannot reach optimality. Presolve can otherwise solve a trivial
         // problem (e.g. an unconstrained quadratic) directly — or the IPM's
@@ -3936,19 +4317,29 @@ fn run_convex_qp(
     } else {
         sol
     };
-    let elapsed = t0.elapsed().as_secs_f64();
+    let elapsed = replayed
+        .as_ref()
+        .map_or_else(|| t0.elapsed().as_secs_f64(), |r| r.0);
 
     // gh#1182: `max_wall_time` is charged from `t0`, which precedes extraction,
     // so once it is spent there is nothing left for a second engine. Whether
     // this solve reports or reroutes, and under which status, is decided in
     // one place: see `convex_qp_next_step`.
-    let next = convex_qp_next_step(
-        class,
-        sol.status,
-        allow_nlp_fallback,
-        qp_opts.time_limit,
-        t0.elapsed(),
-    );
+    //
+    // A replayed answer (gh #1183) has already been judged: it was stashed
+    // with the budget unspent, and its status is the one being reported, so
+    // it is neither rerouted again nor remapped against this call's fresh `t0`.
+    let next = if replayed.is_some() {
+        ConvexNext::Report(sol.status)
+    } else {
+        convex_qp_next_step(
+            class,
+            sol.status,
+            allow_nlp_fallback,
+            qp_opts.time_limit,
+            t0.elapsed(),
+        )
+    };
 
     // gh #535: the convex path finished an LP without a certificate. An LP is
     // also a valid NLP, and the general filter-IPM in this same binary solves
@@ -3960,6 +4351,11 @@ fn run_convex_qp(
     // This sits above the status line, the `.sol` write and the JSON report on
     // purpose — everything below is the verdict, and the rerouted solve owns
     // it. See `lp_declines_to_nlp` for why each gate is there.
+    //
+    // gh #1183: "owns it" no longer means "replaces it". The candidate is
+    // stashed, the NLP arm's answer is measured by the same ruler, and the
+    // caller reports whichever is more accurate -- by calling this driver
+    // again with the stashed point (`replay`) when the convex one wins.
     if next == ConvexNext::Reroute {
         // gh#984 review: the number beside the verdict is the one the verdict
         // was judged on (`kkt_residuals_above_floor`), raw beside it.
@@ -3971,14 +4367,39 @@ fn run_convex_qp(
              against tol {:.1e}); an LP or convex QP is also a valid NLP, so it is \
              being re-solved on the general NLP interior-point path, which \
              certifies the degenerate, rank-deficient and badly-scaled models \
-             the interior path stalls on (gh #133, gh #535). Use \
-             solver_selection=qp-ipm to see the convex result instead.",
+             the interior path stalls on (gh #133, gh #535). The two answers \
+             are then compared on their relative KKT residuals and the more \
+             accurate one is reported (gh #1183). Use solver_selection=qp-ipm to see the \
+             convex result alone.",
             class.name(),
             sol.iters,
             res.kkt_error(),
             raw.kkt_error(),
             qp_opts.tol,
         );
+        timing.overall_alg.end();
+        let declared = if bound_relax.active() {
+            match pounce_cli::qp_extract::extract_qp_with_map(
+                prob,
+                pounce_cli::qp_extract::BoundRelax::NONE,
+            ) {
+                Some((declared, _, _)) => declared,
+                None => qp,
+            }
+        } else {
+            qp
+        };
+        *stash = Some(Box::new(DeclinedQp {
+            sol,
+            declared,
+            con_map,
+            presolve_log,
+            elapsed,
+            timing: Rc::clone(&timing),
+            crossover: pounce_convex::crossover::take_report(),
+            second_order_refused: pounce_convex::active_set::take_second_order_refusal(),
+            arbitration: None,
+        }));
         return None;
     }
     let sol = match next {
@@ -4012,7 +4433,11 @@ fn run_convex_qp(
     );
     // gh#990 item 12: crossover used to be silent at the default print level.
     // One line: which engine, what it had to do, and the residual it ended on.
-    if let Some(c) = pounce_convex::crossover::take_report() {
+    let crossover_report = match &mut replayed {
+        Some(r) => r.1.take(),
+        None => pounce_convex::crossover::take_report(),
+    };
+    if let Some(c) = crossover_report {
         println!(
             "Crossover: {} engine, {}; {} superbasic(s) pushed, {} pivot(s) \
              (push {}, phase 1 {}, phase 2 {}), {} bound flip(s), {} bridge \
@@ -4132,7 +4557,10 @@ fn run_convex_qp(
     // Only when a second-order refusal is what actually happened (gh #997):
     // a `NumericalFailure` from a singular factor or a residual that did not
     // verify is not evidence the point is a saddle, and the note says it is.
-    let second_order_refused = pounce_convex::active_set::take_second_order_refusal();
+    let second_order_refused = match &replayed {
+        Some(r) => r.2,
+        None => pounce_convex::active_set::take_second_order_refusal(),
+    };
     if use_active_set && !ok && inertia == HessianInertia::Indefinite && second_order_refused {
         eprintln!(
             "pounce: note: the active-set engine reached a point that is not a \
@@ -4313,9 +4741,16 @@ fn run_convex_qp(
             outcome.contradicted_by.map(qp_status_to_ars);
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
+        builder.convex_fallback = arbitration.clone();
         note_integer_relaxation(&mut builder.stats);
         note_derivative_check(&mut builder.stats);
-        builder.stats.total_wallclock_time_secs = elapsed;
+        // gh #1183 review: a replayed answer's run also paid for the NLP solve
+        // it beat; the total is the whole run, each arm's share is in
+        // `convex_fallback`.
+        builder.stats.total_wallclock_time_secs = elapsed
+            + arbitration
+                .as_ref()
+                .map_or(0.0, |a| a.nlp_wallclock_time_secs);
         // Real final KKT residuals (from pounce-convex, computed above), so the
         // harness sees genuine convergence numbers rather than zeros -- the
         // verdict's own measurement (gh#984 review, see `verdict`).
@@ -5631,6 +6066,129 @@ mod lp_nlp_fallback_tests {
                 );
             }
         }
+    }
+}
+
+/// gh #1183: which candidate of the LP / convex-QP → NLP fallback reports.
+/// One test per branch of [`convex_candidate_wins`]; the end-to-end versions
+/// on NETLIB models are in `tests/issue_1183_fallback_keeps_the_better_answer.rs`.
+#[cfg(test)]
+mod convex_candidate_tests {
+    use super::convex_candidate_wins;
+    use pounce_convex::QpStatus::{IterationLimit, NumericalFailure, OptimalInaccurate};
+
+    /// The issue's case: both answers usable, the convex one more accurate
+    /// (WOOD1P: `1.1e-7` against `1.2e-6`). It reports.
+    #[test]
+    fn a_more_accurate_convex_answer_wins() {
+        assert!(convex_candidate_wins(
+            1.1e-7,
+            OptimalInaccurate,
+            Some(1.2e-6),
+            true
+        ));
+    }
+
+    /// gh #535's case: the NLP answer is the more accurate. It still reports.
+    #[test]
+    fn a_more_accurate_nlp_answer_wins() {
+        assert!(!convex_candidate_wins(
+            7.6e-9,
+            OptimalInaccurate,
+            Some(2.7e-10),
+            true
+        ));
+    }
+
+    /// A tie keeps the gh #535 behaviour rather than flipping on round-off.
+    #[test]
+    fn a_tie_keeps_the_nlp_answer() {
+        assert!(!convex_candidate_wins(
+            1e-9,
+            OptimalInaccurate,
+            Some(1e-9),
+            true
+        ));
+    }
+
+    /// The guard: a convex answer whose own status is a failure never
+    /// displaces an NLP success, however much more accurate — the swap would
+    /// turn exit 0 into a failure.
+    #[test]
+    fn a_failed_convex_answer_never_displaces_an_nlp_success() {
+        assert!(!convex_candidate_wins(
+            1e-15,
+            IterationLimit,
+            Some(1e-7),
+            true
+        ));
+    }
+
+    /// Both failed (the toguru shape): accuracy decides, and the winner's own
+    /// status is what reports.
+    #[test]
+    fn when_both_fail_accuracy_decides() {
+        assert!(convex_candidate_wins(
+            2e-16,
+            IterationLimit,
+            Some(5e-13),
+            false
+        ));
+        assert!(!convex_candidate_wins(
+            9.4e-3,
+            IterationLimit,
+            Some(3.1e-6),
+            false
+        ));
+    }
+
+    /// No NLP point at all, or one that measures as NaN: anything finite on
+    /// the convex side is better than nothing.
+    #[test]
+    fn a_missing_or_nan_nlp_point_loses_to_a_finite_convex_one() {
+        assert!(convex_candidate_wins(1e-3, IterationLimit, None, false));
+        assert!(convex_candidate_wins(
+            1e-3,
+            OptimalInaccurate,
+            Some(f64::NAN),
+            true
+        ));
+    }
+
+    /// A convex `NumericalFailure` is the convex arm refusing its own point;
+    /// it never wins, however small its residual and however the NLP arm
+    /// fared (`lp_afiro` at `tol=1e-20 qp_tau=0.99`: `5.7e-17` vs `5.5e-13`).
+    #[test]
+    fn a_convex_numerical_failure_never_wins() {
+        assert!(!convex_candidate_wins(
+            5.7e-17,
+            NumericalFailure,
+            Some(5.5e-13),
+            false
+        ));
+        assert!(!convex_candidate_wins(
+            5.7e-17,
+            NumericalFailure,
+            None,
+            false
+        ));
+    }
+
+    /// A broken convex point never wins, whatever the NLP side looks like.
+    #[test]
+    fn a_non_finite_convex_answer_never_wins() {
+        assert!(!convex_candidate_wins(
+            f64::NAN,
+            OptimalInaccurate,
+            None,
+            false
+        ));
+        assert!(!convex_candidate_wins(
+            f64::INFINITY,
+            OptimalInaccurate,
+            Some(1.0),
+            false
+        ));
     }
 }
 
