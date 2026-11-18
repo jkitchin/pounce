@@ -155,21 +155,24 @@ def test_problem_scaling_builds_dense_row_vectors():
     # Untagged rows stay at 1.0, and a tagged constraint the solve does
     # not have a row for is skipped rather than mis-indexed.
     m = tagged_model(o=100.0, c1=10.0)
-    obj, g, x = problem_scaling(m, ["c1", "c2"], {}, COLS)
+    obj, g, x, given = problem_scaling(m, ["c1", "c2"], {}, COLS)
     assert obj == 100.0
     assert g == [10.0, 1.0]
+    assert given == [True, False], "c2 has no Suffix entry"
     assert x is None, "no variable entry means no change of variables"
-    obj, g, x = problem_scaling(m, ["c2"], {}, COLS)
+    obj, g, x, given = problem_scaling(m, ["c2"], {}, COLS)
     assert g == [1.0]
+    assert given == [False]
 
 
 def test_problem_scaling_follows_the_surgery_alias():
     # The declared-parameter surgery renames replaced rows on the clone
     # that is actually solved; the Suffix is keyed by the original.
     m = tagged_model(c1=10.0)
-    obj, g, _ = problem_scaling(m, ["_pounce.c1", "c2"],
-                                {"c1": "_pounce.c1"}, COLS)
+    obj, g, _, given = problem_scaling(m, ["_pounce.c1", "c2"],
+                                       {"c1": "_pounce.c1"}, COLS)
     assert g == [10.0, 1.0]
+    assert given == [True, False]
 
 
 def test_problem_scaling_builds_the_variable_vector():
@@ -177,7 +180,7 @@ def test_problem_scaling_builds_the_variable_vector():
     # in-process path too, dense and in `.col` order, so the column a
     # factor lands on is the one the Suffix named.
     m = tagged_model(o=100.0, x2=0.25)
-    _, _, x = problem_scaling(m, ["c1", "c2"], {}, COLS)
+    _, _, x, _ = problem_scaling(m, ["c1", "c2"], {}, COLS)
     assert x == [1.0, 0.25]
 
 
@@ -186,7 +189,7 @@ def test_problem_scaling_skips_a_variable_with_no_column():
     # pounce could rescale -- the same rule the rows follow, and the
     # alternative is a silently mis-indexed factor.
     m = tagged_model(x1=3.0)
-    _, _, x = problem_scaling(m, ["c1", "c2"], {}, ["x[2]"])
+    _, _, x, _ = problem_scaling(m, ["c1", "c2"], {}, ["x[2]"])
     assert x is None
 
 
@@ -559,3 +562,46 @@ def test_fixed_variable_composition_survives_variable_scaling():
                                2.0 * X.T @ X, rtol=1e-6)
     np.testing.assert_allclose(sens_information(scaled).matrix,
                                sens_information(plain).matrix, rtol=1e-6)
+
+
+# ── rows with no Suffix entry (nlp_scaling_untagged_constr) ──────────────────
+
+def _untagged_rows_model():
+    """`tagged` carries a factor and `untagged` does not. With `x0`
+    scaled by 2, `untagged`'s largest Jacobian entry in the scaled
+    columns is 1000 / 2 = 500, so the gradient-based rule gives it
+    100 / 500 = 0.2. The declared parameter's pin row has no entry
+    either, and its row max of 1 gives it 1."""
+    m = pyo.ConcreteModel()
+    m.p = pyo.Param(initialize=0.0, mutable=True)
+    m.x0 = pyo.Var(initialize=1.0)
+    m.x1 = pyo.Var(initialize=1.0)
+    m.x2 = pyo.Var(initialize=1.0)
+    m.obj = pyo.Objective(expr=m.x0**2 + m.x1**2 + m.x2**2)
+    m.tagged = pyo.Constraint(expr=2 * m.x0 + m.x1 == m.p)
+    m.untagged = pyo.Constraint(expr=1000 * m.x0 + m.x1 == 5)
+    m.scaling_factor = pyo.Suffix(direction=pyo.Suffix.EXPORT)
+    m.scaling_factor[m.tagged] = 0.5
+    m.scaling_factor[m.x0] = 2.0
+    declare_sens_param(m.p)
+    return m
+
+
+@pytest.mark.parametrize("rule, want", [
+    ("gradient-based", [0.2, 0.5, 1.0]),
+    ("none", [0.5, 1.0, 1.0]),
+])
+def test_in_process_path_scales_the_rows_with_no_suffix_entry(rule, want):
+    """The in-process solve marks the rows the Suffix does not name, as
+    the `.nl` reader does, so the option scales the same rows on both
+    paths. Without the marks every row would count as given and keep
+    1.0, which is the `none` answer."""
+    m = _untagged_rows_model()
+    s = pyo.SolverFactory("pounce")
+    s.options.update(USER_SCALING)
+    s.options["nlp_scaling_untagged_constr"] = rule
+    res = s.solve(m)
+    assert res.solver.termination_condition == TerminationCondition.optimal
+    c_scale = session_scaling(m)["c_scale"]
+    got = sorted(np.asarray(c_scale).tolist()) if c_scale is not None else [1.0] * 3
+    assert got == pytest.approx(want)

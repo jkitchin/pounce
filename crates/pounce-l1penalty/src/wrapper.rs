@@ -565,11 +565,24 @@ impl TNLP for L1PenaltyBarrierTnlp {
         self.inner.borrow_mut().get_var_con_metadata(var, con)
     }
 
-    fn get_scaling_parameters(&mut self, _req: ScalingRequest<'_>) -> bool {
-        // Defer scaling support: the wrapper's slack variables and
-        // augmented objective term should be scaled consistently with
-        // the inner; ripopt's reference also passes through. Phase 2.
-        false
+    /// Every row is given factor 1 and nothing else is scaled, so the
+    /// penalty problem is solved unscaled under every scaling option.
+    ///
+    /// Forwarding the inner model's factors is deferred: the wrapper's
+    /// slack variables and augmented objective term should be scaled
+    /// consistently with the inner, and ripopt's reference passes through.
+    /// Until then the rows are marked as given rather than the callback
+    /// answering `false`, because `false` says no row has a factor, and
+    /// `nlp_scaling_untagged_constr=gradient-based` would then scale every
+    /// penalty row, elastic ones included. An answer of `true` with every
+    /// factor 1 installs nothing.
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        *req.obj_scaling = 1.0;
+        *req.use_x_scaling = false;
+        *req.use_g_scaling = true;
+        req.g_scaling.fill(1.0);
+        req.g_scaling_given.fill(true);
+        true
     }
 }
 
@@ -672,6 +685,90 @@ mod tests {
             _ip_cq: &IpoptCq,
         ) {
         }
+    }
+
+    /// [`EqOnly`] with the row written `1000 x[0] + x[1] = 1`, so its
+    /// largest Jacobian entry is 1000.
+    struct Steep(EqOnly);
+
+    impl TNLP for Steep {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            self.0.get_nlp_info()
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            self.0.get_bounds_info(b)
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            self.0.get_starting_point(sp)
+        }
+        fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+            self.0.eval_f(x, new_x)
+        }
+        fn eval_grad_f(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+            self.0.eval_grad_f(x, new_x, g)
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 1000.0 * x[0] + x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Values { values } => {
+                    values[0] = 1000.0;
+                    values[1] = 1.0;
+                    true
+                }
+                structure => self.0.eval_jac_g(x, new_x, structure),
+            }
+        }
+        fn eval_h(
+            &mut self,
+            x: Option<&[Number]>,
+            new_x: bool,
+            obj_factor: Number,
+            lambda: Option<&[Number]>,
+            new_lambda: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            self.0
+                .eval_h(x, new_x, obj_factor, lambda, new_lambda, mode)
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, d: &IpoptData, q: &IpoptCq) {
+            self.0.finalize_solution(sol, d, q)
+        }
+    }
+
+    /// The wrapper marks every row as given factor 1, so under
+    /// `nlp_scaling_untagged_constr=gradient-based` the penalty problem
+    /// stays unscaled. A row the core read as having no factor would get
+    /// 100 / 1000 = 0.1 here.
+    #[test]
+    fn the_penalty_rows_are_left_unscaled_under_the_untagged_rule() {
+        use pounce_nlp::orig_ipopt_nlp::{ScalingMethod, UntaggedConstrScaling};
+        use pounce_nlp::{IpoptNlp, NoScaling, OrigIpoptNlp, TNLPAdapter};
+
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Steep(EqOnly)));
+        let penalty: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(
+            L1PenaltyBarrierTnlp::new(inner, 1.0).expect("wrapper construction"),
+        ));
+        let adapter = Rc::new(RefCell::new(TNLPAdapter::new(penalty).expect("adapter")));
+        let mut nlp = OrigIpoptNlp::new(adapter, Rc::new(NoScaling)).expect("nlp");
+        nlp.set_untagged_constr_scaling(UntaggedConstrScaling::GradientBased);
+        nlp.determine_scaling_from_starting_point(
+            ScalingMethod::UserScaling,
+            100.0,
+            1e-8,
+            0.0,
+            0.0,
+        );
+        assert_eq!(nlp.c_scale_vec(), None, "the penalty row was rescaled");
+        assert_eq!(nlp.d_scale_vec(), None);
+        assert_eq!(nlp.obj_scale_factor(), 1.0);
     }
 
     fn wrap(rho: Number) -> L1PenaltyBarrierTnlp {

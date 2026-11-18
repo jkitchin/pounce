@@ -19,10 +19,12 @@
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::Number;
+use pounce_nlp::orig_ipopt_nlp::{ScalingMethod, UntaggedConstrScaling};
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, Solution, SparsityRequest,
-    StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, Linearity, NlpInfo, ScalingRequest, Solution,
+    SparsityRequest, StartingPoint, TNLP,
 };
+use pounce_nlp::{IpoptNlp, NoScaling, OrigIpoptNlp, TNLPAdapter};
 use pounce_presolve::{LinearEqElimTnlp, PresolveOptions, PresolveTnlp};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -155,6 +157,16 @@ impl TNLP for Fixture {
         true
     }
 
+    /// The two linear rows the reduction removes are given factor 4, and
+    /// the nonlinear row it keeps has none and writes 3. Only user scaling
+    /// reads this, and `solve` runs unscaled.
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        *req.use_g_scaling = true;
+        req.g_scaling.copy_from_slice(&[4.0, 4.0, 3.0]);
+        req.g_scaling_given.copy_from_slice(&[true, true, false]);
+        true
+    }
+
     fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
         self.captured = Some(Captured {
             x: sol.x.to_vec(),
@@ -216,6 +228,35 @@ fn solve(linear_eq_reduction: bool) -> Outcome {
         reduced_n: info.n,
         reduced_m: info.m,
     }
+}
+
+/// The row factor the core installs on the one row the reduction keeps.
+fn kept_row_factor(rule: UntaggedConstrScaling) -> Number {
+    let presolve = Rc::new(RefCell::new(PresolveTnlp::new(
+        Rc::new(RefCell::new(Fixture::default())) as Rc<RefCell<dyn TNLP>>,
+        opts(true),
+    )));
+    let elim: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(LinearEqElimTnlp::new(
+        presolve as Rc<RefCell<dyn TNLP>>,
+        opts(true),
+    )));
+    assert_eq!(elim.borrow_mut().get_nlp_info().expect("dims").m, 1);
+    let adapter = Rc::new(RefCell::new(TNLPAdapter::new(elim).expect("adapter")));
+    let mut nlp = OrigIpoptNlp::new(adapter, Rc::new(NoScaling)).expect("nlp");
+    nlp.set_untagged_constr_scaling(rule);
+    nlp.determine_scaling_from_starting_point(ScalingMethod::UserScaling, 100.0, 1e-8, 0.0, 0.0);
+    nlp.c_scale_vec().map_or(1.0, |c| c[0])
+}
+
+/// The flags follow the rows the reduction keeps. The kept row is the
+/// model's row 2, which has no factor, so the rule gives it 1 (its row
+/// max at the start is 2). Reading a removed row's flag in its place
+/// would give it that row's factor, 4. Without the rule it keeps the 3
+/// it wrote.
+#[test]
+fn the_kept_row_after_removed_rows_gets_its_own_flag() {
+    assert_eq!(kept_row_factor(UntaggedConstrScaling::GradientBased), 1.0);
+    assert_eq!(kept_row_factor(UntaggedConstrScaling::None), 3.0);
 }
 
 #[test]
