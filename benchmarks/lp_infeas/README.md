@@ -74,6 +74,34 @@ There is no Ipopt reference. Ipopt's verdict on an infeasible LP is a local
 same thing. The suite is also not in the composite `BENCHMARK_REPORT.md`,
 whose loader compares solved counts against that reference.
 
+## Checking the certificates
+
+A correct verdict is scored on the status alone, but since gh#1181 each one
+also carries its certificate in the JSON report's `solution.certificate`, in
+the model's own constraints and variables. `check_certificates.py` re-checks
+every one against its `.nl`, with its own parser and no pounce code, so a
+verdict can be scored the way the cpo3 benchmark scores infeasibility —
+by verifying the ray rather than trusting the status:
+
+```sh
+python check_certificates.py nl/ <dir of --json-output reports>
+```
+
+It exits non-zero if a certificate pounce marked `verified` fails. Its
+stationarity residual is relative to the largest column magnitude
+(`max_j Σ_i |J_ij λ_i|`), as Clarabel, SCS and ECOS measure it; per column it
+would read a single-term column holding a `1e-17` leftover as 100% of itself.
+
+Measured 2026-11-18 on NETLIB-infeas at default options: **29 of 29**
+certificates are reported, marked verified, and pass at `--tol 1e-9`
+(largest relative residual `5e-11`, `gosh`). 14 come from the solve's own
+ray, every one of them through presolve's objective-free lift; the other 15
+are presolve verdicts, whose ray comes from re-solving the unreduced model.
+That re-solve is the cost: process wall time against the verdict's own
+`0.0`–`0.2` s goes to 6.9 s on `gosh`, 2.8 s on `bgindy`, 1.8 s on `cplex1`,
+and stays under 1.3 s elsewhere. `qp_certificate=check` skips it. MIPLIB 2017
+Infeas has not been measured with certificates.
+
 ## Results
 
 Measured 2026-11-01 on `174a84f`, the first commit carrying the Farkas box

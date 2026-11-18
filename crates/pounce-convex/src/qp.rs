@@ -476,7 +476,7 @@ pub struct QpIterate {
 /// * PSD — `max(0, −λ_min(smat s))`
 /// * exponential — `max(0, −ψ)` for `ψ = y·log(z/y) − x`, plus `y, z ≥ 0`
 /// * power — `max(0, |x| − y^α z^{1−α})`, plus `y, z ≥ 0`
-fn cone_violation(spec: &ConeSpec, s: &[f64]) -> f64 {
+pub(crate) fn cone_violation(spec: &ConeSpec, s: &[f64]) -> f64 {
     let neg = |v: f64| (-v).max(0.0);
     match spec {
         ConeSpec::Nonneg(_) => s.iter().fold(0.0_f64, |m, &si| m.max(neg(si))),
@@ -539,6 +539,244 @@ impl QpResiduals {
         self.primal_infeasibility
             .max(self.dual_infeasibility)
             .max(self.complementarity)
+    }
+}
+
+/// The five **relative** KKT residuals of a point on an orthant / box QP —
+/// the standard set first-order LP/QP solvers and benchmark verifiers judge a
+/// returned point by: primal, dual, duality gap, primal cone, dual cone, each
+/// normalized by the data it is a residual of. See
+/// [`QpSolution::relative_kkt_residuals`].
+///
+/// This is a different measurement from [`QpSolution::kkt_residuals_above_floor`]
+/// on purpose, and the two can rank the same pair of points opposite ways.
+/// That one is the stopping rule's: absolute row residuals, per-product
+/// complementarity, both with a finite-precision floor. This one is a
+/// verifier's: residuals relative to the data, and the duality *gap* — the
+/// sum of the complementarity products — rather than their maximum. On NETLIB
+/// WOOD1P the NLP arm's point has every complementarity product below `2.6e-9`
+/// and an aggregate gap of `1.2e-6` relative; the convex arm's has one row off
+/// by `2.2e-7` absolute and a relative gap of `8e-10`. The first measure
+/// prefers the NLP point, the second the convex one, and an independent
+/// verifier agrees with the second (gh #1183).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelativeKktResiduals {
+    /// `max(‖Ax − b‖∞, ‖(Gx − h)⁺‖∞)`, relative to
+    /// `1 + max(‖b‖∞, ‖h‖∞, ‖Ax‖∞, ‖Gx‖∞)`.
+    pub primal: f64,
+    /// `‖Px + c + Aᵀy + Gᵀz − z_lb + z_ub‖∞`, relative to
+    /// `1 + max(‖c‖∞, ‖Px‖∞, ‖Aᵀy‖∞, ‖Gᵀz‖∞, ‖z_lb − z_ub‖∞)`.
+    pub dual: f64,
+    /// `|p − d| / (1 + |p| + |d|)`, with `p = ½xᵀPx + cᵀx` and
+    /// `d = −½xᵀPx − bᵀy − hᵀz + lbᵀz_lb − ubᵀz_ub` (finite bounds only).
+    pub gap: f64,
+    /// Variable-box violation `‖(lb − x)⁺, (x − ub)⁺‖∞`, relative like
+    /// [`Self::primal`].
+    pub primal_cone: f64,
+    /// Sign violation of the inequality and bound multipliers,
+    /// `‖(−z)⁺, (−z_lb)⁺, (−z_ub)⁺‖∞`, relative like [`Self::dual`].
+    pub dual_cone: f64,
+}
+
+impl RelativeKktResiduals {
+    /// The largest of the five; the point is "verified" at a tolerance `ε`
+    /// when this is below it.
+    pub fn max(&self) -> f64 {
+        self.primal
+            .max(self.dual)
+            .max(self.gap)
+            .max(self.primal_cone)
+            .max(self.dual_cone)
+    }
+}
+
+/// The three denominators of [`RelativeKktResiduals`] — what each residual is
+/// read *against* — taken from one point: `1 + max(‖b‖∞, ‖h‖∞, ‖Ax‖∞,
+/// ‖Gx‖∞)` for the primal and primal-cone residuals, `1 + max(‖c‖∞, ‖Px‖∞,
+/// ‖Aᵀy‖∞, ‖Gᵀz‖∞, ‖z_lb − z_ub‖∞)` for the dual and dual-cone ones, and
+/// `1 + |p| + |d|` for the gap.
+///
+/// Separate from the residuals so that two points can be read against **one**
+/// scale ([`Self::shared_with`], [`QpSolution::relative_kkt_residuals_at`]).
+/// Each point's own scale is the right reading for a termination test, and the
+/// wrong one for a comparison: the scale grows with the point's own iterates
+/// and multipliers, so a candidate whose duals drifted to `1e8` reads a
+/// stationarity error of `1` as `1e-8` and outranks an honest point for it
+/// (gh #1184 review).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelativeKktScale {
+    pub primal: f64,
+    pub dual: f64,
+    pub gap: f64,
+}
+
+impl RelativeKktScale {
+    /// The component-wise larger of two scales, so that neither point can
+    /// shrink its residuals by inflating its own terms. A non-finite component
+    /// on one side is ignored rather than propagated: a broken candidate
+    /// already reads `NaN` on its own residuals, and must not also zero the
+    /// other candidate's by contributing an infinite denominator.
+    pub fn shared_with(&self, other: &Self) -> Self {
+        let pick = |a: f64, b: f64| match (a.is_finite(), b.is_finite()) {
+            (true, true) => a.max(b),
+            (true, false) => a,
+            (false, true) => b,
+            (false, false) => f64::NAN,
+        };
+        Self {
+            primal: pick(self.primal, other.primal),
+            dual: pick(self.dual, other.dual),
+            gap: pick(self.gap, other.gap),
+        }
+    }
+}
+
+/// The unnormalized pieces [`RelativeKktResiduals`] is built from, and the
+/// point's own [`RelativeKktScale`].
+struct RelativeKktParts {
+    primal: f64,
+    dual: f64,
+    gap: f64,
+    primal_cone: f64,
+    dual_cone: f64,
+    finite: bool,
+    scale: RelativeKktScale,
+}
+
+impl QpSolution {
+    /// The five relative KKT residuals of this point on `prob`, each read
+    /// against this point's own [`RelativeKktScale`]; see
+    /// [`RelativeKktResiduals`]. Orthant / box problems only — a conic
+    /// solve's multipliers live in their cones, not in `z ≥ 0`.
+    ///
+    /// A non-finite entry anywhere makes the corresponding residual `NaN`,
+    /// which a caller ranking points must treat as "worst", not compare. To
+    /// *compare* two points, read both against one scale instead:
+    /// [`Self::relative_kkt_residuals_at`] with [`RelativeKktScale::shared_with`].
+    pub fn relative_kkt_residuals(&self, prob: &QpProblem) -> RelativeKktResiduals {
+        let parts = self.relative_kkt_parts(prob);
+        let scale = parts.scale;
+        Self::normalize(parts, &scale)
+    }
+
+    /// This point's own [`RelativeKktScale`] on `prob`.
+    pub fn relative_kkt_scale(&self, prob: &QpProblem) -> RelativeKktScale {
+        self.relative_kkt_parts(prob).scale
+    }
+
+    /// The five relative KKT residuals of this point read against a scale the
+    /// caller supplies — typically [`RelativeKktScale::shared_with`] over the
+    /// points being compared, so that all of them are measured by one ruler.
+    pub fn relative_kkt_residuals_at(
+        &self,
+        prob: &QpProblem,
+        scale: &RelativeKktScale,
+    ) -> RelativeKktResiduals {
+        Self::normalize(self.relative_kkt_parts(prob), scale)
+    }
+
+    fn normalize(p: RelativeKktParts, scale: &RelativeKktScale) -> RelativeKktResiduals {
+        let guard = |v: f64| if p.finite { v } else { f64::NAN };
+        RelativeKktResiduals {
+            primal: guard(p.primal / scale.primal),
+            dual: guard(p.dual / scale.dual),
+            gap: guard(p.gap / scale.gap),
+            primal_cone: guard(p.primal_cone / scale.primal),
+            dual_cone: guard(p.dual_cone / scale.dual),
+        }
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    fn relative_kkt_parts(&self, prob: &QpProblem) -> RelativeKktParts {
+        let n = prob.n;
+        let x = &self.x;
+        let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |m, a| m.max(a.abs()));
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
+
+        // Each residual is read against the largest of the terms it is a
+        // difference of — the OSQP / Clarabel convention — not against the
+        // data vector alone. The difference matters on a model in epigraph
+        // form, which MIPLIB publishes routinely: leo2 has one unit cost (the
+        // objective variable) and its real costs in an equality row, so
+        // `1 + ‖c‖∞ = 2` would read a stationarity error of `5.5e-3` against
+        // terms of size `1e5`+ as `2.8e-3` relative, while the same residual
+        // read against `‖Aᵀy‖∞` is the `1e-8` it is (gh #1183 review).
+        let mut ax = vec![0.0; prob.m_eq()];
+        prob.a_mul(x, &mut ax);
+        let mut gx = vec![0.0; prob.m_ineq()];
+        prob.g_mul(x, &mut gx);
+        let primal_scale = 1.0
+            + inf_norm(&prob.b)
+                .max(inf_norm(&prob.h))
+                .max(inf_norm(&ax))
+                .max(inf_norm(&gx));
+        let eq = ax
+            .iter()
+            .zip(&prob.b)
+            .fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+        let ineq = gx
+            .iter()
+            .zip(&prob.h)
+            .fold(0.0_f64, |m, (g, h)| m.max((g - h).max(0.0)));
+
+        let mut cone = 0.0_f64;
+        let mut bound_dual = 0.0;
+        for i in 0..n {
+            let (lb, ub) = (prob.lb_of(i), prob.ub_of(i));
+            if lb > -BOUND_INF {
+                cone = cone.max(lb - x[i]);
+                bound_dual += lb * self.z_lb[i];
+            }
+            if ub < BOUND_INF {
+                cone = cone.max(x[i] - ub);
+                bound_dual -= ub * self.z_ub[i];
+            }
+        }
+
+        let mut px = vec![0.0; n];
+        prob.p_mul(x, &mut px);
+        let mut aty = vec![0.0; n];
+        prob.at_mul(&self.y, &mut aty);
+        let mut gtz = vec![0.0; n];
+        prob.gt_mul(&self.z, &mut gtz);
+        let zb: Vec<f64> = (0..n).map(|j| self.z_lb[j] - self.z_ub[j]).collect();
+        let r: Vec<f64> = (0..n)
+            .map(|j| px[j] + prob.c[j] + aty[j] + gtz[j] - zb[j])
+            .collect();
+        let dual_scale = 1.0
+            + inf_norm(&prob.c)
+                .max(inf_norm(&px))
+                .max(inf_norm(&aty))
+                .max(inf_norm(&gtz))
+                .max(inf_norm(&zb));
+
+        let xpx = dot(&px, x);
+        let p_obj = 0.5 * xpx + dot(&prob.c, x);
+        let d_obj = -0.5 * xpx - dot(&prob.b, &self.y) - dot(&prob.h, &self.z) + bound_dual;
+
+        let neg = |v: &[f64]| v.iter().fold(0.0_f64, |m, &a| if -a > m { -a } else { m });
+        let dual_cone = neg(&self.z).max(neg(&self.z_lb)).max(neg(&self.z_ub));
+
+        // `fold(max)` drops a NaN; carry it explicitly so a broken point
+        // cannot read as a perfect one.
+        let finite = x.iter().all(|v| v.is_finite())
+            && self.y.iter().all(|v| v.is_finite())
+            && self.z.iter().all(|v| v.is_finite())
+            && self.z_lb.iter().all(|v| v.is_finite())
+            && self.z_ub.iter().all(|v| v.is_finite());
+        RelativeKktParts {
+            primal: eq.max(ineq),
+            dual: inf_norm(&r),
+            gap: (p_obj - d_obj).abs(),
+            primal_cone: cone.max(0.0),
+            dual_cone,
+            finite,
+            scale: RelativeKktScale {
+                primal: primal_scale,
+                dual: dual_scale,
+                gap: 1.0 + p_obj.abs() + d_obj.abs(),
+            },
+        }
     }
 }
 

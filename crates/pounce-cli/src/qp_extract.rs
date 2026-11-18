@@ -258,6 +258,7 @@ pub fn extract_qp_with_map(
     let mut g: Vec<Triplet> = Vec::new();
     let mut h: Vec<f64> = Vec::new();
     let mut con_map: Vec<ConRowMap> = Vec::with_capacity(prob.con_linear.len());
+    let mut acc = RowAccumulator::new(n);
 
     for (row, lin) in prob.con_linear.iter().enumerate() {
         let lo = prob.g_l[row];
@@ -279,14 +280,8 @@ pub fn extract_qp_with_map(
             .analyze_quadratic_full()
             .map(|(_, l, k)| (l, k))
             .unwrap_or_default();
-        let mut coef = vec![0.0; n];
-        for (var, v) in lin {
-            coef[*var] += *v;
-        }
-        for (var, v) in &nl_lin {
-            coef[*var] += *v;
-        }
-        let nonzeros = || coef.iter().enumerate().filter(|(_, v)| **v != 0.0);
+        let coef = acc.row(lin.iter().chain(nl_lin.iter()).map(|&(var, v)| (var, v)));
+        let nonzeros = || coef.iter().map(|(var, v)| (*var, v));
 
         if lo == hi && lower_bound_present(lo) && upper_bound_present(hi) {
             // Equality row.
@@ -346,6 +341,63 @@ pub fn extract_qp_with_map(
         con_map,
         obj_nl_constant,
     ))
+}
+
+/// Sums one constraint row's `(var, coef)` terms, duplicates merged, and hands
+/// back the nonzeros in ascending `var` order (gh#1182).
+///
+/// Both extractors used to do this with a fresh dense `vec![0.0; n]` per row
+/// and a scan of all `n` entries for the nonzeros — `O(n·m)` for the whole
+/// model, which on an LP is the whole cost of extraction. Measured on a
+/// synthetic LP with 5 nonzeros per column, single thread: 0.2 s at
+/// `n = 25 000`, 3.4 s at `100 000`, 14.6 s at `200 000` — quadrupling with
+/// each doubling, and outside every `max_wall_time` check, since no deadline
+/// is open yet. MIPLIB LP relaxations reach `n` in the millions.
+///
+/// The result is bit-for-bit what the dense version produced: each entry is
+/// summed from `0.0` in the same order (the `.nl` linear section, then the
+/// nonlinear tree's linear terms), an entry that sums to zero is dropped
+/// exactly as `!= 0.0` dropped it, and the output is sorted by `var`, the
+/// dense scan's order. The dense scratch is reused and reset only where a row
+/// touched it, so a row costs `O(k log k)` in its own length `k`.
+struct RowAccumulator {
+    dense: Vec<f64>,
+    seen: Vec<bool>,
+    touched: Vec<usize>,
+    out: Vec<(usize, f64)>,
+}
+
+impl RowAccumulator {
+    fn new(n: usize) -> Self {
+        Self {
+            dense: vec![0.0; n],
+            seen: vec![false; n],
+            touched: Vec::new(),
+            out: Vec::new(),
+        }
+    }
+
+    fn row(&mut self, terms: impl IntoIterator<Item = (usize, f64)>) -> &[(usize, f64)] {
+        for (var, v) in terms {
+            if !self.seen[var] {
+                self.seen[var] = true;
+                self.touched.push(var);
+            }
+            self.dense[var] += v;
+        }
+        self.touched.sort_unstable();
+        self.out.clear();
+        for &var in &self.touched {
+            let v = self.dense[var];
+            if v != 0.0 {
+                self.out.push((var, v));
+            }
+            self.dense[var] = 0.0;
+            self.seen[var] = false;
+        }
+        self.touched.clear();
+        &self.out
+    }
 }
 
 /// The `.nl` variable bounds as `pounce-convex`'s explicit box, with an
@@ -449,6 +501,181 @@ pub fn recover_duals(prob: &NlProblem, con_map: &[ConRowMap], y: &[f64], z: &[f6
             }
         })
         .collect()
+}
+
+/// The inverse of [`recover_duals`] and [`recover_bound_mults`]: express a
+/// point reported in the `.sol` convention — `x`, per-`.nl`-constraint duals
+/// `lambda`, and bound multipliers `z_l` / `z_u` (both `≥ 0` in the internal
+/// minimize sense, multiplied by the objective `sign` exactly as the NLP path
+/// reports them) — as a [`QpSolution`] on the extracted `qp`, so the NLP
+/// arm's point can be measured by the same ruler as the convex arm's,
+/// [`QpSolution::relative_kkt_residuals`] (gh #1183).
+///
+/// A multiplier with the wrong sign for the only side a row (or variable)
+/// has is dropped to zero rather than forced onto a row it does not belong
+/// to: the stationarity residual then carries it, which is the honest place
+/// for a dual-infeasible multiplier to show. Returns `None` when the lengths
+/// do not describe this model.
+#[allow(clippy::too_many_arguments)]
+pub fn qp_point_from_nl(
+    minimize: bool,
+    con_map: &[ConRowMap],
+    qp: &QpProblem,
+    x: &[f64],
+    lambda: &[f64],
+    z_l: Option<&[f64]>,
+    z_u: Option<&[f64]>,
+    status: pounce_convex::QpStatus,
+) -> Option<QpSolution> {
+    if x.len() != qp.n || lambda.len() != con_map.len() {
+        return None;
+    }
+    if z_l.is_some_and(|v| v.len() != qp.n) || z_u.is_some_and(|v| v.len() != qp.n) {
+        return None;
+    }
+    let sign = if minimize { 1.0 } else { -1.0 };
+    let mut y = vec![0.0; qp.m_eq()];
+    let mut z = vec![0.0; qp.m_ineq()];
+    for (m, &lam) in con_map.iter().zip(lambda) {
+        let v = sign * lam;
+        match *m {
+            ConRowMap::Eq { a_row } => y[a_row] = v,
+            ConRowMap::Ineq { upper, lower } => {
+                if v > 0.0
+                    && let Some(r) = upper
+                {
+                    z[r] = v;
+                } else if v < 0.0
+                    && let Some(r) = lower
+                {
+                    z[r] = -v;
+                }
+            }
+        }
+    }
+    let bound = |v: Option<&[f64]>| -> Vec<f64> {
+        v.map(|v| v.iter().map(|&b| (sign * b).max(0.0)).collect())
+            .unwrap_or_else(|| vec![0.0; qp.n])
+    };
+    let x = x.to_vec();
+    let mut px = vec![0.0; qp.n];
+    qp.p_mul(&x, &mut px);
+    let obj = 0.5 * px.iter().zip(&x).map(|(a, b)| a * b).sum::<f64>()
+        + qp.c.iter().zip(&x).map(|(a, b)| a * b).sum::<f64>();
+    Some(QpSolution {
+        status,
+        x,
+        y,
+        z,
+        z_lb: bound(z_l),
+        z_ub: bound(z_u),
+        obj,
+        iters: 0,
+        iterates: Vec::new(),
+    })
+}
+
+/// The certificate behind an infeasible or unbounded convex-QP verdict, in
+/// the `.nl` model's own constraints and variables (gh#1181), for the JSON
+/// report's `solution.certificate`.
+///
+/// A Farkas certificate is first **netted** on each two-sided constraint: the
+/// extractor writes `l ≤ g(x) ≤ u` as two rows `g ≤ u` and `−g ≤ −l`, and a
+/// ray may load both. Replacing `(z_u, z_l)` by `((z_u − z_l)⁺, (z_l − z_u)⁺)`
+/// leaves `Aᵀy + Gᵀz` unchanged and can only lower the value (by
+/// `(u − l)·min(z_u, z_l)`), so the netted ray is re-checked and reported —
+/// and then one `lambda` per constraint, `z_u − z_l` (or `y` on an
+/// equality), says everything the two rows did.
+///
+/// No objective sign is applied: a ray has no objective sense, and flipping
+/// its sign for a maximize model, as [`recover_duals`] does for an optimal
+/// multiplier, would turn a certificate into its negation.
+pub fn certificate_report(
+    prob: &NlProblem,
+    con_map: &[ConRowMap],
+    qp: &QpProblem,
+    cert: pounce_convex::Certificate,
+) -> pounce_solve_report::CertificateInfo {
+    use pounce_convex::Certificate;
+    use std::collections::BTreeMap;
+    let margin = |m: f64| m.is_finite().then_some(m);
+    match cert {
+        Certificate::PrimalInfeasible(f) => {
+            let mut z = f.z.clone();
+            for m in con_map {
+                if let ConRowMap::Ineq {
+                    upper: Some(u),
+                    lower: Some(l),
+                } = *m
+                {
+                    let net = z[u] - z[l];
+                    z[u] = net.max(0.0);
+                    z[l] = (-net).max(0.0);
+                }
+            }
+            // Keep the netted ray unless netting costs it its verification:
+            // it lowers the column magnitudes the residual is measured
+            // against, so a verified ray can in principle fail once netted.
+            // The un-netted ray is then reported as checked; its `lambda`
+            // (`z_u − z_l` per row) is still a certificate, with a support
+            // value at or below the reported `value`.
+            let f = match pounce_convex::certificate::farkas_certificate(qp, &[], &f.y, &z) {
+                Some(netted) if netted.verified || !f.verified => {
+                    pounce_convex::FarkasCertificate {
+                        source: f.source,
+                        ..netted
+                    }
+                }
+                _ => f,
+            };
+            let lambda = con_map
+                .iter()
+                .map(|m| match m {
+                    ConRowMap::Eq { a_row } => f.y[*a_row],
+                    ConRowMap::Ineq { upper, lower } => {
+                        upper.map_or(0.0, |r| f.z[r]) - lower.map_or(0.0, |r| f.z[r])
+                    }
+                })
+                .collect();
+            let per_var = |v: &[f64]| {
+                (0..prob.n)
+                    .map(|j| v.get(j).copied().unwrap_or(0.0))
+                    .collect()
+            };
+            pounce_solve_report::CertificateInfo {
+                kind: "primal_infeasible".to_string(),
+                verified: f.verified,
+                source: f.source.as_str().to_string(),
+                value: f.value,
+                margin: margin(f.margin),
+                lambda,
+                z_l: per_var(&f.z_lb),
+                z_u: per_var(&f.z_ub),
+                d: Vec::new(),
+                residuals: BTreeMap::from([
+                    ("stationarity".to_string(), f.residual),
+                    ("cone_violation".to_string(), f.cone_violation),
+                ]),
+            }
+        }
+        Certificate::DualInfeasible(r) => pounce_solve_report::CertificateInfo {
+            kind: "dual_infeasible".to_string(),
+            verified: r.verified,
+            source: r.source.as_str().to_string(),
+            value: r.value,
+            margin: margin(r.margin),
+            lambda: Vec::new(),
+            z_l: Vec::new(),
+            z_u: Vec::new(),
+            d: r.d,
+            residuals: BTreeMap::from([
+                ("hessian".to_string(), r.hessian_residual),
+                ("equality".to_string(), r.equality_residual),
+                ("cone_violation".to_string(), r.cone_violation),
+                ("bound_violation".to_string(), r.bound_violation),
+            ]),
+        },
+    }
 }
 
 /// The next 0-based row index for a constraint block keyed by its RHS
@@ -600,6 +827,7 @@ pub fn extract_socp_with_map(
     let mut h: Vec<f64> = Vec::new();
     let mut con_map: Vec<ConSocpMap> = Vec::with_capacity(prob.m);
     let mut soc_blocks: Vec<SocBlock> = Vec::new();
+    let mut acc = RowAccumulator::new(n);
 
     for (row, lin) in prob.con_linear.iter().enumerate() {
         let lo = prob.g_l[row];
@@ -646,14 +874,8 @@ pub fn extract_socp_with_map(
         // degree-≤1 terms AMPL folded into the (here empty-Hessian)
         // nonlinear tree, and shift the bounds by the folded constant.
         let (nl_lin, const_shift) = quad.map(|(_, l, k)| (l, k)).unwrap_or_default();
-        let mut coef = vec![0.0; n];
-        for (var, v) in lin {
-            coef[*var] += *v;
-        }
-        for (var, v) in &nl_lin {
-            coef[*var] += *v;
-        }
-        let nonzeros = || coef.iter().enumerate().filter(|(_, v)| **v != 0.0);
+        let coef = acc.row(lin.iter().chain(nl_lin.iter()).map(|&(var, v)| (var, v)));
+        let nonzeros = || coef.iter().map(|(var, v)| (*var, v));
         if lo == hi && lower_bound_present(lo) && upper_bound_present(hi) {
             let eq_row = next_row(&b);
             for (var, v) in nonzeros() {
@@ -1892,6 +2114,104 @@ mod tests {
             "x0={} (expected 3)",
             sol.x[0]
         );
+    }
+
+    /// gh #1183: [`qp_point_from_nl`] inverts [`recover_duals`] and the bound
+    /// multiplier convention, so a point reported in the `.sol` convention
+    /// lands back on the QP multipliers it came from — in both objective
+    /// senses, on every row shape (equality, `≥`, `≤`, range) and with an
+    /// active variable bound.
+    ///
+    ///     opt  x0   s.t.  x0 + x1 = 3,  x0 − x1 ≥ −1,  x0 ≤ 2.6,
+    ///                     0.5 ≤ x1 ≤ 10,  0 ≤ x0 ≤ 2.5,  0 ≤ x1 ≤ 4
+    ///
+    /// `max x0` (and `min −x0`) reach `x = (2.5, 0.5)`: the `x0` upper bound,
+    /// the equality and the range row's lower side active.
+    #[test]
+    fn qp_point_from_nl_inverts_the_sol_convention() {
+        for (minimize, coef) in [(true, -1.0), (false, 1.0)] {
+            let prob = NlProblem {
+                src: None,
+                cse_bodies: Vec::new(),
+                complementarity: Vec::new(),
+                n: 2,
+                m: 4,
+                num_obj: 1,
+                minimize,
+                obj_nonlinear: NlBody::Tree(Expr::Const(0.0)),
+                obj_linear: vec![(0, coef)],
+                obj_constant: 0.0,
+                con_nonlinear: vec![NlBody::Tree(Expr::Const(0.0)); 4],
+                con_linear: vec![
+                    vec![(0, 1.0), (1, 1.0)],
+                    vec![(0, 1.0), (1, -1.0)],
+                    vec![(0, 1.0)],
+                    vec![(1, 1.0)],
+                ],
+                x_l: vec![0.0, 0.0],
+                x_u: vec![2.5, 4.0],
+                g_l: vec![3.0, -1.0, -2e19, 0.5],
+                g_u: vec![3.0, 2e19, 2.6, 10.0],
+                x0: vec![0.0, 0.0],
+                lambda0: vec![0.0; 4],
+                suffixes: Default::default(),
+                imported_funcs: Vec::new(),
+                ampl_options: Vec::new(),
+                nl_counts: None,
+                n_discrete: None,
+                var_names: Vec::new(),
+                con_names: Vec::new(),
+            };
+            let (qp, con_map, _) = extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
+            let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
+            assert_eq!(sol.status, QpStatus::Optimal, "minimize={minimize}");
+            assert!((sol.x[0] - 2.5).abs() < 1e-6 && (sol.x[1] - 0.5).abs() < 1e-6);
+
+            // What the NLP arm reports: `.sol` row duals, and bound
+            // multipliers multiplied by the objective sign.
+            let sign = if minimize { 1.0 } else { -1.0 };
+            let lambda = recover_duals(&prob, &con_map, &sol.y, &sol.z);
+            let z_l: Vec<f64> = sol.z_lb.iter().map(|z| sign * z).collect();
+            let z_u: Vec<f64> = sol.z_ub.iter().map(|z| sign * z).collect();
+
+            let back = qp_point_from_nl(
+                prob.minimize,
+                &con_map,
+                &qp,
+                &sol.x,
+                &lambda,
+                Some(&z_l),
+                Some(&z_u),
+                QpStatus::Optimal,
+            )
+            .expect("lengths match");
+            let close = |a: &[f64], b: &[f64]| a.iter().zip(b).all(|(p, q)| (p - q).abs() < 1e-7);
+            assert!(close(&back.y, &sol.y), "y {:?} vs {:?}", back.y, sol.y);
+            assert!(close(&back.z, &sol.z), "z {:?} vs {:?}", back.z, sol.z);
+            assert!(close(&back.z_lb, &sol.z_lb), "minimize={minimize}");
+            assert!(close(&back.z_ub, &sol.z_ub), "minimize={minimize}");
+            // And so it measures as the point it is: verified.
+            let r = back.relative_kkt_residuals(&qp);
+            assert!(r.max() < 1e-7, "minimize={minimize}: {r:?}");
+            // A multiplier with the wrong sign, as a sign-convention slip
+            // would produce, must read as a failure on that ruler.
+            let flipped: Vec<f64> = lambda.iter().map(|l| -l).collect();
+            let bad = qp_point_from_nl(
+                prob.minimize,
+                &con_map,
+                &qp,
+                &sol.x,
+                &flipped,
+                Some(&z_l),
+                Some(&z_u),
+                QpStatus::Optimal,
+            )
+            .expect("lengths match");
+            assert!(
+                bad.relative_kkt_residuals(&qp).max() > 1e-2,
+                "minimize={minimize}"
+            );
+        }
     }
 
     /// Inequality dual sign/magnitude. min x0² s.t. x0 ≥ 1 (a one-sided

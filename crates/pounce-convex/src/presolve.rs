@@ -299,6 +299,11 @@ pub enum FixpointExit {
     Fixpoint,
     /// The `MAX_ROUNDS` layer cap stopped a loop that was still reducing.
     RoundCap,
+    /// The caller's deadline ([`presolve_until`]) passed between two layers,
+    /// so the loop stopped where it stood (gh#1182). The layers already taken
+    /// are each a complete reduction, so this is a sound, less-reduced
+    /// problem — exactly what `RoundCap` hands back, for a different reason.
+    Deadline,
 }
 
 impl std::fmt::Display for FixpointExit {
@@ -306,6 +311,7 @@ impl std::fmt::Display for FixpointExit {
         match self {
             FixpointExit::Fixpoint => f.write_str("fixpoint"),
             FixpointExit::RoundCap => f.write_str("round cap"),
+            FixpointExit::Deadline => f.write_str("deadline"),
         }
     }
 }
@@ -430,6 +436,7 @@ impl BoxRefinements {
 /// Dropped *rows* (empty rows, duplicate rows) need no stack entry: they
 /// are simply absent from the kept-row maps, so postsolve leaves their
 /// dual at the zero initialization, which is the correct multiplier.
+#[derive(Clone)]
 enum Reduction {
     /// Variable `col` was fixed to `value` by the singleton equality row
     /// `eq_row` (coefficient `a_coef`). Postsolve restores `x[col] =
@@ -584,6 +591,7 @@ pub fn convex_presolve_fingerprint(prob: &QpProblem) -> ConvexPresolveFingerprin
 /// Captured presolve state: the reduced problem plus the transaction
 /// stack and the index maps needed to expand a reduced solution back to
 /// the original space.
+#[derive(Clone)]
 pub struct Presolve {
     /// The reduced problem to hand to the solver.
     pub reduced: QpProblem,
@@ -625,6 +633,12 @@ pub struct Presolve {
     /// [`PresolveStats::exit`]; `Fixpoint` for a single pass, which by
     /// definition did not run out of anything.
     exit: FixpointExit,
+    /// Postsolve a Farkas ray rather than an optimal point (gh#1181): set
+    /// only on the objective-free copy [`Presolve::postsolve_farkas`] builds.
+    /// Every bound-activity test postsolve makes against the lifted `x` is
+    /// replaced by "the bound is finite", because a ray has no point to be
+    /// active at — see that function.
+    ray: bool,
 }
 
 /// Coefficients are treated as nonzero unless exactly 0.0.
@@ -836,9 +850,34 @@ struct Row {
 /// cones. The unprotected merge calls them duplicates, keeps one, and the
 /// solve reports `Optimal` at an objective 67% off (gh #588 §7).
 pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
-    match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled) {
+    presolve_until(prob, None)
+}
+
+/// [`presolve`], stopping between fixpoint layers once `deadline` has passed
+/// (gh#1182).
+///
+/// The fixpoint takes up to `MAX_ROUNDS` layers, each a pass over every
+/// nonzero plus a clone of the problem it reduced, and before this nothing in
+/// it looked at the clock: the solver's deadline scope opens only after
+/// presolve returns. On a synthetic 400 000-column banded LP with 2M nonzeros
+/// presolve took 13.9 s against `max_wall_time = 5`, and the overrun grows with
+/// the model. Checking at each layer boundary bounds it by one layer.
+///
+/// Stopping early never makes the reduction wrong: every layer is a complete
+/// reduction with its own postsolve, so the result is the problem the layers
+/// taken so far produce, reported with [`FixpointExit::Deadline`]. An
+/// infeasibility claim is still re-derived before it is believed (see
+/// [`presolve`]); a re-derivation that the deadline cuts short returns the
+/// partial reduction, which is the conservative answer.
+pub fn presolve_until(prob: &QpProblem, deadline: Option<std::time::Instant>) -> PresolveOutcome {
+    match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled, deadline) {
         PresolveOutcome::Infeasible(trigger) => {
-            match presolve_fixpoint(prob, Catalog::NoSpeculativeFixings, DedupMemo::Enabled) {
+            match presolve_fixpoint(
+                prob,
+                Catalog::NoSpeculativeFixings,
+                DedupMemo::Enabled,
+                deadline,
+            ) {
                 // Confirmed without the speculative fixings: the problem
                 // really is infeasible, and this is the trigger that shows it.
                 confirmed @ PresolveOutcome::Infeasible(_) => confirmed,
@@ -919,7 +958,12 @@ enum DedupMemo {
 /// cap, `bore3d` among them; what has changed is that the loop now says so
 /// ([`FixpointExit`]) instead of leaving a truncated reduction and a fixpoint
 /// looking identical.
-fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog, memo: DedupMemo) -> PresolveOutcome {
+fn presolve_fixpoint(
+    prob: &QpProblem,
+    catalog: Catalog,
+    memo: DedupMemo,
+    deadline: Option<std::time::Instant>,
+) -> PresolveOutcome {
     // Cap layers defensively. A round can contribute two (the catalog pass
     // and an aggregation), so this is a bound on layers, not on rounds.
     //
@@ -993,9 +1037,14 @@ fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog, memo: DedupMemo) -> Pre
             exit = FixpointExit::RoundCap;
             break;
         }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            exit = FixpointExit::Deadline;
+            break;
+        }
     }
-    // A chain this short cannot have reached `MAX_ROUNDS`, so `exit` is
-    // `Fixpoint` here and the single-pass layer already carries it.
+    // An empty chain means the first round found nothing, and that breaks as
+    // `Fixpoint` before the layer cap or the deadline is consulted, so the
+    // passthrough layer's own `Fixpoint` is the right exit.
     if chain.is_empty() {
         // Nothing to do at all; hand back the verbatim-forwarding layer.
         return PresolveOutcome::Reduced(
@@ -1024,6 +1073,7 @@ fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog, memo: DedupMemo) -> Pre
         chain,
         discarded_infeasibility: None,
         exit,
+        ray: false,
     })
 }
 
@@ -1055,6 +1105,7 @@ fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
         chain: Vec::new(),
         discarded_infeasibility: None,
         exit: FixpointExit::Fixpoint,
+        ray: false,
     })
 }
 
@@ -2119,6 +2170,7 @@ fn presolve_once(
         chain: Vec::new(),
         discarded_infeasibility: None,
         exit: FixpointExit::Fixpoint,
+        ray: false,
     })
 }
 
@@ -2718,6 +2770,70 @@ impl Presolve {
         ))
     }
 
+    /// Lift a **Farkas ray** `(y, z)` of the reduced problem to the original
+    /// rows (gh#1181), for an infeasibility certificate.
+    ///
+    /// [`Self::postsolve`] lifts *optimal* duals: every multiplier it has to
+    /// reconstruct — a fixing row's, a free-column singleton's consumed row's
+    /// (`−c_col/a_col`), a forcing row's, and every tightened bound's
+    /// re-attribution to the row that implied it — is read off the
+    /// stationarity residual `Px + c + Aᵀy + Gᵀz` at the lifted point. A
+    /// Farkas ray satisfies the *homogeneous* condition `Aᵀy + Gᵀz − z_lb +
+    /// z_ub = 0` instead, so lifting it through that recovery adds `Px + c`
+    /// terms that do not belong to it, and the lifted ray stops being a ray
+    /// of the original problem. Measured on the 14 NETLIB-infeas models this
+    /// path certifies after presolve has reduced them: 8 of the 14 lifted
+    /// rays failed an independent Farkas check.
+    ///
+    /// The same recovery with the objective removed is the ray recovery, so
+    /// this runs [`Self::postsolve`] on a copy of every layer with `c`, `P`
+    /// and each stored `c_col` zeroed, from the reduced ray with `x = 0`.
+    ///
+    /// That alone is not enough, because postsolve also decides *which bound
+    /// a multiplier belongs to* by where the lifted `x` sits: a tightened
+    /// bound's multiplier moves to the row that implied it only if `x` is on
+    /// the tightened bound and off the original one; the global recovery
+    /// gives a column a bound multiplier only at a bound `x` is on; an
+    /// aggregation hands a survivor's leftover to whichever cluster member
+    /// `x` puts on a bound. A ray has no point to be on anything, so on this
+    /// copy (`ray = true`) each of those tests becomes "the bound is finite",
+    /// and the aggregation hands the leftover to the column whose bound the
+    /// reduced one was transferred from (`x_l_src` / `x_u_src`). Re-attributing
+    /// a tightened bound's whole multiplier to its implying row is exact for a
+    /// ray: `μ/coef` on the row, with the other columns' multipliers at the
+    /// bounds the implied bound was computed from, contributes the same `μ·u'`
+    /// to the Farkas value.
+    /// Only the duals are returned; the lifted point means nothing for a ray.
+    /// Nothing here changes what [`Self::postsolve`] returns, so no solve's
+    /// reported point, objective or multipliers move.
+    pub fn postsolve_farkas(&self, red: &QpSolution) -> (Vec<f64>, Vec<f64>) {
+        let mut view = self.clone();
+        view.drop_objective();
+        let red = QpSolution {
+            x: vec![0.0; red.x.len()],
+            iterates: Vec::new(),
+            ..red.clone()
+        };
+        let lifted = view.postsolve(&red);
+        (lifted.y, lifted.z)
+    }
+
+    /// Zero the objective this presolve recovers duals against, in every
+    /// layer. See [`Self::postsolve_farkas`].
+    fn drop_objective(&mut self) {
+        self.ray = true;
+        self.orig.c.iter_mut().for_each(|c| *c = 0.0);
+        self.orig.p_lower.clear();
+        for r in &mut self.stack {
+            if let Reduction::FreeColSingleton { c_col, .. } = r {
+                *c_col = 0.0;
+            }
+        }
+        for layer in &mut self.chain {
+            layer.drop_objective();
+        }
+    }
+
     /// Expand a reduced-problem solution back to the original space,
     /// recovering primal `x` and duals `(y, z)`. For an iterated presolve,
     /// folds the per-round postsolves in reverse.
@@ -2738,7 +2854,7 @@ impl Presolve {
         // primal lift and dual sweep; it never shares a layer with the
         // single-elimination catalog.
         let mut out = if let [Reduction::Aggregate { plan }] = self.stack.as_slice() {
-            crate::aggregate::postsolve(&self.orig, plan, red)
+            crate::aggregate::postsolve(&self.orig, plan, red, self.ray)
         } else {
             self.postsolve_catalog(red)
         };
@@ -2955,14 +3071,14 @@ impl Presolve {
                 }
                 let delta = if *is_upper {
                     let m = red.z_ub.get(newc).copied().unwrap_or(0.0);
-                    if m > 0.0 && x[*col] < self.orig.ub_of(*col) - BOUND_FEAS_TOL {
+                    if m > 0.0 && (self.ray || x[*col] < self.orig.ub_of(*col) - BOUND_FEAS_TOL) {
                         m / coef
                     } else {
                         0.0
                     }
                 } else {
                     let m = red.z_lb.get(newc).copied().unwrap_or(0.0);
-                    if m > 0.0 && x[*col] > self.orig.lb_of(*col) + BOUND_FEAS_TOL {
+                    if m > 0.0 && (self.ray || x[*col] > self.orig.lb_of(*col) + BOUND_FEAS_TOL) {
                         -m / coef
                     } else {
                         0.0
@@ -2996,8 +3112,8 @@ impl Presolve {
         for i in 0..n {
             let lb = self.orig.lb_of(i);
             let ub = self.orig.ub_of(i);
-            let at_lb = lb > -BOUND_INF && at_bound(x[i], lb);
-            let at_ub = ub < BOUND_INF && at_bound(x[i], ub);
+            let at_lb = lb > -BOUND_INF && (self.ray || at_bound(x[i], lb));
+            let at_ub = ub < BOUND_INF && (self.ray || at_bound(x[i], ub));
             if at_lb && grad[i] > 0.0 {
                 z_lb[i] = grad[i];
             } else if at_ub && grad[i] < 0.0 {
@@ -3345,7 +3461,7 @@ mod dedup_memo_tests {
     }
 
     fn reduce(prob: &QpProblem, memo: DedupMemo) -> Option<(String, PresolveStats)> {
-        match presolve_fixpoint(prob, Catalog::Full, memo) {
+        match presolve_fixpoint(prob, Catalog::Full, memo, None) {
             PresolveOutcome::Reduced(ps) => Some((fingerprint(&ps.reduced), ps.stats())),
             _ => None,
         }
@@ -3500,7 +3616,7 @@ mod dedup_memo_tests {
         // And the merge really happens, or the comparison above is vacuous:
         // the looser of the two parallel rows must be gone.
         let PresolveOutcome::Reduced(ps) =
-            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled)
+            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled, None)
         else {
             panic!("feasible bounded problem");
         };
@@ -3545,7 +3661,7 @@ mod dedup_memo_tests {
 
         // And the skip must really be engaging, or the test proves nothing.
         let PresolveOutcome::Reduced(ps) =
-            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled)
+            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled, None)
         else {
             panic!("feasible bounded problem");
         };
