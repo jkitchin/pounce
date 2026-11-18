@@ -228,6 +228,65 @@ pub fn gradient_scaling_fires(
     constr_target_gradient > 0.0 || row_max.iter().any(|&v| v > max_gradient)
 }
 
+/// The factor `user-scaling` gives each constraint row, in `g` order, from
+/// what [`crate::tnlp::TNLP::get_scaling_parameters`] answered.
+///
+/// `supplied` is the callback's return value. A TNLP that returned `false`,
+/// or set no `g_scaling`, gave no row a factor, whatever `given` holds.
+/// Otherwise every row keeps its `g_scaling` entry, floored at `min_value`,
+/// except that under [`UntaggedConstrScaling::GradientBased`] a row whose
+/// `given` entry is `false` gets [`gradient_row_scale`] of its `row_max`
+/// entry instead. Under that rule a TNLP that gave no row a factor has every
+/// row scaled this way. `row_max` is called only when some row needs it, and
+/// when it returns `None` those rows keep the factor written, or 1.
+///
+/// The interior-point method and the square-system stage both take their
+/// row factors from here, so the two cannot disagree on a model.
+#[allow(clippy::too_many_arguments)]
+pub fn user_row_scale(
+    supplied: bool,
+    use_g_scaling: bool,
+    g_scaling: &[Number],
+    given: &[bool],
+    rule: UntaggedConstrScaling,
+    row_max: impl FnOnce() -> Option<Vec<Number>>,
+    max_gradient: Number,
+    min_value: Number,
+    constr_target_gradient: Number,
+) -> Vec<Number> {
+    let has_factors = supplied && use_g_scaling;
+    let mut out: Vec<Number> = g_scaling
+        .iter()
+        .map(|&s| {
+            if !has_factors {
+                1.0
+            } else if s < min_value {
+                min_value
+            } else {
+                s
+            }
+        })
+        .collect();
+    if rule == UntaggedConstrScaling::GradientBased {
+        let without: Vec<usize> = (0..out.len())
+            .filter(|&i| !has_factors || !given.get(i).copied().unwrap_or(true))
+            .collect();
+        if !without.is_empty() {
+            if let Some(row_max) = row_max() {
+                for i in without {
+                    out[i] = gradient_row_scale(
+                        row_max[i],
+                        max_gradient,
+                        min_value,
+                        constr_target_gradient,
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Concrete `IpoptNlp` over a `TNLPAdapter`. Mirrors upstream
 /// `Ipopt::OrigIpoptNLP`.
 pub struct OrigIpoptNlp {
@@ -1469,13 +1528,9 @@ impl OrigIpoptNlp {
     /// for a TNLP that supplied none. `false` matches upstream's
     /// `GetScalingParameters` return-value contract.
     ///
-    /// Under `nlp_scaling_untagged_constr=gradient-based` a row the user
-    /// gave no factor gets [`gradient_row_scale`] of its Jacobian ∞-norm
-    /// at `full_x`, row by row with no per-block gate, so a row at or
-    /// below `max_gradient` gets 1. A row has no factor when the TNLP
-    /// cleared its [`ScalingRequest::g_scaling_given`] entry, when it set
-    /// no `g_scaling` at all, or when it supplied no scaling. The
-    /// objective is never scaled by this rule.
+    /// The row factors come from [`user_row_scale`], with the Jacobian
+    /// sampled at `full_x`. The objective is never scaled by
+    /// `nlp_scaling_untagged_constr`.
     ///
     /// `OrigIpoptNlp` does not model per-variable rescaling (that would
     /// require transforming `eval_grad_f`, `eval_jac_*`, and `eval_h` in
@@ -1516,20 +1571,15 @@ impl OrigIpoptNlp {
                 g_scaling_given: &mut g_scaling_given,
             })
         };
-        let untagged = self.untagged_constr.get() == UntaggedConstrScaling::GradientBased;
-        if !ok && !untagged {
+        let rule = self.untagged_constr.get();
+        if !ok && rule == UntaggedConstrScaling::None {
             return false;
         }
         if !ok {
-            // Nothing was supplied, so no row has a factor and the
-            // objective keeps the user's constant alone.
+            // Nothing was supplied, so the objective keeps the user's
+            // constant alone and no variable is rescaled.
             obj_scaling = 1.0;
             use_x_scaling = false;
-            use_g_scaling = false;
-        }
-        if !use_g_scaling || g_scaling.len() != n_full_g {
-            g_scaling = vec![1.0; n_full_g];
-            g_scaling_given = vec![!untagged; n_full_g];
         }
 
         // Objective: user's obj_scaling combined with the constant
@@ -1543,39 +1593,34 @@ impl OrigIpoptNlp {
         }
         self.obj_scale_factor.set(df * user_obj_factor);
 
-        // Constraint vector: split user g_scaling into c_scale / d_scale.
+        // Constraint factors over `g`, then split into c_scale / d_scale.
+        // The Jacobian sample is the one gradient-based scaling takes.
         let n_c = cls.n_c as usize;
         let n_d = cls.n_d as usize;
-        let floor = |s: Number| if s < min_value { min_value } else { s };
-        let mut dc: Vec<Number> = cls
-            .c_map
-            .iter()
-            .map(|&g| floor(g_scaling[g as usize]))
-            .collect();
-        let mut dd: Vec<Number> = cls
-            .d_map
-            .iter()
-            .map(|&g| floor(g_scaling[g as usize]))
-            .collect();
-        if untagged && g_scaling_given.iter().any(|&given| !given) {
-            // The same Jacobian sample gradient-based scaling takes. When
-            // it cannot be evaluated the rows keep the factor written.
-            if let Some((c_row_max, d_row_max)) = self.jacobian_row_max(cls, full_x) {
-                let rule = |row_max: Number| {
-                    gradient_row_scale(row_max, max_gradient, min_value, constr_target_gradient)
-                };
-                for (c_idx, &g_idx) in cls.c_map.iter().enumerate() {
-                    if !g_scaling_given[g_idx as usize] {
-                        dc[c_idx] = rule(c_row_max[c_idx]);
-                    }
-                }
-                for (d_idx, &g_idx) in cls.d_map.iter().enumerate() {
-                    if !g_scaling_given[g_idx as usize] {
-                        dd[d_idx] = rule(d_row_max[d_idx]);
-                    }
-                }
+        let row_max = || {
+            let (c_row_max, d_row_max) = self.jacobian_row_max(cls, full_x)?;
+            let mut g_row_max = vec![Number::MIN_POSITIVE; n_full_g];
+            for (c_idx, &g_idx) in cls.c_map.iter().enumerate() {
+                g_row_max[g_idx as usize] = c_row_max[c_idx];
             }
-        }
+            for (d_idx, &g_idx) in cls.d_map.iter().enumerate() {
+                g_row_max[g_idx as usize] = d_row_max[d_idx];
+            }
+            Some(g_row_max)
+        };
+        let g_scale = user_row_scale(
+            ok,
+            use_g_scaling && g_scaling.len() == n_full_g,
+            &g_scaling,
+            &g_scaling_given,
+            rule,
+            row_max,
+            max_gradient,
+            min_value,
+            constr_target_gradient,
+        );
+        let dc: Vec<Number> = cls.c_map.iter().map(|&g| g_scale[g as usize]).collect();
+        let dd: Vec<Number> = cls.d_map.iter().map(|&g| g_scale[g as usize]).collect();
         // Only install the vectors when not all-ones (matches the
         // `Option::None ↔ identity` convention used elsewhere).
         let nontrivial_c = dc.iter().any(|&s| s != 1.0);

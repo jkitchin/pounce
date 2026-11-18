@@ -727,7 +727,8 @@ impl PyProblem {
     ///   a row marked `False` gets the gradient-based row factor instead
     ///   of its `g_scaling` entry, the same rule the `.nl` path applies to
     ///   a row with no `scaling_factor` suffix entry. Otherwise it is not
-    ///   read.
+    ///   read. It needs `g_scaling`: without row factors no row has one,
+    ///   so passing it alone raises `ValueError`.
     ///
     /// The scaling only takes effect when `nlp_scaling_method` is set
     /// to `"user-scaling"`. Call once before `solve()`; cleared by
@@ -747,6 +748,11 @@ impl PyProblem {
             .map(|v| extract_f64_vec(&v, self.m as usize, "g_scaling"))
             .transpose()?;
         if let Some(given) = &g_scaling_given {
+            if g.is_none() {
+                return Err(PyValueError::new_err(
+                    "g_scaling_given needs g_scaling: without row factors no row has one",
+                ));
+            }
             if given.len() != self.m as usize {
                 return Err(PyValueError::new_err(format!(
                     "g_scaling_given: expected length {}, got {}",
@@ -1027,9 +1033,9 @@ impl PyProblem {
 
     /// The user scaling installed by `set_problem_scaling`, as
     /// `(obj_scaling, x_scaling, g_scaling)` with `None` for an axis
-    /// left unscaled, or `None` when no user scaling is installed. A row
-    /// installed with `g_scaling_given` `False` reads NaN in `g_scaling`,
-    /// since it has no factor of its own.
+    /// left unscaled, or `None` when no user scaling is installed. The
+    /// factors are returned as installed. Which rows were given one is
+    /// `get_problem_scaling_given()`.
     fn get_problem_scaling<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyTuple>> {
         self.user_scaling.as_ref().map(|s| {
             let x: PyObject = match &s.x_scaling {
@@ -1037,21 +1043,22 @@ impl PyProblem {
                 None => py.None(),
             };
             let g: PyObject = match &s.g_scaling {
-                Some(v) => {
-                    let mut v = v.clone();
-                    if let Some(given) = &s.g_scaling_given {
-                        for (slot, &g) in v.iter_mut().zip(given) {
-                            if !g {
-                                *slot = Number::NAN;
-                            }
-                        }
-                    }
-                    v.into_pyarray_bound(py).into_any().unbind()
-                }
+                Some(v) => v.clone().into_pyarray_bound(py).into_any().unbind(),
                 None => py.None(),
             };
             PyTuple::new_bound(py, [s.obj.into_py(py), x, g])
         })
+    }
+
+    /// The `g_scaling_given` installed by `set_problem_scaling`, as a
+    /// bool array, or `None` when it was not passed or no user scaling is
+    /// installed. `None` with `g_scaling` set means every row was given
+    /// its factor.
+    fn get_problem_scaling_given<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
+        self.user_scaling
+            .as_ref()
+            .and_then(|s| s.g_scaling_given.clone())
+            .map(|v| v.into_pyarray_bound(py).into_any())
     }
 
     /// The `problem_obj` this Problem was constructed with. Exposed so

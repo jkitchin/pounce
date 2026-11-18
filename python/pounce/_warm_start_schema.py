@@ -243,6 +243,12 @@ def _scaling_digest(problem, opts: Sequence[Tuple[str, Any]]) -> str:
         parts.append(float(obj_s))
         parts.append(None if x_s is None else np.asarray(x_s, dtype=float))
         parts.append(None if g_s is None else np.asarray(g_s, dtype=float))
+        # Which rows were given a factor decides which ones
+        # `nlp_scaling_untagged_constr` rescales. Appended only when it was
+        # installed, so a digest taken without it is unchanged.
+        given = getattr(problem, "get_problem_scaling_given", lambda: None)()
+        if given is not None:
+            parts.append(np.asarray(given, dtype=bool))
     return _digest(*parts)
 
 

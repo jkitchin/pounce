@@ -1074,10 +1074,10 @@ struct IpmScaling {
 ///   all, and [`gradient_row_scale`] gives each row its factor.
 /// * User scaling floors every `g_scaling` entry at
 ///   `nlp_scaling_min_value`, and falls back to no scaling when the TNLP
-///   declines, as the IPM does. Under `nlp_scaling_untagged_constr=
-///   gradient-based` a row the TNLP gave no factor gets
-///   [`gradient_row_scale`] of its Jacobian row at the same point, row by
-///   row, and a TNLP that declines leaves every row in that state.
+///   declines, as the IPM does. The row factors come from
+///   [`user_row_scale`], the function the IPM uses, with the Jacobian
+///   sampled at the same point, so `nlp_scaling_untagged_constr` gives the
+///   same factors here.
 ///
 /// What is *not* reproduced: a wrapper the application inserts inside
 /// `optimize_tnlp` (the start conditioner, the gh#486 variable-scaling
@@ -1088,13 +1088,15 @@ struct IpmScaling {
 ///
 /// [`gradient_scaling_fires`]: pounce_nlp::orig_ipopt_nlp::gradient_scaling_fires
 /// [`gradient_row_scale`]: pounce_nlp::orig_ipopt_nlp::gradient_row_scale
+/// [`user_row_scale`]: pounce_nlp::orig_ipopt_nlp::user_row_scale
 fn ipm_scaling(
     tnlp: &Rc<RefCell<dyn TNLP>>,
     options: &OptionsList,
     plan: &SquareSystemPlan,
 ) -> IpmScaling {
     use pounce_nlp::orig_ipopt_nlp::{
-        gradient_obj_scale, gradient_row_scale, gradient_scaling_fires,
+        UntaggedConstrScaling, gradient_obj_scale, gradient_row_scale, gradient_scaling_fires,
+        user_row_scale,
     };
     let m = plan.m;
     let user_obj = opt_num(options, "obj_scaling_factor", 1.0);
@@ -1133,12 +1135,7 @@ fn ipm_scaling(
     match method.as_str() {
         "none" => unscaled,
         "user-scaling" | "curvature-based" => {
-            let untagged = method == "user-scaling"
-                && options
-                    .get_string_value("nlp_scaling_untagged_constr", "")
-                    .ok()
-                    .and_then(|(v, found)| found.then_some(v))
-                    .is_some_and(|v| v == "gradient-based");
+            let rule = crate::application::untagged_constr_scaling(options);
             let mut obj = 1.0;
             let mut use_x = false;
             let mut xs = vec![1.0; plan.n_full];
@@ -1153,44 +1150,38 @@ fn ipm_scaling(
                 g_scaling: &mut gs,
                 g_scaling_given: &mut given,
             });
-            if !ok && !untagged {
+            if !ok && rule == UntaggedConstrScaling::None {
                 return unscaled;
             }
             if !ok {
                 obj = 1.0;
-                use_g = false;
             }
-            if !use_g {
-                gs = vec![1.0; m];
-                given = vec![!untagged; m];
-            }
-            let mut evals = (0, 0);
-            if given.iter().any(|&g| !g) {
-                evals.1 = 1;
-                if let Some(row_max) = jac_row_max() {
-                    for i in (0..m).filter(|&i| !given[i]) {
-                        gs[i] = gradient_row_scale(row_max[i], max_grad, min_value, constr_target);
-                    }
-                }
-                use_g = true;
-            }
+            let sampled = std::cell::Cell::new(false);
+            let row_scale = user_row_scale(
+                ok,
+                use_g,
+                &gs,
+                &given,
+                rule,
+                || {
+                    sampled.set(true);
+                    jac_row_max()
+                },
+                max_grad,
+                min_value,
+                constr_target,
+            );
             let df = if obj.abs() < min_value {
                 min_value
             } else {
                 obj
             };
             IpmScaling {
-                row_scale: if use_g {
-                    gs.iter()
-                        .map(|&v| if v < min_value { min_value } else { v })
-                        .collect()
-                } else {
-                    vec![1.0; m]
-                },
+                row_scale,
                 computed_obj_scale: 1.0,
                 total_obj_scale: df * user_obj,
                 start_obj_grad_max: Number::NAN,
-                evals,
+                evals: (0, usize::from(sampled.get())),
             }
         }
         _ => {

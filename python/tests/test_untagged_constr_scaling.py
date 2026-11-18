@@ -11,8 +11,6 @@ gradient-based factor 100 / 1000 = 0.1 gives 99.6. The `.nl` path's test,
 ``crates/pounce-cli/tests/untagged_constr_scaling.rs``, uses the same rows.
 """
 
-import math
-
 import numpy as np
 import pytest
 
@@ -85,12 +83,43 @@ def test_the_rule_reads_the_jacobian_after_the_variable_factors():
     assert got == pytest.approx(199.2)
 
 
-def test_get_problem_scaling_reports_nan_for_a_row_without_a_factor():
-    _, _, g = _problem("gradient-based", [True, False]).get_problem_scaling()
-    assert g[0] == 0.5
-    assert math.isnan(g[1])
+def test_the_getters_report_the_factors_and_the_flags_as_installed():
+    prob = _problem("gradient-based", [True, False])
+    _, _, g = prob.get_problem_scaling()
+    assert list(g) == [0.5, 1.0], "the factors come back unmasked"
+    assert list(prob.get_problem_scaling_given()) == [True, False]
+    assert _problem("gradient-based", None).get_problem_scaling_given() is None
+
+
+def test_the_default_applies_the_factor_written_for_a_row_marked_not_given():
+    # Under `none` the flags are not read, so row 1's own factor applies:
+    # 10 on a residual of 996.
+    prob = _problem("none", [True, False])
+    prob.set_problem_scaling(1.0, g_scaling=[0.5, 10.0],
+                             g_scaling_given=[True, False])
+    _, info = pounce.Solver(prob).solve(x0=np.ones(3))
+    assert info["final_constr_viol"] == pytest.approx(9960.0)
+
+
+def test_a_factor_change_on_a_row_marked_not_given_changes_the_digest():
+    from pounce._warm_start_schema import _scaling_digest
+
+    def digest(g1, given=(True, False)):
+        prob = _problem("none", [True, False])
+        prob.set_problem_scaling(1.0, g_scaling=[5.0, g1],
+                                 g_scaling_given=list(given))
+        return _scaling_digest(prob, [])
+
+    assert digest(7.0) != digest(70.0)
+    assert digest(7.0) != digest(7.0, given=(True, True)), "the flags count too"
 
 
 def test_flags_of_the_wrong_length_are_refused():
     with pytest.raises(ValueError, match="g_scaling_given"):
         _problem("gradient-based", [True])
+
+
+def test_flags_without_row_factors_are_refused():
+    prob = _problem("gradient-based", None)
+    with pytest.raises(ValueError, match="g_scaling_given needs g_scaling"):
+        prob.set_problem_scaling(1.0, g_scaling_given=[True, False])

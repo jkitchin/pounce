@@ -312,3 +312,177 @@ fn the_objective_keeps_its_user_factor() {
     let (obj, _, _) = installed(s, DEFAULT);
     assert_eq!(obj, 0.01);
 }
+
+// ---------------------------------------------------------------------------
+// The MPCC wrapper's product rows
+// ---------------------------------------------------------------------------
+
+use pounce_nlp::mpcc::{ComplementarityPair, Lowering, MpccTnlp};
+
+/// What [`PairModel`]'s callback answers.
+#[derive(Clone, Copy, Debug)]
+enum PairAnswer {
+    /// `false`, as an `.nl` with no `scaling_factor` suffix answers.
+    Nothing,
+    /// `true` with an objective factor and no row factors, as an `.nl`
+    /// whose suffix names only the objective answers.
+    ObjectiveOnly,
+    /// `true` with row 0 given factor 1 and row 1 not given.
+    Rows,
+}
+
+/// `min x² + y²` with `x >= 0 ⟂ y >= 0` written as row 0 (`x`) paired with
+/// `y`, and an equality row 1, `1000 x + y = 5`, from `(500, 500)`. The
+/// pair's product row `x·y` has Jacobian `(y, x) = (500, 500)` there, so
+/// the gradient-based rule would give it 100 / 500 = 0.2. Row 1's would be
+/// 0.1, and row 0's 1.
+struct PairModel(PairAnswer);
+
+impl TNLP for PairModel {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 2,
+            m: 2,
+            nnz_jac_g: 3,
+            nnz_h_lag: 2,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&[DEFAULT_NLP_LOWER_BOUND_INF, 0.0]);
+        b.x_u
+            .copy_from_slice(&[DEFAULT_NLP_UPPER_BOUND_INF, DEFAULT_NLP_UPPER_BOUND_INF]);
+        b.g_l.copy_from_slice(&[0.0, 5.0]);
+        b.g_u.copy_from_slice(&[DEFAULT_NLP_UPPER_BOUND_INF, 5.0]);
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        if sp.init_x {
+            sp.x.copy_from_slice(&[500.0, 500.0]);
+        }
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        Some(x[0] * x[0] + x[1] * x[1])
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = 2.0 * x[0];
+        g[1] = 2.0 * x[1];
+        true
+    }
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[0];
+        g[1] = 1000.0 * x[0] + x[1];
+        true
+    }
+    fn eval_jac_g(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1, 1]);
+                jcol.copy_from_slice(&[0, 0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values.copy_from_slice(&[1.0, 1000.0, 1.0]);
+            }
+        }
+        true
+    }
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 1]);
+                jcol.copy_from_slice(&[0, 1]);
+            }
+            SparsityRequest::Values { values } => {
+                values.copy_from_slice(&[2.0 * obj_factor, 2.0 * obj_factor]);
+            }
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _: Solution<'_>, _: &IpoptData, _: &IpoptCq) {}
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        match self.0 {
+            PairAnswer::Nothing => false,
+            PairAnswer::ObjectiveOnly => {
+                *req.obj_scaling = 0.5;
+                *req.use_g_scaling = false;
+                true
+            }
+            PairAnswer::Rows => {
+                *req.use_g_scaling = true;
+                req.g_scaling.copy_from_slice(&[1.0, 1.0]);
+                req.g_scaling_given.copy_from_slice(&[true, false]);
+                true
+            }
+        }
+    }
+}
+
+/// Every row factor the core installs on the lowered pair model, in no
+/// particular order, with an absent block left out (it is all ones).
+fn pair_model_factors(answer: PairAnswer, rule: UntaggedConstrScaling) -> Vec<Number> {
+    let wrapped = MpccTnlp::new(
+        Rc::new(RefCell::new(PairModel(answer))),
+        vec![ComplementarityPair { row: 0, var: 1 }],
+        Lowering::Ineq,
+    )
+    .expect("a valid pair");
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(wrapped));
+    let adapter = Rc::new(RefCell::new(TNLPAdapter::new(tnlp).unwrap()));
+    let mut nlp = OrigIpoptNlp::new(adapter, Rc::new(NoScaling)).unwrap();
+    nlp.set_untagged_constr_scaling(rule);
+    nlp.determine_scaling_from_starting_point(ScalingMethod::UserScaling, 100.0, 1e-8, 0.0, 0.0);
+    let mut all = nlp.c_scale_vec().unwrap_or_default();
+    all.extend(nlp.d_scale_vec().unwrap_or_default());
+    all
+}
+
+/// The product row the wrapper adds keeps factor 1 under the rule,
+/// whatever the inner model answered. The inner rows without a factor
+/// still get it: 0.1 for row 1, and 1 for row 0, whose row max is 1.
+#[test]
+fn the_mpcc_product_row_keeps_factor_one_under_the_rule() {
+    for answer in [
+        PairAnswer::Nothing,
+        PairAnswer::ObjectiveOnly,
+        PairAnswer::Rows,
+    ] {
+        let all = pair_model_factors(answer, UntaggedConstrScaling::GradientBased);
+        assert!(
+            all.iter().all(|&s| s == 1.0 || (s - 0.1).abs() < 1e-15),
+            "{answer:?}: the product row was rescaled: {all:?}"
+        );
+        assert_eq!(
+            all.iter().filter(|&&s| (s - 0.1).abs() < 1e-15).count(),
+            1,
+            "{answer:?}: row 1 gets the rule: {all:?}"
+        );
+    }
+}
+
+/// Without the option the wrapper's answer installs no row factor, as
+/// before it marked its rows.
+#[test]
+fn the_mpcc_wrapper_installs_no_row_factor_without_the_rule() {
+    for answer in [
+        PairAnswer::Nothing,
+        PairAnswer::ObjectiveOnly,
+        PairAnswer::Rows,
+    ] {
+        let all = pair_model_factors(answer, UntaggedConstrScaling::None);
+        assert!(all.iter().all(|&s| s == 1.0), "{answer:?}: {all:?}");
+    }
+}

@@ -26,11 +26,20 @@ changes.
   zero, or when the model has no `scaling_factor` suffix at all.
   `TNLP::get_scaling_parameters` reports this through a new
   `ScalingRequest::g_scaling_given` slice, which the caller fills with
-  `true`, so an existing implementation keeps its meaning. In Python,
-  `Problem.set_problem_scaling` takes `g_scaling_given`, and pyomo-pounce's
+  `true`, so an existing implementation keeps its meaning. The core reads
+  it only from an answer of `true` with `use_g_scaling` set, so the MPCC
+  wrapper answers that way and marks its product rows as given at 1, and
+  the l1-penalty wrapper marks every row as given at 1, which leaves it
+  unscaled as before. In Python, `Problem.set_problem_scaling` takes
+  `g_scaling_given`, which needs `g_scaling`, and
+  `Problem.get_problem_scaling_given()` reads it back. pyomo-pounce's
   in-process sensitivity solve passes it from the Suffix, so it scales the
-  same rows the `.nl` path does. `get_problem_scaling` reports NaN for a
-  row installed without a factor.
+  same rows the `.nl` path does.
+
+  **Rust API (breaking):** `ScalingRequest` gains the public field
+  `g_scaling_given`, so code that builds a `ScalingRequest` with a struct
+  literal, a wrapper TNLP calling its inner model for instance, must set it.
+  An implementation of `get_scaling_parameters` needs no change.
 - **`feral_early_assembly` bounds FERAL's memory on wide elimination trees.**
   The option (environment fallback `POUNCE_FERAL_EARLY_ASSEMBLY`) selects
   feral's contribution-block assembly scheme (feral#231). The default `off`

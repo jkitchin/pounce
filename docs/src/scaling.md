@@ -284,11 +284,20 @@ The other four options there are the ones the wrapper sets. On WaterTAP's
 `RO_with_energy_recovery` flowsheet this run and the wrapper's print
 identical iteration logs.
 
-Through `pounce.Problem`, pass `g_scaling_given` to `set_problem_scaling`,
-`False` for each row you did not scale. pyomo-pounce's in-process
+Through `pounce.Problem`, pass `g_scaling_given` to `set_problem_scaling`
+together with `g_scaling`, `False` for each row you did not scale, and read
+it back with `get_problem_scaling_given()`. pyomo-pounce's in-process
 sensitivity solve does this from the `scaling_factor` Suffix, so it scales
-the same rows the `.nl` path does. A C or Rust caller that supplies no
-scaling at all gets the rule on every row.
+the same rows the `.nl` path does. A Rust `TNLP` sets
+`ScalingRequest::g_scaling_given` to `false` for those rows. A C or Rust
+caller that supplies no scaling at all gets the rule on every row.
+
+A TNLP wrapper that adds rows of its own and wants them left alone answers
+`true`, sets `use_g_scaling`, and marks those rows as given at factor 1,
+whatever its inner model answered, because the core reads the marks only
+from such an answer. The complementarity wrapper does this for its product
+rows, and the l1-penalty wrapper for every row of the penalty problem,
+which it leaves unscaled.
 
 The option does not change routing. An LP or convex QP whose `.nl` carries
 no `scaling_factor` suffix still goes to the convex solver under

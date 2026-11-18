@@ -1609,8 +1609,17 @@ impl TNLP for MpccTnlp {
     }
 
     /// The inner model's factors for its own rows; the product rows are
-    /// unscaled, and count as given so no rule for rows without a factor
-    /// rescales them.
+    /// unscaled.
+    ///
+    /// The product rows are marked as given a factor of 1, so
+    /// `nlp_scaling_untagged_constr` never rescales them. The core reads
+    /// those marks only when the answer is `true` with `use_g_scaling` set
+    /// (`ScalingRequest::g_scaling_given`), so this always answers that
+    /// way. When the inner model supplied no scaling, or no row factors,
+    /// its rows are written as 1 and marked as not given, which is what its
+    /// own answer meant, and the objective and variables stay unscaled. An
+    /// answer of `true` with every factor 1 installs nothing, so a solve
+    /// without the option is unchanged.
     fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
         let ScalingRequest {
             obj_scaling,
@@ -1635,10 +1644,19 @@ impl TNLP for MpccTnlp {
                 g_scaling: inner_g,
                 g_scaling_given: inner_given,
             });
+        if !ok {
+            *obj_scaling = 1.0;
+            *use_x_scaling = false;
+        }
+        if !ok || !*use_g_scaling {
+            inner_g.fill(1.0);
+            inner_given.fill(false);
+        }
+        *use_g_scaling = true;
         products.fill(1.0);
         products_given.fill(true);
         lifts.fill(1.0);
-        ok
+        true
     }
 
     fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {

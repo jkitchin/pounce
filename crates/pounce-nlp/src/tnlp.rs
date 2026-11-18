@@ -105,7 +105,12 @@ pub struct ScalingRequest<'a> {
     ///
     /// Only `nlp_scaling_untagged_constr=gradient-based` reads it: those
     /// rows get the gradient-based row factor instead of the one written.
-    /// A pounce addition with no upstream counterpart.
+    /// It is read only when the TNLP returns `true` and sets
+    /// `use_g_scaling`. Returning `false`, or leaving `use_g_scaling`
+    /// unset, says no row has a factor. So a wrapper that adds rows of its
+    /// own and wants them left alone returns `true`, sets `use_g_scaling`,
+    /// and marks its rows `true` with factor 1, whatever its inner model
+    /// answered. A pounce addition with no upstream counterpart.
     pub g_scaling_given: &'a mut [bool],
 }
 

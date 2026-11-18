@@ -949,6 +949,26 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// `nlp_scaling_untagged_constr` as the solve will apply it. It belongs to
+/// `nlp_scaling_method=user-scaling` alone: under `curvature-based` every
+/// row already has a computed factor, and the other methods do not read
+/// user factors at all. The interior-point method and the square-system
+/// stage both resolve the option here.
+pub(crate) fn untagged_constr_scaling(options: &OptionsList) -> UntaggedConstrScaling {
+    let read = |name: &str| {
+        options
+            .get_string_value(name, "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v))
+    };
+    let user_scaling = read("nlp_scaling_method").is_some_and(|v| v == "user-scaling");
+    if user_scaling && read("nlp_scaling_untagged_constr").is_some_and(|v| v == "gradient-based") {
+        UntaggedConstrScaling::GradientBased
+    } else {
+        UntaggedConstrScaling::None
+    }
+}
+
 /// Smallest `n + m` at which `algorithm=active-set-sqp` starts from the
 /// interior point; see [`IpoptApplication::sqp_auto_handover`]. The fixture
 /// corpus (largest model 813 variables) sits far below it.
@@ -6730,21 +6750,7 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or_else(|| "gradient-based".to_string());
-        // `nlp_scaling_untagged_constr` belongs to `user-scaling` alone:
-        // under `curvature-based` every row already has a computed factor.
-        let untagged_constr = if scaling_method == "user-scaling"
-            && self
-                .options
-                .get_string_value("nlp_scaling_untagged_constr", "")
-                .ok()
-                .and_then(|(v, f)| f.then_some(v))
-                .is_some_and(|v| v == "gradient-based")
-        {
-            UntaggedConstrScaling::GradientBased
-        } else {
-            UntaggedConstrScaling::None
-        };
-        orig_nlp.set_untagged_constr_scaling(untagged_constr);
+        orig_nlp.set_untagged_constr_scaling(untagged_constr_scaling(&self.options));
         let scaling_method = match scaling_method.as_str() {
             "none" => ScalingMethod::None,
             "gradient-based" => ScalingMethod::GradientBased,
