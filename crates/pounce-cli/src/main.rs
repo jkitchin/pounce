@@ -3155,6 +3155,55 @@ fn lp_declines_to_nlp(
         )
 }
 
+/// Has the convex attempt spent the whole `max_wall_time` it was handed?
+/// (gh#1182)
+///
+/// `limit` is the convex driver's `time_limit` — `Some` only when the user set
+/// `max_wall_time` — and `elapsed` is measured from the same instant the
+/// driver charges its sub-budgets against (`convex_opts_with_remaining`).
+///
+/// When it is spent, the LP→NLP fallback (gh #535) and the conic path's
+/// `NumericalFailure` reroute both stand down. The NLP arm would be handed the
+/// `charge_wall_budget` floor — measured on MIPLIB `rmatr200-p5` at
+/// `max_wall_time=30`: the convex arm returned after 42.75 s with a KKT error
+/// of `6.42e-10` against `tol = 1e-8`, the NLP arm stopped at iteration 0 with
+/// `Maximum_WallTime_Exceeded`, and the report carried no `x` and no `λ`. The
+/// reroute's whole premise is that a second engine gets a chance to certify;
+/// with no time left it cannot, so the only effect of firing is to throw away
+/// the convex iterate. Report that iterate instead, under the time-limit status
+/// [`timed_out_unless_verdict`] assigns.
+///
+/// Spent means *spent*, not "nearly spent": a convex solve that stalls with
+/// budget to spare (NETLIB `gen`/`gen1`, the population gh #535 exists for)
+/// still reroutes, and the NLP arm gets whatever is left.
+fn convex_budget_spent(limit: Option<std::time::Duration>, elapsed: std::time::Duration) -> bool {
+    limit.is_some_and(|limit| elapsed >= limit)
+}
+
+/// The CLI-side twin of `pounce_convex`'s `mark_timed_out` (gh#1182): relabel
+/// a status that concluded nothing (`IterationLimit`, `NumericalFailure`) as
+/// `TimeLimit` once the budget is spent, and leave a verdict (`Optimal`,
+/// `OptimalInaccurate`, the two certificates) standing.
+///
+/// The solver already applies that rule to a deadline it sees cross. This one
+/// covers the time charged *after* the solver returned — the presolve
+/// postsolve lift and the driver's own verdict work — which the solver's
+/// deadline scope never sees.
+fn timed_out_unless_verdict(sol: pounce_convex::QpSolution) -> pounce_convex::QpSolution {
+    use pounce_convex::QpStatus;
+    if matches!(
+        sol.status,
+        QpStatus::IterationLimit | QpStatus::NumericalFailure
+    ) {
+        pounce_convex::QpSolution {
+            status: QpStatus::TimeLimit,
+            ..sol
+        }
+    } else {
+        sol
+    }
+}
+
 /// Did the user set `max_iter` explicitly? A user-set iteration budget
 /// suppresses the gh #535 LP→NLP fallback — see [`lp_declines_to_nlp`].
 fn max_iter_explicitly_set(app: &IpoptApplication) -> bool {
@@ -3437,7 +3486,7 @@ fn run_convex_qp(
     let t0 = std::time::Instant::now();
     use pounce_convex::HessianInertia;
     use pounce_convex::active_set::solve_qp_active_set_inertia;
-    use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve};
+    use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve_until};
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
     // What the classifier found out about `P`, handed to the engine rather than
@@ -3609,7 +3658,10 @@ fn run_convex_qp(
     } else if presolve_on {
         let outcome = {
             let _t = timing.presolve.guard();
-            presolve(&qp)
+            // gh#1182: the fixpoint stops between layers once the budget is
+            // spent, rather than running every layer before the solver's own
+            // deadline scope even opens.
+            presolve_until(&qp, convex_opts.time_limit.and_then(|l| t0.checked_add(l)))
         };
         match outcome {
             PresolveOutcome::Reduced(ps) => {
@@ -3640,6 +3692,9 @@ fn run_convex_qp(
                         FixpointExit::Fixpoint => String::new(),
                         FixpointExit::RoundCap => {
                             format!(", cap-truncated after {} layers", st.rounds)
+                        }
+                        FixpointExit::Deadline => {
+                            format!(", stopped by max_wall_time after {} layers", st.rounds)
                         }
                     };
                     presolve_log.push(format!(
@@ -3735,6 +3790,16 @@ fn run_convex_qp(
     };
     let elapsed = t0.elapsed().as_secs_f64();
 
+    // gh#1182: the budget the convex solve was handed is the whole of
+    // `max_wall_time` (less extraction), so once it is spent there is nothing
+    // left for a second engine. See `convex_budget_spent`.
+    let budget_spent = convex_budget_spent(qp_opts.time_limit, t0.elapsed());
+    let sol = if budget_spent {
+        timed_out_unless_verdict(sol)
+    } else {
+        sol
+    };
+
     // gh #535: the convex path finished an LP without a certificate. An LP is
     // also a valid NLP, and the general filter-IPM in this same binary solves
     // the degenerate rank-deficient ones the interior path cannot certify
@@ -3745,7 +3810,7 @@ fn run_convex_qp(
     // This sits above the status line, the `.sol` write and the JSON report on
     // purpose — everything below is the verdict, and the rerouted solve owns
     // it. See `lp_declines_to_nlp` for why each gate is there.
-    if lp_declines_to_nlp(class, sol.status, allow_nlp_fallback) {
+    if !budget_spent && lp_declines_to_nlp(class, sol.status, allow_nlp_fallback) {
         // gh#984 review: the number beside the verdict is the one the verdict
         // was judged on (`kkt_residuals_above_floor`), raw beside it.
         let res = sol.kkt_residuals_above_floor(&qp);
@@ -4266,6 +4331,13 @@ fn run_convex_socp(
         conic_solve(&qp, &cones, &solve_opts())
     };
     let elapsed = t0.elapsed().as_secs_f64();
+    // gh#1182: the same spent-budget rule as `run_convex_qp`.
+    let budget_spent = convex_budget_spent(convex_opts.time_limit, t0.elapsed());
+    let sol = if budget_spent {
+        timed_out_unless_verdict(sol)
+    } else {
+        sol
+    };
 
     // The conic path returned no verified KKT point. A convex QCQP is still a
     // valid NLP — the same reasoning `SOCP_REFORM_FLOP_BUDGET` already uses to
@@ -4281,7 +4353,10 @@ fn run_convex_socp(
     //
     // Nothing has been printed yet: this sits above the status line, the `.sol`
     // write and the JSON report, so a rerouted solve emits exactly one verdict.
-    if allow_nlp_fallback && matches!(sol.status, pounce_convex::QpStatus::NumericalFailure) {
+    if allow_nlp_fallback
+        && !budget_spent
+        && matches!(sol.status, pounce_convex::QpStatus::NumericalFailure)
+    {
         let res = sol.kkt_residuals_conic(&qp, &cones);
         eprintln!(
             "pounce: note: the conic ({}) solve returned no verified KKT point \
@@ -5045,6 +5120,72 @@ mod convex_status_tests {
             qp_status_to_ars(QpStatus::TimeLimit),
             ApplicationReturnStatus::MaximumWallTimeExceeded
         );
+    }
+}
+
+/// gh#1182: the spent-budget rule that stands the convex→NLP reroutes down.
+/// Each branch of both helpers is taken; the CLI test
+/// `issue_1182_convex_wall_time.rs` drives them end to end.
+#[cfg(test)]
+mod convex_budget_tests {
+    use super::{convex_budget_spent, timed_out_unless_verdict};
+    use pounce_convex::{QpSolution, QpStatus};
+    use std::time::Duration;
+
+    #[test]
+    fn no_limit_is_never_spent() {
+        assert!(!convex_budget_spent(None, Duration::from_secs(1_000_000)));
+    }
+
+    #[test]
+    fn spent_means_at_or_past_the_limit() {
+        let limit = Some(Duration::from_secs(30));
+        assert!(!convex_budget_spent(limit, Duration::from_secs(29)));
+        assert!(convex_budget_spent(limit, Duration::from_secs(30)));
+        assert!(convex_budget_spent(limit, Duration::from_secs_f64(42.75)));
+        assert!(convex_budget_spent(Some(Duration::ZERO), Duration::ZERO));
+    }
+
+    fn with_status(status: QpStatus) -> QpSolution {
+        QpSolution {
+            status,
+            x: vec![1.0, 2.0],
+            y: vec![3.0],
+            z: vec![],
+            z_lb: vec![0.0; 2],
+            z_ub: vec![0.0; 2],
+            obj: 5.0,
+            iters: 53,
+            iterates: Vec::new(),
+        }
+    }
+
+    /// A status that concluded nothing becomes `TimeLimit`, and the iterate
+    /// comes with it unchanged: reporting that iterate is the point.
+    #[test]
+    fn a_non_verdict_becomes_a_time_limit_and_keeps_its_iterate() {
+        for status in [QpStatus::IterationLimit, QpStatus::NumericalFailure] {
+            let sol = timed_out_unless_verdict(with_status(status));
+            assert_eq!(sol.status, QpStatus::TimeLimit, "{status:?}");
+            assert_eq!(sol.x, vec![1.0, 2.0]);
+            assert_eq!(sol.y, vec![3.0]);
+            assert_eq!(sol.iters, 53);
+        }
+    }
+
+    /// A conclusion the solve actually reached outranks the clock, the same
+    /// rule `pounce_convex`'s `mark_timed_out` applies inside the solver.
+    #[test]
+    fn a_verdict_stands() {
+        for status in [
+            QpStatus::Optimal,
+            QpStatus::OptimalInaccurate,
+            QpStatus::PrimalInfeasible,
+            QpStatus::DualInfeasible,
+            QpStatus::TimeLimit,
+        ] {
+            assert_eq!(timed_out_unless_verdict(with_status(status)).status, status);
+        }
     }
 }
 
