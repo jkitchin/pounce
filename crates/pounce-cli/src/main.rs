@@ -3595,6 +3595,20 @@ struct ConvexConsole {
     collect_timing: bool,
     /// `print_timing_statistics` — emit the timing block after the verdict.
     print_timing: bool,
+    /// `qp_certificate` (gh#1181).
+    certificate: CertificateMode,
+}
+
+/// What `qp_certificate` asks for on an infeasible or unbounded verdict.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum CertificateMode {
+    /// Report it, re-solving the unreduced model when no ray checks.
+    #[default]
+    Resolve,
+    /// Report and check the verdict's own ray only.
+    Check,
+    /// Report none.
+    Off,
 }
 
 /// Read [`ConvexConsole`] off the application's options list.
@@ -3622,6 +3636,15 @@ fn convex_console(app: &IpoptApplication, json_dbg: bool) -> ConvexConsole {
         // its own option help, so either one arms the detailed timers.
         collect_timing: print_timing || yes("timing_statistics"),
         print_timing,
+        certificate: match opt
+            .get_string_value("qp_certificate", "")
+            .map(|(v, _)| v)
+            .as_deref()
+        {
+            Ok("no") => CertificateMode::Off,
+            Ok("check") => CertificateMode::Check,
+            _ => CertificateMode::Resolve,
+        },
     }
 }
 
@@ -4053,6 +4076,9 @@ fn run_convex_qp(
     type Replayed = (f64, Option<pounce_convex::crossover::CrossoverReport>, bool);
     let mut replayed: Option<Replayed> = None;
     let mut arbitration: Option<pounce_cli::solve_report::ConvexFallbackInfo> = None;
+    // gh#1181: a reduced solve's Farkas ray, lifted to the extracted rows by
+    // the objective-free postsolve, for the certificate below.
+    let mut farkas_lift: Option<(Vec<f64>, Vec<f64>)> = None;
     // Did a presolved IPM solve reach `Optimal` on the reduced problem? Read by
     // the gh#1180 retry below: if postsolve then breaks the point, the full
     // model is worth one solve before the whole convex attempt is discarded.
@@ -4162,6 +4188,9 @@ fn run_convex_qp(
                 // The postsolve lift is presolve's other half, so it is
                 // charged to the same row.
                 let _t = timing.presolve.guard();
+                if red.status == QpStatus::PrimalInfeasible {
+                    farkas_lift = Some(ps.postsolve_farkas(&red));
+                }
                 ps.postsolve(&red)
             }
             PresolveOutcome::Infeasible(trigger) => {
@@ -4430,6 +4459,88 @@ fn run_convex_qp(
             c.kkt_error_after,
         );
     }
+    // gh#1181: the certificate behind an infeasible or unbounded verdict,
+    // checked against the extracted model (the `.nl` rows and variables, with
+    // the `bound_relax_factor` widening — a certificate for the widened model
+    // is one for the declared model, which lies inside it).
+    //
+    // The verdict's own ray is tried first: when presolve reduced the model,
+    // as lifted by the objective-free `postsolve_farkas` (the ordinary
+    // postsolve rebuilds multipliers for an optimum, not a ray), then as the
+    // ordinary postsolve left it. A presolve *verdict* has no ray at all, and
+    // the active-set engine's ray is its own. When none checks, the unreduced
+    // model is re-solved by the IPM for its ray alone — the verdict, the iteration
+    // count and every other reported number stay the first solve's, so this
+    // moves nothing on a feasible model and nothing in the fixture sweep. Not
+    // on an indefinite `P`, which the IPM cannot be handed (gh #112), and not
+    // with no budget left. After the crossover report above is taken, so the
+    // re-solve cannot clobber it.
+    let lift = farkas_lift
+        .as_ref()
+        .map(|(y, z)| (y.as_slice(), z.as_slice()));
+    let outcome = if console.certificate == CertificateMode::Off {
+        pounce_convex::CertificateOutcome {
+            certificate: None,
+            contradicted_by: None,
+        }
+    } else {
+        pounce_convex::certificate_or_resolve(&qp, &[], &sol, lift, || {
+            let o = solve_opts();
+            let worth_it =
+                console.certificate == CertificateMode::Resolve && (presolve_on || use_active_set);
+            let budget_left = o.time_limit.is_none_or(|t| !t.is_zero());
+            (worth_it && budget_left && inertia != HessianInertia::Indefinite).then(|| {
+                solve_qp_ipm(
+                    &qp,
+                    &QpOptions {
+                        collect_iterates: false,
+                        ..o
+                    },
+                    backend,
+                )
+            })
+        })
+    };
+    // One object for the console line and the JSON, so the two cannot
+    // disagree about `verified` or `margin` (gh#1181 review: the console used
+    // to print the certificate before `certificate_report`'s range-row
+    // netting re-checked it).
+    let certificate = outcome
+        .certificate
+        .map(|c| pounce_cli::qp_extract::certificate_report(prob, &con_map, &qp, c));
+    if let Some(contrary) = outcome.contradicted_by {
+        eprintln!(
+            "pounce: warning: the {:?} verdict is contradicted: re-solving the \
+             model without presolve, for a certificate, reached {contrary:?}. \
+             The verdict above is the first solve's and is not changed; treat \
+             it as doubtful and check it, e.g. with qp_presolve=no.",
+            sol.status
+        );
+    }
+    if let Some(c) = certificate
+        .as_ref()
+        .filter(|_| console.verdict && !console.json_debug)
+    {
+        let what = if c.kind == "primal_infeasible" {
+            "Farkas (primal infeasibility)"
+        } else {
+            "recession (unboundedness)"
+        };
+        println!(
+            "Certificate: {what}, {}, margin {:.1e}{}",
+            if c.verified {
+                "verified"
+            } else {
+                "NOT verified"
+            },
+            c.margin.unwrap_or(f64::INFINITY),
+            if c.source == "unreduced_resolve" {
+                " (ray from an unreduced re-solve)"
+            } else {
+                ""
+            },
+        );
+    }
     // gh #848: an indefinite QP whose claimed optimum the second-order screen
     // refuted lands here as `NumericalFailure`, which the shared console
     // vocabulary renders "INTERNAL ERROR: Unknown SolverReturn value." — a
@@ -4625,6 +4736,9 @@ fn run_convex_qp(
         builder.solution.objective = reported_obj;
         builder.solution.x = sol.x.clone();
         builder.solution.lambda = lambda.clone();
+        builder.solution.certificate = certificate.clone();
+        builder.solution.certificate_contradicted_by =
+            outcome.contradicted_by.map(qp_status_to_ars);
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
         builder.convex_fallback = arbitration.clone();

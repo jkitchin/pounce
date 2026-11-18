@@ -40,6 +40,7 @@ pub mod active_set_session;
 pub mod activity;
 pub(crate) mod aggregate;
 pub mod batch;
+pub mod certificate;
 pub mod cones;
 pub mod convex_presolve_session;
 pub(crate) mod correctors;
@@ -72,6 +73,10 @@ pub use active_set_session::{ActiveSetSession, PresolveNote, Reuse, SessionStats
 pub use batch::{
     solve_qp_batch, solve_qp_batch_parallel, solve_qp_batch_parallel_warm, solve_qp_multi_rhs,
     solve_qp_multi_rhs_parallel,
+};
+pub use certificate::{
+    Certificate, CertificateOutcome, CertificateSource, FarkasCertificate, RecessionCertificate,
+    certificate, certificate_or_resolve,
 };
 pub use cones::ConeSpec;
 pub use convex_presolve_session::ConvexPresolveSession;

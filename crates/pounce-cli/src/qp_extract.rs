@@ -575,6 +575,109 @@ pub fn qp_point_from_nl(
     })
 }
 
+/// The certificate behind an infeasible or unbounded convex-QP verdict, in
+/// the `.nl` model's own constraints and variables (gh#1181), for the JSON
+/// report's `solution.certificate`.
+///
+/// A Farkas certificate is first **netted** on each two-sided constraint: the
+/// extractor writes `l ≤ g(x) ≤ u` as two rows `g ≤ u` and `−g ≤ −l`, and a
+/// ray may load both. Replacing `(z_u, z_l)` by `((z_u − z_l)⁺, (z_l − z_u)⁺)`
+/// leaves `Aᵀy + Gᵀz` unchanged and can only lower the value (by
+/// `(u − l)·min(z_u, z_l)`), so the netted ray is re-checked and reported —
+/// and then one `lambda` per constraint, `z_u − z_l` (or `y` on an
+/// equality), says everything the two rows did.
+///
+/// No objective sign is applied: a ray has no objective sense, and flipping
+/// its sign for a maximize model, as [`recover_duals`] does for an optimal
+/// multiplier, would turn a certificate into its negation.
+pub fn certificate_report(
+    prob: &NlProblem,
+    con_map: &[ConRowMap],
+    qp: &QpProblem,
+    cert: pounce_convex::Certificate,
+) -> pounce_solve_report::CertificateInfo {
+    use pounce_convex::Certificate;
+    use std::collections::BTreeMap;
+    let margin = |m: f64| m.is_finite().then_some(m);
+    match cert {
+        Certificate::PrimalInfeasible(f) => {
+            let mut z = f.z.clone();
+            for m in con_map {
+                if let ConRowMap::Ineq {
+                    upper: Some(u),
+                    lower: Some(l),
+                } = *m
+                {
+                    let net = z[u] - z[l];
+                    z[u] = net.max(0.0);
+                    z[l] = (-net).max(0.0);
+                }
+            }
+            // Keep the netted ray unless netting costs it its verification:
+            // it lowers the column magnitudes the residual is measured
+            // against, so a verified ray can in principle fail once netted.
+            // The un-netted ray is then reported as checked; its `lambda`
+            // (`z_u − z_l` per row) is still a certificate, with a support
+            // value at or below the reported `value`.
+            let f = match pounce_convex::certificate::farkas_certificate(qp, &[], &f.y, &z) {
+                Some(netted) if netted.verified || !f.verified => {
+                    pounce_convex::FarkasCertificate {
+                        source: f.source,
+                        ..netted
+                    }
+                }
+                _ => f,
+            };
+            let lambda = con_map
+                .iter()
+                .map(|m| match m {
+                    ConRowMap::Eq { a_row } => f.y[*a_row],
+                    ConRowMap::Ineq { upper, lower } => {
+                        upper.map_or(0.0, |r| f.z[r]) - lower.map_or(0.0, |r| f.z[r])
+                    }
+                })
+                .collect();
+            let per_var = |v: &[f64]| {
+                (0..prob.n)
+                    .map(|j| v.get(j).copied().unwrap_or(0.0))
+                    .collect()
+            };
+            pounce_solve_report::CertificateInfo {
+                kind: "primal_infeasible".to_string(),
+                verified: f.verified,
+                source: f.source.as_str().to_string(),
+                value: f.value,
+                margin: margin(f.margin),
+                lambda,
+                z_l: per_var(&f.z_lb),
+                z_u: per_var(&f.z_ub),
+                d: Vec::new(),
+                residuals: BTreeMap::from([
+                    ("stationarity".to_string(), f.residual),
+                    ("cone_violation".to_string(), f.cone_violation),
+                ]),
+            }
+        }
+        Certificate::DualInfeasible(r) => pounce_solve_report::CertificateInfo {
+            kind: "dual_infeasible".to_string(),
+            verified: r.verified,
+            source: r.source.as_str().to_string(),
+            value: r.value,
+            margin: margin(r.margin),
+            lambda: Vec::new(),
+            z_l: Vec::new(),
+            z_u: Vec::new(),
+            d: r.d,
+            residuals: BTreeMap::from([
+                ("hessian".to_string(), r.hessian_residual),
+                ("equality".to_string(), r.equality_residual),
+                ("cone_violation".to_string(), r.cone_violation),
+                ("bound_violation".to_string(), r.bound_violation),
+            ]),
+        },
+    }
+}
+
 /// The next 0-based row index for a constraint block keyed by its RHS
 /// vector's current length.
 fn next_row(rhs: &[f64]) -> usize {
