@@ -71,7 +71,10 @@ changes.
   a verdict it reached (`Optimal`, `OptimalInaccurate`, a certificate) stands,
   and `IterationLimit` or `NumericalFailure` becomes
   `Maximum_WallTimeExceeded`. A convex solve that stalls with budget left
-  still reroutes. **Rust API:** `pounce_convex::presolve::FixpointExit` gains
+  still reroutes. The same presolve deadline applies to the Python
+  `pounce.qp.solve_qp` and C API path (`pipeline::solve_presolved`). A convex
+  QCQP whose solve spent the budget skips the gh#1114 polish and reports its
+  conic residuals. **Rust API:** `pounce_convex::presolve::FixpointExit` gains
   the variant `Deadline`, and `presolve_until(prob, deadline)` is new.
 - **`minimize` detects a convex LP/QP without `jac` whatever the objective's
   constant term** (gh#1169). The structure probe finite-differenced `fun` twice

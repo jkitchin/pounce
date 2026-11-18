@@ -5,7 +5,7 @@
 //! already met `tol` (MIPLIB `rmatr200-p5`: 42.75 s against
 //! `max_wall_time=30`).
 //!
-//! Three things were wrong, and the first test covers the two overrun sources
+//! Three things were wrong. The first test covers the overrun sources
 //! together:
 //!
 //! * **Extraction was `O(n·m)`.** `extract_qp_with_map` built a dense
@@ -16,9 +16,11 @@
 //!   solver's deadline scope opened, and the aggregation postsolve
 //!   attributed leftovers by scanning every column once per survivor
 //!   (`O(kept·n)`). Together they took 5.9 s on the same model.
-//! * **The fallback ran with the budget spent.** That is the third test's
-//!   branch. The second test is the other branch: an LP that stalls *before*
-//!   the deadline must still reroute.
+//! * **The fallback ran with the budget spent.** Every branch of that
+//!   decision is unit-tested on `convex_qp_next_step` in `main.rs`, because no
+//!   deterministic run lands a convex verdict exactly on the deadline. The
+//!   second test here is the branch that must not change: an LP that stalls
+//!   *before* the deadline still reroutes.
 //!
 //! Measured on the generated model at `max_wall_time=1`, single thread: 9.7 s
 //! of wall clock before, 2.8 s after. Most of what remains is the first KKT
@@ -165,15 +167,24 @@ fn solve(model: &Path, tag: &str, opts: &[&str]) -> Run {
 const REROUTE_NOTE: &str = "being re-solved on the general NLP";
 
 /// A large LP whose convex solve the deadline cuts off: the whole run stays
-/// near the limit, the fallback does not run, and the report carries the
-/// convex iterate.
+/// near the limit, the fallback does not run, and the report carries a primal
+/// and dual vector of the model's shape.
+///
+/// What this does **not** show is the quality of that point. At this limit the
+/// deadline usually crosses before the first iteration, so `x` is the lifted
+/// starting point (measured: 1 768 of 100 000 entries nonzero, the columns
+/// presolve fixed), not a converged iterate. At `max_wall_time=3` the same
+/// model reports a full iterate, but how many iterations fit is
+/// machine-dependent, so that is not asserted. `TimeLimit` never rerouted, even
+/// before this fix, so this test is about the overrun. The reroute gate is
+/// pinned by the `convex_qp_next_step` unit tests.
 ///
 /// The margin is generous on purpose. It allows for one uninterruptible KKT
 /// factorization on a slow CI runner, and it still fails on the code before
 /// this fix, which spent 9.7 s here on a fast machine before the solver even
 /// started.
 #[test]
-fn a_convex_solve_cut_off_by_the_deadline_stops_near_it_and_reports_its_iterate() {
+fn a_convex_solve_cut_off_by_the_deadline_stops_near_it() {
     const N: usize = 100_000;
     const LIMIT: f64 = 0.5;
     const MARGIN: Duration = Duration::from_secs(8);
@@ -216,6 +227,11 @@ fn a_convex_solve_cut_off_by_the_deadline_stops_near_it_and_reports_its_iterate(
 /// gh #535 trigger (the convex arm exhausts its iterations in well under a
 /// second), and an explicit, generous `max_wall_time` must not turn the
 /// fallback off.
+///
+/// It asserts that the reroute *ran*, not which engine answers. gh#1183
+/// (jkitchin/pounce#1184) lets the more accurate of the two candidates
+/// report, and on this model that is the convex one, so an `engine == "nlp"`
+/// assertion would contradict that PR's test of the same command.
 #[test]
 fn a_stall_before_the_deadline_still_falls_back() {
     let run = solve(
@@ -227,9 +243,5 @@ fn a_stall_before_the_deadline_still_falls_back() {
         run.stderr.contains(REROUTE_NOTE),
         "an LP that stalls with budget left must still reroute; stderr=\n{}",
         run.stderr
-    );
-    assert_eq!(
-        run.report.solution.engine, "nlp",
-        "the NLP arm answers a rerouted LP"
     );
 }

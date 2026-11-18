@@ -1034,8 +1034,9 @@ fn presolve_fixpoint(
             break;
         }
     }
-    // A chain this short cannot have reached `MAX_ROUNDS`, so `exit` is
-    // `Fixpoint` here and the single-pass layer already carries it.
+    // An empty chain means the first round found nothing, and that breaks as
+    // `Fixpoint` before the layer cap or the deadline is consulted, so the
+    // passthrough layer's own `Fixpoint` is the right exit.
     if chain.is_empty() {
         // Nothing to do at all; hand back the verbatim-forwarding layer.
         return PresolveOutcome::Reduced(

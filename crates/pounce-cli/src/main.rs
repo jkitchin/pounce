@@ -3180,6 +3180,45 @@ fn convex_budget_spent(limit: Option<std::time::Duration>, elapsed: std::time::D
     limit.is_some_and(|limit| elapsed >= limit)
 }
 
+/// What the LP / convex-QP driver does with a finished convex solve (gh#1182).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConvexNext {
+    /// Hand the model to the NLP arm (gh #535); the convex result is not
+    /// reported.
+    Reroute,
+    /// Report the convex result under this status.
+    Report(pounce_convex::QpStatus),
+}
+
+/// The convex driver's whole post-solve decision, as one pure function, so
+/// every branch of it is unit-testable without having to land a real solve on
+/// a deadline (gh#1182 review).
+///
+/// * Budget left: [`lp_declines_to_nlp`] decides, and a solve it keeps reports
+///   its own status.
+/// * Budget spent: never reroute — the NLP arm would get no time — and report
+///   the status [`timed_out_unless_verdict`] assigns. The issue's own case is
+///   the first row of the second group: an `OptimalInaccurate` returned past
+///   the deadline used to reroute and now reports.
+///
+/// `limit` is the driver's `time_limit` and `elapsed` is measured from the
+/// instant that limit is charged against; see [`convex_budget_spent`].
+fn convex_qp_next_step(
+    class: pounce_cli::dispatch::ProblemClass,
+    status: pounce_convex::QpStatus,
+    allow_nlp_fallback: bool,
+    limit: Option<std::time::Duration>,
+    elapsed: std::time::Duration,
+) -> ConvexNext {
+    if convex_budget_spent(limit, elapsed) {
+        ConvexNext::Report(timed_out_unless_verdict(status))
+    } else if lp_declines_to_nlp(class, status, allow_nlp_fallback) {
+        ConvexNext::Reroute
+    } else {
+        ConvexNext::Report(status)
+    }
+}
+
 /// The CLI-side twin of `pounce_convex`'s `mark_timed_out` (gh#1182): relabel
 /// a status that concluded nothing (`IterationLimit`, `NumericalFailure`) as
 /// `TimeLimit` once the budget is spent, and leave a verdict (`Optimal`,
@@ -3189,18 +3228,11 @@ fn convex_budget_spent(limit: Option<std::time::Duration>, elapsed: std::time::D
 /// covers the time charged *after* the solver returned — the presolve
 /// postsolve lift and the driver's own verdict work — which the solver's
 /// deadline scope never sees.
-fn timed_out_unless_verdict(sol: pounce_convex::QpSolution) -> pounce_convex::QpSolution {
+fn timed_out_unless_verdict(status: pounce_convex::QpStatus) -> pounce_convex::QpStatus {
     use pounce_convex::QpStatus;
-    if matches!(
-        sol.status,
-        QpStatus::IterationLimit | QpStatus::NumericalFailure
-    ) {
-        pounce_convex::QpSolution {
-            status: QpStatus::TimeLimit,
-            ..sol
-        }
-    } else {
-        sol
+    match status {
+        QpStatus::IterationLimit | QpStatus::NumericalFailure => QpStatus::TimeLimit,
+        other => other,
     }
 }
 
@@ -3670,11 +3702,22 @@ fn run_convex_qp(
                 // solved on instead (gh #523). Say so: the guard turns a false
                 // `Infeasible_Problem_Detected` into a normal solve, and this
                 // line is the only trace of the reduction that misfired.
+                //
+                // gh#1182 review: unless the re-derivation itself was stopped
+                // by `max_wall_time`. Then the claim was not refuted, only
+                // left unchecked, and the line must not read as a misfire.
                 if let Some(trigger) = ps.discarded_infeasibility() {
-                    presolve_log.push(format!(
-                        "Presolve: discarded an unconfirmed infeasibility claim — \
-                         {trigger}; solving normally"
-                    ));
+                    presolve_log.push(if ps.stats().exit == FixpointExit::Deadline {
+                        format!(
+                            "Presolve: could not confirm an infeasibility claim before \
+                             max_wall_time — {trigger}; solving the partial reduction"
+                        )
+                    } else {
+                        format!(
+                            "Presolve: discarded an unconfirmed infeasibility claim — \
+                             {trigger}; solving normally"
+                        )
+                    });
                 }
                 let st = ps.stats();
                 if st.reduced_anything() {
@@ -3790,15 +3833,17 @@ fn run_convex_qp(
     };
     let elapsed = t0.elapsed().as_secs_f64();
 
-    // gh#1182: the budget the convex solve was handed is the whole of
-    // `max_wall_time` (less extraction), so once it is spent there is nothing
-    // left for a second engine. See `convex_budget_spent`.
-    let budget_spent = convex_budget_spent(qp_opts.time_limit, t0.elapsed());
-    let sol = if budget_spent {
-        timed_out_unless_verdict(sol)
-    } else {
-        sol
-    };
+    // gh#1182: `max_wall_time` is charged from `t0`, which precedes extraction,
+    // so once it is spent there is nothing left for a second engine. Whether
+    // this solve reports or reroutes, and under which status, is decided in
+    // one place: see `convex_qp_next_step`.
+    let next = convex_qp_next_step(
+        class,
+        sol.status,
+        allow_nlp_fallback,
+        qp_opts.time_limit,
+        t0.elapsed(),
+    );
 
     // gh #535: the convex path finished an LP without a certificate. An LP is
     // also a valid NLP, and the general filter-IPM in this same binary solves
@@ -3810,7 +3855,7 @@ fn run_convex_qp(
     // This sits above the status line, the `.sol` write and the JSON report on
     // purpose — everything below is the verdict, and the rerouted solve owns
     // it. See `lp_declines_to_nlp` for why each gate is there.
-    if !budget_spent && lp_declines_to_nlp(class, sol.status, allow_nlp_fallback) {
+    if next == ConvexNext::Reroute {
         // gh#984 review: the number beside the verdict is the one the verdict
         // was judged on (`kkt_residuals_above_floor`), raw beside it.
         let res = sol.kkt_residuals_above_floor(&qp);
@@ -3831,6 +3876,10 @@ fn run_convex_qp(
         );
         return None;
     }
+    let sol = match next {
+        ConvexNext::Report(status) => pounce_convex::QpSolution { status, ..sol },
+        ConvexNext::Reroute => unreachable!("returned above"),
+    };
 
     // This solve is the one that reports, so what presolve did belongs on the
     // record after all.
@@ -4334,7 +4383,10 @@ fn run_convex_socp(
     // gh#1182: the same spent-budget rule as `run_convex_qp`.
     let budget_spent = convex_budget_spent(convex_opts.time_limit, t0.elapsed());
     let sol = if budget_spent {
-        timed_out_unless_verdict(sol)
+        pounce_convex::QpSolution {
+            status: timed_out_unless_verdict(sol.status),
+            ..sol
+        }
     } else {
         sol
     };
@@ -4385,9 +4437,16 @@ fn run_convex_socp(
     // `(x, λ)` missed the original stationarity by up to `9e-5` on fixtures
     // reported `SolveSucceeded` with a conic `final_dual_inf` of `1e-12`.
     // `None` for a non-optimal verdict, whose `(y, z)` is a certificate.
+    //
+    // gh#1182 review: and `None` once `max_wall_time` is spent. The polish is
+    // a sequence of Newton factorizations with no deadline of its own, and an
+    // unpolished answer reports the conic residuals it actually has.
     let recovery = timing.solution_recovery.guard();
-    let polished =
-        pounce_cli::qcqp_polish::polish_qcqp(&qp, &cones, &con_map, &sol, qp_opts.tol, &backend);
+    let polished = if convex_budget_spent(convex_opts.time_limit, t0.elapsed()) {
+        None
+    } else {
+        pounce_cli::qcqp_polish::polish_qcqp(&qp, &cones, &con_map, &sol, qp_opts.tol, &backend)
+    };
     recovery.stop();
     // A polished point that still misses the KKT conditions is not
     // reported as cleanly converged without a word (PR #1120 review): the
@@ -5128,9 +5187,23 @@ mod convex_status_tests {
 /// `issue_1182_convex_wall_time.rs` drives them end to end.
 #[cfg(test)]
 mod convex_budget_tests {
-    use super::{convex_budget_spent, timed_out_unless_verdict};
-    use pounce_convex::{QpSolution, QpStatus};
+    use super::{ConvexNext, convex_budget_spent, convex_qp_next_step, timed_out_unless_verdict};
+    use pounce_cli::dispatch::ProblemClass;
+    use pounce_convex::QpStatus;
     use std::time::Duration;
+
+    const ALL: [QpStatus; 7] = [
+        QpStatus::Optimal,
+        QpStatus::OptimalInaccurate,
+        QpStatus::PrimalInfeasible,
+        QpStatus::DualInfeasible,
+        QpStatus::IterationLimit,
+        QpStatus::TimeLimit,
+        QpStatus::NumericalFailure,
+    ];
+    const LIMIT: Option<Duration> = Some(Duration::from_secs(30));
+    const LEFT: Duration = Duration::from_secs(10);
+    const SPENT: Duration = Duration::from_millis(42_750);
 
     #[test]
     fn no_limit_is_never_spent() {
@@ -5139,52 +5212,96 @@ mod convex_budget_tests {
 
     #[test]
     fn spent_means_at_or_past_the_limit() {
-        let limit = Some(Duration::from_secs(30));
-        assert!(!convex_budget_spent(limit, Duration::from_secs(29)));
-        assert!(convex_budget_spent(limit, Duration::from_secs(30)));
-        assert!(convex_budget_spent(limit, Duration::from_secs_f64(42.75)));
+        assert!(!convex_budget_spent(LIMIT, Duration::from_secs(29)));
+        assert!(convex_budget_spent(LIMIT, Duration::from_secs(30)));
+        assert!(convex_budget_spent(LIMIT, SPENT));
         assert!(convex_budget_spent(Some(Duration::ZERO), Duration::ZERO));
     }
 
-    fn with_status(status: QpStatus) -> QpSolution {
-        QpSolution {
-            status,
-            x: vec![1.0, 2.0],
-            y: vec![3.0],
-            z: vec![],
-            z_lb: vec![0.0; 2],
-            z_ub: vec![0.0; 2],
-            obj: 5.0,
-            iters: 53,
-            iterates: Vec::new(),
+    /// A status that concluded nothing becomes `TimeLimit`; a conclusion the
+    /// solve reached outranks the clock, the rule `pounce_convex`'s
+    /// `mark_timed_out` applies inside the solver.
+    #[test]
+    fn only_a_non_verdict_becomes_a_time_limit() {
+        for status in ALL {
+            let want = match status {
+                QpStatus::IterationLimit | QpStatus::NumericalFailure => QpStatus::TimeLimit,
+                other => other,
+            };
+            assert_eq!(timed_out_unless_verdict(status), want, "{status:?}");
         }
     }
 
-    /// A status that concluded nothing becomes `TimeLimit`, and the iterate
-    /// comes with it unchanged: reporting that iterate is the point.
+    /// The issue's own case (`rmatr200-p5`): `OptimalInaccurate` returned
+    /// after the deadline. It rerouted before gh#1182 and reports now, as
+    /// itself.
     #[test]
-    fn a_non_verdict_becomes_a_time_limit_and_keeps_its_iterate() {
+    fn a_verdict_past_the_deadline_reports_instead_of_rerouting() {
+        for class in [ProblemClass::Lp, ProblemClass::ConvexQp] {
+            assert_eq!(
+                convex_qp_next_step(class, QpStatus::OptimalInaccurate, true, LIMIT, SPENT),
+                ConvexNext::Report(QpStatus::OptimalInaccurate),
+                "{class:?}"
+            );
+        }
+    }
+
+    /// A non-verdict made stale by the clock (the solver returned before the
+    /// deadline, postsolve carried the run past it) reports as `TimeLimit`.
+    #[test]
+    fn a_stale_non_verdict_past_the_deadline_reports_a_time_limit() {
         for status in [QpStatus::IterationLimit, QpStatus::NumericalFailure] {
-            let sol = timed_out_unless_verdict(with_status(status));
-            assert_eq!(sol.status, QpStatus::TimeLimit, "{status:?}");
-            assert_eq!(sol.x, vec![1.0, 2.0]);
-            assert_eq!(sol.y, vec![3.0]);
-            assert_eq!(sol.iters, 53);
+            assert_eq!(
+                convex_qp_next_step(ProblemClass::Lp, status, true, LIMIT, SPENT),
+                ConvexNext::Report(QpStatus::TimeLimit),
+                "{status:?}"
+            );
         }
     }
 
-    /// A conclusion the solve actually reached outranks the clock, the same
-    /// rule `pounce_convex`'s `mark_timed_out` applies inside the solver.
+    /// No status reroutes once the budget is spent, whatever the class or
+    /// the caller's permission.
     #[test]
-    fn a_verdict_stands() {
-        for status in [
-            QpStatus::Optimal,
-            QpStatus::OptimalInaccurate,
-            QpStatus::PrimalInfeasible,
-            QpStatus::DualInfeasible,
-            QpStatus::TimeLimit,
-        ] {
-            assert_eq!(timed_out_unless_verdict(with_status(status)).status, status);
+    fn nothing_reroutes_with_the_budget_spent() {
+        for status in ALL {
+            for allow in [true, false] {
+                assert_ne!(
+                    convex_qp_next_step(ProblemClass::Lp, status, allow, LIMIT, SPENT),
+                    ConvexNext::Reroute,
+                    "{status:?} allow={allow}"
+                );
+            }
+        }
+    }
+
+    /// With budget left the decision is exactly gh #535's, statuses
+    /// unchanged: the three uncertified exits reroute, the rest report as
+    /// themselves. A missing limit behaves the same.
+    #[test]
+    fn with_budget_left_the_gh535_gate_decides() {
+        for limit in [LIMIT, None] {
+            for status in ALL {
+                let want = if matches!(
+                    status,
+                    QpStatus::OptimalInaccurate
+                        | QpStatus::IterationLimit
+                        | QpStatus::NumericalFailure
+                ) {
+                    ConvexNext::Reroute
+                } else {
+                    ConvexNext::Report(status)
+                };
+                assert_eq!(
+                    convex_qp_next_step(ProblemClass::Lp, status, true, limit, LEFT),
+                    want,
+                    "{status:?} limit={limit:?}"
+                );
+                assert_eq!(
+                    convex_qp_next_step(ProblemClass::Lp, status, false, limit, LEFT),
+                    ConvexNext::Report(status),
+                    "{status:?}: a disallowed fallback reports"
+                );
+            }
         }
     }
 }
