@@ -139,7 +139,8 @@ const ETA_PHI: Number = 1e-4;
 ///
 /// * **f-type** — `grad_p < 0`, `θ_curr ≤ θ_min` and the switching condition
 ///   holds: the trial must satisfy Armijo,
-///   `φ_t ≤ φ_curr + η·α·∇fᵀp`, and the filter is *not* augmented.
+///   `φ_t ≤ φ_curr + η·α·∇fᵀp`, and be acceptable to the filter, which is
+///   *not* augmented.
 /// * **h-type** — otherwise: sufficient progress in `θ` or `φ` and filter
 ///   acceptance, and the current iterate joins the filter.
 ///
@@ -191,7 +192,14 @@ pub fn filter_line_search<N: SqpProblemSpec>(
             // pass (`issue880_sigma_uncertified`, `f ≈ −2.2e12`, ended
             // `Search_Direction_Becomes_Too_Small` at stationarity 2.4e-4).
             let slack = 10.0 * Number::EPSILON * phi_curr.abs();
-            (phi_t - (phi_curr + ETA_PHI * alpha * grad_p) <= slack).then_some(true)
+            // The trial must still be acceptable to the filter, as every
+            // trial is in Wächter-Biegler: Armijo alone let `pooling_rt2stp`
+            // (limited-memory) take a step that raised `θ` from 1.4e-3 to
+            // 0.85 on a 3.6-unit objective gain, a point the filter itself
+            // rejected, and the run never recovered.
+            (phi_t - (phi_curr + ETA_PHI * alpha * grad_p) <= slack
+                && filter.accepts(theta_t, phi_t))
+            .then_some(true)
         } else {
             // `θ_t ≤ (1 − γ_θ)·θ_curr` is no progress at all when
             // `θ_curr = 0`: every feasible trial satisfies it.
