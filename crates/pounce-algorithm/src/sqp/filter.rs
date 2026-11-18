@@ -69,6 +69,9 @@ pub struct SqpFilter {
     /// `THETA_MIN_FACT · max(1, θ_0)`, fixed from the violation of the first
     /// iterate this filter sees. `None` until then.
     theta_min: Option<Number>,
+    /// Consecutive tiny full steps accepted without a line search (see
+    /// [`filter_line_search`]); reset by any other accepted step.
+    tiny_steps: u32,
 }
 
 impl SqpFilter {
@@ -78,6 +81,7 @@ impl SqpFilter {
             gamma_theta: 1e-5,
             gamma_phi: 1e-5,
             theta_min: None,
+            tiny_steps: 0,
         }
     }
 
@@ -125,6 +129,18 @@ const SWITCH_DELTA: Number = 1.0;
 const THETA_MIN_FACT: Number = 1e-4;
 /// Armijo constant of an f-type step. The ℓ1-merit arm uses the same value.
 const ETA_PHI: Number = 1e-4;
+/// A step is *tiny* when `|p_i| ≤ TINY_STEP_TOL·(1 + |x_i|)` in every
+/// component (Ipopt's `tiny_step_tol`, `10·ε`): below round-off in `x`.
+const TINY_STEP_TOL: Number = 10.0 * Number::EPSILON;
+/// Consecutive tiny steps after which the search reports failure.
+const MAX_TINY_STEPS: u32 = 2;
+
+/// Is `α·p` below round-off relative to `x` in every component?
+fn step_is_tiny(x: &[Number], p: &[Number], alpha: Number) -> bool {
+    x.iter()
+        .zip(p.iter())
+        .all(|(&xi, &pi)| (alpha * pi).abs() <= TINY_STEP_TOL * (1.0 + xi.abs()))
+}
 
 /// Filter-line-search backtracking. Same return shape as
 /// [`crate::sqp::line_search::l1_merit_line_search`] so the
@@ -184,14 +200,17 @@ pub fn filter_line_search<N: SqpProblemSpec>(
     // Acceptance of a trial `(θ_t, φ_t)` reached at step length `α` (an SOC
     // trial is judged at `α = 1`, as in Wächter-Biegler §3.3). Returns
     // `Some(f_type)` on acceptance, `None` on rejection.
+    // Every φ comparison carries Ipopt's `Compare_le` slack, `10·ε·|φ|`: near
+    // an optimum the change being tested drops below the round-off in `φ`
+    // itself. Without it on the f-type test, `issue880_sigma_uncertified`
+    // (`f ≈ −2.2e12`) ended `Search_Direction_Becomes_Too_Small` at
+    // stationarity 2.4e-4; without it on the h-type test, a round-off step
+    // whose `∇fᵀp = +3e-15` raised `φ` by one ulp and was refused, so
+    // `stancmin` (limited-memory) could not take the step that carries its
+    // final multipliers.
+    let slack = 10.0 * Number::EPSILON * phi_curr.abs();
     let judge = |filter: &SqpFilter, theta_t: Number, phi_t: Number, alpha: Number| {
         if descent && theta_curr <= theta_min && alpha * switch_lhs > switch_rhs {
-            // Compared with Ipopt's `Compare_le` slack, `10·ε·|φ|`: near an
-            // optimum the demanded decrease `η·α·∇fᵀp` drops below the
-            // round-off in `φ` itself, and without the slack no trial can
-            // pass (`issue880_sigma_uncertified`, `f ≈ −2.2e12`, ended
-            // `Search_Direction_Becomes_Too_Small` at stationarity 2.4e-4).
-            let slack = 10.0 * Number::EPSILON * phi_curr.abs();
             // The trial must still be acceptable to the filter, as every
             // trial is in Wächter-Biegler: Armijo alone let `pooling_rt2stp`
             // (limited-memory) take a step that raised `θ` from 1.4e-3 to
@@ -205,10 +224,48 @@ pub fn filter_line_search<N: SqpProblemSpec>(
             // `θ_curr = 0`: every feasible trial satisfies it.
             let theta_progress =
                 theta_curr > 0.0 && theta_t <= (1.0 - filter.gamma_theta) * theta_curr;
-            let phi_progress = phi_t <= phi_curr - filter.gamma_phi * theta_curr;
+            let phi_progress = phi_t - (phi_curr - filter.gamma_phi * theta_curr) <= slack;
             ((theta_progress || phi_progress) && filter.accepts(theta_t, phi_t)).then_some(false)
         }
     };
+
+    // Tiny step (Ipopt's `tiny_step_tol` rule). A full step below round-off
+    // in `x` cannot be judged by comparing `f` and `θ` — the comparison is
+    // noise — and what it carries is the QP's multipliers, which is how an
+    // SQP finishes at a primal that is already optimal. Take it unjudged.
+    // Two in a row without convergence means the iteration has stalled, and
+    // the search reports failure rather than repeating it: `jit1_node`
+    // (limited-memory) otherwise sat at the interior point's objective for
+    // 160 iterations of `‖αp‖ ≈ 2e-19`.
+    if step_is_tiny(x, p, 1.0) {
+        if filter.tiny_steps < MAX_TINY_STEPS {
+            filter.tiny_steps += 1;
+            let x_new: Vec<Number> = x.iter().zip(p.iter()).map(|(a, d)| a + d).collect();
+            let f_new = nlp.eval_f(&x_new);
+            let c_new = nlp.eval_c(&x_new);
+            if !f_new.is_nan() && !c_new.iter().any(|v| v.is_nan()) {
+                return LineSearchResult {
+                    alpha: 1.0,
+                    nu: current_nu,
+                    x_new,
+                    f_new,
+                    c_new,
+                    success: true,
+                    soc_duals: None,
+                };
+            }
+        }
+        return LineSearchResult {
+            alpha: 1.0,
+            nu: current_nu,
+            x_new: x.to_vec(),
+            f_new: f_curr,
+            c_new: c_curr.to_vec(),
+            success: false,
+            soc_duals: None,
+        };
+    }
+    filter.tiny_steps = 0;
 
     let mut alpha = 1.0_f64;
     let mut x_trial = vec![0.0; x.len()];
@@ -220,20 +277,10 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         for (xt, (&xi, &pi)) in x_trial.iter_mut().zip(x.iter().zip(p.iter())) {
             *xt = xi + alpha * pi;
         }
-        // A *backtracked* trial that rounds to the current iterate is not a
-        // step, and every shorter one rounds there too, so the search has
-        // failed. Without this the `10·ε·|φ|` slack below accepts it as an
-        // f-type step (it changes nothing, so it "decreases" `φ` by zero
-        // within round-off) and the outer loop repeats it until its budget
-        // runs out: `jit1_node` (limited-memory) reached the interior point's
-        // objective by iteration 40, then took 160 identical steps of
-        // `‖αp‖ ≈ 2e-19` (gh#1173).
-        //
-        // The full step is exempt. A QP step that is exactly zero at `α = 1`
-        // still moves the multipliers to the QP's, which is how an SQP
-        // finishes on a model whose primal is already optimal
-        // (`issue_986_sqp_working_set_fixed_vars` converges that way).
-        if alpha < 1.0 && x_trial == x {
+        // Backtracking has shrunk the step below round-off in `x` (the
+        // full step was not tiny, or the branch above took it): every shorter
+        // trial is the same point, so the search has failed.
+        if alpha < 1.0 && step_is_tiny(x, p, alpha) {
             break;
         }
         let f_trial = nlp.eval_f(&x_trial);

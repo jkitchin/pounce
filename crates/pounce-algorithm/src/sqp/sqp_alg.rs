@@ -25,7 +25,7 @@ use crate::sqp::options::{SqpGlobalization, SqpHessianSource, SqpOptions};
 use crate::sqp::problem::SqpProblemSpec;
 use crate::sqp::qp_assembly::{SqpQpData, Triplet};
 use crate::sqp::result::{SqpError, SqpResult, SqpStatus};
-use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
+use pounce_common::types::{Index, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_linalg::triplet::GenTMatrix;
 use pounce_qp::{
     BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver,
@@ -1284,6 +1284,84 @@ impl SqpAlgorithm {
                         final_constr_viol,
                         working_set: iter.working,
                     });
+                }
+            }
+
+            // Uphill step from a feasible iterate (gh#1173). With an indefinite
+            // exact Hessian the active-set QP can stop at a first-order point
+            // of a nonconvex model that is not a descent direction, and from
+            // a feasible point such a step reduces neither `θ` (already 0) nor
+            // `f`: the filter rightly refuses it at every step length and the
+            // solve stops. `palmer5e` did, at f = 197.8 with `∇fᵀp = +6572`
+            // (it had only "solved" before by accepting a step to f = 3e6).
+            //
+            // Re-solve with the model convexified, `B = H + δI` with `δ` the
+            // largest Gershgorin row sum of `H`, so `B ⪰ 0`. At a feasible
+            // iterate `p = 0` is feasible for the step QP, so a convex QP's
+            // optimum has `∇fᵀp ≤ −½·pᵀBp ≤ 0`: a descent direction, which
+            // the line search can then size. Exact Hessian only: a
+            // quasi-Newton `B` is positive definite already. Exactly feasible
+            // iterates only: near feasibility an uphill step can be the price
+            // of restoring `θ`, which the h-type test is there to judge.
+            if matches!(self.hessian, SqpHessianSource::Exact)
+                && low_rank.is_none()
+                && sol.status == QpStatus::Optimal
+                && kkt.constr_viol == 0.0
+                && grad_f
+                    .iter()
+                    .zip(sol.x.iter())
+                    .map(|(g, d)| g * d)
+                    .sum::<Number>()
+                    > 0.0
+            {
+                let mut h = nlp.eval_hess_lag(&iter.x, &iter.lambda_g);
+                let mut row_sum = vec![0.0; n];
+                for k in 0..h.vals.len() {
+                    let (i, j) = ((h.irow[k] - 1) as usize, (h.jcol[k] - 1) as usize);
+                    let a = h.vals[k].abs();
+                    row_sum[i] += a;
+                    if i != j {
+                        row_sum[j] += a;
+                    }
+                }
+                let delta = row_sum.iter().fold(0.0_f64, |a, &b| a.max(b));
+                if delta.is_finite() && delta > 0.0 {
+                    for i in 0..n {
+                        h.irow.push(i as Index + 1);
+                        h.jcol.push(i as Index + 1);
+                        h.vals.push(delta);
+                    }
+                    let convex = SqpQpData::build(
+                        &iter.x,
+                        &grad_f,
+                        &c_vals,
+                        &bl_c,
+                        &bu_c,
+                        &xl,
+                        &xu,
+                        nlp.eval_jac_c(&iter.x),
+                        h,
+                        HessianInertia::Psd,
+                    );
+                    n_qp_solves += 1;
+                    if let Ok(cs) = solve_step_qp(
+                        &mut self.qp_solver,
+                        &convex,
+                        None,
+                        &self.qp_opts,
+                        self.ipm_cold_start.then_some(&self.ipm_seed),
+                    ) {
+                        let gp: Number = grad_f.iter().zip(cs.x.iter()).map(|(g, d)| g * d).sum();
+                        if cs.status == QpStatus::Optimal && gp < 0.0 {
+                            tracing::debug!(target: "pounce::sqp",
+                                "uphill step QP at a feasible iterate; taking the \
+                                 convexified (δ = {delta:.3e}) step instead, \
+                                 ∇fᵀp = {gp:.3e} (gh#1173)");
+                            n_qp_working_set_changes += cs.stats.n_working_set_changes;
+                            sol = cs;
+                            qp_data = convex;
+                        }
+                    }
                 }
             }
 
