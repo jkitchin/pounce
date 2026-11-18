@@ -605,6 +605,11 @@ fn run_inner_resto_impl(
         inner_alg_builder.hessian_approximation =
             pounce_algorithm::alg_builder::HessianApproxChoice::LimitedMemory;
     }
+    // An augmented-system provider reads its options with the restoration
+    // prefix here, as Ipopt components do in the restoration phase.
+    if let Some(sel) = inner_alg_builder.aug_system_provider.as_mut() {
+        sel.prefix = "resto.".to_string();
+    }
     let inner_alg_builder = &inner_alg_builder;
 
     let mut alg_bundle = inner_alg_builder.build_with_backend(backend_factory);

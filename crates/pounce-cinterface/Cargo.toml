@@ -46,5 +46,10 @@ ma57 = ["dep:pounce-hsl", "pounce-algorithm/ma57"]
 # the value the writer printed (9.035978839861492e-24 read back as ...493e-24).
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
+# `custom_linear_solver.rs` loads the reference solver it compiles to read
+# back what pounce handed it (gh#1175).
+[target.'cfg(unix)'.dev-dependencies]
+libloading = "0.8"
+
 [lints]
 workspace = true

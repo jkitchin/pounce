@@ -4,8 +4,8 @@
 //! The option's valid-value list is a faithful port of upstream Ipopt's
 //! — `ma27`, `ma57`, `ma77`, `ma86`, `ma97`, `mumps`, `pardiso`,
 //! `pardisomkl`, `spral`, `wsmp`, `custom`, `feral` — so an `ipopt.opt`
-//! written for Ipopt parses here unchanged. pounce implements two of
-//! them. The resolver mapped everything else through a `_ =>` arm to
+//! written for Ipopt parses here unchanged. pounce implements three of
+//! them: `feral`, `ma57` and `custom` (a library the user names, gh#1175). The resolver mapped everything else through a `_ =>` arm to
 //! FERAL, so `linear_solver=ma97` "worked": a run that reported success
 //! while using a backend the binary does not contain, and a benchmark
 //! comparing linear solvers that compared FERAL against itself.
@@ -76,7 +76,6 @@ fn unimplemented_backends_are_refused() {
         "pardisomkl",
         "spral",
         "wsmp",
-        "custom",
     ]
     .into_iter()
     .enumerate()
@@ -94,6 +93,37 @@ fn unimplemented_backends_are_refused() {
         assert!(
             err.contains("linear_solver=feral"),
             "the refusal must say what to use instead; stderr:\n{err}",
+        );
+    }
+}
+
+/// `custom` is implemented (gh#1175): it loads the library named by
+/// `custom_linear_solver_lib`. Without one, or with one that cannot be
+/// loaded, the run fails and says which -- it never falls back to FERAL.
+/// Both branches, since they fail at different points (option check vs
+/// `dlopen`).
+#[test]
+fn custom_needs_a_loadable_library_and_never_falls_back() {
+    for (tag, extra, says) in [
+        ("custom_unset", None, "custom_linear_solver_lib is not set"),
+        (
+            "custom_missing",
+            Some("custom_linear_solver_lib=/nonexistent/libnope.so"),
+            "cannot load custom_linear_solver_lib",
+        ),
+    ] {
+        let mut opts = vec!["linear_solver=custom"];
+        opts.extend(extra);
+        let (code, err) = run("user_scaling_suffix.nl", tag, &opts);
+        assert_ne!(
+            code,
+            Some(0),
+            "{tag}: a custom solver that never loaded solved; {err}"
+        );
+        assert!(err.contains(says), "{tag}: stderr:\n{err}");
+        assert!(
+            !err.contains("is not implemented"),
+            "{tag}: custom is implemented; stderr:\n{err}"
         );
     }
 }

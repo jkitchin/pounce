@@ -60,6 +60,10 @@ same directory. Scalars match upstream: `ipnumber` is `double`, `ipindex` is
   declare complementarity pairs; see [Complementarity](#complementarity).
 - `SetPounceBounds` / `GetPounceBounds` change and read bounds on an
   existing handle; see [Updating bounds](#updating-bounds).
+- `SetPounceIntegerMetaData`, `SetPounceNumericMetaData`,
+  `SetPounceStringMetaData` and `ClearPounceMetaData` attach metadata to
+  the variables and constraints; see
+  [Custom linear solver and metadata](#custom-linear-solver-and-metadata).
 
 ## Solving
 
@@ -198,6 +202,169 @@ Crossed bounds (`l > u`) are not refused here; the solve reports them, as for
 `CreateIpoptProblem`. The getters for the most recent solve stay readable
 after an update and describe that solve. A session (`IpoptCreateSolver`)
 owns its problem, so it takes no updates.
+
+## Custom linear solver and metadata
+
+pounce's KKT systems can be factored by a solver you supply as a shared
+library, with no fork and no rebuild (gh#1175). The library exports one
+function,
+
+```c
+const PounceLinearSolver *pounce_linear_solver(void);
+```
+
+returning a table of callbacks — `create`, `destroy`, `initialize_structure`,
+`factor`, `solve`, and the optional `set_layout`, `set_metadata` and
+`increase_quality` — declared and documented in `pounce.h`. Select it with
+options, from any frontend (C, an options file, the CLI, Python, the CasADi
+plugin):
+
+```text
+linear_solver                 custom
+custom_linear_solver_lib      /path/to/libmysolver.so
+custom_linear_solver_options  "anything; passed verbatim to create()"
+```
+
+The matrix arrives as 1-based triplets of one triangle (repeated pairs are
+summed) on a pattern fixed at `initialize_structure`. When
+`provides_inertia` is set, `factor` reports the number of negative
+eigenvalues and pounce runs its usual inertia correction on it. A
+`linear_solver=custom` whose library cannot be loaded refuses the solve
+with `Invalid_Option`; it never falls back to another solver. The custom
+solver serves the interior point, its restoration phase and the active-set
+SQP's QP subproblems; crossover keeps using FERAL.
+
+**Block labels.** Metadata set with
+
+```c
+int SetPounceIntegerMetaData(IpoptProblem, int target, const char *key,
+                             ipindex len, const ipindex *values,
+                             unsigned int flags);
+```
+
+(`target` is `POUNCE_META_VARIABLES`, `len == n`, or
+`POUNCE_META_CONSTRAINTS`, `len == m`; `flags` must be 0) follows each
+variable and constraint through presolve and fixed-variable removal. On the
+interior-point systems, whose rows are ordered
+`[x | slacks | equality duals | inequality duals]`, the solver's
+`set_layout` receives the four block sizes and `set_metadata` receives each
+integer key mapped to that order: an `x` row takes its variable's value, a
+slack and both dual rows their constraint's, and a key set on one side only
+reads `-1` on the other's rows. `SetPounceNumericMetaData` and
+`SetPounceStringMetaData` set real and string keys (the string key
+`idx_names` names rows in diagnostics); `ClearPounceMetaData` drops them
+all. Refusals follow the shared check order and return `POUNCE_ERR_*`.
+
+`examples/custom_linear_solver/dense_solver.c` is a complete, small
+reference solver (dense, with exact inertia) that also records what it was
+handed; the crate's `custom_linear_solver.rs` test drives it.
+
+### An augmented-system solver, from Rust
+
+`linear_solver=custom` hands your library the **assembled** matrix: Ipopt's
+sparse-linear-solver level. A structured solver that wants the pieces of the
+system instead — `W`, `D_x`, `δ_x`, `J_c`, `J_d`, `D_c`, `D_d`, `δ_c` — and
+owns regularization, inertia repair and refinement of the system it builds
+from them, sits one level up, at Ipopt's custom `AugSystemSolver`. In POUNCE
+that level is the Rust trait
+`pounce_algorithm::linear_solver_provider::LinearSolverProvider`:
+
+```rust
+use pounce_algorithm::linear_solver_provider::*;
+
+struct Structured;
+
+impl LinearSolverProvider for Structured {
+    fn name(&self) -> &'static str { "structured" }      // linear_solver=structured
+
+    // Typed, bounded options: validated, documented and type-dispatched
+    // (C API, CasADi) like the built-in ones.
+    fn register_options(&self, r: &RegisteredOptions) -> Result<(), SolverException> {
+        r.set_registering_category("Structured Linear Solver");
+        r.add_lower_bounded_number_option("structured_penalty", "Primal penalty per block.",
+                                          0.0, false, 0.0, "")?;
+        Ok(())
+    }
+
+    fn aug_system_solver(&self, ctx: &AugSolverContext<'_>)
+        -> Result<Box<dyn AugSystemSolver>, String> {
+        let (penalty, _) = ctx.options.get_numeric_value("structured_penalty", ctx.prefix)
+            .map_err(|e| e.to_string())?;
+        // ctx.metadata: the KKT layout and the integer var/con metadata in
+        // KKT row order, filled before the first factorization.
+        // ctx.standard(ctx.default_backend()): POUNCE's own StdAugSystemSolver,
+        // for a provider that wraps it.
+        Ok(Box::new(MyAugSystemSolver::new(penalty, ctx.metadata.clone())))
+    }
+}
+
+static STRUCTURED: Structured = Structured;
+
+fn main() {
+    // Before the first IpoptApplication is created.
+    register_linear_solver_provider(&STRUCTURED).unwrap();
+    // ... every frontend linked into this binary now accepts linear_solver=structured
+}
+```
+
+The builder calls `aug_system_solver` everywhere it would otherwise build a
+`StdAugSystemSolver`: on the main path; for both inner solvers of the
+limited-memory low-rank wrapper, which it puts around the provider's solver as
+it does around the standard one; and in restoration, inside
+`AugRestoSystemSolver`, where `ctx.prefix` is `"resto."`. The FERAL-only Schur
+and block-parallel paths stand down. The active-set SQP's QP subproblem is not
+an augmented system and keeps the default backend. Registration is refused
+for a name `linear_solver` already has, or for options that collide with
+registered ones. An `Err` from the provider's `validate` refuses the solve
+with `Invalid_Option`. An `Err` from `aug_system_solver` fails it at the
+first factorization. Neither falls back to FERAL.
+
+**From C and CasADi.** Registration is a Rust call, but the C library needs
+no change to carry it. Build your own `libpounce_cinterface` that re-exports
+the stock one and registers your provider when the library loads, then link
+or load it in place of the stock library (the CasADi plugin loads it by that
+name):
+
+```toml
+[lib]
+name = "pounce_cinterface"
+crate-type = ["cdylib"]
+
+[dependencies]
+pounce-cinterface = "…"   # the version you build against
+pounce-algorithm  = "…"
+structured        = { path = "…" }   # your provider
+```
+
+```rust
+pub use pounce_cinterface::*;   // every C entry point, unchanged
+
+extern "C" fn register() {
+    pounce_algorithm::linear_solver_provider::register_linear_solver_provider(
+        &structured::STRUCTURED,
+    )
+    .expect("register structured");
+}
+// Runs when the library is loaded (Linux/ELF; on macOS use the section
+// "__DATA,__mod_init_func", or the `ctor` crate on either).
+#[used]
+#[unsafe(link_section = ".init_array")]
+static REGISTER: extern "C" fn() = register;
+```
+
+`AddIpoptStrOption(prob, "linear_solver", "structured")` then selects it,
+and your typed options are set with `AddIpoptNumOption` and the like, or
+from a CasADi options dict.
+
+**Owning refinement.** A solver that regularizes or repairs the system it
+factors returns a step that leaves a residual on the rows it changed.
+`PdFullSpaceSolver`'s iterative refinement against the unmodified system
+would undo that change, and when the ratio stalls it would escalate quality
+and treat the system as singular. A solver whose
+`AugSystemSolver::owns_refinement()` returns `true` is solved once per
+request and trusted: there is no residual refinement, and an "improve this
+solution" request becomes a fresh solve. The low-rank and restoration
+wrappers pass the answer through. It defaults to `false`.
 
 ## Sessions
 

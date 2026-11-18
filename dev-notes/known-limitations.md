@@ -189,6 +189,108 @@ and have no direct Ipopt comparison. Not traced.
 
 ---
 
+## Active-set SQP: what the gh#1173 filter costs where an uphill step used to pay off (gh#1173)
+
+*Measured on `claude/pounce-issue-1173-s5pdm9` at `cb8d7c7` against `main`
+at `8632d06`: `scripts/sweep-fixtures.sh` under `algorithm=active-set-sqp`,
+`crossover=yes`, `ipm_sqp_handover=yes` and the default; models transcribed
+from Vanderbei's CUTE `.mod` files where named. The Vanderbei-corpus counts
+quoted are the maintainer's run on PR #1190 at `42dd480d`, before the fixes
+below that run prompted. Recorded 2026-11-18.*
+
+**The change.** The SQP filter accepted any feasible trial from a feasible
+iterate: with `θ_curr = 0`, "`θ_t ≤ (1 − γ_θ)·θ_curr`" holds for every
+feasible trial, so nothing guarded `f`. It now follows Wächter-Biegler /
+Ipopt: near feasibility a descent step is f-type (Armijo on `f`, and still
+filter-acceptable), θ-progress needs `θ_curr > 0`, every comparison carries
+`Compare_le`'s `10·ε·|φ|`, a full step below `10·ε·(1+|x|)` is taken
+unjudged (two in a row fail the search), and an uphill exact-Hessian step at
+an exactly feasible iterate is re-solved on `H + δI`. On the Vanderbei corpus
+at `42dd480d` that took the forced SQP from 519 to 558 successes (exact) and
+511 to 536 (L-BFGS), `InternalError` from 23 to 2 and 26 to 3, and moved
+seven wrong successes onto the reference optimum.
+
+### What is worse
+
+Every entry below was, on `main`, a run rescued by an uphill step that
+happened to land somewhere good. The new rule refuses those steps; none of
+these is a wrong answer.
+
+- **`mu_fallback_declined_bound_active`, exact, 7 → 21 iterations.** `main`
+  goes `f` 1.73 → **223.7** → −2.10 → **76.6** → −3.0. The new run is
+  monotone; its steps are short because the δ-shifted indefinite model
+  under-steps.
+- **`maratosb` (CUTE), limited-memory: `Solve_Succeeded` →
+  `Maximum_Iterations_Exceeded` at the optimum `f = −1.0000000625`.**
+  `x₁ + (x₁²+x₂²−1)²/1e-6` is conditioned ~1e6. `main` reached it through a
+  step to `f = 1.2e9` whose curvature pair taught L-BFGS the valley; the
+  Armijo steps that replace it (α ≈ 3e-8) never do, and stationarity
+  oscillates around 1e-4. The exact-Hessian leg is unaffected.
+- **`drcavty1` (CUTE, n = 10816), forced SQP and `ipm_sqp_handover=yes`:
+  handover accepted at IPM iteration 136 and solved in 48 s on `main`;
+  declined twice and out of wall time at 120 s now.** The handover SQP's
+  iteration 2 is f-type and halves a full step that raised `f` from 1.22e-9
+  to 1.34e-9. Two iterations later the warm-started step QP reports
+  `warm start pins infeasible`, re-seeds from the interior point, and spends
+  **28.8 s in 227 factorizations** until the handover's time limit declines
+  the attempt. The filter decision is Ipopt's; the cost is the warm-start
+  fallback of `pounce-qp` at this size, which `main`'s trajectory never
+  reached. `drcav1lq` is reported the same way on the maintainer's corpus
+  (not reproduced here: the transcription times out on both binaries).
+- **`mpcc_worse_local_solution`, `crossover=yes`, limited-memory:
+  `f = −84.33` → `−10.12`, both `Solve_Succeeded`.** The interior point
+  returns a KKT point at −10.12 with `θ = 1e-8`. `main`'s crossover SQP took
+  a full step that raised `f` (θ-progress), left that point, and converged at
+  a different local minimum, −84.33, in 13 iterations. The step is f-type
+  now; the run reaches −84.33 too but not within `crossover_max_iter`, so
+  crossover is declined and the interior point's own answer stands. Crossover
+  is a polish, so this is the intended outcome, but it is a different answer.
+- **`jit1_node`, `ipm_sqp_handover=yes`, exact: objective 173345.38 →
+  173346.10 (relative 4e-6), both `Solve_Succeeded`.** The handover is now
+  accepted at its first attempt (IPM iteration 18), where `main` declined
+  twice and accepted at 21. The SQP from there converges (scaled dual
+  infeasibility 4.4e-10) to a neighbouring KKT point, the same one the
+  forced L-BFGS SQP reaches.
+- **`cc:design_cent_3`, `ipm_sqp_handover=yes`: lowered-solve iterations
+  524 → 614**, same answer and verdict.
+- **Vanderbei exact leg at `42dd480d`: `catena`, `hanging`, `kiwcresc`,
+  `polak2`, `polak6`** stopped at iteration 0 with
+  `Search_Direction_Becomes_Too_Small` and now run 175–200 iterations (to
+  the wall time on `catena`) before failing the same way; `pfit2`/`pfit3`
+  51–55 → 102–114, `powellbs` 36 → 93, `sineval` 2 → 42 where both succeed.
+  Not re-measured on the final code, whose tiny-step rule ends stalled runs
+  sooner (on the fixtures: `mpcc_scholtes4_biactive` 200 → 51).
+
+### What has been tried
+
+- Bitwise "trial equals `x`" as the stall test: missed `jit1_node` (its
+  `α·p` is 2e-19, not zero) and, applied at `α = 1`, broke the zero-primal
+  multiplier step `issue_986_sqp_working_set_fixed_vars` converges with.
+  Replaced by the tiny-step rule.
+- Armijo alone on f-type steps: `pooling_rt2stp` (limited-memory) took a
+  step raising `θ` from 1.4e-3 to 0.85 that the filter rejected and never
+  recovered (−3138 → −1881). Every trial is now also filter-checked.
+- The slack on the f-type test only: `stancmin`'s round-off multiplier step
+  has `∇fᵀp = +3e-15`, is h-type, and raised `φ` by one ulp.
+
+### How to tell whether a fix works
+
+- The candidate is Ipopt's watchdog (a bounded number of tentative full
+  steps accepted without the filter, rolled back if the following
+  iterations do not make progress): it is how Ipopt gets `main`'s good
+  uphill steps without its bad ones. It must keep
+  `issue_1173_filter_never_steps_uphill_on_an_unconstrained_model` and the
+  issue's three cases (`sqp/tests.rs`) green, since those are uphill steps
+  that went nowhere.
+- `maratosb` (L-BFGS) and `drcavty1` (forced SQP, n = 10816) should solve
+  again; `mu_fallback_declined_bound_active` (exact) should approach 7.
+- For `drcavty1` alone, a fix to `pounce-qp`'s warm-start fallback (the
+  28.8 s interior re-seed) would recover it without touching the filter.
+- Re-run the Vanderbei forced-SQP legs: success counts must not fall below
+  this change's.
+
+---
+
 ## MPCC: four MacMPEC answers stay complementary only to ~7e-5
 
 *Measured on `mpcc/cost-sweep-report` (after `df3fbd12`), MacMPEC through

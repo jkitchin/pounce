@@ -1119,6 +1119,11 @@ pub struct IpoptApplication {
     /// so the matrix the inner solver factors is the one these labels
     /// describe. Reset with the sinks at the top of every solve.
     kkt_blocks_published: crate::alg_builder::KktBlocksCell,
+    /// `linear_solver=custom` (gh#1175): the KKT layout and KKT-ordered
+    /// integer metadata of the current solve, published once the NLP is
+    /// split. Shared with every builder [`Self::algorithm_builder_from_options`]
+    /// mints, the restoration one included, which exists before the layout.
+    custom_kkt_metadata: crate::custom_linsol::KktMetadataCell,
     /// Shared tally of successful linear-solver quality escalations for
     /// the current solve (gh#857). Handed to every `AlgorithmBuilder`
     /// this application mints — [`Self::algorithm_builder_from_options`]
@@ -1425,6 +1430,7 @@ impl IpoptApplication {
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             resto_linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             kkt_blocks_published: Arc::new(Mutex::new(None)),
+            custom_kkt_metadata: Arc::new(Mutex::new(None)),
             quality_escalations: Rc::new(std::cell::Cell::new(0)),
             run_clock: std::cell::Cell::new((
                 pounce_common::utils::wallclock_time(),
@@ -1506,10 +1512,12 @@ impl IpoptApplication {
         &self.journalist
     }
 
-    /// Plug a custom symmetric-linear-solver factory. Useful for tests
-    /// that want to swap MA57 for a stub. Production callers should
-    /// leave this unset — the default ([`default_backend_factory`])
-    /// returns the workspace's MA57 binding.
+    /// Plug a custom symmetric-linear-solver factory (a Rust
+    /// [`SparseSymLinearSolverInterface`](pounce_linsol::SparseSymLinearSolverInterface)).
+    /// Unset, the default ([`default_backend_factory`]) builds FERAL, or
+    /// MA57 under `linear_solver=ma57`. A solver in another language plugs
+    /// in through `linear_solver=custom` instead (gh#1175), which takes
+    /// precedence over this factory.
     pub fn set_linear_backend_factory(&mut self, factory: LinearBackendFactory) {
         self.linear_backend_factory = Some(factory);
     }
@@ -2437,6 +2445,24 @@ impl IpoptApplication {
                 .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
             return ApplicationReturnStatus::InvalidOption;
         }
+        if let Some(Err(e)) = self.custom_linear_solver() {
+            use pounce_common::journalist::JournalCategory;
+            let msg = format!("pounce: linear_solver=custom: {e}\n");
+            eprint!("{msg}");
+            self.journalist
+                .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
+            return ApplicationReturnStatus::InvalidOption;
+        }
+        if let Some(p) = self.linear_solver_provider()
+            && let Err(e) = p.validate(&self.options)
+        {
+            use pounce_common::journalist::JournalCategory;
+            let msg = format!("pounce: linear_solver={}: {e}\n", p.name());
+            eprint!("{msg}");
+            self.journalist
+                .print(JournalLevel::J_ERROR, JournalCategory::J_MAIN, &msg);
+            return ApplicationReturnStatus::InvalidOption;
+        }
 
         // gh#483 follow-up: an option naming a feature pounce does not
         // implement is refused, not shrugged off. See
@@ -3166,10 +3192,11 @@ impl IpoptApplication {
     /// portable `ipopt.opt` over a build flag would cost more than it buys.
     pub fn unimplemented_linear_solver(&self) -> Option<String> {
         let (v, _) = self.options.get_string_value("linear_solver", "").ok()?;
-        ["feral", "ma57"]
+        (["feral", "ma57", "custom"]
             .iter()
             .all(|ok| !v.eq_ignore_ascii_case(ok))
-            .then_some(v)
+            && crate::linear_solver_provider::find_provider(&v).is_none())
+        .then_some(v)
     }
 
     /// The message for the first option the caller set that names a
@@ -3539,17 +3566,62 @@ impl IpoptApplication {
         }
     }
 
+    /// The solver `linear_solver=custom` names, loaded from
+    /// `custom_linear_solver_lib` with `custom_linear_solver_options`;
+    /// `None` when another backend is selected. Loading is cached per path,
+    /// so calling this per builder costs one lookup after the first.
+    pub fn custom_linear_solver(
+        &self,
+    ) -> Option<Result<crate::custom_linsol::CustomLinearSolver, String>> {
+        let (v, _) = self.options.get_string_value("linear_solver", "").ok()?;
+        if !v.eq_ignore_ascii_case("custom") {
+            return None;
+        }
+        let lib = self
+            .options
+            .get_string_value("custom_linear_solver_lib", "")
+            .map(|(v, _)| v)
+            .unwrap_or_default();
+        if lib.is_empty() {
+            return Some(Err(
+                "custom_linear_solver_lib is not set; it names the shared library \
+                 exporting `pounce_linear_solver` (see pounce.h, PounceLinearSolver)"
+                    .into(),
+            ));
+        }
+        let opts = self
+            .options
+            .get_string_value("custom_linear_solver_options", "")
+            .map(|(v, _)| v)
+            .unwrap_or_default();
+        Some(
+            crate::custom_linsol::load(&lib, &opts)
+                .map(|c| c.with_metadata(Arc::clone(&self.custom_kkt_metadata))),
+        )
+    }
+
+    /// The registered [`LinearSolverProvider`](crate::linear_solver_provider::LinearSolverProvider)
+    /// that `linear_solver` names, if any.
+    pub fn linear_solver_provider(
+        &self,
+    ) -> Option<&'static dyn crate::linear_solver_provider::LinearSolverProvider> {
+        let (v, _) = self.options.get_string_value("linear_solver", "").ok()?;
+        crate::linear_solver_provider::find_provider(&v)
+    }
+
     /// The message [`Self::unimplemented_linear_solver`] earns, shared by
     /// every frontend so they cannot drift apart.
     pub fn unimplemented_linear_solver_message(value: &str) -> String {
         format!(
             "pounce: linear_solver={value} is not implemented. pounce provides \
-             `feral` (pure-Rust sparse symmetric, the default) and `ma57` (HSL, \
-             in a `--features ma57` build); the other names in the option's \
-             list come from the upstream Ipopt registry so an ipopt.opt written \
-             for Ipopt still parses. Selecting one used to run FERAL silently, \
+             `feral` (pure-Rust sparse symmetric, the default), `ma57` (HSL, \
+             in a `--features ma57` build) and `custom` (a shared library named \
+             by custom_linear_solver_lib), plus any augmented-system solver \
+             the embedding build registered as a LinearSolverProvider; the \
+             other names in the option's list come from the upstream Ipopt \
+             registry so an ipopt.opt written for Ipopt still parses. Selecting one used to run FERAL silently, \
              which makes a backend comparison measure nothing — so it is \
-             refused instead. Use linear_solver=feral or linear_solver=ma57."
+             refused instead. Use linear_solver=feral, ma57 or custom."
         )
     }
 
@@ -7030,6 +7102,36 @@ impl IpoptApplication {
             let a = adapter.borrow();
             let cls = a.classification();
             self.x_elimination = Some((cls.x_not_fixed_map.clone(), cls.n_full_x as usize));
+            // gh#1175: the custom linear solver's layout and the model's
+            // integer metadata in KKT order. Published for every solve (and
+            // cleared when there is no custom solver) so a re-solve never
+            // reads the previous model's layout.
+            let wants_meta = builder.custom_linear_solver.is_some()
+                || builder
+                    .aug_system_provider
+                    .as_ref()
+                    .is_some_and(|sel| sel.provider.wants_metadata());
+            let meta = wants_meta.then(|| {
+                let mut var = pounce_nlp::tnlp::MetaData::default();
+                let mut con = pounce_nlp::tnlp::MetaData::default();
+                if !a.tnlp().borrow_mut().get_var_con_metadata(&mut var, &mut con) {
+                    var = Default::default();
+                    con = Default::default();
+                }
+                let (meta, dropped) =
+                    crate::custom_linsol::KktMetadata::from_model(cls, &var.integers, &con.integers);
+                for key in dropped {
+                    tracing::warn!(
+                        target: "pounce::linsol",
+                        key = %key,
+                        "integer metadata does not have the model's length; not passed to the custom linear solver"
+                    );
+                }
+                meta
+            });
+            if let Ok(mut g) = self.custom_kkt_metadata.lock() {
+                *g = meta;
+            }
         }
         let mapped = self.model_blocks.as_ref().and_then(|(v, c)| {
             let cls = adapter.borrow().classification().clone();
@@ -8180,6 +8282,20 @@ impl IpoptApplication {
                     requested
                 };
         }
+        // gh#1175: `linear_solver=custom`. A load failure is refused by
+        // `optimize_tnlp` before any builder is used; here it only leaves
+        // the field unset.
+        builder.custom_linear_solver = self.custom_linear_solver().and_then(Result::ok);
+        // A registered augmented-system provider (`linear_solver=<its name>`).
+        // It shares the metadata cell with `custom`: one solve, one layout.
+        builder.aug_system_provider = self.linear_solver_provider().map(|provider| {
+            crate::linear_solver_provider::ProviderSelection {
+                provider,
+                options: self.options.clone(),
+                prefix: String::new(),
+                metadata: Arc::clone(&self.custom_kkt_metadata),
+            }
+        });
 
         // `linear_system_scaling` — symmetric scaling of the augmented
         // KKT matrix before factorization. Port of

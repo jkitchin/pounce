@@ -388,6 +388,77 @@ fn header_bounds_codes_match_the_implementation() {
     }
 }
 
+/// gh#1175: the metadata targets and the custom-linear-solver ABI version
+/// and statuses, header against the Rust constants, both ways. The struct
+/// layout itself is checked by `custom_linear_solver.rs`, which compiles a
+/// solver against this header and has pounce drive it.
+#[test]
+fn header_metadata_and_custom_solver_codes_match_the_implementation() {
+    use pounce_algorithm::custom_linsol as cl;
+    use pounce_cinterface::*;
+    let rust: HashMap<&str, i64> = [
+        ("POUNCE_META_VARIABLES", i64::from(POUNCE_META_VARIABLES)),
+        (
+            "POUNCE_META_CONSTRAINTS",
+            i64::from(POUNCE_META_CONSTRAINTS),
+        ),
+        (
+            "POUNCE_LINEAR_SOLVER_ABI_VERSION",
+            i64::from(cl::POUNCE_LINEAR_SOLVER_ABI_VERSION),
+        ),
+        (
+            "POUNCE_LINSOL_SUCCESS",
+            i64::from(cl::POUNCE_LINSOL_SUCCESS),
+        ),
+        (
+            "POUNCE_LINSOL_SINGULAR",
+            i64::from(cl::POUNCE_LINSOL_SINGULAR),
+        ),
+        (
+            "POUNCE_LINSOL_WRONG_INERTIA",
+            i64::from(cl::POUNCE_LINSOL_WRONG_INERTIA),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let header = include_str!("../include/pounce.h");
+    let mut defined: HashMap<String, i64> = HashMap::new();
+    for line in header.lines() {
+        let Some(rest) = line.trim().strip_prefix("#define ") else {
+            continue;
+        };
+        let mut words = rest.split_whitespace();
+        let Some(name) = words.next().filter(|n| {
+            n.starts_with("POUNCE_META_")
+                || n.starts_with("POUNCE_LINSOL_")
+                || *n == "POUNCE_LINEAR_SOLVER_ABI_VERSION"
+        }) else {
+            continue;
+        };
+        let value: i64 = words
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("`#define {name}` has no integer value"));
+        assert!(
+            defined.insert(name.to_string(), value).is_none(),
+            "pounce.h defines `{name}` twice"
+        );
+    }
+    for (name, value) in &rust {
+        assert_eq!(
+            defined.get(*name),
+            Some(value),
+            "pounce.h `{name}` disagrees with the Rust constant {value} (or is missing)"
+        );
+    }
+    for name in defined.keys() {
+        assert!(
+            rust.contains_key(name.as_str()),
+            "pounce.h defines `{name}` but this test does not know the Rust constant"
+        );
+    }
+}
+
 /// The shared error namespace: every `#define POUNCE_OK` / `POUNCE_ERR_*`
 /// in the header against `POUNCE_ERROR_CODES`, the table
 /// `PounceErrorString` reads, both ways. So a code defined on one side

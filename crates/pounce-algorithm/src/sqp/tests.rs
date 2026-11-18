@@ -2565,3 +2565,593 @@ fn issue_1095_the_warm_schur_rule_reads_the_step3_hint() {
         assert!(zero.schur_updates > 0, "{hessian:?}: {zero:?}");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// gh#1173: exact-Hessian SQP from a negative-curvature start. Three tiny
+// smooth models, bounded below, each started where `∇²L` is indefinite:
+//
+//   A: min sin(3x) + ½x²                      x0 = 0.05
+//   B: min sin(3x)  s.t.  x² ≤ 4              x0 = 0.1
+//   C: min sin(3x₀)+sin(3x₁)+exp(0.3x₀x₁)+½‖x‖²   x0 = (0.1, 0.1)
+//
+// Under the filter, A's first step took `f` from 0.15 to 9.48 and the run
+// ended `MaxIter` at f = 1403: a feasible iterate had `θ = 0`, and
+// "`θ_t ≤ (1 − γ)·θ_curr`" then held for every trial, so nothing guarded the
+// objective. C took the same kind of step to f ≈ 8e19, where `‖∇²L‖ ~ 1e20`
+// outran the inertia ladder and the hard QP error surfaced as
+// `Internal_Error` with no `x`. B's step QP is unbounded below along a ray
+// the NLP refutes, and the proximal re-solve of a QP with rows has nothing
+// to converge to: it ran to its cap and the SQP stopped at its
+// non-stationary start (`|f'| = 2.87`), under both globalizations.
+// ─────────────────────────────────────────────────────────────────
+#[derive(Clone, Copy, Debug)]
+enum Issue1173 {
+    A,
+    B,
+    C,
+}
+
+impl SqpProblemSpec for Issue1173 {
+    fn n(&self) -> usize {
+        match self {
+            Issue1173::C => 2,
+            _ => 1,
+        }
+    }
+    fn m(&self) -> usize {
+        usize::from(matches!(self, Issue1173::B))
+    }
+    fn x_init(&self) -> Vec<Number> {
+        match self {
+            Issue1173::A => vec![0.05],
+            Issue1173::B => vec![0.1],
+            Issue1173::C => vec![0.1, 0.1],
+        }
+    }
+    fn variable_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        let n = self.n();
+        (vec![NLP_LOWER_BOUND_INF; n], vec![NLP_UPPER_BOUND_INF; n])
+    }
+    fn constraint_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        match self {
+            Issue1173::B => (vec![NLP_LOWER_BOUND_INF], vec![4.0]),
+            _ => (Vec::new(), Vec::new()),
+        }
+    }
+    fn eval_f(&mut self, x: &[Number]) -> Number {
+        match self {
+            Issue1173::A => (3.0 * x[0]).sin() + 0.5 * x[0] * x[0],
+            Issue1173::B => (3.0 * x[0]).sin(),
+            Issue1173::C => {
+                (3.0 * x[0]).sin()
+                    + (3.0 * x[1]).sin()
+                    + (0.3 * x[0] * x[1]).exp()
+                    + 0.5 * (x[0] * x[0] + x[1] * x[1])
+            }
+        }
+    }
+    fn eval_grad_f(&mut self, x: &[Number]) -> Vec<Number> {
+        match self {
+            Issue1173::A => vec![3.0 * (3.0 * x[0]).cos() + x[0]],
+            Issue1173::B => vec![3.0 * (3.0 * x[0]).cos()],
+            Issue1173::C => {
+                let e = (0.3 * x[0] * x[1]).exp();
+                vec![
+                    3.0 * (3.0 * x[0]).cos() + 0.3 * x[1] * e + x[0],
+                    3.0 * (3.0 * x[1]).cos() + 0.3 * x[0] * e + x[1],
+                ]
+            }
+        }
+    }
+    fn eval_c(&mut self, x: &[Number]) -> Vec<Number> {
+        match self {
+            Issue1173::B => vec![x[0] * x[0]],
+            _ => Vec::new(),
+        }
+    }
+    fn eval_jac_c(&mut self, x: &[Number]) -> Triplet {
+        match self {
+            Issue1173::B => Triplet {
+                n_rows: 1,
+                n_cols: 1,
+                irow: vec![1],
+                jcol: vec![1],
+                vals: vec![2.0 * x[0]],
+            },
+            _ => Triplet {
+                n_rows: 0,
+                n_cols: self.n(),
+                irow: Vec::new(),
+                jcol: Vec::new(),
+                vals: Vec::new(),
+            },
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[Number], lambda_g: &[Number]) -> Triplet {
+        let (irow, jcol, vals) = match self {
+            Issue1173::A => (vec![1], vec![1], vec![-9.0 * (3.0 * x[0]).sin() + 1.0]),
+            Issue1173::B => (
+                vec![1],
+                vec![1],
+                vec![-9.0 * (3.0 * x[0]).sin() + 2.0 * lambda_g[0]],
+            ),
+            Issue1173::C => {
+                let e = (0.3 * x[0] * x[1]).exp();
+                (
+                    vec![1, 2, 2],
+                    vec![1, 1, 2],
+                    vec![
+                        -9.0 * (3.0 * x[0]).sin() + 0.09 * x[1] * x[1] * e + 1.0,
+                        0.3 * e + 0.09 * x[0] * x[1] * e,
+                        -9.0 * (3.0 * x[1]).sin() + 0.09 * x[0] * x[0] * e + 1.0,
+                    ],
+                )
+            }
+        };
+        let n = self.n();
+        Triplet {
+            n_rows: n,
+            n_cols: n,
+            irow,
+            jcol,
+            vals,
+        }
+    }
+}
+
+fn issue_1173_solve(
+    case: Issue1173,
+    glob: SqpGlobalization,
+    max_iter: Option<u32>,
+) -> crate::sqp::result::SqpResult {
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let mut opts = SqpOptions {
+        hessian: SqpHessianSource::Exact,
+        globalization: glob,
+        ..SqpOptions::default()
+    };
+    if let Some(k) = max_iter {
+        opts.max_iter = k;
+    }
+    let mut nlp = case;
+    SqpAlgorithm::new(qp_solver, opts)
+        .optimize(&mut nlp)
+        .unwrap_or_else(|e| panic!("{case:?} {glob:?}: hard error {e:?}"))
+}
+
+/// Every case reaches the known local minimizer (scipy BFGS and the
+/// interior-point arm agree on each) under both globalizations.
+#[test]
+fn issue_1173_negative_curvature_start_reaches_the_minimizer() {
+    let expected: [(Issue1173, &[Number], Number); 3] = [
+        (Issue1173::A, &[-0.471_043_17], -0.876_655_48),
+        (Issue1173::B, &[-std::f64::consts::FRAC_PI_6], -1.0),
+        (Issue1173::C, &[-0.456_257_67, -0.456_257_67], -0.686_711_50),
+    ];
+    for (case, x_star, f_star) in expected {
+        for glob in [SqpGlobalization::Filter, SqpGlobalization::L1Elastic] {
+            let res = issue_1173_solve(case, glob, None);
+            assert_eq!(
+                res.status,
+                SqpStatus::Optimal,
+                "{case:?} {glob:?}: {:?} after {} iters at x={:?}, f={}",
+                res.status,
+                res.n_iter,
+                res.x,
+                res.obj
+            );
+            assert!(
+                (res.obj - f_star).abs() < 1e-6,
+                "{case:?} {glob:?}: f={}, expected {f_star}",
+                res.obj
+            );
+            for (xi, xs) in res.x.iter().zip(x_star) {
+                assert!(
+                    (xi - xs).abs() < 1e-5,
+                    "{case:?} {glob:?}: x={:?}, expected {x_star:?}",
+                    res.x
+                );
+            }
+        }
+    }
+}
+
+/// The filter must not take an uphill step from a feasible iterate. On the
+/// unconstrained A and C, `f` is non-increasing along the whole trajectory,
+/// checked by capping the outer iterations at each length in turn (the
+/// issue's own table: `sqp_max_iter = 1` gave f = 9.48 from f₀ = 0.15).
+#[test]
+fn issue_1173_filter_never_steps_uphill_on_an_unconstrained_model() {
+    for case in [Issue1173::A, Issue1173::C] {
+        let mut nlp = case;
+        let mut f_prev = nlp.eval_f(&case.x_init());
+        for k in 1..=10 {
+            let res = issue_1173_solve(case, SqpGlobalization::Filter, Some(k));
+            assert!(
+                res.obj <= f_prev + 1e-12,
+                "{case:?}: f rose from {f_prev} to {} at outer iteration {k}",
+                res.obj
+            );
+            f_prev = res.obj;
+        }
+    }
+}
+
+/// `min 1e20·(x⁴/4 − x²/2)` from `x = 0.1`: bounded below, with
+/// `f''(0.1) ≈ −0.97e20`. The §4.5 inertia ladder tops out at `δ = 1e14`, so
+/// no shift makes the step QP's Hessian positive definite and its cold solve
+/// fails with an unrepairable factorization. This is the state gh#1173's case
+/// C reached at `f ≈ 8e19` before the filter fix, and C no longer gets there.
+struct Issue1173HugeNegativeCurvature;
+
+impl SqpProblemSpec for Issue1173HugeNegativeCurvature {
+    fn n(&self) -> usize {
+        1
+    }
+    fn m(&self) -> usize {
+        0
+    }
+    fn x_init(&self) -> Vec<Number> {
+        vec![0.1]
+    }
+    fn variable_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (vec![NLP_LOWER_BOUND_INF], vec![NLP_UPPER_BOUND_INF])
+    }
+    fn constraint_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (Vec::new(), Vec::new())
+    }
+    fn eval_f(&mut self, x: &[Number]) -> Number {
+        1e20 * (0.25 * x[0].powi(4) - 0.5 * x[0] * x[0])
+    }
+    fn eval_grad_f(&mut self, x: &[Number]) -> Vec<Number> {
+        vec![1e20 * (x[0].powi(3) - x[0])]
+    }
+    fn eval_c(&mut self, _x: &[Number]) -> Vec<Number> {
+        Vec::new()
+    }
+    fn eval_jac_c(&mut self, _x: &[Number]) -> Triplet {
+        Triplet {
+            n_rows: 0,
+            n_cols: 1,
+            irow: Vec::new(),
+            jcol: Vec::new(),
+            vals: Vec::new(),
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[Number], _lambda_g: &[Number]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 1,
+            irow: vec![1],
+            jcol: vec![1],
+            vals: vec![1e20 * (3.0 * x[0] * x[0] - 1.0)],
+        }
+    }
+}
+
+/// An unrepairable step-QP factorization ends `QpStepFailed` with the
+/// iterate, not a hard `Err` (which the CLI reported as `Internal_Error` with
+/// `x = null`). The step QP's own verdict is asserted first, so the test
+/// cannot pass by never reaching the branch it pins.
+#[test]
+fn issue_1173_unrepairable_step_qp_factorization_is_qp_step_failed() {
+    let mut nlp = Issue1173HugeNegativeCurvature;
+    let x0 = nlp.x_init();
+    let qp_data = SqpQpData::build(
+        &x0,
+        &nlp.eval_grad_f(&x0),
+        &[],
+        &[],
+        &[],
+        &[NLP_LOWER_BOUND_INF],
+        &[NLP_UPPER_BOUND_INF],
+        nlp.eval_jac_c(&x0),
+        nlp.eval_hess_lag(&x0, &[]),
+        HessianInertia::Indefinite,
+    );
+    let mut qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let err = qp_solver
+        .solve(&qp_data.as_qp(), None, &QpOptions::default())
+        .expect_err("the step QP must fail to factor for this test to reach its branch");
+    assert!(
+        err.is_recoverable_factorization_failure(),
+        "expected an inertia/singular factorization failure, got {err:?}"
+    );
+
+    for glob in [SqpGlobalization::Filter, SqpGlobalization::L1Elastic] {
+        let qp_solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let opts = SqpOptions {
+            hessian: SqpHessianSource::Exact,
+            globalization: glob,
+            ..SqpOptions::default()
+        };
+        let mut nlp = Issue1173HugeNegativeCurvature;
+        let res = SqpAlgorithm::new(qp_solver, opts)
+            .optimize(&mut nlp)
+            .unwrap_or_else(|e| panic!("{glob:?}: hard error {e:?}"));
+        assert_eq!(res.status, SqpStatus::QpStepFailed, "{glob:?}");
+        assert_eq!(res.x, vec![0.1], "{glob:?}: the iterate is reported");
+        assert!(res.obj.is_finite(), "{glob:?}: obj {}", res.obj);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// gh#1173, from the Vanderbei CUTE measurement on PR #1190.
+// ─────────────────────────────────────────────────────────────────
+
+/// `stancmin` (CUTE): `min −(3x₁+6x₂+2x₃−11)/(x₁+4x₂+x₃+1)` s.t.
+/// `3x₁+4x₂+x₃ ≤ 2`, `x₁+4x₂+x₃ ≤ 1`, `x ≥ 0`, from `x = 50·1`. The first
+/// step lands on the optimum `f = 4.25`; the second is a round-off primal step
+/// (`‖p‖ ≈ 2e-15`, `∇fᵀp = +3e-15`) whose content is the QP's multipliers.
+/// It raised `f` by one ulp, the h-type test refused it, and the limited-memory
+/// leg sat at the optimum for 200 iterations with stationarity 1.8.
+struct Stancmin;
+
+impl Stancmin {
+    const A: [Number; 3] = [3.0, 6.0, 2.0];
+    const B: [Number; 3] = [1.0, 4.0, 1.0];
+    fn nd(x: &[Number]) -> (Number, Number) {
+        let n: Number = Self::A.iter().zip(x).map(|(a, xi)| a * xi).sum::<Number>() - 11.0;
+        let d: Number = Self::B.iter().zip(x).map(|(b, xi)| b * xi).sum::<Number>() + 1.0;
+        (n, d)
+    }
+}
+
+impl SqpProblemSpec for Stancmin {
+    fn n(&self) -> usize {
+        3
+    }
+    fn m(&self) -> usize {
+        2
+    }
+    fn x_init(&self) -> Vec<Number> {
+        vec![50.0; 3]
+    }
+    fn variable_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (vec![0.0; 3], vec![NLP_UPPER_BOUND_INF; 3])
+    }
+    fn constraint_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (vec![NLP_LOWER_BOUND_INF; 2], vec![2.0, 1.0])
+    }
+    fn eval_f(&mut self, x: &[Number]) -> Number {
+        let (n, d) = Self::nd(x);
+        -n / d
+    }
+    fn eval_grad_f(&mut self, x: &[Number]) -> Vec<Number> {
+        let (n, d) = Self::nd(x);
+        (0..3)
+            .map(|i| -(Self::A[i] * d - n * Self::B[i]) / (d * d))
+            .collect()
+    }
+    fn eval_c(&mut self, x: &[Number]) -> Vec<Number> {
+        vec![3.0 * x[0] + 4.0 * x[1] + x[2], x[0] + 4.0 * x[1] + x[2]]
+    }
+    fn eval_jac_c(&mut self, _x: &[Number]) -> Triplet {
+        Triplet {
+            n_rows: 2,
+            n_cols: 3,
+            irow: vec![1, 1, 1, 2, 2, 2],
+            jcol: vec![1, 2, 3, 1, 2, 3],
+            vals: vec![3.0, 4.0, 1.0, 1.0, 4.0, 1.0],
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[Number], _lambda_g: &[Number]) -> Triplet {
+        // ∇²(−N/D) = (a bᵀ + b aᵀ)/D² − 2N·b bᵀ/D³; the rows are linear.
+        let (n, d) = Self::nd(x);
+        let (a, b) = (Self::A, Self::B);
+        let (mut irow, mut jcol, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..3 {
+            for j in 0..=i {
+                irow.push(i as Index + 1);
+                jcol.push(j as Index + 1);
+                vals.push(
+                    (a[i] * b[j] + b[i] * a[j]) / (d * d) - 2.0 * n * b[i] * b[j] / (d * d * d),
+                );
+            }
+        }
+        Triplet {
+            n_rows: 3,
+            n_cols: 3,
+            irow,
+            jcol,
+            vals,
+        }
+    }
+}
+
+#[test]
+fn issue_1173_stancmin_takes_the_round_off_step_that_carries_its_multipliers() {
+    for hess in [SqpHessianSource::Lbfgs, SqpHessianSource::Exact] {
+        let qp_solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let opts = SqpOptions {
+            hessian: hess,
+            ..SqpOptions::default()
+        };
+        let res = SqpAlgorithm::new(qp_solver, opts)
+            .optimize(&mut Stancmin)
+            .unwrap_or_else(|e| panic!("{hess:?}: hard error {e:?}"));
+        assert_eq!(
+            res.status,
+            SqpStatus::Optimal,
+            "{hess:?}: {:?} after {} iters at f={} (stationarity {:.2e})",
+            res.status,
+            res.n_iter,
+            res.obj,
+            res.final_stationarity
+        );
+        assert!((res.obj - 4.25).abs() < 1e-9, "{hess:?}: f={}", res.obj);
+        // Base finished in 2; the regression spent the whole budget.
+        assert!(res.n_iter <= 5, "{hess:?}: {} iterations", res.n_iter);
+    }
+}
+
+/// `palmer5e` (CUTE): a Chebyshev-basis least-squares fit with one exponential
+/// term and `K ≥ 0`. At iteration 7 of the exact-Hessian SQP, from a feasible
+/// iterate, the active-set QP on the indefinite model returned an ascent
+/// direction (`∇fᵀp = +6572`); the filter refused it at every step length and
+/// the solve stopped at `f = 197.8`. Before the filter fix it reached `2.128`
+/// only by accepting a step to `f = 3e6`. The convexified re-solve gives a
+/// descent direction there and the solve continues below `f = 0.05` (the
+/// interior-point arm reaches 0.0209 at its iteration limit).
+struct Palmer5e {
+    t: Vec<[Number; 11]>,
+}
+
+impl Palmer5e {
+    // The model's own 6-digit abscissae (CUTE `palmer5e`), which happen to
+    // round π/2, π/3, π/6: the exact constants would be a different model.
+    #[allow(clippy::approx_constant)]
+    const X: [Number; 12] = [
+        0.0, 1.570796, 1.396263, 1.308997, 1.221730, 1.125835, 1.047198, 0.872665, 0.698132,
+        0.523599, 0.349066, 0.174533,
+    ];
+    const Y: [Number; 12] = [
+        83.57418, 81.007654, 18.983286, 8.051067, 2.044762, 0.0, 1.170451, 10.479881, 25.785001,
+        44.126844, 62.822177, 77.719674,
+    ];
+    fn new() -> Self {
+        let b = Self::X[1];
+        let (a, diff) = (-b, 2.0 * b);
+        let t = Self::X
+            .iter()
+            .map(|&xi| {
+                let mut t = [0.0; 11];
+                let s = (2.0 * xi - a - b) / diff;
+                t[0] = 1.0;
+                t[1] = s;
+                for j in 2..11 {
+                    t[j] = 2.0 * t[j - 1] * s - t[j - 2];
+                }
+                t
+            })
+            .collect();
+        Self { t }
+    }
+    /// Residuals `r_m` and their Jacobian rows; variables are
+    /// `(A0, A2, A4, A6, A8, A10, K, L)`.
+    fn residuals(&self, x: &[Number]) -> Vec<(Number, [Number; 8], Number, Number)> {
+        (0..12)
+            .map(|m| {
+                let t = &self.t[m];
+                let x2 = Self::X[m] * Self::X[m];
+                let e = (-x[6] * x2).exp();
+                let model = x[0] * t[0]
+                    + x[1] * t[2]
+                    + x[2] * t[4]
+                    + x[3] * t[6]
+                    + x[4] * t[8]
+                    + x[5] * t[10]
+                    + x[7] * e;
+                let r = Self::Y[m] - model;
+                let mut j = [0.0; 8];
+                for (k, c) in [0, 2, 4, 6, 8, 10].iter().enumerate() {
+                    j[k] = -t[*c];
+                }
+                j[6] = x[7] * x2 * e;
+                j[7] = -e;
+                (r, j, e, x2)
+            })
+            .collect()
+    }
+}
+
+impl SqpProblemSpec for Palmer5e {
+    fn n(&self) -> usize {
+        8
+    }
+    fn m(&self) -> usize {
+        0
+    }
+    fn x_init(&self) -> Vec<Number> {
+        vec![
+            19.264, -1.7302, 40.794, 0.83021, 3.7090, -0.17723, 10.0, 1.0,
+        ]
+    }
+    fn variable_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        let mut xl = vec![NLP_LOWER_BOUND_INF; 8];
+        xl[6] = 0.0;
+        (xl, vec![NLP_UPPER_BOUND_INF; 8])
+    }
+    fn constraint_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (Vec::new(), Vec::new())
+    }
+    fn eval_f(&mut self, x: &[Number]) -> Number {
+        self.residuals(x).iter().map(|(r, ..)| r * r).sum()
+    }
+    fn eval_grad_f(&mut self, x: &[Number]) -> Vec<Number> {
+        let mut g = vec![0.0; 8];
+        for (r, j, ..) in self.residuals(x) {
+            for k in 0..8 {
+                g[k] += 2.0 * r * j[k];
+            }
+        }
+        g
+    }
+    fn eval_c(&mut self, _x: &[Number]) -> Vec<Number> {
+        Vec::new()
+    }
+    fn eval_jac_c(&mut self, _x: &[Number]) -> Triplet {
+        Triplet {
+            n_rows: 0,
+            n_cols: 8,
+            irow: Vec::new(),
+            jcol: Vec::new(),
+            vals: Vec::new(),
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[Number], _lambda_g: &[Number]) -> Triplet {
+        // 2·Σ (J_mᵀJ_m + r_m ∇²r_m); only (K,K) and (L,K) of ∇²r_m are nonzero:
+        // ∂²r/∂K² = −L·x⁴·e, ∂²r/∂K∂L = x²·e.
+        let mut h = [[0.0; 8]; 8];
+        for (r, j, e, x2) in self.residuals(x) {
+            for a in 0..8 {
+                for b in 0..=a {
+                    h[a][b] += 2.0 * j[a] * j[b];
+                }
+            }
+            h[6][6] += 2.0 * r * (-x[7] * x2 * x2 * e);
+            h[7][6] += 2.0 * r * (x2 * e);
+        }
+        let (mut irow, mut jcol, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for a in 0..8 {
+            for b in 0..=a {
+                irow.push(a as Index + 1);
+                jcol.push(b as Index + 1);
+                vals.push(h[a][b]);
+            }
+        }
+        Triplet {
+            n_rows: 8,
+            n_cols: 8,
+            irow,
+            jcol,
+            vals,
+        }
+    }
+}
+
+#[test]
+fn issue_1173_palmer5e_convexifies_an_uphill_step_at_a_feasible_point() {
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let opts = SqpOptions {
+        hessian: SqpHessianSource::Exact,
+        ..SqpOptions::default()
+    };
+    let mut nlp = Palmer5e::new();
+    let res = SqpAlgorithm::new(qp_solver, opts)
+        .optimize(&mut nlp)
+        .unwrap_or_else(|e| panic!("hard error {e:?}"));
+    assert!(res.obj.is_finite());
+    assert!(
+        res.obj < 0.05,
+        "stopped at f = {} ({:?} after {} iters); 197.8 is the uphill-step stall",
+        res.obj,
+        res.status,
+        res.n_iter
+    );
+}

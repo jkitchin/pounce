@@ -681,7 +681,11 @@ sweep) and the Jupyter notebook in
 `sqp_globalization = filter` (the default) follows Fletcher-Leyffer
 2002 — a Pareto-frontier filter on `(constraint violation,
 objective)`. Robust, no penalty parameter to tune, recommended
-for general nonlinear NLPs.
+for general nonlinear NLPs. Near feasibility it switches to the
+Wächter-Biegler f-type test: a step along a descent direction must
+lower the objective by an Armijo fraction of `∇fᵀp` (and still be
+acceptable to the filter), so an iterate with no constraint violation
+never takes an uphill step.
 
 `sqp_globalization = l1-elastic` is the SNOPT-style Han-Powell
 merit `φ(x; ν) = f(x) + ν · violation(x)` with adaptive ν. The

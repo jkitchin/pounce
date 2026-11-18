@@ -10,6 +10,37 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **A custom linear solver, from any frontend, and block labels for it**
+  (gh#1175). `linear_solver=custom` with `custom_linear_solver_lib=<path>`
+  loads a shared library that exports `pounce_linear_solver()`, returning a
+  `PounceLinearSolver` table of C callbacks (`pounce.h`): create, structure,
+  factor (with inertia), solve. It serves the interior point, restoration and
+  the SQP's QP subproblems. Crossover stays on FERAL. A library that cannot be
+  loaded refuses the solve with `Invalid_Option`; pounce does not fall back.
+  `custom_linear_solver_options` is passed through to `create()`. The C API
+  gains Ipopt's `get_var_con_metadata`: `SetPounceIntegerMetaData`,
+  `SetPounceNumericMetaData`, `SetPounceStringMetaData` and
+  `ClearPounceMetaData`. Integer keys reach the custom solver mapped to KKT
+  row order `[x | slacks | equality duals | inequality duals]` after
+  fixed-variable removal. The CasADi plugin now forwards
+  `var/con_{integer,numeric,string}_md` instead of only echoing them. The
+  reference solver is `crates/pounce-cinterface/examples/custom_linear_solver/dense_solver.c`.
+- **An augmented-system solver supplied by the embedding build** (PR #1177
+  review). `pounce_algorithm::linear_solver_provider::LinearSolverProvider` is
+  the counterpart of Ipopt's custom `AugSystemSolver`. It receives the system's
+  pieces rather than the assembled matrix, so a structured KKT solver can own
+  regularization and inertia repair. Register it once with
+  `register_linear_solver_provider` and select it with `linear_solver=<name>`
+  from every frontend linked into the binary. It builds every
+  augmented-system solver: the main path, both low-rank inner solvers, and
+  restoration with prefix `resto.`. It registers its own typed, bounded
+  options. It receives `KktMetadata` on the same terms as `custom`.
+- **`AugSystemSolver::owns_refinement()`**, default `false`. When it returns
+  `true`, `PdFullSpaceSolver` solves once and accepts the step, with no
+  residual refinement against the unmodified system and no quality escalation
+  from it. An improve request becomes a fresh solve.
+  `LowRankAugSystemSolver` and restoration's `AugRestoSystemSolver` pass it
+  through.
 - **Infeasible and unbounded convex verdicts carry their certificate
   (gh#1181).** On `primal_infeasible` / `dual_infeasible` the convex LP/QP
   arm now returns a Farkas ray or a recession direction in the caller's own
@@ -115,6 +146,34 @@ changes.
   halved toward the start, in the same direction, up to ten times. On the
   column, two halvings evaluate cleanly. A draw that evaluates the first time
   is unchanged bit for bit, and the ladder logs any halving.
+- **The active-set SQP no longer takes uphill steps from a feasible
+  point, stalls at a non-stationary start, or ends `Internal_Error` with no
+  `x` when started on negative curvature (gh#1173).** Under the default
+  `sqp_globalization=filter`, an iterate with zero constraint violation
+  accepted any feasible step: `min sin(3x) + ½x²` from `x = 0.05` went from
+  `f = 0.15` to `f = 9.48` in one step and ended `Maximum_Iterations_Exceeded`
+  at `f = 1403`. The filter now uses the Wächter-Biegler switching rule, so
+  near feasibility a descent step must also reduce `f` by an Armijo fraction,
+  and it now solves to `f = -0.876655`. When the step QP is unbounded along a
+  direction the NLP refutes and the proximal re-solve fails, the SQP steps
+  along that direction under the line search instead of stopping at
+  `x0` (`min sin(3x) s.t. x² ≤ 4` from `x = 0.1` now reaches `-π/6`, `f = -1`).
+  A step QP whose factorization cannot be repaired ends
+  `Search_Direction_Becomes_Too_Small` with the iterate instead of
+  `Internal_Error` with `x = null`. The filter also takes Ipopt's tiny-step
+  rule and `Compare_le` round-off slack, so a round-off step that only
+  carries the final multipliers is no longer refused, and an exact-Hessian
+  step that goes uphill from a feasible point is re-solved on a convexified
+  model, which gives a descent direction. On the Vanderbei CUTE set under
+  `algorithm=active-set-sqp`, measured before those last two refinements,
+  the change raised successes from 519 to 558 (exact Hessian) and 511 to 536
+  (limited-memory), and `Internal_Error` exits fell from 23 to 2 and 26 to 3. Some runs that used to succeed only by accepting
+  an uphill step now take longer or stop; they are listed, with
+  measurements, in `dev-notes/known-limitations.md`.
+- **The CasADi plugin no longer ignores an option POUNCE rejects.** A value
+  out of bounds, not among a string option's values, or for an unknown
+  keyword ran the solve on the option's default. Now it raises, as CasADi's
+  `ipopt` plugin does ("Invalid options were detected by Ipopt").
 - **`minimize` reads both sides of a quadratic constraint row when routing
   to the conic solver** (gh#1174). The convex-QCQP detector treated every
   quadratic row as `g(x) ≥ lo` and never read `hi`. So scipy's natural
