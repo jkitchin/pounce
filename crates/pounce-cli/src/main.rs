@@ -3859,47 +3859,54 @@ fn run_convex_qp(
     // nothing is left, so a success is never reported past the cap. A retry
     // that does not reach `Optimal` is said on stderr and its iterations are
     // counted on the point that stands, so a stalled retry is not silent cost.
+    //
+    // Nor is it run once `max_wall_time` is spent (gh#1182): it would start
+    // with no time, stop at once, and print a note about a retry that never
+    // ran.
     let retry_budget = qp_opts.max_iter.saturating_sub(sol.iters);
-    let sol =
-        if reduced_was_optimal && sol.status == QpStatus::OptimalInaccurate && retry_budget > 0 {
-            let postsolved_kkt = sol.kkt_residuals_above_floor(&qp).kkt_error();
-            let retry_t0 = std::time::Instant::now();
-            let retry = {
-                let _t = timing.solve.guard();
-                let mut o = solve_opts();
-                o.max_iter = retry_budget;
-                ipm_solve(&qp, &o)
-            };
-            if retry.status == QpStatus::Optimal {
-                presolve_log.push(format!(
+    let sol = if reduced_was_optimal
+        && sol.status == QpStatus::OptimalInaccurate
+        && retry_budget > 0
+        && !convex_budget_spent(qp_opts.time_limit, t0.elapsed())
+    {
+        let postsolved_kkt = sol.kkt_residuals_above_floor(&qp).kkt_error();
+        let retry_t0 = std::time::Instant::now();
+        let retry = {
+            let _t = timing.solve.guard();
+            let mut o = solve_opts();
+            o.max_iter = retry_budget;
+            ipm_solve(&qp, &o)
+        };
+        if retry.status == QpStatus::Optimal {
+            presolve_log.push(format!(
                 "Presolve: the postsolved point failed the KKT check (error {postsolved_kkt:.2e} \
                  against tol {:.1e}); re-solved without presolve",
                 qp_opts.tol,
             ));
-                pounce_convex::QpSolution {
-                    // Both solves' iterations were spent on this answer.
-                    iters: sol.iters + retry.iters,
-                    ..retry
-                }
-            } else {
-                eprintln!(
-                    "pounce: note: the postsolved point failed the KKT check (error \
+            pounce_convex::QpSolution {
+                // Both solves' iterations were spent on this answer.
+                iters: sol.iters + retry.iters,
+                ..retry
+            }
+        } else {
+            eprintln!(
+                "pounce: note: the postsolved point failed the KKT check (error \
                  {postsolved_kkt:.2e} against tol {:.1e}); re-solving without presolve \
                  ended {:?} after {} iterations in {:.3}s, so the postsolved point \
                  stands (gh #1180)",
-                    qp_opts.tol,
-                    retry.status,
-                    retry.iters,
-                    retry_t0.elapsed().as_secs_f64(),
-                );
-                pounce_convex::QpSolution {
-                    iters: sol.iters + retry.iters,
-                    ..sol
-                }
+                qp_opts.tol,
+                retry.status,
+                retry.iters,
+                retry_t0.elapsed().as_secs_f64(),
+            );
+            pounce_convex::QpSolution {
+                iters: sol.iters + retry.iters,
+                ..sol
             }
-        } else {
-            sol
-        };
+        }
+    } else {
+        sol
+    };
     let elapsed = t0.elapsed().as_secs_f64();
 
     // gh#1182: `max_wall_time` is charged from `t0`, which precedes extraction,
