@@ -117,6 +117,30 @@ changes.
   variable.
 
 ### Fixed
+- **The active-set SQP no longer takes uphill steps from a feasible
+  point, stalls at a non-stationary start, or ends `Internal_Error` with no
+  `x` when started on negative curvature (gh#1173).** Under the default
+  `sqp_globalization=filter`, an iterate with zero constraint violation
+  accepted any feasible step: `min sin(3x) + ½x²` from `x = 0.05` went from
+  `f = 0.15` to `f = 9.48` in one step and ended `Maximum_Iterations_Exceeded`
+  at `f = 1403`. The filter now uses the Wächter-Biegler switching rule, so
+  near feasibility a descent step must also reduce `f` by an Armijo fraction,
+  and it now solves to `f = -0.876655`. When the step QP is unbounded along a
+  direction the NLP refutes and the proximal re-solve fails, the SQP steps
+  along that direction under the line search instead of stopping at
+  `x0` (`min sin(3x) s.t. x² ≤ 4` from `x = 0.1` now reaches `-π/6`, `f = -1`).
+  A step QP whose factorization cannot be repaired ends
+  `Search_Direction_Becomes_Too_Small` with the iterate instead of
+  `Internal_Error` with `x = null`. The filter also takes Ipopt's tiny-step
+  rule and `Compare_le` round-off slack, so a round-off step that only
+  carries the final multipliers is no longer refused, and an exact-Hessian
+  step that goes uphill from a feasible point is re-solved on a convexified
+  model, which gives a descent direction. On the Vanderbei CUTE set under
+  `algorithm=active-set-sqp`, measured before those last two refinements,
+  the change raised successes from 519 to 558 (exact Hessian) and 511 to 536
+  (limited-memory), and `Internal_Error` exits fell from 23 to 2 and 26 to 3. Some runs that used to succeed only by accepting
+  an uphill step now take longer or stop; they are listed, with
+  measurements, in `dev-notes/known-limitations.md`.
 - **The CasADi plugin no longer ignores an option POUNCE rejects.** A value
   out of bounds, not among a string option's values, or for an unknown
   keyword ran the solve on the option's default. Now it raises, as CasADi's
