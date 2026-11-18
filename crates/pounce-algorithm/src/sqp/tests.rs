@@ -3002,6 +3002,9 @@ struct Palmer5e {
 }
 
 impl Palmer5e {
+    // The model's own 6-digit abscissae (CUTE `palmer5e`), which happen to
+    // round π/2, π/3, π/6: the exact constants would be a different model.
+    #[allow(clippy::approx_constant)]
     const X: [Number; 12] = [
         0.0, 1.570796, 1.396263, 1.308997, 1.221730, 1.125835, 1.047198, 0.872665, 0.698132,
         0.523599, 0.349066, 0.174533,
