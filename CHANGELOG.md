@@ -86,6 +86,29 @@ changes.
   variable.
 
 ### Fixed
+- **The convex arm keeps to `max_wall_time` on large LPs, and a spent budget
+  no longer throws its answer away** (gh#1182). Three phases ran outside every
+  deadline check. LP/QP extraction built a dense row vector per constraint,
+  which made it `O(n·m)`. The presolve fixpoint ran all its layers before the
+  solver's deadline opened. The aggregation postsolve scanned every column once
+  per surviving column. On a generated 100 000-column banded LP at
+  `max_wall_time=1`, one thread, the run took 9.7 s before and 2.8 s after.
+  What is left is the first KKT factorization, which a deadline cannot
+  interrupt. Extraction is now linear in the nonzeros and gives bit-identical
+  rows. Presolve stops between layers once the budget is spent and reports it
+  as `stopped by max_wall_time after N layers`. Each layer is a complete
+  reduction, so the smaller reduction is still a sound one. When the convex
+  solve has used up the budget, the gh #535 LP→NLP fallback and the conic
+  path's `NumericalFailure` reroute no longer run. The NLP arm would get no time
+  and stop at iteration 0 with no `x`. The convex iterate is reported instead:
+  a verdict it reached (`Optimal`, `OptimalInaccurate`, a certificate) stands,
+  and `IterationLimit` or `NumericalFailure` becomes
+  `Maximum_WallTimeExceeded`. A convex solve that stalls with budget left
+  still reroutes. The same presolve deadline applies to the Python
+  `pounce.qp.solve_qp` and C API path (`pipeline::solve_presolved`). A convex
+  QCQP whose solve spent the budget skips the gh#1114 polish and reports its
+  conic residuals. **Rust API:** `pounce_convex::presolve::FixpointExit` gains
+  the variant `Deadline`, and `presolve_until(prob, deadline)` is new.
 - **The convex QP interior-point stops where it converges on two
   Maros–Mészáros models it had slowed down on** (gh#1180). QPILOTNO went from
   40 iterations to 283 on the NLP path, and POWELL20 from 18 to 121. Both

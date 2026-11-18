@@ -16,7 +16,7 @@
 //! plumbing, and are what a caller that already holds a `QpProblem` uses.
 
 use crate::ipm::QpOptions;
-use crate::presolve::{PresolveOutcome, PresolveStats, presolve};
+use crate::presolve::{PresolveOutcome, PresolveStats, presolve_until};
 use crate::qp::{QpProblem, QpSolution, QpStatus};
 use pounce_qp::HessianInertia;
 use std::fmt;
@@ -265,7 +265,9 @@ where
         iters: 0,
         iterates: Vec::new(),
     };
-    match presolve(prob) {
+    // gh#1182: the fixpoint stops between layers once the caller's budget is
+    // spent, as it does on the CLI path.
+    match presolve_until(prob, o.time_limit.and_then(|l| t0.checked_add(l))) {
         PresolveOutcome::Reduced(ps) => {
             let mut ro = QpOptions {
                 obj_constant: o.obj_constant + ps.obj_offset(),

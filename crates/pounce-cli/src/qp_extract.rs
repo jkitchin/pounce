@@ -258,6 +258,7 @@ pub fn extract_qp_with_map(
     let mut g: Vec<Triplet> = Vec::new();
     let mut h: Vec<f64> = Vec::new();
     let mut con_map: Vec<ConRowMap> = Vec::with_capacity(prob.con_linear.len());
+    let mut acc = RowAccumulator::new(n);
 
     for (row, lin) in prob.con_linear.iter().enumerate() {
         let lo = prob.g_l[row];
@@ -279,14 +280,8 @@ pub fn extract_qp_with_map(
             .analyze_quadratic_full()
             .map(|(_, l, k)| (l, k))
             .unwrap_or_default();
-        let mut coef = vec![0.0; n];
-        for (var, v) in lin {
-            coef[*var] += *v;
-        }
-        for (var, v) in &nl_lin {
-            coef[*var] += *v;
-        }
-        let nonzeros = || coef.iter().enumerate().filter(|(_, v)| **v != 0.0);
+        let coef = acc.row(lin.iter().chain(nl_lin.iter()).map(|&(var, v)| (var, v)));
+        let nonzeros = || coef.iter().map(|(var, v)| (*var, v));
 
         if lo == hi && lower_bound_present(lo) && upper_bound_present(hi) {
             // Equality row.
@@ -346,6 +341,63 @@ pub fn extract_qp_with_map(
         con_map,
         obj_nl_constant,
     ))
+}
+
+/// Sums one constraint row's `(var, coef)` terms, duplicates merged, and hands
+/// back the nonzeros in ascending `var` order (gh#1182).
+///
+/// Both extractors used to do this with a fresh dense `vec![0.0; n]` per row
+/// and a scan of all `n` entries for the nonzeros — `O(n·m)` for the whole
+/// model, which on an LP is the whole cost of extraction. Measured on a
+/// synthetic LP with 5 nonzeros per column, single thread: 0.2 s at
+/// `n = 25 000`, 3.4 s at `100 000`, 14.6 s at `200 000` — quadrupling with
+/// each doubling, and outside every `max_wall_time` check, since no deadline
+/// is open yet. MIPLIB LP relaxations reach `n` in the millions.
+///
+/// The result is bit-for-bit what the dense version produced: each entry is
+/// summed from `0.0` in the same order (the `.nl` linear section, then the
+/// nonlinear tree's linear terms), an entry that sums to zero is dropped
+/// exactly as `!= 0.0` dropped it, and the output is sorted by `var`, the
+/// dense scan's order. The dense scratch is reused and reset only where a row
+/// touched it, so a row costs `O(k log k)` in its own length `k`.
+struct RowAccumulator {
+    dense: Vec<f64>,
+    seen: Vec<bool>,
+    touched: Vec<usize>,
+    out: Vec<(usize, f64)>,
+}
+
+impl RowAccumulator {
+    fn new(n: usize) -> Self {
+        Self {
+            dense: vec![0.0; n],
+            seen: vec![false; n],
+            touched: Vec::new(),
+            out: Vec::new(),
+        }
+    }
+
+    fn row(&mut self, terms: impl IntoIterator<Item = (usize, f64)>) -> &[(usize, f64)] {
+        for (var, v) in terms {
+            if !self.seen[var] {
+                self.seen[var] = true;
+                self.touched.push(var);
+            }
+            self.dense[var] += v;
+        }
+        self.touched.sort_unstable();
+        self.out.clear();
+        for &var in &self.touched {
+            let v = self.dense[var];
+            if v != 0.0 {
+                self.out.push((var, v));
+            }
+            self.dense[var] = 0.0;
+            self.seen[var] = false;
+        }
+        self.touched.clear();
+        &self.out
+    }
 }
 
 /// The `.nl` variable bounds as `pounce-convex`'s explicit box, with an
@@ -703,6 +755,7 @@ pub fn extract_socp_with_map(
     let mut h: Vec<f64> = Vec::new();
     let mut con_map: Vec<ConSocpMap> = Vec::with_capacity(prob.m);
     let mut soc_blocks: Vec<SocBlock> = Vec::new();
+    let mut acc = RowAccumulator::new(n);
 
     for (row, lin) in prob.con_linear.iter().enumerate() {
         let lo = prob.g_l[row];
@@ -749,14 +802,8 @@ pub fn extract_socp_with_map(
         // degree-≤1 terms AMPL folded into the (here empty-Hessian)
         // nonlinear tree, and shift the bounds by the folded constant.
         let (nl_lin, const_shift) = quad.map(|(_, l, k)| (l, k)).unwrap_or_default();
-        let mut coef = vec![0.0; n];
-        for (var, v) in lin {
-            coef[*var] += *v;
-        }
-        for (var, v) in &nl_lin {
-            coef[*var] += *v;
-        }
-        let nonzeros = || coef.iter().enumerate().filter(|(_, v)| **v != 0.0);
+        let coef = acc.row(lin.iter().chain(nl_lin.iter()).map(|&(var, v)| (var, v)));
+        let nonzeros = || coef.iter().map(|(var, v)| (*var, v));
         if lo == hi && lower_bound_present(lo) && upper_bound_present(hi) {
             let eq_row = next_row(&b);
             for (var, v) in nonzeros() {
