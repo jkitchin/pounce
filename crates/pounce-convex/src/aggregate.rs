@@ -450,6 +450,22 @@ pub(crate) fn postsolve(orig: &QpProblem, plan: &EliminationPlan, red: &QpSoluti
     orig.at_mul(&y, &mut grad);
 
     // --- attribute each survivor's leftover ---
+    //
+    // The eliminated columns that hang off each survivor, in ascending column
+    // order — the order the scan below used to find them in by walking all of
+    // `plan.recovery` once per survivor. That walk was `O(kept · n)`, and it
+    // ran outside every deadline check: on a synthetic 200 000-column LP whose
+    // solve was cut off at its first iterate (so nearly every survivor carried
+    // a leftover) this lift alone took 37 s against `max_wall_time = 0.01`
+    // (gh#1182). Built once, it is `O(n)`; the attribution is unchanged.
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (j, rec) in plan.recovery.iter().enumerate() {
+        if let VarRecovery::Affine { rep, coeff, .. } = *rec
+            && coeff != 0.0
+        {
+            members[rep].push(j);
+        }
+    }
     let mut z_lb = vec![0.0; n];
     let mut z_ub = vec![0.0; n];
     let mut moved = false;
@@ -464,13 +480,10 @@ pub(crate) fn postsolve(orig: &QpProblem, plan: &EliminationPlan, red: &QpSoluti
             // complementarity pass below.
             continue;
         }
-        for (j, rec) in plan.recovery.iter().enumerate() {
-            let VarRecovery::Affine { rep: r, coeff, .. } = *rec else {
-                continue;
+        for &j in &members[rep] {
+            let VarRecovery::Affine { coeff, .. } = plan.recovery[j] else {
+                unreachable!("`members` holds affine recoveries only");
             };
-            if r != rep || coeff == 0.0 {
-                continue;
-            }
             let mu = leftover / coeff;
             let (at_lb, at_ub) = on_bounds(orig, &x, j);
             if at_lb && mu > 0.0 {

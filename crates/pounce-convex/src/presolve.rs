@@ -299,6 +299,11 @@ pub enum FixpointExit {
     Fixpoint,
     /// The `MAX_ROUNDS` layer cap stopped a loop that was still reducing.
     RoundCap,
+    /// The caller's deadline ([`presolve_until`]) passed between two layers,
+    /// so the loop stopped where it stood (gh#1182). The layers already taken
+    /// are each a complete reduction, so this is a sound, less-reduced
+    /// problem — exactly what `RoundCap` hands back, for a different reason.
+    Deadline,
 }
 
 impl std::fmt::Display for FixpointExit {
@@ -306,6 +311,7 @@ impl std::fmt::Display for FixpointExit {
         match self {
             FixpointExit::Fixpoint => f.write_str("fixpoint"),
             FixpointExit::RoundCap => f.write_str("round cap"),
+            FixpointExit::Deadline => f.write_str("deadline"),
         }
     }
 }
@@ -836,9 +842,34 @@ struct Row {
 /// cones. The unprotected merge calls them duplicates, keeps one, and the
 /// solve reports `Optimal` at an objective 67% off (gh #588 §7).
 pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
-    match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled) {
+    presolve_until(prob, None)
+}
+
+/// [`presolve`], stopping between fixpoint layers once `deadline` has passed
+/// (gh#1182).
+///
+/// The fixpoint takes up to `MAX_ROUNDS` layers, each a pass over every
+/// nonzero plus a clone of the problem it reduced, and before this nothing in
+/// it looked at the clock: the solver's deadline scope opens only after
+/// presolve returns. On a synthetic 400 000-column banded LP with 2M nonzeros
+/// presolve took 13.9 s against `max_wall_time = 5`, and the overrun grows with
+/// the model. Checking at each layer boundary bounds it by one layer.
+///
+/// Stopping early never makes the reduction wrong: every layer is a complete
+/// reduction with its own postsolve, so the result is the problem the layers
+/// taken so far produce, reported with [`FixpointExit::Deadline`]. An
+/// infeasibility claim is still re-derived before it is believed (see
+/// [`presolve`]); a re-derivation that the deadline cuts short returns the
+/// partial reduction, which is the conservative answer.
+pub fn presolve_until(prob: &QpProblem, deadline: Option<std::time::Instant>) -> PresolveOutcome {
+    match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled, deadline) {
         PresolveOutcome::Infeasible(trigger) => {
-            match presolve_fixpoint(prob, Catalog::NoSpeculativeFixings, DedupMemo::Enabled) {
+            match presolve_fixpoint(
+                prob,
+                Catalog::NoSpeculativeFixings,
+                DedupMemo::Enabled,
+                deadline,
+            ) {
                 // Confirmed without the speculative fixings: the problem
                 // really is infeasible, and this is the trigger that shows it.
                 confirmed @ PresolveOutcome::Infeasible(_) => confirmed,
@@ -919,7 +950,12 @@ enum DedupMemo {
 /// cap, `bore3d` among them; what has changed is that the loop now says so
 /// ([`FixpointExit`]) instead of leaving a truncated reduction and a fixpoint
 /// looking identical.
-fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog, memo: DedupMemo) -> PresolveOutcome {
+fn presolve_fixpoint(
+    prob: &QpProblem,
+    catalog: Catalog,
+    memo: DedupMemo,
+    deadline: Option<std::time::Instant>,
+) -> PresolveOutcome {
     // Cap layers defensively. A round can contribute two (the catalog pass
     // and an aggregation), so this is a bound on layers, not on rounds.
     //
@@ -993,9 +1029,14 @@ fn presolve_fixpoint(prob: &QpProblem, catalog: Catalog, memo: DedupMemo) -> Pre
             exit = FixpointExit::RoundCap;
             break;
         }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            exit = FixpointExit::Deadline;
+            break;
+        }
     }
-    // A chain this short cannot have reached `MAX_ROUNDS`, so `exit` is
-    // `Fixpoint` here and the single-pass layer already carries it.
+    // An empty chain means the first round found nothing, and that breaks as
+    // `Fixpoint` before the layer cap or the deadline is consulted, so the
+    // passthrough layer's own `Fixpoint` is the right exit.
     if chain.is_empty() {
         // Nothing to do at all; hand back the verbatim-forwarding layer.
         return PresolveOutcome::Reduced(
@@ -3345,7 +3386,7 @@ mod dedup_memo_tests {
     }
 
     fn reduce(prob: &QpProblem, memo: DedupMemo) -> Option<(String, PresolveStats)> {
-        match presolve_fixpoint(prob, Catalog::Full, memo) {
+        match presolve_fixpoint(prob, Catalog::Full, memo, None) {
             PresolveOutcome::Reduced(ps) => Some((fingerprint(&ps.reduced), ps.stats())),
             _ => None,
         }
@@ -3500,7 +3541,7 @@ mod dedup_memo_tests {
         // And the merge really happens, or the comparison above is vacuous:
         // the looser of the two parallel rows must be gone.
         let PresolveOutcome::Reduced(ps) =
-            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled)
+            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled, None)
         else {
             panic!("feasible bounded problem");
         };
@@ -3545,7 +3586,7 @@ mod dedup_memo_tests {
 
         // And the skip must really be engaging, or the test proves nothing.
         let PresolveOutcome::Reduced(ps) =
-            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled)
+            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled, None)
         else {
             panic!("feasible bounded problem");
         };
