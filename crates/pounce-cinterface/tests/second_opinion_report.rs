@@ -33,10 +33,11 @@
 //! the session path (`IpoptSolverSolve`) does not run it; neither needs its
 //! own branch here.
 //!
-//! The block's timing fields (`base_wallclock_secs`, `rung_wallclock_secs`,
-//! `total_wallclock_secs`, gh#1176) differ from run to run, so
-//! [`block_at_both_levels`] checks them for consistency -- one entry per rung,
-//! non-negative, summing to the total -- and returns the block without them.
+//! The block's timing fields (`base_wallclock_secs`, `probe_wallclock_secs`,
+//! `rung_wallclock_secs`, `total_wallclock_secs`, gh#1176) differ from run to
+//! run, so [`block_at_both_levels`] checks them for consistency -- one entry
+//! per rung, non-negative, summing to the total -- and returns the block
+//! without them.
 //! The rest (rung labels, statuses and iteration counts) is deterministic and
 //! is compared whole.
 //! `common/second_opinion_python_reports.json` holds Python's values
@@ -393,6 +394,7 @@ fn block_at_both_levels(p: IpoptProblem) -> (Value, Value) {
     // Timing (gh#1176): one wall time per rung, adding up to the total.
     let secs = |v: &Value| v.as_f64().unwrap_or_else(|| panic!("not a number: {v}"));
     let base_secs = secs(&block["base_wallclock_secs"]);
+    let probe_secs = secs(&block["probe_wallclock_secs"]);
     let rung_secs: Vec<f64> = block["rung_wallclock_secs"]
         .as_array()
         .unwrap()
@@ -400,9 +402,10 @@ fn block_at_both_levels(p: IpoptProblem) -> (Value, Value) {
         .map(secs)
         .collect();
     assert_eq!(rung_secs.len(), tried.len(), "one wall time per rung");
-    assert!(base_secs >= 0.0 && rung_secs.iter().all(|&t| t >= 0.0));
+    assert!(base_secs > 0.0, "the base solve took no time: {base_secs}");
+    assert!(probe_secs >= 0.0 && rung_secs.iter().all(|&t| t >= 0.0));
     let total_secs = secs(&block["total_wallclock_secs"]);
-    let sum = base_secs + rung_secs.iter().sum::<f64>();
+    let sum = base_secs + probe_secs + rung_secs.iter().sum::<f64>();
     assert!(
         (total_secs - sum).abs() <= 1e-9 * sum.max(1.0),
         "{total_secs} vs {sum}"
@@ -444,6 +447,7 @@ fn block_at_both_levels(p: IpoptProblem) -> (Value, Value) {
     let obj = block.as_object_mut().unwrap();
     for k in [
         "base_wallclock_secs",
+        "probe_wallclock_secs",
         "rung_wallclock_secs",
         "total_wallclock_secs",
     ] {

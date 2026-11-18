@@ -20,8 +20,8 @@ use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint,
-    TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, NlpInfo, Solution, SparsityRequest,
+    StartingPoint, TNLP,
 };
 use pounce_restoration::second_opinion_driver::{SecondOpinionOutcome, run_second_opinion_ladder};
 
@@ -194,15 +194,18 @@ fn a_spent_limit_runs_no_rung_and_says_so() {
 #[test]
 fn rungs_spend_what_is_left_of_the_run_not_a_fresh_allowance() {
     // Each constraint evaluation sleeps, so a solve takes over a second. The
-    // limit is sized off a measured base solve and the pause leaves the
-    // ladder ~0.3 s of it, against the ~`base` seconds a rung run to
-    // completion takes. Charged, the run ends near the limit; each rung on a
-    // fresh allowance -- the defect -- ran a whole solve past it.
+    // base solve runs with no limit at all, and the limit is set only once it
+    // returns: `base` seconds already spent plus `LEFT` for the ladder. So the
+    // base solve's own duration cannot make the test miss -- the limit is
+    // sized off *this* run, not a separate measurement of a similar one -- and
+    // the run clock, which started at the base solve, is what charges the
+    // rungs. Charged, the run ends near the limit; each rung on a fresh
+    // allowance -- the defect -- ran a whole `~base`-second solve past it.
     //
-    // The sleep is calibrated, not fixed: `sleep(2 ms)` overshoots by a
-    // platform-dependent amount (a base solve measured 2.6 s on macOS and
-    // 0.95 s on a Linux runner), and the margins below only need `base` to be
-    // large against the ~0.3 s the pause leaves.
+    // The sleep is calibrated so `base` is large against `LEFT`: `sleep(2 ms)`
+    // overshoots by a platform-dependent amount (a base solve measured 2.6 s
+    // on macOS and 0.95 s on a Linux runner).
+    const LEFT: f64 = 0.3;
     let measure = |delay: Duration| {
         let mut probe = quiet_app(&[]);
         let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Infeasible { delay }));
@@ -211,35 +214,75 @@ fn rungs_spend_what_is_left_of_the_run_not_a_fresh_allowance() {
         t0.elapsed().as_secs_f64()
     };
     let mut delay = Duration::from_millis(2);
-    let mut base = measure(delay);
-    if base < 1.2 {
-        delay = delay.mul_f64((1.5 / base.max(0.05)).min(20.0));
-        base = measure(delay);
+    let probe = measure(delay);
+    if probe < 1.2 {
+        delay = delay.mul_f64((1.5 / probe.max(0.05)).min(20.0));
     }
+
+    let mut app = quiet_app(&[]);
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Infeasible { delay }));
+    let t0 = Instant::now();
+    let status = app.optimize_tnlp(Rc::clone(&tnlp));
+    let base = t0.elapsed().as_secs_f64();
     assert!(
-        base > 1.0,
+        base > 4.0 * LEFT,
         "the fixture no longer takes the time this test is sized for: {base:.3} s \
          at a {delay:?} sleep per evaluation"
     );
-    let limit = base + 0.5;
-    let mut app = quiet_app(&[("max_wall_time", limit)]);
-    let pause = Duration::from_secs_f64(0.2);
-    let (outcome, _, elapsed) = run(&mut app, delay, pause);
-    assert!(outcome.ran(), "no rung ran; the pause was sized wrong");
-    // One iteration's worth of overshoot past the deadline is the solver's
-    // own check granularity; an uncharged rung overshoots by a whole solve.
+    let limit = base + LEFT;
+    app.options_mut()
+        .set_numeric_value("max_wall_time", limit, true, false)
+        .unwrap();
+    let stats = app.statistics();
+    let outcome = run_second_opinion_ladder(&mut app, tnlp, status, stats, &mut |_| {});
+    let elapsed = t0.elapsed().as_secs_f64();
+    assert!(outcome.ran(), "no rung ran; {LEFT} s should have been left");
+    // The solver checks its deadline between steps, so a rung overshoots the
+    // limit by a step's worth; an uncharged rung overshoots by a whole solve.
     assert!(
         elapsed < limit + 0.5 * base,
-        "the run took {elapsed:.3} s against max_wall_time={limit} \
+        "the run took {elapsed:.3} s against max_wall_time={limit:.3} \
          (rungs {:?} took {:?} s)",
         outcome.tried,
         outcome.rung_wallclock_secs,
     );
+    let total = outcome.total_wallclock_secs();
     assert!(
-        (outcome.total_wallclock_secs() - elapsed).abs() < 0.25,
-        "reported total {:.3} s, measured {elapsed:.3} s",
-        outcome.total_wallclock_secs()
+        (total - elapsed).abs() < 0.25_f64.max(0.1 * elapsed),
+        "reported total {total:.3} s, measured {elapsed:.3} s"
     );
+}
+
+#[test]
+fn every_solve_measures_its_limit_from_the_run_clock() {
+    // gh#1176 review item 1: the interior point's deadline starts at the run
+    // clock, not at "now", so a solve the application makes below
+    // `optimize_tnlp` -- the mu fallback, the gh#884 retry, the gh#983 audit,
+    // none of which resets the clock -- is charged to the run. Driven here
+    // through the public hold, the one way to put a solve inside a run that
+    // started earlier. Both branches: a run with time left solves as usual,
+    // a run whose limit is spent stops at once.
+    let run_in = |already_spent: f64| {
+        let mut app = quiet_app(&[("max_wall_time", 5.0)]);
+        let now = (
+            pounce_common::utils::wallclock_time(),
+            pounce_common::utils::cpu_time(),
+        );
+        app.hold_run_clock(true);
+        app.set_run_clock((now.0 - already_spent, now.1));
+        let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SlowRosenbrock {
+            delay: Duration::ZERO,
+            pause_at: None,
+        }));
+        let status = app.optimize_tnlp(t);
+        app.hold_run_clock(false);
+        (status, app.statistics().iteration_count)
+    };
+    let (fresh, _) = run_in(0.0);
+    assert_eq!(fresh, ApplicationReturnStatus::SolveSucceeded);
+    let (spent, iters) = run_in(10.0);
+    assert_eq!(spent, ApplicationReturnStatus::MaximumWallTimeExceeded);
+    assert!(iters <= 1, "a spent run still iterated {iters} times");
 }
 
 /// Unconstrained Rosenbrock with a sleeping objective: a run capped by
@@ -247,6 +290,8 @@ fn rungs_spend_what_is_left_of_the_run_not_a_fresh_allowance() {
 /// `mu_strategy_fallback` re-solve.
 struct SlowRosenbrock {
     delay: Duration,
+    /// Sleep this long, once, in the intermediate callback at this iteration.
+    pause_at: Option<(Index, Duration)>,
 }
 
 impl TNLP for SlowRosenbrock {
@@ -306,7 +351,45 @@ impl TNLP for SlowRosenbrock {
         }
         true
     }
+    fn intermediate_callback(
+        &mut self,
+        stats: IterStats,
+        _ip_data: &IpoptData,
+        _ip_cq: &IpoptCq,
+    ) -> bool {
+        if let Some((at, pause)) = self.pause_at
+            && stats.iter == at
+        {
+            self.pause_at = None;
+            std::thread::sleep(pause);
+        }
+        true
+    }
     fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _c: &IpoptCq) {}
+}
+
+#[test]
+fn a_mu_strategy_fallback_skipped_for_time_is_recorded() {
+    // gh#1176 review item 4. The first attempt stops at its iteration cap, so
+    // the fallback opens; a pause in the callback after its last iteration spends the limit, so
+    // the re-solve is skipped. The record says so instead of reading as a
+    // fallback that never opened.
+    let mut app = quiet_app(&[("max_wall_time", 0.3)]);
+    app.options_mut()
+        .set_integer_value("max_iter", 12, true, false)
+        .unwrap();
+    let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SlowRosenbrock {
+        delay: Duration::ZERO,
+        pause_at: Some((12, Duration::from_millis(400))),
+    }));
+    let status = app.optimize_tnlp(t);
+    assert_eq!(status, ApplicationReturnStatus::MaximumIterationsExceeded);
+    let record = app
+        .statistics()
+        .mu_strategy_fallback
+        .expect("a skipped fallback leaves no record");
+    assert!(record.skipped_for_time, "{record:?}");
+    assert_eq!(record.retry_iteration_count, 0, "{record:?}");
 }
 
 #[test]
@@ -328,7 +411,10 @@ fn the_mu_strategy_fallback_re_solve_spends_what_is_left_of_the_run() {
                     .unwrap();
             }
         }
-        let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SlowRosenbrock { delay }));
+        let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SlowRosenbrock {
+            delay,
+            pause_at: None,
+        }));
         let t0 = Instant::now();
         let status = app.optimize_tnlp(t);
         (status, app.statistics(), t0.elapsed().as_secs_f64())

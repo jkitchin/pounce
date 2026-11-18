@@ -67,6 +67,27 @@ impl Deadline {
         }
     }
 
+    /// A deadline measured from an earlier origin rather than from now:
+    /// `wall_start` / `cpu_start` are readings of [`wallclock_time`] /
+    /// [`cpu_time`] taken when the budgeted run began. gh#1176: a solve
+    /// that is one leg of a longer run (a re-solve, a retry) is charged
+    /// against the run's limit, not handed a fresh one.
+    pub fn starting_at(
+        max_wall: Number,
+        max_cpu: Number,
+        wall_start: Number,
+        cpu_start: Number,
+    ) -> Self {
+        Self {
+            inner: Rc::new(DeadlineInner {
+                wall_start,
+                cpu_start,
+                max_wall,
+                max_cpu,
+            }),
+        }
+    }
+
     /// Return `Some(kind)` if either budget has been crossed, else
     /// `None`. CPU is tested before wall to match the branch order of
     /// upstream `OptimalityErrorConvergenceCheck::CheckConvergence` (and

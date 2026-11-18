@@ -150,6 +150,8 @@ pub struct ConditionedStartTnlp {
     lower_inf: Number,
     upper_inf: Number,
     report: RefCell<Option<ConditionerReport>>,
+    /// `evaluates_finitely` has asked for the Jacobian structure once.
+    jac_structure_requested: std::cell::Cell<bool>,
     /// The last `(raw start, conditioned start, report)` triple, so a second
     /// `get_starting_point` for the *same* incoming point does not redo the
     /// work. There is a second call on the warm-start path
@@ -175,6 +177,7 @@ impl ConditionedStartTnlp {
             lower_inf: -DEFAULT_BOUND_INF,
             upper_inf: DEFAULT_BOUND_INF,
             report: RefCell::new(None),
+            jac_structure_requested: std::cell::Cell::new(false),
             cache: RefCell::new(None),
         }
     }
@@ -357,6 +360,23 @@ impl ConditionedStartTnlp {
         let mut g = vec![0.0; m];
         if !inner.eval_g(x, false, &mut g) || !g.iter().all(|v| v.is_finite()) {
             return false;
+        }
+        // The structure first, as the solve itself (and `apply_adam`) asks
+        // for it: a TNLP may build its values layout on that call, and a
+        // values request before it is outside the protocol.
+        if !self.jac_structure_requested.get() {
+            let (mut irow, mut jcol) = (vec![0 as Index; nnz], vec![0 as Index; nnz]);
+            if !inner.eval_jac_g(
+                None,
+                true,
+                SparsityRequest::Structure {
+                    irow: &mut irow,
+                    jcol: &mut jcol,
+                },
+            ) {
+                return false;
+            }
+            self.jac_structure_requested.set(true);
         }
         let mut jac = vec![0.0; nnz];
         inner.eval_jac_g(Some(x), false, SparsityRequest::Values { values: &mut jac })
@@ -775,6 +795,10 @@ mod tests {
         /// below this, the way `log` of an expression is -- with no variable
         /// bound saying so (gh#1176).
         nan_below: Option<Number>,
+        /// The Jacobian structure has been asked for. A values request before
+        /// it fails, as it would on a TNLP that builds its layout on the
+        /// structure call -- the protocol the solve follows.
+        jac_structure_seen: bool,
     }
 
     impl Toy {
@@ -791,6 +815,7 @@ mod tests {
                 init_x: true,
                 f_calls: 0,
                 nan_below: None,
+                jac_structure_seen: false,
             }
         }
         fn m(&self) -> usize {
@@ -869,8 +894,14 @@ mod tests {
                         irow[j] = 0;
                         jcol[j] = j as Index;
                     }
+                    self.jac_structure_seen = true;
                 }
-                SparsityRequest::Values { values } => values.fill(1.0),
+                SparsityRequest::Values { values } => {
+                    if !self.jac_structure_seen {
+                        return false;
+                    }
+                    values.fill(1.0);
+                }
             }
             true
         }
@@ -986,6 +1017,23 @@ mod tests {
             assert!((a - (1.0 + f * (b - 1.0))).abs() <= 1e-15, "{a} vs {b}");
         }
         assert!(x.iter().any(|v| *v != 1.0), "the start did not move at all");
+    }
+
+    #[test]
+    fn the_evaluability_check_asks_for_the_jacobian_structure_first() {
+        // gh#1176 review item 2: the check requested Jacobian values on a
+        // TNLP that had never been asked for its structure. A model that
+        // answers values only after the structure call then read as
+        // unevaluable at every point, and the draw was never halved. The
+        // halving test above has no constraints, so it cannot see this.
+        let mut toy = toy_near_a_domain_edge(8);
+        toy.with_constraint = true;
+        toy.g_l = -1e3;
+        toy.g_u = 1e3;
+        let (x, report) = conditioned(toy, jitter(1));
+        assert!(!report.unevaluable, "{report:?}");
+        assert!(report.halvings >= 1, "{report:?}");
+        assert!(x.iter().all(|v| *v >= 0.999), "{x:?}");
     }
 
     #[test]
@@ -1316,6 +1364,16 @@ mod tests {
         let mut g = [0.0; 1];
         assert!(wrapped.eval_g(&x, true, &mut g));
         assert_eq!(g, [7.0]);
+        let (mut irow, mut jcol) = ([0 as Index; 2], [0 as Index; 2]);
+        assert!(wrapped.eval_jac_g(
+            None,
+            true,
+            SparsityRequest::Structure {
+                irow: &mut irow,
+                jcol: &mut jcol,
+            }
+        ));
+        assert_eq!((irow, jcol), ([0, 0], [0, 1]));
         let mut vals = [0.0; 2];
         assert!(wrapped.eval_jac_g(
             Some(&x),

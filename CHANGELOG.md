@@ -25,19 +25,23 @@ changes.
 ### Fixed
 - **`max_wall_time` and `max_cpu_time` bound the whole run, second-opinion
   ladder included** (gh#1176). Every solve built its own deadline from those
-  options, so the `mu_strategy` fallback re-solve and each ladder rung started a
-  new full allowance. On the issue's 2594-variable distillation column,
+  options, so the `mu_strategy` fallback re-solve, the dual-divergence retry,
+  the scale-audit re-solve, crossover and each ladder rung started a new full
+  allowance. On the issue's 2594-variable distillation column,
   `max_wall_time=40` ran for 112 s (26 s base, then 21 + 40 + 0 + 25 s of
-  rungs). Now each re-solve gets what is left of the run. When nothing is left,
+  rungs). Every deadline is now measured from the start of the caller's
+  solve, so each re-solve gets what is left of the run. When nothing is left,
   the remaining rungs are skipped and the log names them; the same column stops
-  at 40.5 s. A limit the caller did not set stays unset.
+  at 40.5 s. A skipped `mu_strategy` fallback is recorded
+  (`mu_strategy_fallback.skipped_for_time`). A limit the caller did not set
+  stays unset; the scale audit used to write an unset one back as caller-set.
 - **The ladder reports the run's total time** (gh#1176). Each `Total seconds in
   POUNCE` line covers one solve, so a laddered run's console ended on the last
   rung's time: 24.9 s printed on a 174 s run. The ladder now ends with a line
-  giving the whole run's wall time, split into the base solve and the
-  re-solves. The solve report's `second_opinion` block adds
-  `base_wallclock_secs`, `rung_wallclock_secs`, `total_wallclock_secs` and
-  `skipped_for_time`.
+  giving the whole run's wall time, split into the base solve, the ladder's
+  setup and the re-solves. The solve report's `second_opinion` block adds
+  `base_wallclock_secs`, `probe_wallclock_secs`, `rung_wallclock_secs`,
+  `total_wallclock_secs` and `skipped_for_time`.
 - **The perturbed-start rung no longer dies at iteration 0 on a model that is
   undefined near its start** (gh#1176). `start_point_perturbation` kept the
   displaced point inside the bounds, but it never checked that the model could
@@ -47,7 +51,7 @@ changes.
   point is now evaluated once. If the result is not finite, the displacement is
   halved toward the start, in the same direction, up to ten times. On the
   column, two halvings evaluate cleanly. A draw that evaluates the first time
-  is unchanged bit for bit.
+  is unchanged bit for bit, and the ladder logs any halving.
 - **`minimize` detects a convex LP/QP without `jac` whatever the objective's
   constant term** (gh#1169). The structure probe finite-differenced `fun` twice
   at steps sized for general functions, which left `~2.5e-3·|f|` of round-off

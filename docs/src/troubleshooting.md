@@ -554,6 +554,7 @@ This came from gh#1176: on a catalytic-distillation column, the `1e-2` shift
 made 28 constraint rows NaN for every seed tried, and the rung ended at
 iteration 0 with `Invalid_Number_Detected` without testing anything. Two
 halvings evaluated cleanly. If no halving evaluates, the full draw is kept.
+Either way the ladder says so in a `pounce:` line after the rung.
 
 You can apply the same displacement yourself, without waiting for a
 failure, with `start_point_perturbation 1e-2`; vary
@@ -569,15 +570,18 @@ Things worth knowing:
   `mu_strategy=adaptive`) is skipped.
 - The extra solves are spent only on runs that would otherwise report
   failure. Nothing changes on a successful solve.
-- `max_wall_time` and `max_cpu_time` cover the whole run: the base solve, its
-  `mu_strategy` fallback re-solve, every rung and the square-system stage.
+- `max_wall_time` and `max_cpu_time` cover the whole run, measured from the
+  start of the call: setup, the base solve, every re-solve it makes on its own
+  (the `mu_strategy` fallback, the dual-divergence retry, the scale audit,
+  crossover), every rung and the square-system stage.
   Each re-solve gets only what is left. When nothing is left, the remaining
   rungs are skipped and the log names them (`second_opinion.skipped_for_time`
-  in the solve report). Before gh#1176, each re-solve got a fresh allowance, so
+  in the solve report); a skipped `mu_strategy` fallback is recorded as
+  `statistics.mu_strategy_fallback.skipped_for_time`. Before gh#1176, each re-solve got a fresh allowance, so
   `max_wall_time=40` could run for 112 s. A limit you did not set stays unset.
 - Each `Total seconds in POUNCE` line covers a single solve. The ladder ends
-  with one line giving the whole run's wall time, split into the base solve and
-  the re-solves, and the solve report carries the same split
+  with one line giving the whole run's wall time, split into the base solve,
+  the ladder's setup between it and the first rung, and the re-solves, and the solve report carries the same split
   (`second_opinion.total_wallclock_secs`).
 - All four rungs are on by default; set all four `*_retry` options to
   `no` for upstream IPOPT's behaviour of shipping the first verdict.
@@ -658,8 +662,9 @@ pounce: second opinion — re-solving with start_point_perturbation=1e-2…
 pounce: start_point_perturbation=1e-2 re-solve did not recover (InvalidNumberDetected).
 pounce: keeping the original Invalid_Number_Detected verdict; it survived
         1 independent re-solve(s) (start_point_perturbation=1e-2).
-pounce: total wall time 0.004 s (0.002 s base solve + 0.002 s over 1 re-solve(s));
-        each "Total seconds in POUNCE" above covers one solve.
+pounce: total wall time 0.004 s (0.002 s base solve + 0.000 s ladder setup +
+        0.002 s over 1 re-solve(s)); each "Total seconds in POUNCE" above covers
+        one solve.
 pounce: the model is not finite at its own starting point: objective f(x) = NaN.
 Status: Invalid_Number_Detected
 ```
@@ -682,8 +687,9 @@ $ pounce degen.nl
 pounce: keeping the original Infeasible_Problem_Detected verdict; it survived
         3 independent re-solve(s) (feral_scaling=mc64, mu_strategy=adaptive,
         start_point_perturbation=1e-2).
-pounce: total wall time 0.031 s (0.009 s base solve + 0.022 s over 3 re-solve(s));
-        each "Total seconds in POUNCE" above covers one solve.
+pounce: total wall time 0.031 s (0.009 s base solve + 0.000 s ladder setup +
+        0.022 s over 3 re-solve(s)); each "Total seconds in POUNCE" above covers
+        one solve.
 pounce: the constraint Jacobian is rank-deficient there: 2 of 2 constraint rows
         have an identically zero gradient here (rows 0, 1); 2 of 2 variable
         columns are identically zero here (variables 0, 1).
