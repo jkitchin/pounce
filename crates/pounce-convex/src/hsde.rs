@@ -195,9 +195,31 @@ fn on_infeasibility_ray(tau: f64, kappa: f64) -> bool {
 /// zero" as `ipm::SLACK_NOISE_KAPPA`.
 pub(crate) const REL_FLOOR_KAPPA: f64 = 64.0;
 
+/// Width of [`true_slack_complementarity`]'s per-product floor, in units of
+/// `REL_FLOOR_KAPPA·ε·|ẑ_i|·(|h_i| + Σ|g_ij x̂_j|)` (gh#1180).
+///
+/// The verdict ([`crate::qp::QpSolution::kkt_residuals_above_floor`]) reads
+/// each product above `REPORT_FLOOR_FACTOR = 4` of these; the loop must be
+/// *stricter* than that, by a margin for the few ulps its homogeneous
+/// residuals and the verdict's recomputation from the returned point differ
+/// by, or it stops on points the verdict then demotes. Half the verdict's
+/// width leaves a factor of two.
+///
+/// It used to be a binary gate on the slack: once the slack cleared its own
+/// quantum the whole product counted, against `tol`. At multipliers of `1e11`
+/// on every row (Maros-Meszaros POWELL20) a slack at the primal residual's
+/// level (`1e-9`, which `pres < tol` accepts) reads `~1e2`. That is
+/// unreachable in doubles, and the loop ground `μ` to `1e-63` for a hundred
+/// iterations, stopping at 121 only when the product happened to read exactly
+/// `0`. The verdict accepted every one of those iterates from 18 on. Measured
+/// on POWELL20: factor 1 still runs to 121; factor 2 stops at 27, objective
+/// within `2.2e-11` of the 121-iteration answer, worst row residual `1.4e-10`.
+const TRUE_COMP_FLOOR_FACTOR: f64 = 2.0;
+
 /// `max_i |ẑ_i · (h_i − (Gx̂)_i)|` over the rows whose true slack is
-/// resolvable (above `REL_FLOOR_KAPPA·ε` of its own terms), in the
-/// un-homogenized frame: `gx` is `G x` and `x̂ = x/τ`, `ẑ = z/τ`.
+/// resolvable (above `REL_FLOOR_KAPPA·ε` of its own terms), each product read
+/// above its own noise ([`TRUE_COMP_FLOOR_FACTOR`]), in the un-homogenized
+/// frame: `gx` is `G x` and `x̂ = x/τ`, `ẑ = z/τ`.
 ///
 /// The complementarity of the point the solve will actually return. The
 /// loop's own `max sᵢzᵢ` reads the internal slack, which is the true slack only
@@ -241,12 +263,19 @@ pub(crate) fn true_slack_complementarity(
     if !(tau > 0.0) {
         return f64::INFINITY;
     }
+    let k = REL_FLOOR_KAPPA * f64::EPSILON;
+    let k_prod = TRUE_COMP_FLOOR_FACTOR * k;
     let mut worst = 0.0_f64;
     for (((&hi, &gxi), &gai), &zi) in h.iter().zip(gx).zip(gabs).zip(z) {
         let gxh = gxi / tau;
         let slack = hi - gxh;
-        if slack.abs() > REL_FLOOR_KAPPA * f64::EPSILON * hi.abs().max(gai / tau) {
-            worst = worst.max(((slack * zi / tau).abs() - obj_ulp).max(0.0));
+        let mag = hi.abs() + gai / tau;
+        let zh = (zi / tau).abs();
+        // gh#1180: the product is read above *its* noise, the verdict's
+        // per-product floor; see `TRUE_COMP_FLOOR_FACTOR`. A slack inside its
+        // quantum still reads `0`, so this only relaxes the old rule.
+        if slack.abs() > k * hi.abs().max(gai / tau) {
+            worst = worst.max(((slack * zi / tau).abs() - k_prod * zh * mag - obj_ulp).max(0.0));
         }
     }
     worst
@@ -1746,7 +1775,8 @@ mod tests {
         let gx = [(1e5 - 5e-3) * tau, (1e9 + 1e-7) * tau];
         let z = [1.0 * tau, 1e3 * tau];
         let c = true_slack_complementarity(&h, &gx, &gx.map(f64::abs), &z, tau, 0.0);
-        assert!((c - 5e-3).abs() < 1e-9, "{c:e}");
+        // Less its own noise, `2·k·|ẑ|·(|h| + |G||x̂|) = 5.7e-9` (gh#1180).
+        assert!((c - 5e-3).abs() < 1e-8, "{c:e}");
         // Both inside the quantum: nothing to count.
         let gx_tight = [1e5 * tau, 1e9 * tau];
         assert_eq!(
@@ -1755,6 +1785,19 @@ mod tests {
         );
         // A collapsed tau cannot certify anything.
         assert!(true_slack_complementarity(&h, &gx, &gx, &z, 0.0, 0.0).is_infinite());
+        // gh#1180, POWELL20's shape: every row active at `ẑ = 1.37e11`,
+        // terms `2e4`, true slack `5e-10` -- resolvable (quantum `2.8e-10`),
+        // so the old gate counted all of `69` against `tol = 1e-8`. Its noise
+        // is `2·k·ẑ·mag = 77`: nothing above it. Ten times the slack is.
+        let (hp, zp) = ([-1.5], [1.37e11 * tau]);
+        let gabs_p = [2e4 * tau];
+        let gxp = [(-1.5 - 5e-10) * tau];
+        assert_eq!(
+            true_slack_complementarity(&hp, &gxp, &gabs_p, &zp, tau, 0.0),
+            0.0
+        );
+        let gxp10 = [(-1.5 - 5e-9) * tau];
+        assert!(true_slack_complementarity(&hp, &gxp10, &gabs_p, &zp, tau, 0.0) > 100.0);
         // gh#1000 (I.8): `h = 0`, `Gx` a cancellation of `1e3`-sized terms
         // that left `2e-13`. The terms, not `|Gx|`, set the quantum.
         let (h0, gx0, z0) = ([0.0], [-2e-13 * tau], [1.6e6 * tau]);

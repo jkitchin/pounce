@@ -15,7 +15,7 @@
 //!
 //! | fixture | convex | NLP | reports | decided by |
 //! |---|---|---|---|---|
-//! | `lp_etamacro.nl` (NETLIB ETAMACRO) | `7.6e-11`, acceptable | `1.1e-8`, succeeded | convex | accuracy |
+//! | `lp_tuff.nl` (NETLIB TUFF) at `tol=1e-12` | `1.4e-12`, acceptable | `3.9e-9`, succeeded | convex | accuracy |
 //! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable | `1.5e-16`, succeeded | NLP | accuracy |
 //! | `lp_israel.nl` at `tol=1e-16` | `2.0e-16`, iteration limit | `5.2e-14`, acceptable | NLP | the status guard |
 //! | `lp_afiro.nl` at `tol=1e-20` | `2.4e-16`, iteration limit | `5.5e-13`, search direction too small | convex, its own failing status | accuracy |
@@ -29,9 +29,12 @@
 //! `issue_535_lp_falls_back_to_nlp.rs` on `lp_afiro` with `qp_tau=0.99`.
 //!
 //! The margins are a decade or more on purpose; NETLIB CAPRI reaches the
-//! fallback at `3.9e-10` against `2.7e-10` and is not used. `lp_etamacro.nl`
-//! was produced by `benchmarks/lp/generate_nl.py` from the NETLIB MPS file.
-//! Every case takes well under a second.
+//! fallback at `3.9e-10` against `2.7e-10` and is not used. Since gh#1180's
+//! unreduced retry the convex arm certifies most of the NETLIB models that
+//! used to reach the fallback at the default `tol` (ETAMACRO, SHARE2B, and
+//! the issue's WOOD1P / WOODW among them), so the convex-wins fixture runs at
+//! `tol=1e-12`. `lp_tuff.nl` was produced by `benchmarks/lp/generate_nl.py`
+//! from the NETLIB MPS file. Every case takes well under a second.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -94,7 +97,9 @@ fn status_lines(stdout: &str) -> Vec<&str> {
 #[test]
 fn a_more_accurate_convex_answer_is_kept() {
     for leg in [&[][..], &[LBFGS][..]] {
-        let r = run("lp_etamacro.nl", leg);
+        let mut args = vec!["tol=1e-12"];
+        args.extend_from_slice(leg);
+        let r = run("lp_tuff.nl", &args);
         assert!(
             r.stderr.to_lowercase().contains("did not certify"),
             "{leg:?}: precondition — the convex solve must decline; stderr=\n{}",
@@ -115,9 +120,16 @@ fn a_more_accurate_convex_answer_is_kept() {
             fb.convex_kkt_error * 10.0 < nlp,
             "{leg:?}: precondition — a clear convex win; {fb:?}"
         );
-        // The NLP arm *succeeded* by its own criteria; the convex answer
-        // replaces it on accuracy, which is the whole point of the issue.
-        assert_eq!(fb.nlp_status, "Solve_Succeeded", "{leg:?}");
+        // The NLP arm *succeeded* by its own criteria (strictly on the exact
+        // leg, at acceptable level under L-BFGS); the convex answer replaces
+        // it on accuracy, which is the whole point of the issue.
+        assert!(
+            matches!(
+                fb.nlp_status.as_str(),
+                "Solve_Succeeded" | "Solved_To_Acceptable_Level"
+            ),
+            "{leg:?}: {fb:?}"
+        );
 
         assert_eq!(r.report.solution.engine, "cvx-qp", "{leg:?}");
         assert_eq!(
@@ -141,10 +153,10 @@ fn a_more_accurate_convex_answer_is_kept() {
             "{leg:?}: the .sol is the convex arm's; head=\n{}",
             r.sol.lines().take(2).collect::<Vec<_>>().join("\n")
         );
-        // NETLIB ETAMACRO's published optimum.
+        // NETLIB TUFF's published optimum.
         let obj = r.report.solution.objective;
         assert!(
-            ((obj - -755.71521774) / 755.71521774).abs() < 1e-6,
+            ((obj - 0.29214776509) / 0.29214776509).abs() < 1e-6,
             "{leg:?}: objective {obj}"
         );
         // The run paid for both solves: its wall time is the sum, and each
@@ -281,7 +293,7 @@ fn when_both_fail_the_verdict_stays_honest() {
 /// which answer it kept — the console counterpart of `convex_fallback`.
 #[test]
 fn the_comparison_is_announced() {
-    let r = run("lp_etamacro.nl", &[]);
+    let r = run("lp_tuff.nl", &["tol=1e-12"]);
     let line = r
         .stderr
         .lines()
