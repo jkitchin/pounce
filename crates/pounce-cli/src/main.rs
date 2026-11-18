@@ -2752,8 +2752,14 @@ fn real_main() -> ExitCode {
         // `kkt_residuals_above_floor`: that one reads rows absolutely and
         // complementarity per product, and on NETLIB WOOD1P / WOODW it ranks
         // the pair the opposite way to the verifier (see the type's docs).
+        //
+        // One ruler in the literal sense, too: both points are read against
+        // one `RelativeKktScale`, the larger of their two. Each point's own
+        // scale grows with its own iterates and multipliers, so read that way
+        // an NLP point whose duals drifted to `1e8` would score a stationarity
+        // error of `1` as `1e-8` and win for it (gh #1184 review).
         let declared = &ch.declined.declared;
-        let nlp_rel = {
+        let nlp_point = {
             let point = nominal_capture.borrow();
             let mults = bound_mult_capture.borrow();
             point.as_ref().and_then(|(x, lambda)| {
@@ -2772,9 +2778,16 @@ fn real_main() -> ExitCode {
                     pounce_convex::QpStatus::OptimalInaccurate,
                 )
             })
-        }
-        .map(|p| p.relative_kkt_residuals(declared));
-        let convex_rel = ch.declined.sol.relative_kkt_residuals(declared);
+        };
+        let convex_scale = ch.declined.sol.relative_kkt_scale(declared);
+        let scale = match &nlp_point {
+            Some(p) => convex_scale.shared_with(&p.relative_kkt_scale(declared)),
+            None => convex_scale,
+        };
+        let nlp_rel = nlp_point
+            .as_ref()
+            .map(|p| p.relative_kkt_residuals_at(declared, &scale));
+        let convex_rel = ch.declined.sol.relative_kkt_residuals_at(declared, &scale);
         let nlp_kkt_error = nlp_rel.map(|r| r.max());
         let convex_kkt_error = convex_rel.max();
         let convex_wins = convex_candidate_wins(

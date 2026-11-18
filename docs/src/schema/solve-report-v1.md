@@ -445,7 +445,9 @@ Both answers are measured by one ruler, the five relative KKT residuals
 (primal, dual, duality gap, primal cone, dual cone, each relative to the
 largest of the terms it is made of; `pounce_convex::RelativeKktResiduals`), on
 the model as declared, and the one whose largest residual is smaller is
-reported. A tie keeps the NLP answer; a convex answer whose own status is a
+reported. Both are read against one scale (`pounce_convex::RelativeKktScale`),
+the component-wise larger of the two answers' own, so neither can shrink its
+residuals by inflating its own iterates or multipliers. A tie keeps the NLP answer; a convex answer whose own status is a
 failure never replaces an NLP answer that succeeded; and a convex
 `NumericalFailure` never wins. `solution` is the winner's in full: point,
 status, `engine`, `solve_result_num`, `statistics.iteration_count`. This block
@@ -456,10 +458,10 @@ is the whole run, both solves.
 |---|---|---|
 | `winner` | string | Engine whose answer was reported (`cvx-qp`, `qp-active-set`, `nlp`, `sqp-active-set`, `square-lm`); equals `solution.engine`. |
 | `loser` | string | Engine whose answer was discarded. |
-| `convex_kkt_error` | float | The convex answer's largest relative KKT residual. |
+| `convex_kkt_error` | float | The convex answer's largest relative KKT residual, on the shared scale. |
 | `convex_status` | string | Upstream status name of the convex answer. |
 | `convex_iterations` | integer | Iterations the convex solve spent. |
-| `nlp_kkt_error` | float \| omitted | The NLP answer's largest relative KKT residual; omitted when the NLP arm produced no point that maps onto the model. |
+| `nlp_kkt_error` | float \| omitted | The NLP answer's largest relative KKT residual, on the shared scale; omitted when the NLP arm produced no point that maps onto the model. |
 | `nlp_status` | string | Upstream status name of the NLP answer. |
 | `nlp_iterations` | integer | Iterations the NLP solve spent. |
 | `convex_wallclock_time_secs` | float | Wall-clock seconds of the convex attempt. |
