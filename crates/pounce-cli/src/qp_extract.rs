@@ -489,12 +489,20 @@ pub fn certificate_report(
                     z[l] = (-net).max(0.0);
                 }
             }
+            // Keep the netted ray unless netting costs it its verification:
+            // it lowers the column magnitudes the residual is measured
+            // against, so a verified ray can in principle fail once netted.
+            // The un-netted ray is then reported as checked; its `lambda`
+            // (`z_u − z_l` per row) is still a certificate, with a support
+            // value at or below the reported `value`.
             let f = match pounce_convex::certificate::farkas_certificate(qp, &[], &f.y, &z) {
-                Some(netted) => pounce_convex::FarkasCertificate {
-                    source: f.source,
-                    ..netted
-                },
-                None => f,
+                Some(netted) if netted.verified || !f.verified => {
+                    pounce_convex::FarkasCertificate {
+                        source: f.source,
+                        ..netted
+                    }
+                }
+                _ => f,
             };
             let lambda = con_map
                 .iter()

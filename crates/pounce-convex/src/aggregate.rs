@@ -479,6 +479,15 @@ pub(crate) fn postsolve(
         if ray {
             // The reduced bound that carries this leftover, and the column
             // whose declared bound it is.
+            //
+            // Known gap (gh#1181 review): when the provenance is missing, or
+            // names a column that is not `Affine` on this same survivor, the
+            // leftover is dropped here rather than attributed. That is safe,
+            // not silent in effect — the lifted ray then fails the
+            // certificate's independent check, and `certificate_or_resolve`
+            // falls back on the unreduced re-solve — but it costs that
+            // re-solve. No NETLIB-infeas model reaches it (all 14 presolved
+            // lifts verify); a model that does is the fixture to add.
             let k = plan.vars_kept.iter().position(|&v| v == rep);
             let src = k.and_then(|k| {
                 if leftover > 0.0 {

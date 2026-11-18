@@ -32,11 +32,17 @@ changes.
   against its `.nl` independently. Not yet on the CLI's conic QCQP arm or
   in the C API.
 
+  If that re-solve reaches an *optimum* instead, the verdict is not
+  changed but is flagged as contradicted: a warning on the CLI, the JSON
+  report's `solution.certificate_contradicted_by`, and in Python
+  `QpResult.certificate_contradicted_by` plus a `RuntimeWarning`.
+
   **Rust API:** `pounce_convex::certificate` (`Certificate`,
-  `certificate`, `certificate_or_resolve`),
+  `certificate`, `certificate_or_resolve` returning `CertificateOutcome`),
   `pipeline::solve_presolved_with_ray`, and
-  `pounce_solve_report::SolutionInfo::certificate` (a new public field, so
-  a struct literal of `SolutionInfo` needs `certificate: None`).
+  `pounce_solve_report::SolutionInfo::{certificate,
+  certificate_contradicted_by}` (new public fields, so a struct literal of
+  `SolutionInfo` needs both set to `None`).
 - **`nlp_scaling_untagged_constr` gives user scaling a factor for the rows
   the user did not scale.** Under `nlp_scaling_method=user-scaling`, the
   value `gradient-based` gives each constraint row with no user factor the

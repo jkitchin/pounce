@@ -617,7 +617,12 @@ number stay the first solve's. That re-solve is the cost of the feature:
 up to ~7 s on NETLIB-infeas (`gosh`, against a 0.2 s verdict), and more
 on a model where one IPM iteration is expensive. `qp_certificate=check`
 skips it (a presolve verdict then reports no certificate);
-`qp_certificate=no` reports none at all.
+`qp_certificate=no` reports none at all. If the re-solve reaches an
+*optimum* instead, the verdict is left as it is but flagged: a CLI warning,
+`solution.certificate_contradicted_by` in the JSON, and
+`QpResult.certificate_contradicted_by` with a `RuntimeWarning` in Python.
+That is the strongest sign of a false verdict the search can see. Bounds
+at `±1e20` are read as absent, as everywhere else on the convex arm.
 
 **Where it appears.** The CLI prints `Certificate: Farkas (primal
 infeasibility), verified, margin …` under the result line and writes

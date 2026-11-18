@@ -677,6 +677,13 @@ pub struct SolutionInfo {
     /// violation and certifies nothing. See [`CertificateInfo`].
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub certificate: Option<CertificateInfo>,
+    /// Set when the infeasible or unbounded verdict above was **contradicted**:
+    /// the re-solve of the unreduced model, run to find a certificate, reached
+    /// this optimum instead (gh#1181 review). The verdict is not changed — it
+    /// is the first solve's — but it should be treated as doubtful. Absent
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub certificate_contradicted_by: Option<ApplicationReturnStatus>,
 }
 
 /// An infeasibility or unboundedness certificate, normalized to unit
@@ -1062,6 +1069,7 @@ impl ReportBuilder {
                 lambda: Vec::new(),
                 suffixes: Vec::new(),
                 certificate: None,
+                certificate_contradicted_by: None,
             },
             stats: empty_stats(),
             iterations: Vec::new(),

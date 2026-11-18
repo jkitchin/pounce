@@ -75,8 +75,8 @@ pub use batch::{
     solve_qp_multi_rhs_parallel,
 };
 pub use certificate::{
-    Certificate, CertificateSource, FarkasCertificate, RecessionCertificate, certificate,
-    certificate_or_resolve,
+    Certificate, CertificateOutcome, CertificateSource, FarkasCertificate, RecessionCertificate,
+    certificate, certificate_or_resolve,
 };
 pub use cones::ConeSpec;
 pub use convex_presolve_session::ConvexPresolveSession;

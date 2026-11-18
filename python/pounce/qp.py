@@ -253,6 +253,12 @@ class QpResult:
         that is how a doubtful verdict shows. ``source`` is ``"solve"`` (the
         verdict's own ray, lifted through presolve) or
         ``"unreduced_resolve"`` (see ``qp_certificate`` on :func:`solve_qp`).
+    certificate_contradicted_by:
+        ``None``, unless the unreduced re-solve that :func:`solve_qp` runs
+        for a certificate reached an optimum (``"optimal"`` or
+        ``"optimal_inaccurate"``) against the infeasible or unbounded
+        verdict. ``status`` is not changed, but the verdict should then be
+        treated as doubtful; a ``RuntimeWarning`` says so too.
     presolve:
         ``None`` unless the solve ran with ``qp_presolve=True``. Then a dict:
         ``outcome`` is ``"reduced"`` (solved the reduced problem and
@@ -293,6 +299,7 @@ class QpResult:
     kappa: Optional[float] = None
     certificate_scale: Optional[float] = None
     certificate: Optional[dict] = None
+    certificate_contradicted_by: Optional[str] = None
     presolve: Optional[dict] = None
     crossover: Optional[dict] = None
 
@@ -978,6 +985,7 @@ def _to_result(d: dict) -> QpResult:
         kappa=d.get("kappa"),
         certificate_scale=d.get("certificate_scale"),
         certificate=d.get("certificate"),
+        certificate_contradicted_by=d.get("certificate_contradicted_by"),
         presolve=d.get("presolve"),
         crossover=d.get("crossover"),
     )

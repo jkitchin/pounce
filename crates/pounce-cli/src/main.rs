@@ -3863,49 +3863,66 @@ fn run_convex_qp(
     let lift = farkas_lift
         .as_ref()
         .map(|(y, z)| (y.as_slice(), z.as_slice()));
-    let certificate = (console.certificate != CertificateMode::Off)
-        .then(|| {
-            pounce_convex::certificate_or_resolve(&qp, &[], &sol, lift, || {
-                let o = solve_opts();
-                let worth_it = console.certificate == CertificateMode::Resolve
-                    && (presolve_on || use_active_set);
-                let budget_left = o.time_limit.is_none_or(|t| !t.is_zero());
-                (worth_it && budget_left && inertia != HessianInertia::Indefinite).then(|| {
-                    solve_qp_ipm(
-                        &qp,
-                        &QpOptions {
-                            collect_iterates: false,
-                            ..o
-                        },
-                        backend,
-                    )
-                })
+    let outcome = if console.certificate == CertificateMode::Off {
+        pounce_convex::CertificateOutcome {
+            certificate: None,
+            contradicted_by: None,
+        }
+    } else {
+        pounce_convex::certificate_or_resolve(&qp, &[], &sol, lift, || {
+            let o = solve_opts();
+            let worth_it =
+                console.certificate == CertificateMode::Resolve && (presolve_on || use_active_set);
+            let budget_left = o.time_limit.is_none_or(|t| !t.is_zero());
+            (worth_it && budget_left && inertia != HessianInertia::Indefinite).then(|| {
+                solve_qp_ipm(
+                    &qp,
+                    &QpOptions {
+                        collect_iterates: false,
+                        ..o
+                    },
+                    backend,
+                )
             })
         })
-        .flatten();
+    };
+    // One object for the console line and the JSON, so the two cannot
+    // disagree about `verified` or `margin` (gh#1181 review: the console used
+    // to print the certificate before `certificate_report`'s range-row
+    // netting re-checked it).
+    let certificate = outcome
+        .certificate
+        .map(|c| pounce_cli::qp_extract::certificate_report(prob, &con_map, &qp, c));
+    if let Some(contrary) = outcome.contradicted_by {
+        eprintln!(
+            "pounce: warning: the {:?} verdict is contradicted: re-solving the \
+             model without presolve, for a certificate, reached {contrary:?}. \
+             The verdict above is the first solve's and is not changed; treat \
+             it as doubtful and check it, e.g. with qp_presolve=no.",
+            sol.status
+        );
+    }
     if let Some(c) = certificate
         .as_ref()
         .filter(|_| console.verdict && !console.json_debug)
     {
-        let what = match c {
-            pounce_convex::Certificate::PrimalInfeasible(_) => "Farkas (primal infeasibility)",
-            pounce_convex::Certificate::DualInfeasible(_) => "recession (unboundedness)",
-        };
-        let margin = match c {
-            pounce_convex::Certificate::PrimalInfeasible(f) => f.margin,
-            pounce_convex::Certificate::DualInfeasible(r) => r.margin,
+        let what = if c.kind == "primal_infeasible" {
+            "Farkas (primal infeasibility)"
+        } else {
+            "recession (unboundedness)"
         };
         println!(
-            "Certificate: {what}, {}, margin {margin:.1e}{}",
-            if c.verified() {
+            "Certificate: {what}, {}, margin {:.1e}{}",
+            if c.verified {
                 "verified"
             } else {
                 "NOT verified"
             },
-            match c.source() {
-                pounce_convex::CertificateSource::Solve => "",
-                pounce_convex::CertificateSource::UnreducedResolve =>
-                    " (ray from an unreduced re-solve)",
+            c.margin.unwrap_or(f64::INFINITY),
+            if c.source == "unreduced_resolve" {
+                " (ray from an unreduced re-solve)"
+            } else {
+                ""
             },
         );
     }
@@ -4101,9 +4118,9 @@ fn run_convex_qp(
         builder.solution.objective = reported_obj;
         builder.solution.x = sol.x.clone();
         builder.solution.lambda = lambda.clone();
-        builder.solution.certificate = certificate
-            .clone()
-            .map(|c| pounce_cli::qp_extract::certificate_report(prob, &con_map, &qp, c));
+        builder.solution.certificate = certificate.clone();
+        builder.solution.certificate_contradicted_by =
+            outcome.contradicted_by.map(qp_status_to_ars);
         builder.stats.iteration_count = sol.iters as _;
         builder.stats.final_objective = reported_obj;
         note_integer_relaxation(&mut builder.stats);

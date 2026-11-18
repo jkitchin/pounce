@@ -247,6 +247,7 @@ fn solution_dict_hsde<'py>(
     // presolve lift and an unreduced re-solve (see `attach_certificate`).
     let cert = prob.and_then(|p| pounce_convex::certificate(p, cones, &sol));
     attach_certificate(py, &d, cert)?;
+    d.set_item("certificate_contradicted_by", py.None())?;
     d.set_item("obj", sol.obj)?;
     d.set_item("iters", sol.iters)?;
 
@@ -355,6 +356,39 @@ fn attach_certificate(
         }
     }
     d.set_item("certificate", cd)
+}
+
+/// [`attach_certificate`], plus `certificate_contradicted_by`: the status
+/// string of an unreduced re-solve that reached an optimum against the
+/// infeasible or unbounded verdict, else `None`. A contradiction also raises
+/// a `RuntimeWarning`, since it is the strongest evidence of a false verdict
+/// the certificate search can see (gh#1181 review).
+fn attach_outcome(
+    py: Python<'_>,
+    d: &Bound<'_, PyDict>,
+    outcome: pounce_convex::CertificateOutcome,
+) -> PyResult<()> {
+    attach_certificate(py, d, outcome.certificate)?;
+    match outcome.contradicted_by {
+        Some(s) => {
+            let status: String = d
+                .get_item("status")?
+                .map_or(Ok(String::new()), |v| v.extract())?;
+            PyErr::warn_bound(
+                py,
+                &py.get_type_bound::<pyo3::exceptions::PyRuntimeWarning>(),
+                &format!(
+                    "solve_qp: the {status:?} verdict is contradicted: re-solving \
+                     without presolve, for a certificate, reached {:?}. The status \
+                     is not changed; treat it as doubtful.",
+                    status_str(s)
+                ),
+                1,
+            )?;
+            d.set_item("certificate_contradicted_by", status_str(s))
+        }
+        None => d.set_item("certificate_contradicted_by", py.None()),
+    }
 }
 
 /// `qp_certificate=`: `"yes"` (default) re-solves the unreduced problem for a
@@ -690,7 +724,10 @@ pub fn solve_qp<'py>(
     // on a `P` the caller reported indefinite, which the IPM cannot take.
     let certify = |sol: &QpSolution, lift: Option<(Vec<f64>, Vec<f64>)>, differs: bool| {
         if !want_cert {
-            return None;
+            return pounce_convex::CertificateOutcome {
+                certificate: None,
+                contradicted_by: None,
+            };
         }
         let lift = lift.as_ref().map(|(y, z)| (y.as_slice(), z.as_slice()));
         pounce_convex::certificate_or_resolve(&prob.inner, &[], sol, lift, || {
@@ -743,7 +780,7 @@ pub fn solve_qp<'py>(
             });
             let d = solution_dict_hsde(py, sol, Some(&prob.inner), &[], hs, o.tol)?;
             attach_engine_reports(py, &d, pre, cross)?;
-            attach_certificate(py, &d, cert)?;
+            attach_outcome(py, &d, cert)?;
             Ok(d)
         }
         "active-set" => {
@@ -772,7 +809,7 @@ pub fn solve_qp<'py>(
             });
             let d = solution_dict(py, sol, Some(&prob.inner), &[], o.tol)?;
             attach_engine_reports(py, &d, pre, None)?;
-            attach_certificate(py, &d, cert)?;
+            attach_outcome(py, &d, cert)?;
             Ok(d)
         }
         other => Err(PyValueError::new_err(format!(

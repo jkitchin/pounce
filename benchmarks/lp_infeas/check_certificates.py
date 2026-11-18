@@ -64,6 +64,7 @@ def parse_nl(path):
     sides = [None] * m
     bounds = [None] * n
     c = [0.0] * n
+    const = [0.0] * m  # a row body's constant term, ``C<i>`` then ``n<k>``
     minimize = True
     i = 10
     while i < len(lines):
@@ -73,12 +74,21 @@ def parse_nl(path):
             continue
         tag, rest = head[0], head[1:].split()
         if tag in "CO":
-            body = lines[i + 1].strip()
-            if body not in ("n0", "n0.0"):
-                raise ValueError(f"nonlinear or constant body in {head}: {body}")
+            body = lines[i + 1].split("#")[0].strip()
+            if not body.startswith("n"):
+                raise ValueError(f"nonlinear body in {head}: {body}")
             if tag == "O":
                 minimize = int(rest[1]) == 0
+            else:
+                # A constant body term moves the row: l <= Jx + k <= u.
+                const[int(rest[0]) if rest else int(head[1:])] = float(body[1:])
             i += 2
+        elif tag == "d":
+            # Initial duals: irrelevant to the certificate.
+            i += 1 + int(rest[0])
+        elif tag == "S":
+            # A suffix: ``S<kind> <count> <name>`` then ``count`` lines.
+            i += 1 + int(rest[1])
         elif tag == "x":
             i += 1 + int(rest[0])
         elif tag == "r":
@@ -113,6 +123,7 @@ def parse_nl(path):
             raise ValueError(f"unhandled segment {head!r}")
     if nobj and not minimize:
         c = [-v for v in c]
+    sides = [(lo - k, up - k) for (lo, up), k in zip(sides, const)]
     return n, m, rows, sides, bounds, c
 
 
@@ -198,7 +209,13 @@ def main():
         if cert is None:
             print(f"{nl.stem:28s} no certificate")
             continue
-        model = parse_nl(nl)
+        try:
+            model = parse_nl(nl)
+        except (ValueError, IndexError) as e:
+            # Not a model this checker can read (binary, nonlinear, defined
+            # variables, ...): say so and go on, rather than stop the run.
+            print(f"{nl.stem:28s} skipped ({e})")
+            continue
         check = check_farkas if cert["kind"] == "primal_infeasible" else check_recession
         why = check(model, cert, args.tol)
         verdict = "PASS" if why is None else f"FAIL ({why})"

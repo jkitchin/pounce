@@ -39,7 +39,7 @@ fn presolved(prob: &QpProblem) -> (QpSolution, Option<Certificate>) {
     let o = QpOptions::default();
     let (sol, _, ray) = solve_presolved_with_ray(prob, &o, |p, po| solve_qp_ipm(p, po, backend));
     let lift = ray.as_ref().map(|(y, z)| (y.as_slice(), z.as_slice()));
-    let cert = certificate_or_resolve(prob, &[], &sol, lift, || Some(plain(prob)));
+    let cert = certificate_or_resolve(prob, &[], &sol, lift, || Some(plain(prob))).certificate;
     (sol, cert)
 }
 
@@ -253,7 +253,9 @@ fn presolve_verdict_gets_its_certificate_from_the_unreduced_problem() {
         certificate(&p, &[], &sol).is_none(),
         "a presolve verdict has no ray of its own"
     );
-    let c = certificate_or_resolve(&p, &[], &sol, None, || Some(plain(&p))).expect("certificate");
+    let c = certificate_or_resolve(&p, &[], &sol, None, || Some(plain(&p)))
+        .certificate
+        .expect("certificate");
     assert_eq!(c.source(), CertificateSource::UnreducedResolve);
     check_farkas(&p, &c);
 }
@@ -389,7 +391,75 @@ fn objective_free_lift_is_a_certificate_where_the_plain_postsolve_is_not() {
     let c = certificate_or_resolve(&p, &[], &sol, Some((&y, &z)), || {
         panic!("the lifted ray should have checked")
     })
+    .certificate
     .expect("certificate");
     assert_eq!(c.source(), CertificateSource::Solve);
     check_farkas(&p, &c);
+}
+
+/// A bound at `±1e20` is no bound, by the engine's convention (`BOUND_INF`,
+/// and `NEG_INF`/`POS_INF`'s docs), and the certificate must read it the same
+/// way (gh#1181 review). Reading `−1e20` with `is_finite()` as a real bound
+/// put the Farkas ray's rounding leftover on it — `value ≈ +1.9e9` — and
+/// called a recession direction moving toward `−1e20` a bound crossing, so
+/// both certificates came back "not verified" on correct verdicts, and
+/// `qp_certificate=yes` paid for a pointless re-solve. Each model is solved
+/// with the sentinel and with `±∞`; both must give the same verified result.
+#[test]
+fn bounds_at_the_bound_inf_sentinel_are_no_bounds() {
+    for big in [1e20, INF] {
+        // x₀ + x₁ ≤ 0 and x₀ + x₁ ≥ 1, x₀ ∈ [0, 10], x₁ free.
+        let farkas = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![0.0, 0.0],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(1, 0, -1.0),
+                Triplet::new(1, 1, -1.0),
+            ],
+            h: vec![0.0, -1.0],
+            lb: vec![0.0, -big],
+            ub: vec![10.0, big],
+        };
+        let sol = plain(&farkas);
+        assert_eq!(sol.status, QpStatus::PrimalInfeasible, "bound {big}");
+        let c = certificate(&farkas, &[], &sol).expect("certificate");
+        assert!(c.verified(), "bound {big}: {c:?}");
+        let Certificate::PrimalInfeasible(f) = &c else {
+            unreachable!()
+        };
+        assert_eq!(
+            f.z_lb[1], 0.0,
+            "bound {big}: a multiplier on an absent bound"
+        );
+        assert_eq!(
+            f.z_ub[1], 0.0,
+            "bound {big}: a multiplier on an absent bound"
+        );
+
+        // min x₀ s.t. x₀ − x₁ = 0, both free: unbounded along d = −(1, 1).
+        let recession = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1.0, 0.0],
+            a: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, -1.0)],
+            b: vec![0.0],
+            g: vec![],
+            h: vec![],
+            lb: vec![-big, -big],
+            ub: vec![big, big],
+        };
+        let sol = plain(&recession);
+        assert_eq!(sol.status, QpStatus::DualInfeasible, "bound {big}");
+        let c = certificate(&recession, &[], &sol).expect("certificate");
+        let Certificate::DualInfeasible(r) = &c else {
+            unreachable!()
+        };
+        assert!(r.verified, "bound {big}: {r:?}");
+        assert_eq!(r.bound_violation, 0.0, "bound {big}");
+    }
 }

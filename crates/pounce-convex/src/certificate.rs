@@ -77,7 +77,7 @@
 
 use crate::cones::ConeSpec;
 use crate::ipm::FARKAS_MARGIN_MIN;
-use crate::qp::{QpProblem, QpSolution, QpStatus};
+use crate::qp::{BOUND_INF, QpProblem, QpSolution, QpStatus};
 
 /// Which engine output a certificate came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +205,20 @@ fn gamma(len: usize) -> f64 {
     le / (1.0 - le)
 }
 
+/// Whether column `j` has a lower bound, by the engine's convention: anything
+/// at or past `−BOUND_INF` (`−1e20`) is no bound, as `NEG_INF`'s docs say. A
+/// plain `is_finite()` would read a caller's `−1e20` as a real bound, put the
+/// ray's rounding leftover on it, and report a false "not verified"
+/// (gh#1181 review).
+fn has_lb(prob: &QpProblem, j: usize) -> bool {
+    prob.lb_of(j) > -BOUND_INF
+}
+
+/// [`has_lb`] for the upper bound.
+fn has_ub(prob: &QpProblem, j: usize) -> bool {
+    prob.ub_of(j) < BOUND_INF
+}
+
 fn inf_norm(v: &[f64]) -> f64 {
     v.iter().fold(0.0_f64, |m, x| m.max(x.abs()))
 }
@@ -243,41 +257,74 @@ pub fn certificate(prob: &QpProblem, cones: &[ConeSpec], sol: &QpSolution) -> Op
 /// caller pays for a second solve only then; returning `None` from it skips
 /// that step (no budget left, or nothing different to solve). The verdict
 /// reported beside the certificate stays `sol`'s; a re-solve contributes a
-/// ray and nothing else.
+/// ray and nothing else — except when it **contradicts** the verdict, which
+/// [`CertificateOutcome::contradicted_by`] reports.
 pub fn certificate_or_resolve(
     prob: &QpProblem,
     cones: &[ConeSpec],
     sol: &QpSolution,
     farkas_lift: Option<(&[f64], &[f64])>,
     resolve: impl FnOnce() -> Option<QpSolution>,
-) -> Option<Certificate> {
+) -> CertificateOutcome {
+    let done = |certificate| CertificateOutcome {
+        certificate,
+        contradicted_by: None,
+    };
     if !matches!(
         sol.status,
         QpStatus::PrimalInfeasible | QpStatus::DualInfeasible
     ) {
-        return None;
+        return done(None);
     }
     let lifted = farkas_lift
         .filter(|_| sol.status == QpStatus::PrimalInfeasible)
         .and_then(|(y, z)| farkas_certificate(prob, cones, y, z))
         .map(Certificate::PrimalInfeasible);
     if lifted.as_ref().is_some_and(Certificate::verified) {
-        return lifted;
+        return done(lifted);
     }
     let own = certificate(prob, cones, sol);
     if own.as_ref().is_some_and(Certificate::verified) {
-        return own;
+        return done(own);
     }
     let first = lifted.or(own);
-    let second = resolve()
+    let resolved = resolve();
+    // A re-solve that reaches an optimum contradicts an infeasible or
+    // unbounded verdict outright; one that runs out of iterations or time
+    // says nothing. An infeasible/unbounded pair is not a contradiction —
+    // a model can be both, and the embedding reports whichever ray it
+    // reaches first.
+    let contradicted_by = resolved
+        .as_ref()
+        .map(|r| r.status)
+        .filter(|s| matches!(s, QpStatus::Optimal | QpStatus::OptimalInaccurate));
+    let second = resolved
         .filter(|r| r.status == sol.status)
         .and_then(|r| certificate(prob, cones, &r))
         .map(|c| c.with_source(CertificateSource::UnreducedResolve));
-    match (first, second) {
+    let certificate = match (first, second) {
         (_, Some(s)) if s.verified() => Some(s),
         (Some(f), _) => Some(f),
         (None, s) => s,
+    };
+    CertificateOutcome {
+        certificate,
+        contradicted_by,
     }
+}
+
+/// What [`certificate_or_resolve`] found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CertificateOutcome {
+    /// The certificate, if any ray was found; see [`Certificate::verified`].
+    pub certificate: Option<Certificate>,
+    /// The status of the unreduced re-solve when it reached an **optimum**
+    /// against an infeasible or unbounded verdict. That is the strongest
+    /// evidence of a false verdict this code can see — the case gh#414 was on
+    /// the optimal side — so a caller must surface it rather than let the
+    /// certificate's absence speak for it. `None` when no re-solve ran or it
+    /// agreed or was inconclusive.
+    pub contradicted_by: Option<QpStatus>,
 }
 
 /// Build and check the Farkas certificate from the ray `(y, z)`.
@@ -340,12 +387,12 @@ pub fn farkas_certificate(
             continue;
         }
         if qj > 0.0 {
-            if prob.lb_of(j).is_finite() {
+            if has_lb(prob, j) {
                 z_lb[j] = qj;
             } else {
                 r[j] = qj;
             }
-        } else if prob.ub_of(j).is_finite() {
+        } else if has_ub(prob, j) {
             z_ub[j] = -qj;
         } else {
             r[j] = qj;
@@ -457,8 +504,7 @@ pub fn recession_certificate(
         .iter()
         .enumerate()
         .map(|(j, &dj)| {
-            let crosses =
-                (dj < 0.0 && prob.lb_of(j).is_finite()) || (dj > 0.0 && prob.ub_of(j).is_finite());
+            let crosses = (dj < 0.0 && has_lb(prob, j)) || (dj > 0.0 && has_ub(prob, j));
             if crosses { 0.0 } else { dj }
         })
         .collect();
@@ -537,10 +583,10 @@ fn recession_candidate(
     };
     let mut bound_violation = 0.0_f64;
     for (j, &dj) in d.iter().enumerate() {
-        if prob.lb_of(j).is_finite() {
+        if has_lb(prob, j) {
             bound_violation = bound_violation.max(-dj);
         }
-        if prob.ub_of(j).is_finite() {
+        if has_ub(prob, j) {
             bound_violation = bound_violation.max(dj);
         }
     }
@@ -786,6 +832,38 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// A re-solve that reaches an optimum against an infeasible verdict is
+    /// reported, not silently dropped (gh#1181 review); one that only runs
+    /// out of iterations is not a contradiction.
+    #[test]
+    fn a_resolve_reaching_an_optimum_contradicts_the_verdict() {
+        let p = QpProblem {
+            n: 1,
+            p_lower: vec![],
+            c: vec![1.0],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0],
+            ub: vec![],
+        };
+        // A presolve-style verdict: no ray at all.
+        let verdict = sol(QpStatus::PrimalInfeasible, vec![0.0], vec![], vec![]);
+        let out = certificate_or_resolve(&p, &[], &verdict, None, || {
+            Some(sol(QpStatus::Optimal, vec![0.0], vec![], vec![]))
+        });
+        assert_eq!(out.contradicted_by, Some(QpStatus::Optimal));
+        assert!(out.certificate.is_none());
+        let out = certificate_or_resolve(&p, &[], &verdict, None, || {
+            Some(sol(QpStatus::IterationLimit, vec![0.0], vec![], vec![]))
+        });
+        assert_eq!(out.contradicted_by, None);
+        // No re-solve, no claim either way.
+        let out = certificate_or_resolve(&p, &[], &verdict, None, || None);
+        assert_eq!(out.contradicted_by, None);
     }
 
     /// SOC dual-cone membership: `(1, 1)` is on the boundary, `(1, 2)` is
