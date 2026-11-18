@@ -174,14 +174,24 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         .get_or_insert(THETA_MIN_FACT * theta_curr.max(1.0));
     // Switching condition, less its `α` factor (applied per trial below).
     let descent = grad_p.is_finite() && grad_p < 0.0;
-    let switch_lhs = if descent { (-grad_p).powf(SWITCH_S_PHI) } else { 0.0 };
+    let switch_lhs = if descent {
+        (-grad_p).powf(SWITCH_S_PHI)
+    } else {
+        0.0
+    };
     let switch_rhs = SWITCH_DELTA * theta_curr.powf(SWITCH_S_THETA);
     // Acceptance of a trial `(θ_t, φ_t)` reached at step length `α` (an SOC
     // trial is judged at `α = 1`, as in Wächter-Biegler §3.3). Returns
     // `Some(f_type)` on acceptance, `None` on rejection.
     let judge = |filter: &SqpFilter, theta_t: Number, phi_t: Number, alpha: Number| {
         if descent && theta_curr <= theta_min && alpha * switch_lhs > switch_rhs {
-            (phi_t <= phi_curr + ETA_PHI * alpha * grad_p).then_some(true)
+            // Compared with Ipopt's `Compare_le` slack, `10·ε·|φ|`: near an
+            // optimum the demanded decrease `η·α·∇fᵀp` drops below the
+            // round-off in `φ` itself, and without the slack no trial can
+            // pass (`issue880_sigma_uncertified`, `f ≈ −2.2e12`, ended
+            // `Search_Direction_Becomes_Too_Small` at stationarity 2.4e-4).
+            let slack = 10.0 * Number::EPSILON * phi_curr.abs();
+            (phi_t - (phi_curr + ETA_PHI * alpha * grad_p) <= slack).then_some(true)
         } else {
             // `θ_t ≤ (1 − γ_θ)·θ_curr` is no progress at all when
             // `θ_curr = 0`: every feasible trial satisfies it.
