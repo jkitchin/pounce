@@ -10,6 +10,37 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **A custom linear solver, from any frontend, and block labels for it**
+  (gh#1175). `linear_solver=custom` with `custom_linear_solver_lib=<path>`
+  loads a shared library that exports `pounce_linear_solver()`, returning a
+  `PounceLinearSolver` table of C callbacks (`pounce.h`): create, structure,
+  factor (with inertia), solve. It serves the interior point, restoration and
+  the SQP's QP subproblems. Crossover stays on FERAL. A library that cannot be
+  loaded refuses the solve with `Invalid_Option`; pounce does not fall back.
+  `custom_linear_solver_options` is passed through to `create()`. The C API
+  gains Ipopt's `get_var_con_metadata`: `SetPounceIntegerMetaData`,
+  `SetPounceNumericMetaData`, `SetPounceStringMetaData` and
+  `ClearPounceMetaData`. Integer keys reach the custom solver mapped to KKT
+  row order `[x | slacks | equality duals | inequality duals]` after
+  fixed-variable removal. The CasADi plugin now forwards
+  `var/con_{integer,numeric,string}_md` instead of only echoing them. The
+  reference solver is `crates/pounce-cinterface/examples/custom_linear_solver/dense_solver.c`.
+- **An augmented-system solver supplied by the embedding build** (PR #1177
+  review). `pounce_algorithm::linear_solver_provider::LinearSolverProvider` is
+  the counterpart of Ipopt's custom `AugSystemSolver`. It receives the system's
+  pieces rather than the assembled matrix, so a structured KKT solver can own
+  regularization and inertia repair. Register it once with
+  `register_linear_solver_provider` and select it with `linear_solver=<name>`
+  from every frontend linked into the binary. It builds every
+  augmented-system solver: the main path, both low-rank inner solvers, and
+  restoration with prefix `resto.`. It registers its own typed, bounded
+  options. It receives `KktMetadata` on the same terms as `custom`.
+- **`AugSystemSolver::owns_refinement()`**, default `false`. When it returns
+  `true`, `PdFullSpaceSolver` solves once and accepts the step, with no
+  residual refinement against the unmodified system and no quality escalation
+  from it. An improve request becomes a fresh solve.
+  `LowRankAugSystemSolver` and restoration's `AugRestoSystemSolver` pass it
+  through.
 - **Infeasible and unbounded convex verdicts carry their certificate
   (gh#1181).** On `primal_infeasible` / `dual_infeasible` the convex LP/QP
   arm now returns a Farkas ray or a recession direction in the caller's own
@@ -86,6 +117,10 @@ changes.
   variable.
 
 ### Fixed
+- **The CasADi plugin no longer ignores an option POUNCE rejects.** A value
+  out of bounds, not among a string option's values, or for an unknown
+  keyword ran the solve on the option's default. Now it raises, as CasADi's
+  `ipopt` plugin does ("Invalid options were detected by Ipopt").
 - **`minimize` reads both sides of a quadratic constraint row when routing
   to the conic solver** (gh#1174). The convex-QCQP detector treated every
   quadratic row as `g(x) ≥ lo` and never read `hi`. So scipy's natural

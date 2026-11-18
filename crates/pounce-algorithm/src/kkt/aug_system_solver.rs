@@ -109,6 +109,26 @@ pub trait AugSystemSolver {
     /// Ask the underlying solver for higher-quality pivoting.
     fn increase_quality(&mut self) -> bool;
 
+    /// Whether this solver refines its own solutions against the matrix it
+    /// factored, so the caller must not refine them against the unmodified
+    /// primal-dual system. A KKT oracle that regularizes, repairs inertia
+    /// per block or condenses the system returns a step that by construction
+    /// leaves a residual on the rows it modified; `PdFullSpaceSolver`'s
+    /// refinement loop would undo that modification and, when the ratio
+    /// stagnates, escalate quality and pretend the system singular.
+    ///
+    /// When `true`, `PdFullSpaceSolver` solves once and accepts the result:
+    /// no residual-based refinement, no quality escalation from it, and an
+    /// "improve this solution" request is answered by a fresh solve rather
+    /// than by returning the given solution unchanged.
+    ///
+    /// Defaults to `false`. Wrappers holding an inner solver
+    /// (`LowRankAugSystemSolver`, restoration's `AugRestoSystemSolver`)
+    /// forward their inner solver's answer.
+    fn owns_refinement(&self) -> bool {
+        false
+    }
+
     /// Status of the most recent `solve` call.
     fn last_solve_status(&self) -> ESymSolverStatus;
 

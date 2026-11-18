@@ -207,6 +207,12 @@ impl AugSystemSolver for AugRestoSystemSolver {
         self.inner.increase_quality()
     }
 
+    /// The restoration phase's own `PdFullSpaceSolver` must not refine a
+    /// KKT oracle's step against the unmodified system either.
+    fn owns_refinement(&self) -> bool {
+        self.inner.owns_refinement()
+    }
+
     fn last_solve_status(&self) -> ESymSolverStatus {
         self.inner.last_solve_status()
     }
