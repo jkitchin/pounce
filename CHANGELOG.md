@@ -76,6 +76,34 @@ changes.
   QCQP whose solve spent the budget skips the gh#1114 polish and reports its
   conic residuals. **Rust API:** `pounce_convex::presolve::FixpointExit` gains
   the variant `Deadline`, and `presolve_until(prob, deadline)` is new.
+- **The convex QP interior-point stops where it converges on two
+  Maros–Mészáros models it had slowed down on** (gh#1180). QPILOTNO went from
+  40 iterations to 283 on the NLP path, and POWELL20 from 18 to 121. Both
+  date from gh#984's second pass, which stopped labelling `Optimal` a point
+  whose KKT error was above `tol`. The old fast answers were such points:
+  QPILOTNO's violated two equality rows by `1.6e-4`, and POWELL20's had a
+  primal residual of `3e-5`. Two separate defects then kept the solver from
+  certifying the correct answer:
+  * *QPILOTNO.* Presolve's postsolve recovered an eliminated column at
+    `-2.7e-14` and clamped it to its bound. The column's coefficient of
+    `5.85e6` turned that into a `1.6e-7` violation of two equality rows, so
+    the CLI discarded the convex answer and re-solved from scratch on the NLP
+    path. When the reduced problem was solved to `Optimal` and only the
+    postsolved point fails, the CLI now first re-solves the full model without
+    presolve: 84 iterations in total, with the answer from `cvx-qp`. A
+    `Presolve:` line reports when this happens.
+  * *POWELL20.* Every constraint row is active and there is no strict
+    interior, so the multipliers drift to `1e11`. The stopping test counted
+    each row's complementarity product in full once the row's slack was above
+    rounding level. At those multipliers a slack of `1e-9` already reads as
+    `~1e2`, and the loop ran on until a product happened to read exactly 0.
+    Each product is now judged above its own rounding floor, at half the width
+    the final verdict allows: 121 → 27 iterations, objective `2.2e-11` from
+    the exact optimum.
+
+  On the full 138-problem set no other problem changes status, iteration
+  count or objective. In `scripts/sweep-fixtures.sh` only the two fixtures
+  that pin this change move.
 - **`minimize` detects a convex LP/QP without `jac` whatever the objective's
   constant term** (gh#1169). The structure probe finite-differenced `fun` twice
   at steps sized for general functions, which left `~2.5e-3·|f|` of round-off
