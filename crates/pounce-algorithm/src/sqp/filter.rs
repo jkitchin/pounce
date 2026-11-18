@@ -28,11 +28,12 @@
 //! to the filter (the standard margin convention), removing any
 //! filter entries that the new pair dominates.
 //!
-//! This implementation skips Fletcher-Leyffer's full f-mode /
-//! h-mode switching (which requires a `d_φ` predicted-derivative
-//! and trigger constants) — it ships the dominance test +
-//! sufficient-progress check, which is the SOTA filter's core
-//! and matches every commonly-cited reduced filter SQP variant.
+//! Near feasibility (`θ ≤ θ_min`) a descent step that satisfies the
+//! Wächter-Biegler switching condition is an **f-type** step instead:
+//! it must reduce `φ` by an Armijo fraction of `∇fᵀp`, and it does not
+//! augment the filter. That switching rule was missing until gh#1173,
+//! and without it a feasible iterate (`θ = 0`) accepted any feasible
+//! trial however far uphill it went. See [`filter_line_search`].
 //!
 //! ## First-step caveat (PR #50 review C4)
 //!
@@ -64,6 +65,10 @@ pub struct SqpFilter {
     entries: Vec<(Number, Number)>,
     pub gamma_theta: Number,
     pub gamma_phi: Number,
+    /// `θ_min` of the switching condition (see [`filter_line_search`]):
+    /// `THETA_MIN_FACT · max(1, θ_0)`, fixed from the violation of the first
+    /// iterate this filter sees. `None` until then.
+    theta_min: Option<Number>,
 }
 
 impl SqpFilter {
@@ -72,6 +77,7 @@ impl SqpFilter {
             entries: Vec::new(),
             gamma_theta: 1e-5,
             gamma_phi: 1e-5,
+            theta_min: None,
         }
     }
 
@@ -107,6 +113,19 @@ impl SqpFilter {
     }
 }
 
+/// Switching-condition constants (Wächter-Biegler 2006 §2.3, Ipopt's
+/// defaults): an iteration is an *f-type* step — judged by Armijo decrease
+/// of the objective rather than by the filter — when its search direction
+/// descends and `α·(−∇fᵀp)^S_PHI > DELTA·θ^S_THETA` at a violation `θ`
+/// no larger than `θ_min`.
+const SWITCH_S_PHI: Number = 2.3;
+const SWITCH_S_THETA: Number = 1.1;
+const SWITCH_DELTA: Number = 1.0;
+/// `θ_min = THETA_MIN_FACT · max(1, θ_0)` (Ipopt's `theta_min_fact`).
+const THETA_MIN_FACT: Number = 1e-4;
+/// Armijo constant of an f-type step. The ℓ1-merit arm uses the same value.
+const ETA_PHI: Number = 1e-4;
+
 /// Filter-line-search backtracking. Same return shape as
 /// [`crate::sqp::line_search::l1_merit_line_search`] so the
 /// caller dispatches by `SqpGlobalization` choice. The `nu`
@@ -114,12 +133,30 @@ impl SqpFilter {
 /// meaning here (the filter has no penalty parameter); we
 /// echo back `current_nu` unchanged so the caller's state
 /// machine doesn't have to special-case it.
+///
+/// `grad_p` is `∇f(x)ᵀp`, the predicted first-order change of the objective
+/// along `p`. It selects between the two acceptance rules (gh#1173):
+///
+/// * **f-type** — `grad_p < 0`, `θ_curr ≤ θ_min` and the switching condition
+///   holds: the trial must satisfy Armijo,
+///   `φ_t ≤ φ_curr + η·α·∇fᵀp`, and the filter is *not* augmented.
+/// * **h-type** — otherwise: sufficient progress in `θ` or `φ` and filter
+///   acceptance, and the current iterate joins the filter.
+///
+/// Without the f-type branch a feasible iterate (`θ_curr = 0`) had nothing
+/// guarding the objective: `θ_t ≤ (1 − γ_θ)·0` holds for every feasible
+/// trial, so "sufficient progress" passed on `θ` alone and any step was
+/// taken. On `min sin(3x) + ½x²` from `x = 0.05` the first step went from
+/// `f = 0.15` to `f = 9.48`, and the run wandered to `f = 1403`. An uphill
+/// step on a model with `m = 0` and no bounds is now rejected, and a
+/// θ-progress claim needs `θ_curr > 0` to mean anything.
 #[allow(clippy::too_many_arguments)]
 pub fn filter_line_search<N: SqpProblemSpec>(
     nlp: &mut N,
     filter: &mut SqpFilter,
     x: &[Number],
     p: &[Number],
+    grad_p: Number,
     f_curr: Number,
     c_curr: &[Number],
     bl: &[Number],
@@ -132,6 +169,28 @@ pub fn filter_line_search<N: SqpProblemSpec>(
 ) -> LineSearchResult {
     let theta_curr = l1_violation(x, c_curr, bl, bu, xl, xu);
     let phi_curr = f_curr;
+    let theta_min = *filter
+        .theta_min
+        .get_or_insert(THETA_MIN_FACT * theta_curr.max(1.0));
+    // Switching condition, less its `α` factor (applied per trial below).
+    let descent = grad_p.is_finite() && grad_p < 0.0;
+    let switch_lhs = if descent { (-grad_p).powf(SWITCH_S_PHI) } else { 0.0 };
+    let switch_rhs = SWITCH_DELTA * theta_curr.powf(SWITCH_S_THETA);
+    // Acceptance of a trial `(θ_t, φ_t)` reached at step length `α` (an SOC
+    // trial is judged at `α = 1`, as in Wächter-Biegler §3.3). Returns
+    // `Some(f_type)` on acceptance, `None` on rejection.
+    let judge = |filter: &SqpFilter, theta_t: Number, phi_t: Number, alpha: Number| {
+        if descent && theta_curr <= theta_min && alpha * switch_lhs > switch_rhs {
+            (phi_t <= phi_curr + ETA_PHI * alpha * grad_p).then_some(true)
+        } else {
+            // `θ_t ≤ (1 − γ_θ)·θ_curr` is no progress at all when
+            // `θ_curr = 0`: every feasible trial satisfies it.
+            let theta_progress =
+                theta_curr > 0.0 && theta_t <= (1.0 - filter.gamma_theta) * theta_curr;
+            let phi_progress = phi_t <= phi_curr - filter.gamma_phi * theta_curr;
+            ((theta_progress || phi_progress) && filter.accepts(theta_t, phi_t)).then_some(false)
+        }
+    };
 
     let mut alpha = 1.0_f64;
     let mut x_trial = vec![0.0; x.len()];
@@ -189,18 +248,20 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         // such information: it says the model could not be evaluated there.
         let trial_is_evaluable =
             !f_trial.is_nan() && !theta_trial.is_nan() && !c_trial.iter().any(|v| v.is_nan());
-        // Sufficient progress: at least one of θ or φ strictly
-        // decreased against the *current* iterate by the
-        // configured margin.
-        let theta_progress = theta_trial <= (1.0 - filter.gamma_theta) * theta_curr;
-        let phi_progress = phi_trial <= phi_curr - filter.gamma_phi * theta_curr;
-        let progress = trial_is_evaluable && (theta_progress || phi_progress);
+        // f-type: Armijo on φ. h-type: sufficient progress in θ or φ
+        // against the *current* iterate, and not dominated by the filter.
+        let verdict = if trial_is_evaluable {
+            judge(filter, theta_trial, phi_trial, alpha)
+        } else {
+            None
+        };
 
-        if progress && filter.accepts(theta_trial, phi_trial) {
-            // Accept. Add current to filter (Fletcher-Leyffer's
-            // "h-mode" augmentation; we don't distinguish f-mode
-            // here per the module-doc rationale).
-            filter.add(theta_curr, phi_curr);
+        if let Some(f_type) = verdict {
+            // Accept. An h-type step adds the current iterate to the
+            // filter; an f-type step does not (Wächter-Biegler 2006 §2.3).
+            if !f_type {
+                filter.add(theta_curr, phi_curr);
+            }
             return LineSearchResult {
                 alpha,
                 nu: current_nu,
@@ -239,8 +300,6 @@ pub fn filter_line_search<N: SqpProblemSpec>(
                             let c_soc = nlp.eval_c(&x_soc);
                             let theta_soc = l1_violation(&x_soc, &c_soc, bl, bu, xl, xu);
                             let phi_soc = f_soc;
-                            let tp = theta_soc <= (1.0 - filter.gamma_theta) * theta_curr;
-                            let pp = phi_soc <= phi_curr - filter.gamma_phi * theta_curr;
                             // Feasibility safeguard (Wächter-Biegler
                             // 2006 §3.3): the correction must actually
                             // reduce the violation below the
@@ -253,12 +312,15 @@ pub fn filter_line_search<N: SqpProblemSpec>(
                             let soc_evaluable = !f_soc.is_nan()
                                 && !theta_soc.is_nan()
                                 && !c_soc.iter().any(|v| v.is_nan());
-                            if soc_evaluable
-                                && soc_feasible
-                                && (tp || pp)
-                                && filter.accepts(theta_soc, phi_soc)
-                            {
-                                filter.add(theta_curr, phi_curr);
+                            let soc_verdict = if soc_evaluable && soc_feasible {
+                                judge(filter, theta_soc, phi_soc, 1.0)
+                            } else {
+                                None
+                            };
+                            if let Some(f_type) = soc_verdict {
+                                if !f_type {
+                                    filter.add(theta_curr, phi_curr);
+                                }
                                 return LineSearchResult {
                                     alpha: 1.0,
                                     nu: current_nu,

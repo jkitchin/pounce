@@ -840,7 +840,7 @@ impl SqpAlgorithm {
             // `-c(x_k)`, so the previous QP's *primal* doesn't
             // carry over even when the active set does.
             let warm_started = iter.working.is_some();
-            let mut sol = if let Some(prev_w) = iter.working.as_ref() {
+            let sol = if let Some(prev_w) = iter.working.as_ref() {
                 // A warm solve that *errors* falls back to cold rather than
                 // aborting the SQP (gh #855). The cold-start fallback below
                 // already exists for a warm solve that comes back `MaxIter` /
@@ -874,7 +874,7 @@ impl SqpAlgorithm {
                     warm_opts.as_ref().unwrap_or(&self.qp_opts),
                     self.ipm_cold_start.then_some(&self.ipm_seed),
                 ) {
-                    Ok(v) => v,
+                    Ok(v) => Ok(v),
                     Err(e) => {
                         tracing::debug!(target: "pounce::sqp",
                             "warm-started step QP failed hard ({e:?}); re-solving \
@@ -887,7 +887,7 @@ impl SqpAlgorithm {
                             None,
                             &self.qp_opts,
                             self.ipm_cold_start.then_some(&self.ipm_seed),
-                        )?
+                        )
                     }
                 }
             } else {
@@ -897,7 +897,39 @@ impl SqpAlgorithm {
                     None,
                     &self.qp_opts,
                     self.ipm_cold_start.then_some(&self.ipm_seed),
-                )?
+                )
+            };
+            // A cold step QP whose KKT factorization cannot be repaired — the
+            // §4.5 inertia ladder exhausted, or a singular block no shift
+            // fixes — says the *model at this iterate* gives no step, which is
+            // `QpStepFailed`, reported with the iterate. Propagating it as an
+            // `Err` surfaced as `Internal_Error` with no `x` at all (gh#1173,
+            // reached there after an uphill step put `‖∇²L‖` near `1e20`).
+            // Any other error is still a broken solve and still propagates.
+            let mut sol = match sol {
+                Ok(v) => v,
+                Err(e) if e.is_recoverable_factorization_failure() => {
+                    tracing::debug!(target: "pounce::sqp",
+                        "step QP factorization could not be repaired ({e:?}); \
+                         stopping with QpStepFailed at the current iterate (gh#1173)");
+                    self.qp_opts = base;
+                    let obj = nlp.eval_f(&iter.x);
+                    self.iterates = Some(iter.clone());
+                    return Ok(SqpResult {
+                        x: iter.x,
+                        lambda_g: iter.lambda_g,
+                        lambda_x: iter.lambda_x,
+                        obj,
+                        status: SqpStatus::QpStepFailed,
+                        n_iter: outer,
+                        n_qp_solves,
+                        n_qp_working_set_changes,
+                        final_stationarity,
+                        final_constr_viol,
+                        working_set: iter.working,
+                    });
+                }
+                Err(e) => return Err(e.into()),
             };
             n_qp_solves += 1;
             n_qp_working_set_changes += sol.stats.n_working_set_changes;
@@ -1074,6 +1106,29 @@ impl SqpAlgorithm {
                     n_qp_solves += 1;
                     if prox.status == QpStatus::Optimal {
                         sol = prox;
+                    } else if let Some(d) = sol
+                        .unbounded_ray
+                        .as_deref()
+                        .and_then(|ray| descent_ray_step(ray, &grad_f, n))
+                    {
+                        // The proximal re-solve has nothing to converge to
+                        // when the step QP is unbounded below *and has rows*:
+                        // it repeats proximal steps along the same open
+                        // direction until its iteration cap (gh#1173,
+                        // `min sin(3x) s.t. x² ≤ 4` from `x = 0.1`: 201
+                        // refactors, `MaxIter`, and the SQP stopped at its
+                        // non-stationary start as `QpStepFailed`). The ray
+                        // the QP did return is a step in its own right: it
+                        // descends on the true `∇f`, nothing in the
+                        // linearization blocks it, and the line search below
+                        // picks its length on the true NLP. Multipliers stay
+                        // where they are — the QP produced none for this step.
+                        tracing::debug!(target: "pounce::sqp",
+                            "proximal re-solve ended {:?}; stepping along the step                              QP's unit descent ray and letting the line search                              size it (gh#1173)", prox.status);
+                        sol.x = d;
+                        sol.lambda_g.clone_from(&iter.lambda_g);
+                        sol.lambda_x.clone_from(&iter.lambda_x);
+                        sol.status = QpStatus::Optimal;
                     }
                 }
             }
@@ -1347,6 +1402,7 @@ impl SqpAlgorithm {
                         &mut self.filter,
                         &iter.x,
                         &sol.x,
+                        grad_f.iter().zip(sol.x.iter()).map(|(g, d)| g * d).sum(),
                         f_curr,
                         &c_vals,
                         &bl_c,
@@ -1610,6 +1666,29 @@ fn ray_certifies_unbounded<N: SqpProblemSpec>(
         }
     }
     true
+}
+
+/// The step QP's recession ray `ray`, rescaled to unit max-norm over the
+/// NLP's own `n` variables, when it is a strict descent direction of the
+/// true objective (`∇fᵀd < 0`); `None` otherwise. Used as the step when
+/// the ray did not certify unboundedness and the proximal re-solve could not
+/// produce one either (gh#1173). Unit length in the iterate's own units is
+/// the longest step the line search will try; it only ever shortens it.
+fn descent_ray_step(ray: &[Number], grad_f: &[Number], n: usize) -> Option<Vec<Number>> {
+    if ray.len() < n || grad_f.len() != n {
+        return None;
+    }
+    let scale = ray[..n].iter().map(|v| v.abs()).fold(0.0, f64::max);
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let d: Vec<Number> = ray.iter().map(|v| v / scale).collect();
+    let slope: Number = grad_f.iter().zip(d.iter()).map(|(g, di)| g * di).sum();
+    let g_norm = grad_f.iter().map(|v| v * v).sum::<Number>().sqrt();
+    if !slope.is_finite() || slope >= -1e-9 * g_norm.max(1.0) {
+        return None;
+    }
+    Some(d)
 }
 
 #[derive(Debug, Clone, Copy)]
