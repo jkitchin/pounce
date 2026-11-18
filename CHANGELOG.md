@@ -53,6 +53,18 @@ changes.
   variable.
 
 ### Fixed
+- **`minimize` reads both sides of a quadratic constraint row when routing
+  to the conic solver** (gh#1174). The convex-QCQP detector treated every
+  quadratic row as `g(x) ≥ lo` and never read `hi`. So scipy's natural
+  `NonlinearConstraint(q, -inf, ub)` with `q` convex failed the convexity
+  test: `solver_selection="socp"` raised and `"auto"` fell back to the NLP
+  solver. A row with only `hi` finite is now read as `g ≤ hi`, which is convex
+  when `q` is. The same flaw also produced a wrong answer that the issue
+  missed. A two-sided row `lo ≤ g ≤ hi` with concave `g` routed to `socp`
+  with `g ≤ hi` silently dropped. `min ‖x‖² s.t. 1 ≤ ‖x‖² ≤ 4` returned
+  `f = 0` with success, where the answer is `1`. Such a row now stays on the
+  NLP path. Under the old code, a concave `q ≤ ub` made `auto` raise
+  "`h` contains NaN or Inf". That row now goes to the NLP solver.
 - **`minimize` detects a convex LP/QP without `jac` whatever the objective's
   constant term** (gh#1169). The structure probe finite-differenced `fun` twice
   at steps sized for general functions, which left `~2.5e-3·|f|` of round-off
