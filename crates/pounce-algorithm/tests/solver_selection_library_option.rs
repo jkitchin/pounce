@@ -227,7 +227,13 @@ fn every_convex_knob_is_registered_core_side() {
             .is_ok(),
         "`qp_gondzio_corr` should be a registered library option"
     );
-    for name in ["qp_hsde", "qp_equilibrate", "qp_crossover", "qp_presolve"] {
+    for name in [
+        "qp_hsde",
+        "qp_equilibrate",
+        "qp_crossover",
+        "qp_presolve",
+        "qp_certificate",
+    ] {
         assert!(
             o.set_string_value(name, "no", true, true).is_ok(),
             "`{name}` should be a registered library option"
