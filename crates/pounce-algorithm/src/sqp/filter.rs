@@ -220,6 +220,16 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         for (xt, (&xi, &pi)) in x_trial.iter_mut().zip(x.iter().zip(p.iter())) {
             *xt = xi + alpha * pi;
         }
+        // A trial that rounds to the current iterate is not a step, and
+        // every shorter one rounds there too, so the search has failed. Without
+        // this the `10·ε·|φ|` slack below accepts it as an f-type step (it
+        // changes nothing, so it "decreases" `φ` by zero within round-off) and
+        // the outer loop repeats it until its budget runs out: `jit1_node`
+        // (limited-memory) reached the interior point's objective by iteration
+        // 40, then took 160 identical steps of `‖αp‖ ≈ 2e-19` (gh#1173).
+        if x_trial == x {
+            break;
+        }
         let f_trial = nlp.eval_f(&x_trial);
         let c_trial = nlp.eval_c(&x_trial);
         let theta_trial = l1_violation(&x_trial, &c_trial, bl, bu, xl, xu);

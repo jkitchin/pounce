@@ -1124,7 +1124,18 @@ impl SqpAlgorithm {
                         // picks its length on the true NLP. Multipliers stay
                         // where they are — the QP produced none for this step.
                         tracing::debug!(target: "pounce::sqp",
-                            "proximal re-solve ended {:?}; stepping along the step                              QP's unit descent ray and letting the line search                              size it (gh#1173)", prox.status);
+                            "proximal re-solve ended {:?}; stepping along the step \
+                             QP's unit descent ray and letting the line search \
+                             size it (gh#1173)", prox.status);
+                        // `Optimal` here only routes the step to the line
+                        // search; nothing downstream reads it as "the QP
+                        // certified these multipliers". With the current
+                        // multipliers handed back, the `(1−α)λ + α·λ_qp` blend
+                        // after the line search leaves them unchanged, the
+                        // quasi-Newton pair is built at a fixed multiplier
+                        // (`curvature_pair`), and the next convergence test
+                        // measures stationarity at those multipliers afresh.
+                        // The elastic step below does exactly the same.
                         sol.x = d;
                         sol.lambda_g.clone_from(&iter.lambda_g);
                         sol.lambda_x.clone_from(&iter.lambda_x);
@@ -1674,6 +1685,16 @@ fn ray_certifies_unbounded<N: SqpProblemSpec>(
 /// the ray did not certify unboundedness and the proximal re-solve could not
 /// produce one either (gh#1173). Unit length in the iterate's own units is
 /// the longest step the line search will try; it only ever shortens it.
+///
+/// The unit length is deliberate. The ray carries a direction and no length
+/// (the model is unbounded along it, so its own minimizer is at infinity),
+/// and the step is taken only when the NLP has refuted the recession, i.e.
+/// the true objective turns back up somewhere along the ray. A longer first
+/// trial would only spend evaluations backtracking to where that happens; a
+/// model badly scaled in `x` pays for it at most one unit per outer
+/// iteration, until the next linearization yields an ordinary step. On the
+/// measured cases one ray step is taken per solve (`mpcc_scholtes4_biactive`
+/// once at iteration 0; issue B once).
 fn descent_ray_step(ray: &[Number], grad_f: &[Number], n: usize) -> Option<Vec<Number>> {
     if ray.len() < n || grad_f.len() != n {
         return None;

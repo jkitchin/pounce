@@ -2777,3 +2777,103 @@ fn issue_1173_filter_never_steps_uphill_on_an_unconstrained_model() {
         }
     }
 }
+
+/// `min 1e20·(x⁴/4 − x²/2)` from `x = 0.1`: bounded below, with
+/// `f''(0.1) ≈ −0.97e20`. The §4.5 inertia ladder tops out at `δ = 1e14`, so
+/// no shift makes the step QP's Hessian positive definite and its cold solve
+/// fails with an unrepairable factorization. This is the state gh#1173's case
+/// C reached at `f ≈ 8e19` before the filter fix, and C no longer gets there.
+struct Issue1173HugeNegativeCurvature;
+
+impl SqpProblemSpec for Issue1173HugeNegativeCurvature {
+    fn n(&self) -> usize {
+        1
+    }
+    fn m(&self) -> usize {
+        0
+    }
+    fn x_init(&self) -> Vec<Number> {
+        vec![0.1]
+    }
+    fn variable_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (vec![NLP_LOWER_BOUND_INF], vec![NLP_UPPER_BOUND_INF])
+    }
+    fn constraint_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        (Vec::new(), Vec::new())
+    }
+    fn eval_f(&mut self, x: &[Number]) -> Number {
+        1e20 * (0.25 * x[0].powi(4) - 0.5 * x[0] * x[0])
+    }
+    fn eval_grad_f(&mut self, x: &[Number]) -> Vec<Number> {
+        vec![1e20 * (x[0].powi(3) - x[0])]
+    }
+    fn eval_c(&mut self, _x: &[Number]) -> Vec<Number> {
+        Vec::new()
+    }
+    fn eval_jac_c(&mut self, _x: &[Number]) -> Triplet {
+        Triplet {
+            n_rows: 0,
+            n_cols: 1,
+            irow: Vec::new(),
+            jcol: Vec::new(),
+            vals: Vec::new(),
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[Number], _lambda_g: &[Number]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 1,
+            irow: vec![1],
+            jcol: vec![1],
+            vals: vec![1e20 * (3.0 * x[0] * x[0] - 1.0)],
+        }
+    }
+}
+
+/// An unrepairable step-QP factorization ends `QpStepFailed` with the
+/// iterate, not a hard `Err` (which the CLI reported as `Internal_Error` with
+/// `x = null`). The step QP's own verdict is asserted first, so the test
+/// cannot pass by never reaching the branch it pins.
+#[test]
+fn issue_1173_unrepairable_step_qp_factorization_is_qp_step_failed() {
+    let mut nlp = Issue1173HugeNegativeCurvature;
+    let x0 = nlp.x_init();
+    let qp_data = SqpQpData::build(
+        &x0,
+        &nlp.eval_grad_f(&x0),
+        &[],
+        &[],
+        &[],
+        &[NLP_LOWER_BOUND_INF],
+        &[NLP_UPPER_BOUND_INF],
+        nlp.eval_jac_c(&x0),
+        nlp.eval_hess_lag(&x0, &[]),
+        HessianInertia::Indefinite,
+    );
+    let mut qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let err = qp_solver
+        .solve(&qp_data.as_qp(), None, &QpOptions::default())
+        .expect_err("the step QP must fail to factor for this test to reach its branch");
+    assert!(
+        err.is_recoverable_factorization_failure(),
+        "expected an inertia/singular factorization failure, got {err:?}"
+    );
+
+    for glob in [SqpGlobalization::Filter, SqpGlobalization::L1Elastic] {
+        let qp_solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let opts = SqpOptions {
+            hessian: SqpHessianSource::Exact,
+            globalization: glob,
+            ..SqpOptions::default()
+        };
+        let mut nlp = Issue1173HugeNegativeCurvature;
+        let res = SqpAlgorithm::new(qp_solver, opts)
+            .optimize(&mut nlp)
+            .unwrap_or_else(|e| panic!("{glob:?}: hard error {e:?}"));
+        assert_eq!(res.status, SqpStatus::QpStepFailed, "{glob:?}");
+        assert_eq!(res.x, vec![0.1], "{glob:?}: the iterate is reported");
+        assert!(res.obj.is_finite(), "{glob:?}: obj {}", res.obj);
+    }
+}
