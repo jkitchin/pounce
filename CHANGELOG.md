@@ -108,7 +108,9 @@ changes.
   sixteenth to a third of the iterations. The CLI now measures both answers by
   their relative KKT residuals (primal, dual, duality gap, primal cone, dual
   cone, each relative to the terms it is made of) on the declared model and
-  reports the more accurate one, under its own status. A tie keeps the NLP
+  reports the more accurate one, under its own status. Both answers are read
+  against one scale, the larger of the two, so an answer cannot shrink its
+  own residuals by inflating its iterates or multipliers. A tie keeps the NLP
   answer; a convex answer whose status is a failure never replaces an NLP
   success; and a convex `NumericalFailure` (the convex arm's own verification
   refusing its point) never wins. The comparison is printed on stderr and

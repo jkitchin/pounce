@@ -184,3 +184,102 @@ fn a_non_finite_point_reads_as_nan_not_zero() {
     let r = point([f64::NAN, 0.25], -2.0, 1.0, [0.0, 0.0]).relative_kkt_residuals(&model());
     assert!(r.max().is_nan(), "{r:?}");
 }
+
+/// gh #1184 review: reading each point against its *own* scale lets a point
+/// shrink its residuals by inflating its own terms. `min x s.t. x = 1, x ≤ 1`:
+/// the honest point carries stationarity error `e` with `y = −1 + e, z = 0`.
+/// The inflated one carries a 20% larger error, plus `t = 1e6` on `y` and its
+/// exact opposite on the active `z`; the two cancel in stationarity and
+/// complementarity, but put `‖Aᵀy‖∞ ≈ ‖Gᵀz‖∞ ≈ t` into its own dual scale.
+fn inflation_pair() -> (QpProblem, QpSolution, QpSolution) {
+    let (e, t) = (1e-6, 1e6);
+    let prob = QpProblem {
+        n: 1,
+        p_lower: vec![],
+        c: vec![1.0],
+        a: vec![Triplet {
+            row: 0,
+            col: 0,
+            val: 1.0,
+        }],
+        b: vec![1.0],
+        g: vec![Triplet {
+            row: 0,
+            col: 0,
+            val: 1.0,
+        }],
+        h: vec![1.0],
+        lb: vec![],
+        ub: vec![],
+    };
+    let pt = |y: f64, z: f64| QpSolution {
+        status: QpStatus::Optimal,
+        x: vec![1.0],
+        y: vec![y],
+        z: vec![z],
+        z_lb: vec![0.0],
+        z_ub: vec![0.0],
+        obj: 1.0,
+        iters: 0,
+        iterates: Vec::new(),
+    };
+    let honest = pt(-1.0 + e, 0.0);
+    let inflated = pt(-1.0 + 1.2 * e - t, t);
+    (prob, honest, inflated)
+}
+
+#[test]
+fn read_against_its_own_scale_an_inflated_point_wins() {
+    let (prob, honest, inflated) = inflation_pair();
+    let h = honest.relative_kkt_residuals(&prob).max();
+    let i = inflated.relative_kkt_residuals(&prob).max();
+    assert!(
+        i < h,
+        "precondition: the inflated point must outrank the honest one on \
+         its own scale, or this pair does not show the defect; {i:e} vs {h:e}"
+    );
+}
+
+#[test]
+fn read_against_a_shared_scale_it_does_not() {
+    let (prob, honest, inflated) = inflation_pair();
+    let scale = honest
+        .relative_kkt_scale(&prob)
+        .shared_with(&inflated.relative_kkt_scale(&prob));
+    let h = honest.relative_kkt_residuals_at(&prob, &scale).max();
+    let i = inflated.relative_kkt_residuals_at(&prob, &scale).max();
+    assert!(h < i, "the larger error must read larger; {h:e} vs {i:e}");
+}
+
+/// The shared scale is the larger of the two, component by component, and a
+/// non-finite component on one side is ignored: a broken candidate already
+/// reads `NaN` on its own residuals and must not zero the other's.
+#[test]
+fn shared_with_takes_the_larger_finite_component() {
+    use pounce_convex::RelativeKktScale;
+    let a = RelativeKktScale {
+        primal: 2.0,
+        dual: 5.0,
+        gap: f64::INFINITY,
+    };
+    let b = RelativeKktScale {
+        primal: 3.0,
+        dual: f64::NAN,
+        gap: 4.0,
+    };
+    let s = a.shared_with(&b);
+    assert_eq!((s.primal, s.dual, s.gap), (3.0, 5.0, 4.0));
+    assert_eq!(s, b.shared_with(&a));
+}
+
+/// A point read against its own scale through `relative_kkt_residuals_at`
+/// is exactly `relative_kkt_residuals`: the split changes no reading.
+#[test]
+fn the_own_scale_reading_is_unchanged() {
+    let p = point([0.75, 0.251], -2.01, 1.1, [0.1, 0.0]);
+    let own = p.relative_kkt_scale(&model());
+    assert_eq!(
+        p.relative_kkt_residuals(&model()),
+        p.relative_kkt_residuals_at(&model(), &own)
+    );
+}

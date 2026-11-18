@@ -590,15 +590,104 @@ impl RelativeKktResiduals {
     }
 }
 
+/// The three denominators of [`RelativeKktResiduals`] — what each residual is
+/// read *against* — taken from one point: `1 + max(‖b‖∞, ‖h‖∞, ‖Ax‖∞,
+/// ‖Gx‖∞)` for the primal and primal-cone residuals, `1 + max(‖c‖∞, ‖Px‖∞,
+/// ‖Aᵀy‖∞, ‖Gᵀz‖∞, ‖z_lb − z_ub‖∞)` for the dual and dual-cone ones, and
+/// `1 + |p| + |d|` for the gap.
+///
+/// Separate from the residuals so that two points can be read against **one**
+/// scale ([`Self::shared_with`], [`QpSolution::relative_kkt_residuals_at`]).
+/// Each point's own scale is the right reading for a termination test, and the
+/// wrong one for a comparison: the scale grows with the point's own iterates
+/// and multipliers, so a candidate whose duals drifted to `1e8` reads a
+/// stationarity error of `1` as `1e-8` and outranks an honest point for it
+/// (gh #1184 review).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelativeKktScale {
+    pub primal: f64,
+    pub dual: f64,
+    pub gap: f64,
+}
+
+impl RelativeKktScale {
+    /// The component-wise larger of two scales, so that neither point can
+    /// shrink its residuals by inflating its own terms. A non-finite component
+    /// on one side is ignored rather than propagated: a broken candidate
+    /// already reads `NaN` on its own residuals, and must not also zero the
+    /// other candidate's by contributing an infinite denominator.
+    pub fn shared_with(&self, other: &Self) -> Self {
+        let pick = |a: f64, b: f64| match (a.is_finite(), b.is_finite()) {
+            (true, true) => a.max(b),
+            (true, false) => a,
+            (false, true) => b,
+            (false, false) => f64::NAN,
+        };
+        Self {
+            primal: pick(self.primal, other.primal),
+            dual: pick(self.dual, other.dual),
+            gap: pick(self.gap, other.gap),
+        }
+    }
+}
+
+/// The unnormalized pieces [`RelativeKktResiduals`] is built from, and the
+/// point's own [`RelativeKktScale`].
+struct RelativeKktParts {
+    primal: f64,
+    dual: f64,
+    gap: f64,
+    primal_cone: f64,
+    dual_cone: f64,
+    finite: bool,
+    scale: RelativeKktScale,
+}
+
 impl QpSolution {
-    /// The five relative KKT residuals of this point on `prob`; see
+    /// The five relative KKT residuals of this point on `prob`, each read
+    /// against this point's own [`RelativeKktScale`]; see
     /// [`RelativeKktResiduals`]. Orthant / box problems only — a conic
     /// solve's multipliers live in their cones, not in `z ≥ 0`.
     ///
     /// A non-finite entry anywhere makes the corresponding residual `NaN`,
-    /// which a caller ranking points must treat as "worst", not compare.
-    #[allow(clippy::needless_range_loop)]
+    /// which a caller ranking points must treat as "worst", not compare. To
+    /// *compare* two points, read both against one scale instead:
+    /// [`Self::relative_kkt_residuals_at`] with [`RelativeKktScale::shared_with`].
     pub fn relative_kkt_residuals(&self, prob: &QpProblem) -> RelativeKktResiduals {
+        let parts = self.relative_kkt_parts(prob);
+        let scale = parts.scale;
+        Self::normalize(parts, &scale)
+    }
+
+    /// This point's own [`RelativeKktScale`] on `prob`.
+    pub fn relative_kkt_scale(&self, prob: &QpProblem) -> RelativeKktScale {
+        self.relative_kkt_parts(prob).scale
+    }
+
+    /// The five relative KKT residuals of this point read against a scale the
+    /// caller supplies — typically [`RelativeKktScale::shared_with`] over the
+    /// points being compared, so that all of them are measured by one ruler.
+    pub fn relative_kkt_residuals_at(
+        &self,
+        prob: &QpProblem,
+        scale: &RelativeKktScale,
+    ) -> RelativeKktResiduals {
+        Self::normalize(self.relative_kkt_parts(prob), scale)
+    }
+
+    fn normalize(p: RelativeKktParts, scale: &RelativeKktScale) -> RelativeKktResiduals {
+        let guard = |v: f64| if p.finite { v } else { f64::NAN };
+        RelativeKktResiduals {
+            primal: guard(p.primal / scale.primal),
+            dual: guard(p.dual / scale.dual),
+            gap: guard(p.gap / scale.gap),
+            primal_cone: guard(p.primal_cone / scale.primal),
+            dual_cone: guard(p.dual_cone / scale.dual),
+        }
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    fn relative_kkt_parts(&self, prob: &QpProblem) -> RelativeKktParts {
         let n = prob.n;
         let x = &self.x;
         let inf_norm = |v: &[f64]| v.iter().fold(0.0_f64, |m, a| m.max(a.abs()));
@@ -675,13 +764,18 @@ impl QpSolution {
             && self.z.iter().all(|v| v.is_finite())
             && self.z_lb.iter().all(|v| v.is_finite())
             && self.z_ub.iter().all(|v| v.is_finite());
-        let guard = |v: f64| if finite { v } else { f64::NAN };
-        RelativeKktResiduals {
-            primal: guard(eq.max(ineq) / primal_scale),
-            dual: guard(inf_norm(&r) / dual_scale),
-            gap: guard((p_obj - d_obj).abs() / (1.0 + p_obj.abs() + d_obj.abs())),
-            primal_cone: guard(cone.max(0.0) / primal_scale),
-            dual_cone: guard(dual_cone / dual_scale),
+        RelativeKktParts {
+            primal: eq.max(ineq),
+            dual: inf_norm(&r),
+            gap: (p_obj - d_obj).abs(),
+            primal_cone: cone.max(0.0),
+            dual_cone,
+            finite,
+            scale: RelativeKktScale {
+                primal: primal_scale,
+                dual: dual_scale,
+                gap: 1.0 + p_obj.abs() + d_obj.abs(),
+            },
         }
     }
 }
