@@ -573,6 +573,69 @@ on the two-variable example above. In Rust, `pounce_convex::hsde_scalars`
 (`clear()` before the solve, `take()` after, same thread) carries the same
 pair.
 
+#### The certificate, in your problem's own rows (gh#1181)
+
+The ray above lives wherever the engine found it: in the presolved,
+equilibrated problem. A certificate you can check needs it in *your* rows
+and columns, normalized, and checked — so an infeasible or unbounded
+verdict now also carries one, built by `pounce_convex::certificate` and
+checked against the problem you passed, independently of the solver:
+
+- **Primal infeasible** — a Farkas certificate `(y, z, z_lb, z_ub)` with
+  `Aᵀy + Gᵀz − z_lb + z_ub = 0` and
+  `bᵀy + hᵀz − lbᵀz_lb + ubᵀz_ub < 0`, `z` in the dual cone, and each bound
+  multiplier non-negative and zero on an infinite bound. The bound
+  multipliers are derived from `(y, z)` column by column — the part of
+  `Aᵀy + Gᵀz` each finite bound can absorb — rather than read off the
+  engine.
+- **Unbounded** — a recession direction `d` with `Pd = 0`, `Ad = 0`,
+  `−Gd` in the cone, `d` respecting every finite bound's sign, and
+  `cᵀd < 0`.
+
+Each is normalized to unit inf-norm and reported with its residuals and a
+`verified` flag. *Verified* is the engine's own standard, applied to the
+original data: the value negative beyond the rounding of the dot product
+that formed it, and `margin` — the relative value over the relative
+residual, the radius in units of the data's scale within which a Farkas
+ray excludes every feasible point — at least `1e4`. A certificate that
+does not verify is still reported: that is how a doubtful verdict would
+show (gh#414 was a false *optimal*; a false *infeasible* would surface as
+a certificate that does not check).
+
+**Through presolve.** Postsolve lifts *optimal* duals: a removed row's
+multiplier is rebuilt from stationarity (`Px + c + Aᵀy + Gᵀz`) at the
+lifted point, and a tightened bound's multiplier is handed back to the row
+that implied it only if the lifted `x` sits on that bound. Neither is
+right for a ray, and on NETLIB-infeas 8 of the 14 presolved models the IPM
+certified came back with a lifted ray that failed the check. The ray is
+therefore lifted a second time by `Presolve::postsolve_farkas`, which runs
+the same postsolve with the objective removed and every bound-activity
+test replaced by "the bound is finite"; all 14 then verify. A verdict
+**presolve** reaches by itself (15 of the 29) has no ray to lift, so the
+unreduced model is re-solved for one — the verdict and every reported
+number stay the first solve's. That re-solve is the cost of the feature:
+up to ~7 s on NETLIB-infeas (`gosh`, against a 0.2 s verdict), and more
+on a model where one IPM iteration is expensive. `qp_certificate=check`
+skips it (a presolve verdict then reports no certificate);
+`qp_certificate=no` reports none at all.
+
+**Where it appears.** The CLI prints `Certificate: Farkas (primal
+infeasibility), verified, margin …` under the result line and writes
+`solution.certificate` into the `--json-output` report, with `lambda` one
+multiplier per `.nl` constraint (positive on its upper side, negative on
+its lower; a range row's two halves netted into one), `z_l`/`z_u` per
+variable, or `d` per variable — in minimize form, so a maximize model's
+`value` is `−∇fᵀd`. Python's `solve_qp` / `solve_socp` return it as
+`QpResult.certificate` (`solve_qp` takes `qp_certificate=` too).
+[`benchmarks/lp_infeas/check_certificates.py`](https://github.com/jkitchin/pounce/tree/main/benchmarks/lp_infeas/check_certificates.py)
+re-checks every report against its `.nl` with no pounce code.
+
+Not covered yet: the conic QCQP arm of the CLI (`cvx-qcqp`) — its
+multipliers are on second-order blocks of a reformulation, not on your
+quadratic rows — and the C API's `PounceQpGetCertificate`, which still
+reports only the scale and `τ`/`κ`. The NLP arm has no certificate to give:
+"locally infeasible" is a stationary point of the constraint violation.
+
 #### Degenerate LP duals are not unique
 
 At a degenerate vertex the dual solution is not unique: the optimal duals

@@ -3243,6 +3243,7 @@ impl IpoptApplication {
             "qp_hsde",
             "qp_equilibrate",
             "qp_crossover",
+            "qp_certificate",
         ];
         let name = CONVEX_ONLY.iter().find(|name| {
             crate::unimplemented_options::set_to_a_non_default(

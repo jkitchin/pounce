@@ -19,7 +19,7 @@
 use numpy::IntoPyArray;
 use pounce_convex::pipeline::{
     EngineSwitches, PipelineError, PresolveReport, check_ipm_inertia, demote_unverified_optimal,
-    solve_presolved,
+    solve_presolved_with_ray,
 };
 use pounce_convex::{ActiveSetOverrides, HessianInertia, solve_qp_active_set_inertia};
 use pounce_convex::{
@@ -242,6 +242,11 @@ fn solution_dict_hsde<'py>(
     d.set_item("kappa", hsde.map(|h| h.kappa))?;
     // One definition with the C API's `PounceQpGetCertificate`.
     d.set_item("certificate_scale", pounce_convex::certificate_scale(&sol))?;
+    // gh#1181: the certificate itself, checked against the caller's own
+    // problem. `solve_qp` replaces this with one that may also use the
+    // presolve lift and an unreduced re-solve (see `attach_certificate`).
+    let cert = prob.and_then(|p| pounce_convex::certificate(p, cones, &sol));
+    attach_certificate(py, &d, cert)?;
     d.set_item("obj", sol.obj)?;
     d.set_item("iters", sol.iters)?;
 
@@ -307,6 +312,63 @@ fn solution_dict_hsde<'py>(
     d.set_item("z_lb", sol.z_lb.into_pyarray_bound(py))?;
     d.set_item("z_ub", sol.z_ub.into_pyarray_bound(py))?;
     Ok(d)
+}
+
+/// Set `d["certificate"]` (gh#1181): `None`, or a dict with `kind`
+/// (`"primal_infeasible"` / `"dual_infeasible"`), `verified`, `source`,
+/// `value`, `margin`, and either the Farkas ray `y`, `z`, `z_lb`, `z_ub` with
+/// `residual`, `cone_violation`, or the recession direction `d` with
+/// `hessian_residual`, `equality_residual`, `cone_violation`,
+/// `bound_violation`. See `pounce_convex::certificate` for the algebra.
+fn attach_certificate(
+    py: Python<'_>,
+    d: &Bound<'_, PyDict>,
+    cert: Option<pounce_convex::Certificate>,
+) -> PyResult<()> {
+    use pounce_convex::Certificate;
+    let Some(cert) = cert else {
+        return d.set_item("certificate", py.None());
+    };
+    let cd = PyDict::new_bound(py);
+    cd.set_item("kind", cert.kind())?;
+    cd.set_item("verified", cert.verified())?;
+    cd.set_item("source", cert.source().as_str())?;
+    match cert {
+        Certificate::PrimalInfeasible(f) => {
+            cd.set_item("value", f.value)?;
+            cd.set_item("margin", f.margin)?;
+            cd.set_item("residual", f.residual)?;
+            cd.set_item("cone_violation", f.cone_violation)?;
+            cd.set_item("y", f.y.into_pyarray_bound(py))?;
+            cd.set_item("z", f.z.into_pyarray_bound(py))?;
+            cd.set_item("z_lb", f.z_lb.into_pyarray_bound(py))?;
+            cd.set_item("z_ub", f.z_ub.into_pyarray_bound(py))?;
+        }
+        Certificate::DualInfeasible(r) => {
+            cd.set_item("value", r.value)?;
+            cd.set_item("margin", r.margin)?;
+            cd.set_item("hessian_residual", r.hessian_residual)?;
+            cd.set_item("equality_residual", r.equality_residual)?;
+            cd.set_item("cone_violation", r.cone_violation)?;
+            cd.set_item("bound_violation", r.bound_violation)?;
+            cd.set_item("d", r.d.into_pyarray_bound(py))?;
+        }
+    }
+    d.set_item("certificate", cd)
+}
+
+/// `qp_certificate=`: `"yes"` (default) re-solves the unreduced problem for a
+/// ray when the verdict's own does not check; `"check"` never re-solves;
+/// `"no"` reports none. Returns `(report, may_resolve)`.
+fn parse_certificate_mode(v: Option<&str>) -> PyResult<(bool, bool)> {
+    match v.unwrap_or("yes") {
+        "yes" => Ok((true, true)),
+        "check" => Ok((true, false)),
+        "no" => Ok((false, false)),
+        other => Err(PyValueError::new_err(format!(
+            "solve_qp: qp_certificate must be 'yes', 'check' or 'no', got {other:?}"
+        ))),
+    }
 }
 
 /// Extract a `QpWarmStart` from a Python mapping (typically a previous
@@ -579,7 +641,7 @@ fn attach_engine_reports(
 /// [`EngineSwitches`] (moved to `pounce_convex::pipeline`, gh#1147) for
 /// which engine reads which, and what is refused.
 #[pyfunction]
-#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm", tau=None, tau_max=None, time_limit=None, hessian_inertia="psd", qp_presolve=None, qp_reg=None, qp_hsde=None, qp_equilibrate=None, qp_crossover=None))]
+#[pyo3(signature = (prob, tol=None, max_iter=None, warm_start=None, collect_iterates=false, method="ipm", tau=None, tau_max=None, time_limit=None, hessian_inertia="psd", qp_presolve=None, qp_reg=None, qp_hsde=None, qp_equilibrate=None, qp_crossover=None, qp_certificate=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_qp<'py>(
     py: Python<'py>,
@@ -598,8 +660,11 @@ pub fn solve_qp<'py>(
     qp_hsde: Option<bool>,
     qp_equilibrate: Option<bool>,
     qp_crossover: Option<bool>,
+    qp_certificate: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
     check_tau(tau, "tau")?;
+    let (want_cert, may_resolve) = parse_certificate_mode(qp_certificate)?;
+    let t0 = std::time::Instant::now();
     check_tau(tau_max, "tau_max")?;
     let inertia = parse_hessian_inertia(hessian_inertia)?;
     let limit = time_limit_duration(time_limit, "solve_qp")?;
@@ -617,6 +682,33 @@ pub fn solve_qp<'py>(
     switches.apply(&mut o);
     let presolve_on = switches.presolve.unwrap_or(false);
     let warm = warm_start.map(warm_from_dict).transpose()?;
+    // gh#1181: the certificate for an infeasible or unbounded verdict.
+    // `lift` is the presolve-lifted Farkas ray; the re-solve (an unreduced,
+    // cold interior-point solve, within what is left of `time_limit`) runs
+    // only when no ray before it checks, and only where it could find a
+    // different one: after presolve, or behind the active-set engine. Never
+    // on a `P` the caller reported indefinite, which the IPM cannot take.
+    let certify = |sol: &QpSolution, lift: Option<(Vec<f64>, Vec<f64>)>, differs: bool| {
+        if !want_cert {
+            return None;
+        }
+        let lift = lift.as_ref().map(|(y, z)| (y.as_slice(), z.as_slice()));
+        pounce_convex::certificate_or_resolve(&prob.inner, &[], sol, lift, || {
+            let left = o.time_limit.map(|l| l.saturating_sub(t0.elapsed()));
+            (may_resolve
+                && differs
+                && inertia != HessianInertia::Indefinite
+                && left.is_none_or(|l| !l.is_zero()))
+            .then(|| {
+                let ro = QpOptions {
+                    time_limit: left,
+                    collect_iterates: false,
+                    ..o
+                };
+                solve_qp_ipm(&prob.inner, &ro, backend)
+            })
+        })
+    };
 
     // `method` selects the engine, so that the *same* engine is reachable from
     // Python and from the CLI. Before this, `solver_selection="qp-active-set"`
@@ -625,27 +717,33 @@ pub fn solve_qp<'py>(
     match method {
         "ipm" => {
             check_ipm_inertia(inertia).map_err(pipeline_err)?;
-            let (sol, hs, pre, cross) = py.allow_threads(|| {
+            let (sol, hs, pre, cross, cert) = py.allow_threads(|| {
                 pounce_convex::hsde_scalars::clear();
                 pounce_convex::crossover::clear_report();
-                let (sol, pre) = match &warm {
-                    Some(w) => (solve_qp_ipm_warm(&prob.inner, &o, w, backend), None),
+                let (sol, pre, lift) = match &warm {
+                    Some(w) => (solve_qp_ipm_warm(&prob.inner, &o, w, backend), None, None),
                     None if presolve_on => {
-                        let (sol, pre) =
-                            solve_presolved(&prob.inner, &o, |p, po| solve_qp_ipm(p, po, backend));
-                        (demote_unverified_optimal(&prob.inner, &o, sol), Some(pre))
+                        let (sol, pre, lift) =
+                            solve_presolved_with_ray(&prob.inner, &o, |p, po| {
+                                solve_qp_ipm(p, po, backend)
+                            });
+                        (
+                            demote_unverified_optimal(&prob.inner, &o, sol),
+                            Some(pre),
+                            lift,
+                        )
                     }
-                    None => (solve_qp_ipm(&prob.inner, &o, backend), None),
+                    None => (solve_qp_ipm(&prob.inner, &o, backend), None, None),
                 };
-                (
-                    sol,
-                    pounce_convex::hsde_scalars::take(),
-                    pre,
-                    pounce_convex::crossover::take_report(),
-                )
+                // Taken before the certificate's re-solve can overwrite them.
+                let hs = pounce_convex::hsde_scalars::take();
+                let cross = pounce_convex::crossover::take_report();
+                let cert = certify(&sol, lift, presolve_on || warm.is_some());
+                (sol, hs, pre, cross, cert)
             });
             let d = solution_dict_hsde(py, sol, Some(&prob.inner), &[], hs, o.tol)?;
             attach_engine_reports(py, &d, pre, cross)?;
+            attach_certificate(py, &d, cert)?;
             Ok(d)
         }
         "active-set" => {
@@ -658,20 +756,23 @@ pub fn solve_qp<'py>(
                 ));
             }
             let ov = ActiveSetOverrides::default();
-            let (sol, pre) = py.allow_threads(|| {
-                if presolve_on {
-                    let (sol, pre) = solve_presolved(&prob.inner, &o, |p, po| {
+            let (sol, pre, cert) = py.allow_threads(|| {
+                let (sol, pre, lift) = if presolve_on {
+                    let (sol, pre, lift) = solve_presolved_with_ray(&prob.inner, &o, |p, po| {
                         solve_qp_active_set_inertia(p, po, &ov, inertia, &mut backend)
                     });
-                    (sol, Some(pre))
+                    (sol, Some(pre), lift)
                 } else {
                     let sol =
                         solve_qp_active_set_inertia(&prob.inner, &o, &ov, inertia, &mut backend);
-                    (sol, None)
-                }
+                    (sol, None, None)
+                };
+                let cert = certify(&sol, lift, true);
+                (sol, pre, cert)
             });
             let d = solution_dict(py, sol, Some(&prob.inner), &[], o.tol)?;
             attach_engine_reports(py, &d, pre, None)?;
+            attach_certificate(py, &d, cert)?;
             Ok(d)
         }
         other => Err(PyValueError::new_err(format!(

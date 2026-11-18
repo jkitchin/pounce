@@ -671,6 +671,64 @@ pub struct SolutionInfo {
     /// Empty when no sensitivity / reduced-Hessian step ran.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub suffixes: Vec<SolutionSuffix>,
+    /// The certificate behind an infeasible or unbounded verdict of a convex
+    /// engine (gh#1181); absent on every other status and on the NLP arm,
+    /// whose "locally infeasible" is a stationary point of the constraint
+    /// violation and certifies nothing. See [`CertificateInfo`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub certificate: Option<CertificateInfo>,
+}
+
+/// An infeasibility or unboundedness certificate, normalized to unit
+/// inf-norm and expressed in the model's own constraints and variables
+/// (`pounce_convex::certificate`, gh#1181).
+///
+/// `kind = "primal_infeasible"` is a Farkas certificate: with `lambda[i]`
+/// multiplying constraint `i`'s body (positive on its upper side, negative on
+/// its lower side; free on an equality) and `z_l`, `z_u` the variable-bound
+/// multipliers, `Σᵢ lambda[i]·∇gᵢ − z_l + z_u = 0` up to `residual`, and
+/// `value` — the sum of each multiplier times the bound it is on — is
+/// negative, so no point satisfies the constraints and bounds together.
+///
+/// `kind = "dual_infeasible"` is a recession direction `d`: it keeps every
+/// constraint and bound satisfied along `x + t·d` and drives the objective
+/// (in minimize form: a maximize model's objective is negated) to `−∞`, with
+/// `value = ∇fᵀd < 0`.
+///
+/// `verified` says whether the certificate passed the independent check
+/// against the model as solved; `margin` is the ratio that check reads
+/// (`null` when every residual is exactly zero). A certificate is reported
+/// even when it does not verify — that is how a doubtful verdict shows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CertificateInfo {
+    /// `"primal_infeasible"` or `"dual_infeasible"`.
+    pub kind: String,
+    pub verified: bool,
+    /// `"solve"` (the verdict's own ray, lifted through presolve) or
+    /// `"unreduced_resolve"` (a re-solve without presolve supplied the ray;
+    /// the verdict is still the first solve's).
+    pub source: String,
+    /// Farkas value (primal) or `∇fᵀd` (dual); negative for a certificate.
+    pub value: Number,
+    /// The check's margin; `null` for an exact certificate.
+    #[serde(default)]
+    pub margin: Option<Number>,
+    /// Constraint multipliers, one per constraint (primal only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub lambda: Vec<Number>,
+    /// Lower-bound multipliers, one per variable (primal only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub z_l: Vec<Number>,
+    /// Upper-bound multipliers, one per variable (primal only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub z_u: Vec<Number>,
+    /// Recession direction, one entry per variable (dual only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub d: Vec<Number>,
+    /// Named residuals of the check: `stationarity` and `cone_violation`
+    /// (primal); `hessian`, `equality`, `cone_violation` and
+    /// `bound_violation` (dual).
+    pub residuals: std::collections::BTreeMap<String, Number>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1003,6 +1061,7 @@ impl ReportBuilder {
                 x: Vec::new(),
                 lambda: Vec::new(),
                 suffixes: Vec::new(),
+                certificate: None,
             },
             stats: empty_stats(),
             iterations: Vec::new(),

@@ -476,7 +476,7 @@ pub struct QpIterate {
 /// * PSD — `max(0, −λ_min(smat s))`
 /// * exponential — `max(0, −ψ)` for `ψ = y·log(z/y) − x`, plus `y, z ≥ 0`
 /// * power — `max(0, |x| − y^α z^{1−α})`, plus `y, z ≥ 0`
-fn cone_violation(spec: &ConeSpec, s: &[f64]) -> f64 {
+pub(crate) fn cone_violation(spec: &ConeSpec, s: &[f64]) -> f64 {
     let neg = |v: f64| (-v).max(0.0);
     match spec {
         ConeSpec::Nonneg(_) => s.iter().fold(0.0_f64, |m, &si| m.max(neg(si))),

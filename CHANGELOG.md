@@ -10,6 +10,33 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Infeasible and unbounded convex verdicts carry their certificate
+  (gh#1181).** On `primal_infeasible` / `dual_infeasible` the convex LP/QP
+  arm now returns a Farkas ray or a recession direction in the caller's own
+  rows and columns, normalized, with its residuals and a `verified` flag
+  from a check against the original data that reads nothing from the
+  solver. The CLI prints a `Certificate:` line and writes
+  `solution.certificate` (one `lambda` per `.nl` constraint) into the JSON
+  report; Python's `solve_qp` / `solve_socp` return
+  `QpResult.certificate`. A ray found after presolve is lifted by a new
+  objective-free postsolve, `Presolve::postsolve_farkas`: the ordinary one
+  rebuilds multipliers from `Px + c` and from bound activity at the lifted
+  point, and 8 of the 14 presolved NETLIB-infeas rays it lifted failed the
+  check, against 0 of 14 now. A verdict presolve reaches on its own has no
+  ray, so the unreduced model is re-solved for one; that is the feature's
+  cost (up to ~7 s on NETLIB-infeas `gosh`), and the new option
+  `qp_certificate` (`yes` / `check` / `no`, CLI and `solve_qp`) turns it
+  off. No verdict, iteration count or reported point changes. All 29
+  NETLIB-infeas certificates verify, and pass
+  `benchmarks/lp_infeas/check_certificates.py`, which re-checks a report
+  against its `.nl` independently. Not yet on the CLI's conic QCQP arm or
+  in the C API.
+
+  **Rust API:** `pounce_convex::certificate` (`Certificate`,
+  `certificate`, `certificate_or_resolve`),
+  `pipeline::solve_presolved_with_ray`, and
+  `pounce_solve_report::SolutionInfo::certificate` (a new public field, so
+  a struct literal of `SolutionInfo` needs `certificate: None`).
 - **`nlp_scaling_untagged_constr` gives user scaling a factor for the rows
   the user did not scale.** Under `nlp_scaling_method=user-scaling`, the
   value `gradient-based` gives each constraint row with no user factor the
