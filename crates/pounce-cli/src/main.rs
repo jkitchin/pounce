@@ -3755,29 +3755,53 @@ fn run_convex_qp(
     // and the gates below see it as before. Gated on the reduced solve having
     // been `Optimal`, so it fires only when postsolve itself is what failed --
     // a solve that stalled on the reduced problem would stall again here.
-    let sol = if reduced_was_optimal && sol.status == QpStatus::OptimalInaccurate {
-        let retry = {
-            let _t = timing.solve.guard();
-            ipm_solve(&qp, &solve_opts())
-        };
-        if retry.status == QpStatus::Optimal {
-            presolve_log.push(format!(
-                "Presolve: the postsolved point failed the KKT check (error {:.2e} \
+    //
+    // The retry spends the caller's budget, not a fresh one (gh#1185 review):
+    // it gets the `max_iter` the reduced solve left over and is skipped when
+    // nothing is left, so a success is never reported past the cap. A retry
+    // that does not reach `Optimal` is said on stderr and its iterations are
+    // counted on the point that stands, so a stalled retry is not silent cost.
+    let retry_budget = qp_opts.max_iter.saturating_sub(sol.iters);
+    let sol =
+        if reduced_was_optimal && sol.status == QpStatus::OptimalInaccurate && retry_budget > 0 {
+            let postsolved_kkt = sol.kkt_residuals_above_floor(&qp).kkt_error();
+            let retry_t0 = std::time::Instant::now();
+            let retry = {
+                let _t = timing.solve.guard();
+                let mut o = solve_opts();
+                o.max_iter = retry_budget;
+                ipm_solve(&qp, &o)
+            };
+            if retry.status == QpStatus::Optimal {
+                presolve_log.push(format!(
+                "Presolve: the postsolved point failed the KKT check (error {postsolved_kkt:.2e} \
                  against tol {:.1e}); re-solved without presolve",
-                sol.kkt_residuals_above_floor(&qp).kkt_error(),
                 qp_opts.tol,
             ));
-            pounce_convex::QpSolution {
-                // Both solves' iterations were spent on this answer.
-                iters: sol.iters + retry.iters,
-                ..retry
+                pounce_convex::QpSolution {
+                    // Both solves' iterations were spent on this answer.
+                    iters: sol.iters + retry.iters,
+                    ..retry
+                }
+            } else {
+                eprintln!(
+                    "pounce: note: the postsolved point failed the KKT check (error \
+                 {postsolved_kkt:.2e} against tol {:.1e}); re-solving without presolve \
+                 ended {:?} after {} iterations in {:.3}s, so the postsolved point \
+                 stands (gh #1180)",
+                    qp_opts.tol,
+                    retry.status,
+                    retry.iters,
+                    retry_t0.elapsed().as_secs_f64(),
+                );
+                pounce_convex::QpSolution {
+                    iters: sol.iters + retry.iters,
+                    ..sol
+                }
             }
         } else {
             sol
-        }
-    } else {
-        sol
-    };
+        };
     let elapsed = t0.elapsed().as_secs_f64();
 
     // gh #535: the convex path finished an LP without a certificate. An LP is

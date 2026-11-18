@@ -80,7 +80,8 @@ fn tmp_path(tag: &str, ext: &str) -> PathBuf {
     p
 }
 
-/// Solve `stem` with `opts`, returning the JSON report and stdout.
+/// Solve `stem` with `opts`, returning the JSON report and stdout followed by
+/// stderr (the failed-retry note is on stderr).
 fn solve(stem: &str, opts: &[&str]) -> (SolveReport, String) {
     let json = tmp_path(stem, "json");
     let mut cmd = Command::new(pounce_exe());
@@ -102,7 +103,11 @@ fn solve(stem: &str, opts: &[&str]) -> (SolveReport, String) {
     let _ = std::fs::remove_file(&json);
     (
         serde_json::from_str(&text).expect("parse SolveReport JSON"),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
+        format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
     )
 }
 
@@ -145,6 +150,46 @@ fn qpilotno_postsolve_failure_is_retried_unreduced() {
         it <= 120,
         "{stem}: {it} iterations (measured 84; the NLP reroute was 283 + 42)"
     );
+}
+
+/// The retry's third branch: taken, but not `Optimal`, so the postsolved point
+/// stands. Reached deterministically through the budget: the reduced solve
+/// spends 42 of `max_iter = 50`, the unreduced retry gets the remaining 8 and
+/// ends `IterationLimit`. The retry spends the caller's budget, never a fresh
+/// one (gh#1185 review: it used to get the full `max_iter` and report
+/// `Optimal` at 84 iterations under a cap of 50), and its failure is said and
+/// counted rather than dropped.
+#[test]
+fn qpilotno_failed_retry_keeps_the_postsolved_point_within_max_iter() {
+    let stem = "convex_qp_qpilotno";
+    for cap in [45usize, 50] {
+        let arg = format!("max_iter={cap}");
+        let (r, out) = solve(stem, &[arg.as_str()]);
+        assert!(
+            out.contains("re-solving without presolve ended IterationLimit"),
+            "{stem} @ {arg}: the failed-retry branch was not reached or not \
+             reported; output=\n{out}"
+        );
+        assert!(
+            !out.contains("re-solved without presolve"),
+            "{stem} @ {arg}: a retry inside the leftover budget claimed success; \
+             output=\n{out}"
+        );
+        assert_ne!(
+            r.solution.status,
+            ApplicationReturnStatus::SolveSucceeded,
+            "{stem} @ {arg}: the postsolved point fails the KKT check and must \
+             not be reported as a clean success; output=\n{out}"
+        );
+        let it = r.statistics.iteration_count as usize;
+        assert_eq!(
+            it,
+            cap,
+            "{stem} @ {arg}: both solves' iterations count, and together they \
+             spend exactly the cap (measured 42 + {})",
+            cap - 42
+        );
+    }
 }
 
 /// The other branch of the same gate: without presolve there is no postsolve
