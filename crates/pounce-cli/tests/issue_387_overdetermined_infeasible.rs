@@ -63,6 +63,13 @@ fn solve_result_num(text: &str) -> i32 {
 /// Write `nl_text` to a temp file, solve it under `-AMPL` with default
 /// options, and return the `.sol` text.
 fn solve(tag: &str, nl_text: &str) -> String {
+    solve_with(tag, nl_text, false)
+}
+
+/// `solve`, optionally with `presolve=yes` — the leg that reaches Phase 2's
+/// redundant-row removal, which dropped both rows at `s = 1e-12` under an
+/// absolute tolerance and reported the model solved (gh #1197).
+fn solve_with(tag: &str, nl_text: &str, presolve: bool) -> String {
     let dir = std::env::temp_dir();
     let nl = dir.join(format!("pounce_issue387_{tag}.nl"));
     let sol = dir.join(format!("pounce_issue387_{tag}.sol"));
@@ -80,6 +87,11 @@ fn solve(tag: &str, nl_text: &str) -> String {
         .arg(&sol)
         .arg("solver_selection=nlp")
         .arg("print_level=0")
+        .arg(if presolve {
+            "presolve=yes"
+        } else {
+            "presolve=no"
+        })
         .output()
         .expect("spawn pounce");
     assert_eq!(out.status.code(), Some(0), "-AMPL must exit 0");
@@ -113,13 +125,19 @@ fn contradictory_equalities_report_infeasible_band() {
 /// the solve provably cannot run and so cannot disagree.
 #[test]
 fn verdict_is_scale_invariant_where_certifiable() {
-    for k in [-12, -9, -6, -3, 0, 3, 6, 9, 12] {
-        let text = solve(&format!("k{k}"), &inf_eq_nl(10.0_f64.powi(k)));
-        let srn = solve_result_num(&text);
-        assert!(
-            (200..300).contains(&srn),
-            "row scale 1e{k}: same empty feasible set, but \
-             solve_result_num={srn} left the infeasible band:\n{text}"
-        );
+    for presolve in [false, true] {
+        for k in [-12, -9, -6, -3, 0, 3, 6, 9, 12] {
+            let text = solve_with(
+                &format!("k{k}_p{presolve}"),
+                &inf_eq_nl(10.0_f64.powi(k)),
+                presolve,
+            );
+            let srn = solve_result_num(&text);
+            assert!(
+                (200..300).contains(&srn),
+                "row scale 1e{k}, presolve={presolve}: same empty feasible set, \
+                 but solve_result_num={srn} left the infeasible band:\n{text}"
+            );
+        }
     }
 }

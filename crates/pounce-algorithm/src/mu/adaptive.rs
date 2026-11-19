@@ -605,18 +605,15 @@ impl AdaptiveMuUpdate {
         }
         let d = data.borrow();
         let frac = if let Some(deadline) = d.deadline.as_ref() {
-            // The shared deadline (pounce#242) measures from a fixed
-            // start instant and is what the convergence check trusts,
-            // so it is what we measure against too.
-            let cpu = fraction_of(
-                deadline.max_cpu(),
-                deadline.max_cpu() - deadline.remaining_cpu(),
-            );
-            let wall = fraction_of(
-                deadline.max_wall(),
-                deadline.max_wall() - deadline.remaining_wall(),
-            );
-            cpu.max(wall)
+            // The shared deadline (pounce#242) is what the convergence
+            // check trusts, so it is what we measure against too -- but as
+            // a fraction of *this solve's* share of it. The deadline's
+            // origin is the run's (gh#1176), so a re-solve (the
+            // `mu_strategy_fallback` flip to adaptive, above all) would
+            // otherwise start already past the pin and never enter free
+            // mode, defeating the retry. For a solve that is the whole run
+            // the share is the whole budget, as before.
+            deadline.share_spent_fraction()
         } else {
             // Direct-driver / unit-test path — no deadline installed;
             // mirror `conv_check::opt_error`'s fallback to `overall_alg`.
@@ -1214,10 +1211,20 @@ mod tests {
         budget: (Number, Number),
         budget_pin_fraction: Number,
     ) -> bool {
+        returns_to_free_mode_under_deadline(
+            pounce_common::timing::Deadline::new(budget.0, budget.1),
+            budget_pin_fraction,
+        )
+    }
+
+    fn returns_to_free_mode_under_deadline(
+        deadline: pounce_common::timing::Deadline,
+        budget_pin_fraction: Number,
+    ) -> bool {
         let mut a = AdaptiveMuUpdate::new();
         a.budget_pin_fraction = budget_pin_fraction;
         let (data, cq) = test_fixture::fixture(0.1);
-        data.borrow_mut().deadline = Some(pounce_common::timing::Deadline::new(budget.0, budget.1));
+        data.borrow_mut().deadline = Some(deadline);
         let _ = a.update_barrier_parameter(&data, &cq, None, None);
         let _ = a.update_barrier_parameter(&data, &cq, None, None);
         assert!(!a.free_mu_mode, "fixture must reach fixed mode first");
@@ -1244,6 +1251,53 @@ mod tests {
         assert!(
             !returns_to_free_mode_under_budget((1e-9, 1e-9), 0.75),
             "with the budget spent the strategy must stay in fixed mode"
+        );
+    }
+
+    /// gh#1176 review: a re-solve's deadline is measured from the *run's*
+    /// origin, so the `mu_strategy_fallback` flip to adaptive, started with
+    /// 20% of a 100 s run left, used to read 80% spent on its first check
+    /// and pin at once -- the retry never entered free mode, which is the
+    /// one thing it is for. The pin measures the re-solve's own share.
+    #[test]
+    fn a_re_solve_late_in_the_run_is_not_pinned_by_what_earlier_legs_spent() {
+        use pounce_common::utils::{cpu_time, wallclock_time};
+        let deadline = pounce_common::timing::Deadline::starting_at(
+            100.0,
+            100.0,
+            wallclock_time() - 80.0,
+            cpu_time() - 80.0,
+        );
+        // Control: the run's limit itself is honoured from the run's origin.
+        assert!(
+            deadline.remaining_wall() < 21.0,
+            "{}",
+            deadline.remaining_wall()
+        );
+        assert!(deadline.exceeded().is_none());
+        assert!(
+            returns_to_free_mode_under_deadline(deadline, 0.75),
+            "a re-solve that has spent none of its own share must not be pinned"
+        );
+    }
+
+    /// The other branch of the same rule: a re-solve that has spent its
+    /// own share is pinned, as any solve is.
+    #[test]
+    fn a_re_solve_that_spent_its_own_share_is_pinned() {
+        use pounce_common::utils::{cpu_time, wallclock_time};
+        // Run origin 10 s back on a 10.002 s budget: the re-solve's share is
+        // ~2 ms, and the sleep spends it before the strategy reads it.
+        let deadline = pounce_common::timing::Deadline::starting_at(
+            10.002,
+            1e6,
+            wallclock_time() - 10.0,
+            cpu_time(),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(
+            !returns_to_free_mode_under_deadline(deadline, 0.75),
+            "a re-solve past its own share must stay in fixed mode"
         );
     }
 

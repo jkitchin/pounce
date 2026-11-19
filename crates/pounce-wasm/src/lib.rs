@@ -581,16 +581,7 @@ fn solve_loaded_with(
     });
     // gh #850: what the ladder did, for the solve report — the same block
     // the CLI writes, taken before `statistics` moves out of the outcome.
-    let second_opinion = ladder
-        .ran()
-        .then(|| pounce_solve_report::SecondOpinionInfo {
-            tried: ladder.tried.iter().map(|s| s.to_string()).collect(),
-            promoted_by: ladder.promoted_by.map(|s| s.to_string()),
-            base_status: ladder.base_status.upstream_name().to_string(),
-            base_iteration_count: ladder.base_iteration_count,
-            rung_iteration_counts: ladder.rung_iteration_counts.clone(),
-            total_iteration_count: ladder.total_iteration_count(),
-        });
+    let second_opinion = ladder.ran().then(|| ladder.report_info());
     let status = ladder.status;
     let stats = ladder.statistics;
     let presolve_report = presolve.as_ref().map(|p| {
