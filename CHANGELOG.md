@@ -133,6 +133,15 @@ changes.
   Hessian legs. `pounce-qp` gains the two bounds as
   `QpOptions::max_total_iter` and `QpOptions::max_stall_iters`; both are off
   by default.
+- **`presolve=yes` no longer hangs after the solve has converged, and
+  `max_wall_time` now covers postsolve** (gh#1196). Recovering the original
+  problem's multipliers for bounds presolve derived could run unbounded:
+  Vanderbei `qpnstair` spent over 800 s there after the interior point had
+  converged, past a 10 s `max_wall_time`. That recovery now has a fixed work
+  allowance and stops at the solve's time limit. If either runs out, the
+  reported duals are the reduced solve's, as they already were for a
+  component too large to recover. It is also faster where it does finish:
+  on a 590-multiplier component, 4.5 s became 0.19 s, with the same answer.
 - **`presolve=yes` no longer reports an infeasible model solved when its
   linear rows have small coefficients** (gh#1197). Redundant-row removal
   tested whether the variable box implies a row using an absolute `1e-9`
