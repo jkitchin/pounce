@@ -8218,6 +8218,9 @@ impl IpoptApplication {
         if let Some(v) = read_num("obj_scale_certificate_threshold") {
             builder.conv_check.obj_scale_certificate_threshold = v;
         }
+        if let Some(v) = read_num("relative_gap_tol") {
+            builder.conv_check.relative_gap_tol = v;
+        }
         if let Some(v) = read_num("primal_noise_floor_kappa") {
             builder.conv_check.primal_noise_floor_kappa = v;
         }

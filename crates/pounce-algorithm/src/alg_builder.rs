@@ -163,6 +163,9 @@ pub struct ConvCheckOptions {
     /// refused while the unscaled KKT error is still above `acceptable_tol`
     /// (gh #200). `0` disables the mechanism.
     pub obj_scale_certificate_threshold: Number,
+    /// `relative_gap_tol`: the relative duality gap a strict certificate must
+    /// also meet. `0` disables.
+    pub relative_gap_tol: Number,
     /// Safety factor on the per-row floor the **strict** gate uses to decide
     /// when a constraint residual is finer than the row can represent
     /// (gh #528). `0` disables the floor, restoring upstream Ipopt's
@@ -199,6 +202,7 @@ impl Default for ConvCheckOptions {
             infeas_viol_kappa: 1e2,
             infeas_max_streak: 5,
             obj_scale_certificate_threshold: 1e-4,
+            relative_gap_tol: 0.0,
             primal_noise_floor_kappa: 64.0,
             acceptable_progress_kappa: 1e-1,
             dual_inf_scale_kappa: 1.0,
@@ -1820,6 +1824,8 @@ impl AlgorithmBuilder {
                 veto_extra_iters: 0,
                 rel_infeas_extra_iters: 0,
                 prev_rel_viol: f64::NAN,
+                relative_gap_tol: self.conv_check.relative_gap_tol,
+                gap_extra_iters: 0,
             });
 
         let init: Box<dyn crate::init::r#trait::IterateInitializer> = if self.warm_start_init_point

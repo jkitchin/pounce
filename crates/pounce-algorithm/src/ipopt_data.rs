@@ -80,6 +80,15 @@ pub struct IpoptData {
     pub curr_mu: Number,
     pub curr_tau: Number,
     pub tol: Number,
+    /// Lower barrier-parameter floor requested by the convergence check's
+    /// relative duality-gap gate (`relative_gap_tol`). `None` (the default)
+    /// leaves the μ updates' own floors untouched. When the gate refuses a
+    /// certificate because `Σ complementarity` is still too large relative to
+    /// the objective, it sets this so μ can be driven below the
+    /// `tol/(barrier_tol_factor+1)` and `mu_min` floors — otherwise the
+    /// gate could never be met (every product sits at ≈ μ on the central
+    /// path, so the gap is ≈ N·μ).
+    pub gap_mu_floor: Option<Number>,
 
     pub perturbations: PdPerturbations,
 
@@ -260,6 +269,7 @@ impl IpoptData {
             curr_mu: 0.1,
             curr_tau: 0.99,
             tol: 1e-8,
+            gap_mu_floor: None,
             perturbations: PdPerturbations::default(),
             kkt_debug: None,
             info_alpha_primal: 0.0,

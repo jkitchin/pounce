@@ -38,6 +38,13 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
 }
 
+/// The convex interior point's backend: static pivoting on at `tol >= 1e-10`
+/// (see [`FeralSolverInterface::for_convex_ipm`]). The CLI's convex path uses
+/// the same constructor, so both frontends factor the same way.
+fn ipm_backend(tol: f64) -> impl Fn() -> Box<dyn SparseSymLinearSolverInterface> + Copy {
+    move || Box::new(FeralSolverInterface::for_convex_ipm(tol))
+}
+
 /// Transparent `Send` shim used to move a non-`Send` value (a factorization /
 /// sensitivity holding `dyn SparseSymLinearSolverInterface` trait objects)
 /// across a `py.allow_threads` boundary. SAFETY: the closure runs on the
@@ -742,7 +749,7 @@ pub fn solve_qp<'py>(
                     collect_iterates: false,
                     ..o
                 };
-                solve_qp_ipm(&prob.inner, &ro, backend)
+                solve_qp_ipm(&prob.inner, &ro, ipm_backend(ro.tol))
             })
         })
     };
@@ -758,11 +765,15 @@ pub fn solve_qp<'py>(
                 pounce_convex::hsde_scalars::clear();
                 pounce_convex::crossover::clear_report();
                 let (sol, pre, lift) = match &warm {
-                    Some(w) => (solve_qp_ipm_warm(&prob.inner, &o, w, backend), None, None),
+                    Some(w) => (
+                        solve_qp_ipm_warm(&prob.inner, &o, w, ipm_backend(o.tol)),
+                        None,
+                        None,
+                    ),
                     None if presolve_on => {
                         let (sol, pre, lift) =
                             solve_presolved_with_ray(&prob.inner, &o, |p, po| {
-                                solve_qp_ipm(p, po, backend)
+                                solve_qp_ipm(p, po, ipm_backend(po.tol))
                             });
                         (
                             demote_unverified_optimal(&prob.inner, &o, sol),
@@ -770,12 +781,26 @@ pub fn solve_qp<'py>(
                             lift,
                         )
                     }
-                    None => (solve_qp_ipm(&prob.inner, &o, backend), None, None),
+                    None => (
+                        solve_qp_ipm(&prob.inner, &o, ipm_backend(o.tol)),
+                        None,
+                        None,
+                    ),
                 };
                 // Taken before the certificate's re-solve can overwrite them.
                 let hs = pounce_convex::hsde_scalars::take();
                 let cross = pounce_convex::crossover::take_report();
-                let cert = certify(&sol, lift, presolve_on || warm.is_some());
+                let mut cert = certify(&sol, lift, presolve_on || warm.is_some());
+                // gh#1181 follow-up: project the stationarity residual out of
+                // a Farkas ray, as the CLI does (`polish_farkas`).
+                cert.certificate = cert.certificate.map(|c| match c {
+                    pounce_convex::Certificate::PrimalInfeasible(f) => {
+                        pounce_convex::Certificate::PrimalInfeasible(
+                            pounce_convex::certificate::polish_farkas(&prob.inner, &[], f, backend),
+                        )
+                    }
+                    other => other,
+                });
                 (sol, hs, pre, cross, cert)
             });
             let d = solution_dict_hsde(py, sol, Some(&prob.inner), &[], hs, o.tol)?;

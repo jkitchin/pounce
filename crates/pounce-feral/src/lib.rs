@@ -946,6 +946,10 @@ pub(crate) fn pivot_counts(solver: &Solver) -> Option<(usize, usize)> {
     Some((delayed, two_by_two))
 }
 
+/// The tightest convex-IPM `tol` for which [`FeralSolverInterface::for_convex_ipm`]
+/// turns static pivoting on; see there.
+pub const STATIC_PIVOT_MIN_TOL: f64 = 1e-10;
+
 /// Everything POUNCE records about one successful factorization. Shared
 /// by the monolithic backend and the Schur backend's eliminated block.
 /// Every read is `O(n)` or cheaper — negligible next to the factor.
@@ -1148,6 +1152,33 @@ impl FeralSolverInterface {
             parallel: Some(false),
             ..FeralConfig::from_env()
         })
+    }
+
+    /// Backend for the convex LP/QP interior point (`pounce-convex`).
+    ///
+    /// Identical to [`Self::new`] except that static pivoting defaults
+    /// **on** when `tol >= STATIC_PIVOT_MIN_TOL` (an explicit
+    /// `POUNCE_FERAL_STATIC_PIVOTING` still wins). The convex KKT is
+    /// quasi-definite by construction — `P + δ_w` on `(x, x)`, `-(W² + δ)` on
+    /// the cone block, `-δ_c` on `(y, y)` — so an `LDLᵀ` with 1×1 pivots
+    /// exists for every symmetric permutation and delaying a pivot buys no
+    /// stability, while near convergence the `-s/z` pivots of active bound
+    /// rows fall below `pivtol · |offdiag|` and delayed pivoting cascades them
+    /// into a dense root front that feral factors with its scalar kernel.
+    /// Measured on MIPLIB `rmatr200-p5`: one late factorization grows from
+    /// `nnz(L)` 3.0e6 / 0.02 s to 2.0e8 / 266 s (62 041 delayed columns), and
+    /// the solve goes from ~300 s to 10.5 s with static pivoting.
+    ///
+    /// Static pivoting perturbs tiny pivots, which caps the attainable KKT
+    /// accuracy near 1e-13 (measured: `lp_israel` at `tol = 1e-16` goes from
+    /// 1.9e-16 to 2.0e-13). Below `STATIC_PIVOT_MIN_TOL` the caller asked for
+    /// more than that, so delayed pivoting stays.
+    pub fn for_convex_ipm(tol: f64) -> Self {
+        let mut cfg = FeralConfig::from_env();
+        if cfg.static_pivoting.is_none() && tol >= STATIC_PIVOT_MIN_TOL {
+            cfg.static_pivoting = Some(true);
+        }
+        Self::with_config(cfg)
     }
 
     /// Construct with explicit configuration. Cascade-break
