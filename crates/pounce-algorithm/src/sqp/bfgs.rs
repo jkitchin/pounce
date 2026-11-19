@@ -276,9 +276,10 @@ impl DampedBfgs {
             // by the ratio. `gilbert` (CUTE, n = 1000, gh#1191): sized at
             // `γ = 0.81` before the sphere's multiplier settled at 17.7, the
             // true curvature is ≈ 18 in every direction, `B`'s smallest
-            // diagonal was still ≈ 1 at iteration 200, and 45 of its 204 pairs
-            // showed `sᵀy > 10·sᵀBs`. Stationarity bounced between 1e-6 and
-            // 1e-4 for 50 iterations, and it certified at 204 against 25 for
+            // diagonal was still ≈ 1 at iteration 200, and 45 of the 204 pairs
+            // of a run on #1190's head showed `sᵀy > 10·sᵀBs`. Stationarity
+            // bounced between 1e-6 and 1e-4 for 50 iterations, and it
+            // certified at 197 (`main`) to 204 (#1190's head) against 25 for
             // L-BFGS (which re-scales from every pair) and 33 for the exact
             // Hessian.
             //

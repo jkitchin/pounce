@@ -747,7 +747,7 @@ so that first scale can go stale in every unexplored direction. When the
 multipliers have moved by more than half their size since the last sizing,
 and a step shows `B` short of the curvature along it by more than 10×, the
 update re-sizes from that step and starts over (gh#1191). On `gilbert`
-(n = 1000) that took a 204-iteration run to 50.
+(n = 1000) that took a 197-iteration run to 50.
 
 What the lift does not change is the cost of an active-set walk. A cold QP
 needs about one pivot per constraint that becomes active, and each pivot is a

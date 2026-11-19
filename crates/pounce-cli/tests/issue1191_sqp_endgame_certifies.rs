@@ -34,10 +34,11 @@
 //! first pair (`γ = 0.81`), before the sphere constraint's multiplier settled
 //! at 17.7. The true curvature is about 18 in every direction, and every
 //! direction no step explored kept curvature about 1. Stationarity bounced
-//! between 1e-6 and 1e-4, and the n = 1000 corpus model certified at 204
-//! iterations (`main`), against 25 for real L-BFGS and 33 for the exact
-//! Hessian. `DampedBfgs` now re-sizes when the multipliers have moved and a
-//! pair shows `B` short of the curvature by more than 10×: 204 → 50.
+//! between 1e-6 and 1e-4. The n = 1000 model hit the 200-iteration cap on
+//! the corpus `.nl`, and certified at 197 on this transcription (`main`),
+//! against 25 for real L-BFGS and 33 for the exact Hessian. `DampedBfgs` now
+//! re-sizes when the multipliers have moved and a pair shows `B` short of the
+//! curvature by more than 10×: 197 → 50.
 //! The fixture is the same model at n = 400 (`main`: 135 iterations; now
 //! 60), small enough for CI.
 
