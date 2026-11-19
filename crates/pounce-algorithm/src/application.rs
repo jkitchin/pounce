@@ -11393,6 +11393,43 @@ mod tests {
         );
     }
 
+    /// The same leak through the other entry point. With `presolve=yes` the
+    /// second solve bails inside the presolve wrapper's setup (its inner
+    /// TNLP declines `get_bounds_info` there), within `optimize_tnlp` and
+    /// before `optimize_constrained` -- and so before the reset at its top.
+    /// Found when CI ran the test above with `presolve` on by default
+    /// (gh#1176); `optimize_tnlp` now clears the flag with the rest of the
+    /// per-solve state. Without that it fails with `Some(false)`.
+    #[test]
+    fn row_scaling_active_is_cleared_when_a_presolved_solve_bails_in_presolve_setup() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("presolve yes\n").unwrap();
+
+        let refuse = std::rc::Rc::new(std::cell::Cell::new(false));
+        let first = std::rc::Rc::new(std::cell::RefCell::new(DescribesItselfOnce {
+            refuse: std::rc::Rc::clone(&refuse),
+            inner: ExactQuadratic,
+        }));
+        let _ = app
+            .optimize_tnlp(std::rc::Rc::clone(&first) as std::rc::Rc<std::cell::RefCell<dyn TNLP>>);
+        assert!(
+            app.row_scaling_active.get().is_some(),
+            "the first solve did not record a row-scaling verdict, so this \
+             test cannot show the second one clearing it",
+        );
+
+        refuse.set(true);
+        let _ = app.optimize_tnlp(first as std::rc::Rc<std::cell::RefCell<dyn TNLP>>);
+
+        assert_eq!(
+            app.row_scaling_active.get(),
+            None,
+            "a presolved solve that bailed in presolve setup left the previous \
+             solve's row-scaling verdict in place (gh#794 review round 2)",
+        );
+    }
+
     #[test]
     fn application_sqp_path_solves_convex_eq_nlp_and_finalizes() {
         let finalize_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
