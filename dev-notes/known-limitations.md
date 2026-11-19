@@ -341,7 +341,7 @@ handover lines above are the check.
 
 ---
 
-## Active-set SQP: `ssebnln` (limited-memory) fails slower, in second-order-correction QPs that run to the cap (gh#1191)
+## Active-set SQP: `ssebnln` (limited-memory) fails slower, in second-order-correction QPs that run to the cap (gh#1191, tracked in gh#1195)
 
 *Measured on `claude/eloquent-knuth-1ypxda` at `5b1724e` against `main` at
 `5463adb`, forced `algorithm=active-set-sqp hessian_approximation=limited-memory`,
