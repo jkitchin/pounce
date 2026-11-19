@@ -10,6 +10,25 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **The second-opinion ladder tries presolve before accepting a local
+  infeasibility verdict** (gh#1176). A new last rung, `presolve=yes`
+  (`infeasibility_presolve_retry`, default `yes`), re-solves the model once
+  through presolve when a solve that ran without presolve ends
+  `Infeasible_Problem_Detected` and every earlier rung agrees. Presolve's bound
+  tightening derives finite bounds the model implies but does not declare, and
+  those keep the interior point's first steps physical. gh#1176's
+  catalytic-distillation column (1547 variables), which the default solve and
+  every earlier rung called infeasible, now solves at the default settings to
+  CONOPT's objective (23914.517), and `pounce verify --require-optimal`
+  accepts its `.sol`. The Wächter–Biegler textbook example goes from the
+  locally infeasible `x1 = -1` to its optimum `x1 = 1`. The rung is promoted
+  only if the re-solve converges, and its duals are presolve's postsolved ones,
+  for the model as written. Presolve's own default is unchanged. Turning it on
+  by default fails 37 workspace tests and costs three Vanderbei models, while
+  this rung runs only on a solve that has already failed. Because it runs
+  last, a model like gh#1176's still spends the base solve and rungs 1–4
+  first: 307 s on the column, against about 1 s with `presolve=yes` from the
+  start.
 - **`relative_gap_tol`**, an NLP-arm option, default `0` (off) (gh#1193). The
   strict convergence test bounds the *largest* complementarity product. The
   duality gap is their *sum*, about `N·μ`, so on a model with many bounds a

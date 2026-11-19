@@ -25,6 +25,7 @@ pounce-algorithm.workspace = true
 pounce-hsl = { workspace = true, optional = true }
 pounce-linsol.workspace = true
 pounce-solve-report.workspace = true
+pounce-presolve.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

@@ -2335,9 +2335,10 @@ impl IpoptApplication {
         // that declines `get_bounds_info` there), returned with the previous
         // solve's `Some(false)` standing. That stale verdict is exactly what
         // the ℓ₁ outer loop must never read as fact (gh#794 review round 2).
-        // With `presolve` on by default every solve takes that route, which
-        // is how `row_scaling_active_is_cleared_when_a_later_solve_bails_early`
-        // found it.
+        // Found when an experiment ran with `presolve` on by default, which
+        // sent `row_scaling_active_is_cleared_when_a_later_solve_bails_early`
+        // down that route; `..._when_a_presolved_solve_bails_in_presolve_setup`
+        // pins it under `presolve=yes`.
         self.row_scaling_active.set(None);
         if !self.run_clock_held.get() {
             self.run_clock.set((

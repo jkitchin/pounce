@@ -2543,6 +2543,16 @@ fn real_main() -> ExitCode {
     // answer by construction never passes through that hook.
     let square_system_promoted = second_opinion.promoted_by
         == Some(pounce_algorithm::square_system::SQUARE_SYSTEM_RUNG_LABEL);
+    // The presolve rung (gh#1176) is the same case once more: the ladder
+    // wraps the model in the presolve layer for that rung only, so the
+    // `on_converged` capture holds the *reduced* problem's iterate -- row
+    // multipliers short by every dropped row, and bound multipliers on bounds
+    // presolve derived -- while `counting` received postsolve's answer,
+    // lifted to the original problem with the derived-bound duals recovered.
+    // The CLI's own presolve swaps that lifted answer in further down; this
+    // rung's wrapper is not the one it knows about.
+    let presolve_rung_promoted =
+        second_opinion.promoted_by == Some(pounce_algorithm::second_opinion::PRESOLVE_RUNG_LABEL);
     // A declared-complementarity run is the same case again: every lowered
     // solve that converged ran `on_converged`, so the cell holds the *last*
     // one's point — and the driver runs the continuation and the exact
@@ -2551,7 +2561,11 @@ fn real_main() -> ExitCode {
     // `optimize_tnlp`. Measured on `qpec_small.nl`: the JSON carried the
     // exact stage's `(1.000019, 1.0000095, 0)` at objective 4.5e-10 while the
     // continuation's answer, the one reported, sat at 0.
-    if app.answer_restored_from_floor() || square_system_promoted || mpcc_outcome.is_some() {
+    if app.answer_restored_from_floor()
+        || square_system_promoted
+        || presolve_rung_promoted
+        || mpcc_outcome.is_some()
+    {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
             x_capture_from_finalize = true;
