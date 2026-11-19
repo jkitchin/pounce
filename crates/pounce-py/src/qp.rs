@@ -1131,7 +1131,7 @@ impl PyQpSensitivity {
         type Payload = (Vec<f64>, f64, Result<QpSensitivity, SensError>);
         let (status, payload): (QpStatus, Option<Payload>) = py
             .allow_threads(|| {
-                let sol = solve_qp_ipm(qp, &o, backend);
+                let sol = solve_qp_ipm(qp, &o, ipm_backend(qp, o.tol));
                 // gh #880: `OptimalInaccurate` now also carries the `σ`
                 // cascade's "could not certify" verdict, and that population
                 // built a payload before. See `QpSensitivity::build`.

@@ -4744,7 +4744,9 @@ fn run_convex_qp(
             &sol,
             &solve_opts(),
             pins,
-            ipm_backend(&qp, solve_opts().tol),
+            // A sensitivity factorization, not an IPM solve: delayed pivoting,
+            // as in the Python frontend's `QpSensitivity::build`.
+            active_set_backend,
         ) {
             Ok(x_pert) => {
                 qp_bound_suffixes.push(pounce_cli::convex_sens::sens_suffix(x_pert));

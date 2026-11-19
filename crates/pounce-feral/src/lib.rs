@@ -2876,9 +2876,6 @@ mod tests {
         }
     }
 
-    /// The pounce default leaves static pivoting unset (`None`), so the
-    /// backend inherits feral's SSIDS-style delayed-pivot default and the
-    /// numeric path is unchanged unless a caller opts in.
     /// Every branch of the convex-IPM rule: on only when the tolerance is
     /// loose enough *and* the free columns are few; an explicit setting wins
     /// both ways; the boundaries are inclusive.
@@ -2901,6 +2898,9 @@ mod tests {
         assert_eq!(f(Some(true), 1e-12, 0.9), Some(true));
     }
 
+    /// The pounce default leaves static pivoting unset (`None`), so the
+    /// backend inherits feral's SSIDS-style delayed-pivot default and the
+    /// numeric path is unchanged unless a caller opts in.
     #[test]
     fn default_static_pivoting_is_none() {
         assert_eq!(FeralConfig::default().static_pivoting, None);

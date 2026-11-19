@@ -1109,6 +1109,7 @@ impl ConvCheck for OptErrorConvCheck {
         let rel_veto = rel_viol > self.relative_viol_threshold()
             && self.rel_infeas_extra_iters < VETO_MAX_EXTRA_ITERS;
         let mut rel_veto_blocked = false;
+        let mut gap_blocked = false;
 
         // gh #200: refuse a certificate the objective scaling has masked, and
         // keep iterating. A constant objective scale cancels out of the Newton
@@ -1195,7 +1196,13 @@ impl ConvCheck for OptErrorConvCheck {
                 }
             } else if self.gap_gate_refuses(data, cq, obj_scale) {
                 // `relative_gap_tol`: refused on the duality gap; the gate has
-                // lowered the μ floor and the run continues.
+                // lowered the μ floor and the run continues. The acceptable
+                // exit below is blocked too: otherwise each refusal counts
+                // toward `acceptable_iter`, and a gap that does not close
+                // within that many iterations would end Solved_To_Acceptable
+                // on a point the strict test had already passed — not "as it
+                // would have without the gate" once the budget is spent.
+                gap_blocked = true;
             } else {
                 // The certificate is going out with a dual infeasibility above
                 // `dual_inf_tol`, which the end-of-run summary will print
@@ -1229,6 +1236,9 @@ impl ConvCheck for OptErrorConvCheck {
         if acceptable_now && rel_veto {
             acceptable_now = false;
             rel_veto_blocked = true;
+        }
+        if gap_blocked {
+            acceptable_now = false;
         }
         if rel_veto_blocked {
             self.rel_infeas_extra_iters += 1;

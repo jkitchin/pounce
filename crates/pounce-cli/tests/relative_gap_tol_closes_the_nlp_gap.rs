@@ -125,3 +125,29 @@ fn the_fallback_holds_the_nlp_arm_to_the_gap() {
         "the gate is what moved the NLP answer: {fb_off:?} vs {fb:?}"
     );
 }
+
+/// A refused strict certificate must not be swapped for an acceptable-level
+/// one at the same point. Before this was blocked, each refusal counted toward
+/// `acceptable_iter`, so a gap that did not close within that many iterations
+/// ended `Solved_To_Acceptable_Level` on the very point the gate had refused.
+/// `acceptable_iter=1` reaches that branch on the first refusal: it exited
+/// acceptable at `1.3e-8` from the optimum; it now certifies below `tol`.
+#[test]
+fn a_refused_certificate_does_not_exit_acceptable() {
+    let r = run(
+        "relative_gap_knapsack_500.nl",
+        &[
+            "solver_selection=nlp",
+            "bound_relax_factor=0",
+            "tol=1e-8",
+            "relative_gap_tol=1e-8",
+            "acceptable_iter=1",
+        ],
+    );
+    assert_eq!(r.solution.status, ApplicationReturnStatus::SolveSucceeded);
+    let e = rel_err(&r);
+    assert!(
+        (0.0..=1e-8).contains(&e),
+        "relative objective error {e:.2e}"
+    );
+}
