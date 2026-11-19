@@ -126,6 +126,15 @@ changes.
   reported duals are the reduced solve's, as they already were for a
   component too large to recover. It is also faster where it does finish:
   on a 590-multiplier component, 4.5 s became 0.19 s, with the same answer.
+- **`presolve=yes` no longer reports an infeasible model solved when its
+  linear rows have small coefficients** (gh#1197). Redundant-row removal
+  tested whether the variable box implies a row using an absolute `1e-9`
+  tolerance, so any row with coefficients near `1e-9` or below passed and was
+  dropped, even if no point in the box satisfied it. `s*x == 0.2*s,
+  s*x == 0.8*s, x in [0, 1]` at `s = 1e-12` returned `Optimal Solution Found`
+  with presolve on and local infeasibility with it off. The tolerance is now
+  relative to the row's own magnitude, so rescaling a row no longer changes
+  whether it is dropped.
 - **`max_wall_time` and `max_cpu_time` bound the whole run, second-opinion
   ladder included** (gh#1176). Every solve built its own deadline from those
   options, so the `mu_strategy` fallback re-solve, the dual-divergence retry,
