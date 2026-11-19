@@ -162,6 +162,92 @@ changes.
   correction of `y` through the equality rows. It keeps the polished ray only
   when it verifies better than the original. The CLI and Python QP paths both
   apply it.
+- **`presolve=yes` no longer hangs after the solve has converged, and
+  `max_wall_time` now covers postsolve** (gh#1196). Recovering the original
+  problem's multipliers for bounds presolve derived could run unbounded:
+  Vanderbei `qpnstair` spent over 800 s there after the interior point had
+  converged, past a 10 s `max_wall_time`. That recovery now has a fixed work
+  allowance and stops at the solve's time limit. If either runs out, the
+  reported duals are the reduced solve's, as they already were for a
+  component too large to recover. It is also faster where it does finish:
+  on a 590-multiplier component, 4.5 s became 0.19 s, with the same answer.
+- **`presolve=yes` no longer reports an infeasible model solved when its
+  linear rows have small coefficients** (gh#1197). Redundant-row removal
+  tested whether the variable box implies a row using an absolute `1e-9`
+  tolerance, so any row with coefficients near `1e-9` or below passed and was
+  dropped, even if no point in the box satisfied it. `s*x == 0.2*s,
+  s*x == 0.8*s, x in [0, 1]` at `s = 1e-12` returned `Optimal Solution Found`
+  with presolve on and local infeasibility with it off. The tolerance is now
+  relative to the row's own magnitude, so rescaling a row no longer changes
+  whether it is dropped.
+- **`max_wall_time` and `max_cpu_time` bound the whole run, second-opinion
+  ladder included** (gh#1176). Every solve built its own deadline from those
+  options, so the `mu_strategy` fallback re-solve, the dual-divergence retry,
+  the scale-audit re-solve, crossover and each ladder rung started a new full
+  allowance. On the issue's 2594-variable distillation column,
+  `max_wall_time=40` ran for 112 s (26 s base, then 21 + 40 + 0 + 25 s of
+  rungs). Every deadline is now measured from the start of the caller's
+  solve, so each re-solve gets what is left of the run. When nothing is left,
+  the remaining rungs are skipped and the log names them; the same column stops
+  at 40.5 s. A skipped `mu_strategy` fallback is recorded
+  (`mu_strategy_fallback.skipped_for_time`). A limit the caller did not set
+  stays unset; the scale audit used to write an unset one back as caller-set.
+  The adaptive-mu budget pin (`adaptive_mu_budget_pin_fraction`, pounce#753)
+  still measures the fraction of each solve's *own* share of that limit,
+  `Deadline::share_spent_fraction`: measured from the run's start instead, a
+  `mu_strategy` fallback flipped to adaptive with a fifth of the run left
+  read 80% spent on its first check and pinned to fixed mode at once, so it
+  never ran the free-mode oracle it was retried for.
+- **The ladder reports the run's total time** (gh#1176). Each `Total seconds in
+  POUNCE` line covers one solve, so a laddered run's console ended on the last
+  rung's time: 24.9 s printed on a 174 s run. The ladder now ends with a line
+  giving the whole run's wall time, split into the base solve, the ladder's
+  setup and the re-solves. The solve report's `second_opinion` block adds
+  `base_wallclock_secs`, `probe_wallclock_secs`, `rung_wallclock_secs`,
+  `total_wallclock_secs` and `skipped_for_time`.
+- **The perturbed-start rung no longer dies at iteration 0 on a model that is
+  undefined near its start** (gh#1176). `start_point_perturbation` kept the
+  displaced point inside the bounds, but it never checked that the model could
+  be evaluated there. On the distillation column, the `1e-2` shift made 28
+  constraint rows NaN for every seed tried, and the rung returned
+  `Invalid_Number_Detected` in 0.003 s without testing anything. The displaced
+  point is now evaluated once. If the result is not finite, the displacement is
+  halved toward the start, in the same direction, up to ten times. On the
+  column, two halvings evaluate cleanly. A draw that evaluates the first time
+  is unchanged bit for bit, and the ladder logs any halving.
+- **The active-set SQP certifies an optimum it has reached where the
+  objective can no longer tell steps apart (gh#1191).** Under
+  `algorithm=active-set-sqp hessian_approximation=limited-memory`,
+  `palmer8e` and `hs99exp` (CUTE) reached their optima and stopped
+  `Search_Direction_Becomes_Too_Small` at stationarity 1.7e-8 and 3.0e-8,
+  against `tol = 1e-8`. On `palmer8e` the last step's predicted objective
+  change was below the objective's round-off, so the line search was comparing
+  noise. A step like that is now taken at full length, provided it does not
+  raise the constraint violation. It now ends `Solve_Succeeded` at the same
+  objective in 134 iterations. A run of steps below round-off in `x` that
+  keeps cutting the residual is also no longer counted as a stall.
+- **The active-set SQP's stopping test scales the stationarity residual by
+  the multipliers, as Ipopt's does (gh#1191).** `sqp_tol` is now compared
+  with the residual divided by `s_d = max(100, mean |λ|)/100`. The unscaled
+  residual must still meet `sqp_dual_inf_tol`. With large multipliers the
+  residual has a round-off floor above an absolute `1e-8`. `hs99exp`
+  (`f ≈ −1e9`, `s_d ≈ 91`) sat at 4e-8 to 1e-7, and certified only when the
+  noise happened to dip below `tol`, which on the CUTE corpus `.nl` it never
+  did. It now certifies at iteration 55. A solve can only stop at the same
+  iterate or an earlier one, and models whose multipliers average at most 100
+  are unaffected.
+- **The dense quasi-Newton SQP Hessian re-sizes when the constraint
+  multipliers make its scale stale (gh#1191).** At `n ≤ 1000`,
+  `hessian_approximation=limited-memory` runs a dense damped BFGS, which set
+  its scale once, from the first step. On `gilbert` (CUTE, n = 1000) that was
+  before the sphere constraint's multiplier settled. The curvature then
+  grew 20× in every direction the steps had not explored, the steps
+  overshot there, and the run hit the 200-iteration cap at the optimum. It
+  now certifies in 52 iterations (the exact Hessian takes 33). The fix
+  raises the model's curvature by the smallest uniform amount that agrees
+  with the latest step. It applies only when a step shows the model short of
+  the curvature by more than 10× and the multipliers have moved since the
+  last sizing, so models without nonlinear constraints are unaffected.
 - **The active-set SQP no longer takes uphill steps from a feasible
   point, stalls at a non-stationary start, or ends `Internal_Error` with no
   `x` when started on negative curvature (gh#1173).** Under the default

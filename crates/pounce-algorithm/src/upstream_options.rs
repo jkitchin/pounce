@@ -639,7 +639,7 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         0.0,
         true,
         1e-8,
-        "Maximum-norm tolerance on the SQP KKT stationarity residual. Only consulted when \"algorithm\" is \"active-set-sqp\".",
+        "Maximum-norm tolerance on the SQP KKT stationarity residual, divided first by Ipopt's multiplier scale s_d = max(100, mean |multiplier|)/100; the unscaled residual must also meet \"sqp_dual_inf_tol\". Only consulted when \"algorithm\" is \"active-set-sqp\".",
     )?;
     r.add_lower_bounded_number_option(
         "sqp_constr_viol_tol",

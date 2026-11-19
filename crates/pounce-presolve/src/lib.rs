@@ -703,6 +703,10 @@ pub struct PresolveTnlp {
 
     /// What the derived-bound recovery did at the last `finalize_solution`.
     derived_bound_recovery: Option<dual_recovery::Outcome>,
+    /// The solve's time budget, when the caller handed one over
+    /// ([`Self::set_deadline`]): postsolve work that runs after the
+    /// interior-point loop honours it too (gh#1196).
+    deadline: Option<pounce_common::timing::Deadline>,
     /// The inner evaluations the iteration made, for the live-iterate lift.
     live_record: live_lift::EvalRecord,
 
@@ -907,6 +911,7 @@ impl PresolveTnlp {
             bound_multiplier_overrides: Vec::new(),
             duals_rewritten: false,
             derived_bound_recovery: None,
+            deadline: None,
             served_warm_start: None,
             live_record: live_lift::EvalRecord::default(),
             starting_point_projection_report: WarmProjectionReport::default(),
@@ -926,6 +931,15 @@ impl PresolveTnlp {
     pub fn probing_without_a_solve(mut self) -> Self {
         self.witness_rule = WitnessRule::DeclaredRowRelative;
         self
+    }
+
+    /// Charge postsolve's own work to the solve's time budget: the
+    /// derived-bound dual recovery stops, and keeps the reduced solve's
+    /// duals, once `deadline` is crossed (gh#1196). Without one that work is
+    /// still capped, by a fixed flop allowance
+    /// (`dual_recovery::MAX_WORK_FLOPS`).
+    pub fn set_deadline(&mut self, deadline: Option<pounce_common::timing::Deadline>) {
+        self.deadline = deadline;
     }
 
     /// Enable projection of served warm-start primals into the presolved box.
@@ -956,6 +970,7 @@ impl PresolveTnlp {
             bound_multiplier_overrides: Vec::new(),
             duals_rewritten: false,
             derived_bound_recovery: None,
+            deadline: None,
             served_warm_start: None,
             live_record: live_lift::EvalRecord::default(),
             starting_point_projection_report: WarmProjectionReport::default(),
@@ -1166,14 +1181,16 @@ impl PresolveTnlp {
             derived_l: &derived_l,
             derived_u: &derived_u,
         };
-        let out = dual_recovery::reattribute(&view, lambda, z_l, z_u);
+        let budget =
+            dual_recovery::Budget::new(dual_recovery::MAX_WORK_FLOPS, self.deadline.as_ref());
+        let out = dual_recovery::reattribute(&view, lambda, z_l, z_u, budget);
         if out.rolled_back {
             tracing::warn!(
                 target: "pounce_presolve",
                 "presolve postsolve: multipliers on derived bounds could not be \
-                 re-attributed to the original problem (component past the dense cap \
-                 or residual not reduced); the reported duals keep the reduced \
-                 problem's attribution"
+                 re-attributed to the original problem (component past the dense cap, \
+                 work budget or deadline spent, or residual not reduced); the reported \
+                 duals keep the reduced problem's attribution"
             );
         } else if out.n_spurious > 0 {
             tracing::debug!(

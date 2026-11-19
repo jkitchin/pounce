@@ -166,6 +166,14 @@ pub struct MuStrategyFallbackRecord {
     /// the statistics describes the first attempt, and the re-solve's cost is
     /// visible only here.
     pub promoted: bool,
+    /// gh#1176: the first attempt spent the caller's `max_wall_time` /
+    /// `max_cpu_time`, so the re-solve was not run. `retry_status` is empty
+    /// and `retry_iteration_count` 0. Omitted from JSON when `false`.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "std::ops::Not::not")
+    )]
+    pub skipped_for_time: bool,
 }
 
 impl MuStrategyFallbackRecord {
@@ -182,6 +190,14 @@ pub struct SolveStatistics {
     pub total_cpu_time_secs: Number,
     pub total_sys_time_secs: Number,
     pub total_wallclock_time_secs: Number,
+    /// gh#1176: wall seconds from the start of the caller's `optimize_tnlp`
+    /// to its return -- setup, presolve and every internal re-solve (the mu
+    /// fallback, the gh#884 retry, the gh#983 audit) included, which
+    /// `total_wallclock_time_secs` (the returned attempt's alone) is not.
+    /// `0` on a solve made inside the second-opinion ladder, whose rungs the
+    /// ladder times itself.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub run_wallclock_time_secs: Number,
     pub num_obj_evals: Index,
     pub num_constr_evals: Index,
     pub num_obj_grad_evals: Index,
@@ -537,6 +553,7 @@ impl Default for SolveStatistics {
             total_cpu_time_secs: 0.0,
             total_sys_time_secs: 0.0,
             total_wallclock_time_secs: 0.0,
+            run_wallclock_time_secs: 0.0,
             num_obj_evals: 0,
             num_constr_evals: 0,
             num_obj_grad_evals: 0,

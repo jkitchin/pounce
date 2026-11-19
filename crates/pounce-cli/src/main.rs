@@ -1909,6 +1909,22 @@ fn real_main() -> ExitCode {
             ),
             None => pounce_presolve::PresolveTnlp::new(Rc::clone(&inner_tnlp), presolve_opts),
         }));
+        // gh#1196: postsolve's dual recovery runs after the solve's own
+        // deadline checks have stopped. Hand it the same budget, measured
+        // from here — before the solve's clock starts, so it can only trip
+        // earlier, never later, than the solve's.
+        {
+            let limit = |name: &str| {
+                app.options()
+                    .get_numeric_value(name, "")
+                    .map_or(1e6, |(v, _)| v)
+            };
+            p.borrow_mut()
+                .set_deadline(Some(pounce_common::timing::Deadline::new(
+                    limit("max_wall_time"),
+                    limit("max_cpu_time"),
+                )));
+        }
         // Force the lazy init now so we can print a one-line summary.
         let _ = p.borrow_mut().get_nlp_info();
         {
