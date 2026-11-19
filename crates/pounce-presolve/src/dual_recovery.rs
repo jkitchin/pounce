@@ -48,7 +48,7 @@
 //! keeps it), and anything the residual does not reach.
 //!
 //! The component is solved sparse, one strictly convex QP per proximal step
-//! through `pounce-qp` ([`ProxQp`]), with no cap on its size: the work is
+//! through `pounce-qp` ([`StepQp`]), with no cap on its size: the work is
 //! bounded by an allowance of active-set changes and the solve's deadline
 //! ([`Budget`]). Running out, a failed step, or a solve that does not reduce
 //! the residual leaves the duals exactly as the solver reported them and
@@ -70,7 +70,7 @@ use pounce_common::timing::Deadline;
 use pounce_common::types::{
     NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number, lower_bound_present, upper_bound_present,
 };
-use pounce_feral::FeralSolverInterface;
+use pounce_feral::{FeralConfig, FeralSolverInterface};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_qp::{
     BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver, QpOptions, QpProblem,
@@ -82,7 +82,12 @@ use pounce_qp::{
 /// dimension one: each step's QP is charged `(changes + 1) × dim`. A change
 /// costs a sparse Schur update and the solves around it, which grow with
 /// the KKT system, so a count of changes alone does not bound the time.
-pub(crate) const MAX_WORK: f64 = 2e6;
+///
+/// Measured (release, one thread): qpnstair uses `1.5e3`, deb7 `6.3e4`.
+/// A component with a row touching every multiplier (the adversarial
+/// `Stair`) uses `6.4e5` at 800 multipliers (1.0 s) and `9.8e5` at 1000
+/// (1.8 s); larger ones run out and roll back, at a few seconds.
+pub(crate) const MAX_WORK: f64 = 1e6;
 
 /// Read-only view of the original problem at the postsolved point.
 pub(crate) struct KktView<'a> {
@@ -637,53 +642,115 @@ impl LsSystem {
     }
 }
 
-/// One proximal step as a sparse QP in the *correction* `d = w⁺ − w_k` and
-/// the residual `r`:
+/// A row of `A` with more than this many entries, and more than
+/// [`DENSE_ROW_FACTOR`] times the median row, keeps its residual as a
+/// variable in [`StepQp`] instead of entering `AᵀA`, where it would put
+/// `c(c+1)/2` entries. Measured: the densest row of qpnstair's component has
+/// 24 entries (median 4), of deb7's 14 (median 3); a variable that every
+/// multiplier touches has one per multiplier.
+const DENSE_ROW_MIN: usize = 32;
+const DENSE_ROW_FACTOR: usize = 8;
+
+/// One proximal step as a sparse QP in the *correction* `d = w⁺ − w_k`:
 ///
 /// ```text
-///   min ½‖r‖² + ½μ‖d‖²   s.t.  r − A·d = r_k,   d_c ≥ −w_k,c where constrained
+///   min ½‖A_s·d + r_s‖² + ½‖t‖² + ½μ‖d‖²
+///   s.t.  t − A_t·d = r_t,   d_c ≥ −w_k,c where constrained
 /// ```
 ///
-/// with `r_k = A·w_k + b` evaluated directly. That is
-/// `min ½‖A·w⁺ + b‖² + ½μ‖w⁺ − w_k‖²` without forming `AᵀA` (dense where `A`
-/// is not, and squaring its conditioning), and in correction form, so the
-/// KKT solve's error scales with `|d|`, which vanishes as the iteration
-/// converges, not with `|w|`: each step is a round of iterative refinement.
-/// Solving for `w⁺` outright left `1.3e-10` of error on a unique `λ = 2`.
-/// `H = diag(μ·I, I)` is positive definite, so every step's QP is strictly
-/// convex, and `(d, r) = (0, r_k)` is feasible for it.
-struct ProxQp {
+/// with `r_k = A·w_k + b` evaluated directly and split by rows: the sparse
+/// rows `A_s` enter the Hessian as `A_sᵀA_s`, and each dense row of `A_t`
+/// (see [`DENSE_ROW_MIN`]) keeps its residual as a variable `t`. That is
+/// `min ½‖A·w⁺ + b‖² + ½μ‖w⁺ − w_k‖²` either way. It is posed in
+/// correction form, so the KKT solve's error scales with `|d|`, which
+/// vanishes as the iteration converges, not with `|w|`: each step is a
+/// round of iterative refinement, and that is also what corrects the
+/// squared conditioning of `A_sᵀA_s`. Solving for `w⁺` outright left
+/// `1.3e-10` of error on a unique `λ = 2`.
+///
+/// Why split, measured on the recovery alone (release, single thread):
+/// with every row augmented (`r` a variable throughout, no `AᵀA`), qpnstair
+/// took 13 ms and deb7's final call 347 ms against the dense solve's 90 and
+/// 280; with every row eliminated, 8 and 148 ms, but a component with one
+/// row touching all 800 multipliers (`AᵀA` dense) took 14.4 s against
+/// 1.7 s augmented. The split takes each where it wins.
+struct StepQp {
     k: usize,
-    nrows: usize,
+    /// Rows of the system kept as residual variables, in `t` order.
+    dense: Vec<usize>,
+    /// Row → its position in `dense`, or `usize::MAX` for an eliminated row.
+    dense_at: Vec<usize>,
     h: SymTMatrix,
+    /// The Hessian's values without `μ`, and where its `d` diagonal sits.
+    base: Vec<Number>,
+    diag_at: Vec<usize>,
     a: GenTMatrix,
     xl: Vec<Number>,
     xu: Vec<Number>,
 }
 
-impl ProxQp {
+impl StepQp {
     fn new(sys: &LsSystem) -> Self {
-        let (k, nrows) = (sys.k(), sys.nrows);
-        let n = k + nrows;
-        let diag: Vec<i32> = (1..=n as i32).collect();
-        let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as i32, diag.clone(), diag));
-        let mut hv = vec![1.0; n];
-        hv[..k].fill(0.0);
-        h.set_values(&hv);
-        let (mut ir, mut jc, mut val) = (Vec::new(), Vec::new(), Vec::new());
+        let k = sys.k();
+        let mut by_row: Vec<Vec<(usize, Number)>> = vec![Vec::new(); sys.nrows];
         for (c, col) in sys.cols.iter().enumerate() {
             for &(row, a) in col {
-                ir.push(row as i32 + 1);
+                by_row[row].push((c, a));
+            }
+        }
+        let mut counts: Vec<usize> = by_row.iter().map(Vec::len).collect();
+        counts.sort_unstable();
+        let median = counts.get(counts.len() / 2).copied().unwrap_or(0);
+        let limit = DENSE_ROW_MIN.max(DENSE_ROW_FACTOR * median);
+        let dense: Vec<usize> = (0..sys.nrows)
+            .filter(|&r| by_row[r].len() > limit)
+            .collect();
+        let mut dense_at = vec![usize::MAX; sys.nrows];
+        for (t, &r) in dense.iter().enumerate() {
+            dense_at[r] = t;
+        }
+        let n = k + dense.len();
+        // `A_sᵀA_s` (lower triangle), plus the diagonal of every variable.
+        let mut acc: std::collections::BTreeMap<(usize, usize), Number> = Default::default();
+        for c in 0..n {
+            acc.insert((c, c), if c < k { 0.0 } else { 1.0 });
+        }
+        for (r, row) in by_row.iter().enumerate() {
+            if dense_at[r] != usize::MAX {
+                continue;
+            }
+            for (i, &(ci, ai)) in row.iter().enumerate() {
+                for &(cj, aj) in &row[..=i] {
+                    let key = if ci >= cj { (ci, cj) } else { (cj, ci) };
+                    *acc.entry(key).or_insert(0.0) += ai * aj;
+                }
+            }
+        }
+        let (mut ir, mut jc, mut base) = (Vec::new(), Vec::new(), Vec::new());
+        let mut diag_at = Vec::with_capacity(k);
+        for (&(p, q), &v) in &acc {
+            if p == q && p < k {
+                diag_at.push(base.len());
+            }
+            ir.push(p as i32 + 1);
+            jc.push(q as i32 + 1);
+            base.push(v);
+        }
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as i32, ir, jc));
+        h.set_values(&base);
+        // `t − A_t·d = r_t`.
+        let (mut ir, mut jc, mut val) = (Vec::new(), Vec::new(), Vec::new());
+        for (t, &r) in dense.iter().enumerate() {
+            for &(c, a) in &by_row[r] {
+                ir.push(t as i32 + 1);
                 jc.push(c as i32 + 1);
                 val.push(-a);
             }
-        }
-        for row in 0..nrows {
-            ir.push(row as i32 + 1);
-            jc.push((k + row) as i32 + 1);
+            ir.push(t as i32 + 1);
+            jc.push((k + t) as i32 + 1);
             val.push(1.0);
         }
-        let mut a = GenTMatrix::new(GenTMatrixSpace::new(nrows as i32, n as i32, ir, jc));
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(dense.len() as i32, n as i32, ir, jc));
         a.set_values(&val);
         let mut xl = vec![NLP_LOWER_BOUND_INF; n];
         for (c, &con) in sys.constrained.iter().enumerate() {
@@ -693,31 +760,57 @@ impl ProxQp {
         }
         Self {
             k,
-            nrows,
+            dense,
+            dense_at,
             h,
+            base,
+            diag_at,
             a,
             xl,
             xu: vec![NLP_UPPER_BOUND_INF; n],
         }
     }
 
+    fn n(&self) -> usize {
+        self.k + self.dense.len()
+    }
+
     fn set_mu(&mut self, mu: Number) {
-        self.h.values_mut()[..self.k].fill(mu);
+        let mut v = self.base.clone();
+        for &d in &self.diag_at {
+            v[d] += mu;
+        }
+        self.h.set_values(&v);
+    }
+
+    /// The step's linear term `A_sᵀr_s` and right-hand side `r_t`.
+    fn rhs(&self, sys: &LsSystem, r_k: &[Number]) -> (Vec<Number>, Vec<Number>) {
+        let mut g = vec![0.0; self.n()];
+        for (c, col) in sys.cols.iter().enumerate() {
+            g[c] = col
+                .iter()
+                .filter(|&&(row, _)| self.dense_at[row] == usize::MAX)
+                .map(|&(row, a)| a * r_k[row])
+                .sum();
+        }
+        let r_t = self.dense.iter().map(|&r| r_k[r]).collect();
+        (g, r_t)
     }
 
     /// Set up the step from `w_k` (whose sign constraints hold): the lower
-    /// bounds `d_c ≥ −w_k,c`, and the warm start `(d, r) = (0, r_k)` with
+    /// bounds `d_c ≥ −w_k,c`, and the warm start `(d, t) = (0, r_t)` with
     /// each constrained entry already at zero on its bound. `prev` carries
     /// the previous step's multipliers, which stay a good guess.
     fn start(
         &mut self,
         sys: &LsSystem,
         w: &[Number],
-        r_k: &[Number],
+        r_t: &[Number],
         prev: Option<QpWarmStart>,
     ) -> QpWarmStart {
-        let n = self.k + self.nrows;
-        let mut working = WorkingSet::cold(n, self.nrows);
+        let n = self.n();
+        let m = self.dense.len();
+        let mut working = WorkingSet::cold(n, m);
         for (c, &con) in sys.constrained.iter().enumerate() {
             if con {
                 self.xl[c] = -w[c];
@@ -728,10 +821,10 @@ impl ProxQp {
         }
         working.constraints.fill(ConsStatus::Equality);
         let mut x = vec![0.0; self.k];
-        x.extend_from_slice(r_k);
+        x.extend_from_slice(r_t);
         let (lambda_g, lambda_x) = match prev {
             Some(p) => (p.lambda_g, p.lambda_x),
-            None => (vec![0.0; self.nrows], vec![0.0; n]),
+            None => (vec![0.0; m], vec![0.0; n]),
         };
         QpWarmStart {
             x,
@@ -748,7 +841,7 @@ const STALL_STEPS: usize = 3;
 
 /// `min ½‖A·w + b‖²` subject to `w_c ≥ 0` where constrained, by a
 /// proximal-point iteration `w⁺ = argmin ½‖A·w + b‖² + ½μ‖w − w_k‖²` started
-/// at `w0`. Each step is a strictly convex sparse QP ([`ProxQp`]) solved by
+/// at `w0`. Each step is a strictly convex sparse QP ([`StepQp`]) solved by
 /// `pounce-qp`'s active-set method, warm-started from the step before. On a
 /// consistent system with a unique solution this converges to it; on a
 /// degenerate one, to a solution near `w0`.
@@ -778,11 +871,17 @@ fn solve_sign_constrained_ls(
     let k = sys.k();
     let col_norm = sys.max_col_norm();
     let max_diag = (col_norm * col_norm).max(1e-300);
-    let mut mu = 1e-6 * max_diag;
+    // Small from the start: a Tikhonov step centred at `w_k` tends, as
+    // `μ → 0`, to the least-squares solution nearest `w_k`, which is where
+    // the proximal iteration was heading anyway, and the correction form
+    // absorbs the conditioning (`ε/μ ≈ 2e-6` relative). `1e-6`, which the
+    // dense normal-equations solve this replaced needed, took qpnstair 30
+    // steps and 222 ms; `1e-10` takes it 15 ms.
+    let mut mu = 1e-10 * max_diag;
     let mu_min = 1e-12 * max_diag;
-    let mut qp = ProxQp::new(sys);
-    // `(w, r)` and one multiplier per equality row.
-    let kkt_dim = k + 2 * sys.nrows;
+    let mut qp = StepQp::new(sys);
+    // `(d, t)` and one multiplier per dense row.
+    let kkt_dim = qp.n() + qp.dense.len();
     let base = QpOptions {
         // The work allowance bounds the solve; a pass may take as many
         // changes as it has left.
@@ -792,7 +891,16 @@ fn solve_sign_constrained_ls(
         certify_recession_ray: false,
         ..QpOptions::default()
     };
-    let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::serial()));
+    // Serial, for a deterministic answer. No in-backend refinement: the
+    // loop around it is the refinement (each step recomputes `r_k` exactly
+    // and solves for a correction), which is the condition `FeralConfig::
+    // refine` names for turning it off.
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::with_config(FeralConfig {
+            parallel: Some(false),
+            refine: false,
+            ..FeralConfig::from_env()
+        })));
     let mut w = w0.to_vec();
     let mut res = sys.residual(&w);
     let mut best = (res.iter().fold(0.0_f64, |m, x| m.max(x.abs())), w.clone());
@@ -804,16 +912,16 @@ fn solve_sign_constrained_ls(
             return Err(Failure::Budget);
         }
         qp.set_mu(mu);
-        let warm = qp.start(sys, &w, &res, prev.take());
-        let g = vec![0.0; k + sys.nrows];
+        let (g, r_t) = qp.rhs(sys, &res);
+        let warm = qp.start(sys, &w, &r_t, prev.take());
         let problem = QpProblem {
-            n: k + sys.nrows,
-            m: sys.nrows,
+            n: qp.n(),
+            m: qp.dense.len(),
             h: &qp.h,
             g: &g,
             a: &qp.a,
-            bl: &res,
-            bu: &res,
+            bl: &r_t,
+            bu: &r_t,
             xl: &qp.xl,
             xu: &qp.xu,
             hessian_inertia: HessianInertia::Psd,
@@ -1171,12 +1279,12 @@ mod tests {
     }
 
     /// The slow branch completes inside the default budget past the old
-    /// dense solve's 600 cap (it took 0.49 s at 800 and could not afford
-    /// 900; this takes 2.0 s, its KKT system having a dense row), and its
-    /// answer is a valid multiplier set: right signs, stationarity no worse
-    /// than the acceptance target. Measured on the same structure: 1.27e6 of
-    /// the 2e6 work units at 800, 1.77e6 at 1000; 2000 runs out (4.5 s) and
-    /// rolls back on the budget.
+    /// dense solve's 600 cap, and its answer is a valid multiplier set:
+    /// right signs, stationarity no worse than the acceptance target. Its
+    /// one row touching every multiplier is the case [`StepQp`] keeps
+    /// augmented (`t`): eliminated, `AᵀA` is dense and this took 14.4 s.
+    /// Measured: 1.0 s, against 0.49 s for the dense solve this replaced.
+    /// That is the one structure where the dense solve was faster.
     #[test]
     fn a_large_component_with_many_active_set_changes_is_affordable() {
         let p = Stair::new(400, 800);

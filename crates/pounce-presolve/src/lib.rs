@@ -1182,7 +1182,9 @@ impl PresolveTnlp {
             derived_u: &derived_u,
         };
         let budget = dual_recovery::Budget::new(dual_recovery::MAX_WORK, self.deadline.as_ref());
+        let started = std::time::Instant::now();
         let out = dual_recovery::reattribute(&view, lambda, z_l, z_u, budget);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
         if out.rolled_back {
             let cause = out
                 .cause
@@ -1190,6 +1192,7 @@ impl PresolveTnlp {
             tracing::warn!(
                 target: "pounce_presolve",
                 residual_before = out.residual_before,
+                elapsed_ms,
                 "presolve postsolve: multipliers on derived bounds could not be \
                  re-attributed to the original problem: {cause}; the reported \
                  duals keep the reduced problem's attribution"
@@ -1202,6 +1205,7 @@ impl PresolveTnlp {
                 residual_before = out.residual_before,
                 residual_after = out.residual_after,
                 restarted = out.restarted,
+                elapsed_ms,
                 "presolve postsolve: re-attributed derived-bound multipliers"
             );
         }

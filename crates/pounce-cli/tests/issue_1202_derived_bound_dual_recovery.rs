@@ -20,11 +20,14 @@
 //!
 //! The duals this pins are a KKT multiplier set of the *original* model:
 //! bound-projected stationarity and bound complementarity at
-//! `presolve=no`'s level. They are not `presolve=no`'s duals: on 6 rows and
-//! 50 variables the multipliers are not unique (both sets are stationary to
-//! `2e-8` with the same signs and complementarity, so their difference is a
-//! null vector), and the recovery keeps the reduced solve's split there.
-//! Everywhere else the two agree to `1.4e-4` against magnitudes of `9e4`.
+//! `presolve=no`'s level. On 6 rows and 50 variables the multipliers are not
+//! unique: two valid sets were measured stationary to `2e-8` with the same
+//! signs and complementarity, so their difference is a null vector. The
+//! recovery first returned one differing from `presolve=no`'s by up to
+//! `2.8e4` there. Since its proximal weight became small (each step lands on
+//! the least-squares solution nearest its start), it returns `presolve=no`'s
+//! to `5e-3`. Everywhere else the two agree to `1.4e-4` against magnitudes
+//! of `9e4`. The test asserts validity, not the choice.
 //!
 //! The rolled-back `.sol` used to pass `pounce verify --require-optimal`.
 //! That check gated only on the residual *with* the `.sol`'s bound

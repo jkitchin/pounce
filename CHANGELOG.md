@@ -118,32 +118,47 @@ changes.
 
 ### Changed
 - **Presolve's derived-bound dual recovery is solved sparse, with no size
-  cap** (gh#1202 follow-up). It used to hand-roll a dense normal-equations
-  Cholesky and an active-set loop, capped at 600 multipliers (800 after
-  deb7). Each proximal step is now a strictly convex sparse QP solved by
-  `pounce-qp`, in correction form so that each step is a round of iterative
-  refinement. It never forms `AᵀA`. The work bound is now an allowance of
-  `(active-set changes + 1) × KKT dimension` (`MAX_WORK = 2e6`) instead of
-  a flop count, still deterministic. Measured against the dense version:
-  - Every fixture that recovered still recovers. Primal values are
-    identical, and the duals agree to rounding except on deb7 and qpnstair,
-    whose multipliers are not unique. There both answers verify with no
-    misplaced multiplier, and qpnstair's now differs from `presolve=no` on
-    39 variables instead of 50.
-  - Run times: qpnstair 0.69 s (was 0.64 s) and deb7 2.5 s (was 2.2 s).
-  - On a synthetic component whose KKT system has a dense row, 590
-    multipliers take 1.2 s (was 0.16 s), and 800 take 2.0 s (was 0.49 s).
-    Components the dense solve refused (900 and up) are now solved: 1000
-    take 3.2 s, and 2000 exhaust the work allowance after 4.5 s and roll back
-    on the budget.
+  cap, and is faster** (gh#1202 follow-up). It used to hand-roll a dense
+  normal-equations Cholesky and an active-set loop, capped at 600
+  multipliers (800 after deb7). Each proximal step is now a strictly convex
+  sparse QP solved by `pounce-qp`. The rows of `A` are split: sparse rows
+  enter the Hessian as `A_sᵀA_s`, and a dense row keeps its residual as a
+  variable, so `AᵀA` is never formed dense. Each step is in correction
+  form, so it doubles as a round of iterative refinement. The work bound is
+  now `(active-set changes + 1) × KKT dimension` (`MAX_WORK = 1e6`) instead
+  of a flop count, and is still deterministic. Recovery time against the
+  dense version:
 
-  Getting there took two fixes, each measured on qpnstair. Entries the QP
-  held on their bound were read back as `1e-17` and re-added every step
-  (587 active-set changes, against 54 once they read as zero), and
-  Schur-complement updates are now enabled (they were off, so every change
-  refactored the KKT system). A deadline with no limit (`max_wall_time`'s
-  default `1e20` s) is now treated as no time limit; converting it to a
-  `Duration` panicked.
+  | | before | now |
+  |---|---|---|
+  | qpnstair | 90 ms | 8 ms |
+  | deb7, both calls | 119 + 280 ms | 94 + 139 ms |
+  | synthetic, 800 multipliers on one shared variable | 0.49 s | 1.0 s |
+
+  The synthetic case is the one structure where the dense solve was faster.
+  1000 such multipliers, which the dense solve refused, now take 1.8 s;
+  larger ones roll back on the budget within a few seconds. Every fixture
+  that recovered still recovers, with the same primal and duals equal to
+  rounding, except deb7 and qpnstair, whose multipliers are not unique.
+  qpnstair's now match `presolve=no`'s to `5e-3`; they had differed by up to
+  `2.8e4`.
+
+  What made it fast, each change measured on qpnstair or deb7:
+  - Entries the QP held on their bound were read back as `1e-17` and
+    re-added every step. Reading them as exactly zero cut 587 active-set
+    changes to 54.
+  - Schur-complement updates are on; they were off, so every change
+    refactored the KKT system.
+  - The proximal weight starts at `1e-10·max‖A_c‖²` instead of `1e-6`. That
+    took qpnstair from 30 steps (222 ms) to 15 ms: a small weight lands each
+    step on the least-squares solution nearest its start.
+  - Eliminating the sparse rows took deb7's final call from 347 ms to
+    148 ms.
+  - FERAL's in-backend refinement is off, worth 10–20%; the proximal loop
+    is the refinement.
+
+  A deadline with no limit (`max_wall_time`'s default `1e20` s) is now
+  treated as no time limit; converting it to a `Duration` panicked.
 
 ### Fixed
 - **`pounce verify --require-optimal` rejects bound multipliers that cannot
