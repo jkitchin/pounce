@@ -147,8 +147,28 @@ changes.
   multipliers in `3.4e8` flops, about a tenth of the budget. The roll-back
   warning now names its cause and what it measured (component past the
   cap, no multiplier to carry the residual, work budget, or residual not
-  reduced). Across the fixture corpus the only other roll-back is `deb7`,
-  unchanged: its component reaches 602 multipliers against the 600 cap.
+  reduced).
+
+  `deb7` rolled back too, first on the 600-multiplier cap (its components
+  have 662 and 684), and past the cap on its residual: `2.4e-2` against a
+  target of `1.1e-3`. Its reduced solve hands over a cancelling pair
+  `λ = ±1.16e10` on two equalities with the same gradient at `x*`, so only
+  their sum is determined. Anchored at that split, the iteration could not
+  get below the rounding it costs. Three changes, each measured on deb7:
+  the recovery now starts from zero when rounding at the anchor alone uses a
+  tenth of the target; it weakens the proximal term when progress stalls
+  (the rate was ×0.97 a step); and it stops at the least-squares optimum of
+  an inconsistent system, by its projected gradient. Before that last
+  change, weakening the proximal term ran an ill-conditioned active-set QP
+  into the work budget. The rounding-floor estimate is now per row: one
+  `1e10` entry no longer reads as a floor of `3e-2` everywhere. The cap is
+  800, the largest at which the near-cap adversarial test still fits the
+  work budget. deb7 now re-attributes 70 multipliers to residual `1.02e-4`,
+  the least-squares optimum at that point (the solver's own is `1.13e-4`;
+  scipy's bounded least squares finds `1.03e-4`). No multiplier sits on a
+  side that cannot carry one (`125` before), and bound complementarity is
+  `3.3e-6`, equal to `presolve=no`'s (`452` before). No roll-back remains in
+  the fixture corpus.
 - **`presolve=yes` no longer hangs after the solve has converged, and
   `max_wall_time` now covers postsolve** (gh#1196). Recovering the original
   problem's multipliers for bounds presolve derived could run unbounded:

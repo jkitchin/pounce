@@ -33,7 +33,11 @@
 //! (degenerate), the solve is a proximal-point iteration started from the
 //! reduced solve's own multipliers (spurious entries zeroed), so it returns
 //! a valid KKT multiplier set of the original problem that keeps as much of
-//! the reduced solve's attribution as stays valid. That is deterministic,
+//! the reduced solve's attribution as stays valid. The exception is an
+//! attribution that cannot be kept at working precision — a cancelling
+//! `±1e10` pair on constraints with the same gradient (deb7, gh#1202) —
+//! where it starts from zero and leans to the smallest valid multipliers
+//! instead (`Outcome::restarted`). That is deterministic,
 //! and it is the easiest rule to defend: every multiplier in the answer
 //! belongs to a constraint the original model declares and that is active,
 //! with the right sign, and stationarity holds.
@@ -63,8 +67,11 @@
 use pounce_common::timing::Deadline;
 use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 
-/// Most multipliers one dense recovery solve will take on.
-pub(crate) const MAX_UNKNOWNS: usize = 600;
+/// Most multipliers one dense recovery solve will take on. 800 since
+/// gh#1202 (deb7's components are 662 and 684): the largest size at which
+/// `a_component_near_the_cap_with_many_active_set_changes_is_affordable`
+/// still fits [`MAX_WORK_FLOPS`]; 900 does not.
+pub(crate) const MAX_UNKNOWNS: usize = 800;
 /// Most variables one connected component may span.
 pub(crate) const MAX_COMPONENT_VARS: usize = 5000;
 /// Most floating-point operations one recovery may spend, all proximal
@@ -111,6 +118,10 @@ pub(crate) struct Outcome {
     /// `true` when the roll-back was the work budget or the deadline
     /// running out ([`Budget`], gh#1196).
     pub budget_exhausted: bool,
+    /// The solve started from zero, not from the reduced solve's
+    /// multipliers, because rounding at those already cost a tenth of the
+    /// target (gh#1202).
+    pub restarted: bool,
     /// Which branch rolled back, with what it measured (gh#1202); `None`
     /// when nothing was rolled back.
     pub cause: Option<RollBack>,
@@ -403,8 +414,34 @@ pub(crate) fn reattribute(
     // Accept the recovery only when it actually closes stationarity: to the
     // solver's own residual, or to a level no tolerance would notice.
     let target = (10.0 * out.residual_before).max(1e-8 * scale);
-    let Some(w) = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &w0, target, &mut budget)
-    else {
+    let resid_of = |w: &[Number]| -> Number {
+        (0..nv)
+            .map(|row| {
+                let mut acc = b[row];
+                for c in 0..k {
+                    acc += a[row * k + c] * w[c];
+                }
+                acc.abs()
+            })
+            .fold(0.0_f64, Number::max)
+    };
+    // Anchor at the reduced solve's multipliers, so a degenerate component
+    // keeps as much of their attribution as stays valid — unless the
+    // anchor cannot be honoured at working precision: when rounding at the
+    // anchor alone already costs a tenth of the target, start from zero,
+    // which leans to the smallest valid multipliers instead. deb7 (gh#1202)
+    // hands over a cancelling pair `±1.16e10` on two equalities with the
+    // same gradient at `x*`; anchored there, the residual crept down ×0.97
+    // a step against a floor of `5e-4` and the recovery rolled back, while
+    // multipliers of size `1.4e3` close it to `1e-4`.
+    let start = if rounding_floor(&a, &b, nv, k, &w0) > 0.1 * target {
+        out.restarted = true;
+        vec![0.0; k]
+    } else {
+        w0
+    };
+    let w = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &start, target, &mut budget);
+    let Some(w) = w else {
         restore(lambda, z_l, z_u);
         out.rolled_back = true;
         out.budget_exhausted = true;
@@ -414,15 +451,7 @@ pub(crate) fn reattribute(
         out.n_unknowns = 0;
         return out;
     };
-    let res_after = (0..nv)
-        .map(|row| {
-            let mut acc = b[row];
-            for c in 0..k {
-                acc += a[row * k + c] * w[c];
-            }
-            acc.abs()
-        })
-        .fold(0.0_f64, Number::max);
+    let res_after = resid_of(&w);
     if !(res_after <= target) {
         restore(lambda, z_l, z_u);
         out.rolled_back = true;
@@ -487,6 +516,59 @@ impl<'a> Budget<'a> {
 /// gets to halve before the iteration counts as stalled.
 const STALL_STEPS: usize = 3;
 
+/// Is `w` optimal for `min ½‖A·w + b‖²` subject to the sign constraints,
+/// given its residual `res = A·w + b`? The projected gradient `Aᵀres` —
+/// every free entry, and a constrained entry at zero where it pushes below
+/// zero — at most `1e-6` of `max_c ‖A_c‖₂ · ‖res‖₂`.
+///
+/// This is the stop for an *inconsistent* system, whose residual stays above
+/// the rounding floor at the optimum: on deb7 (gh#1202) the optimum is
+/// `1.02e-4` (the primal is accurate to about that), and without this test
+/// the iteration kept weakening `μ` past it until an ill-conditioned
+/// active-set QP spent the whole work budget. A consistent system stops at
+/// the floor first: there `‖res‖₂ → 0` and this ratio does not shrink.
+fn ls_optimal(
+    a: &[Number],
+    res: &[Number],
+    nrows: usize,
+    k: usize,
+    constrained: &[bool],
+    w: &[Number],
+    col_norm: Number,
+) -> bool {
+    let rn = res.iter().map(|x| x * x).sum::<Number>().sqrt();
+    if !(rn > 0.0) || !(col_norm > 0.0) {
+        return false;
+    }
+    let mut pg = 0.0_f64;
+    for p in 0..k {
+        let gp: Number = (0..nrows).map(|row| a[row * k + p] * res[row]).sum();
+        let v = if constrained[p] && w[p] <= 0.0 {
+            (-gp).max(0.0)
+        } else {
+            gp.abs()
+        };
+        pg = pg.max(v);
+    }
+    pg <= 1e-6 * col_norm * rn
+}
+
+/// What rounding alone costs evaluating `A·w + b`:
+/// `100·ε·max_r (|b_r| + Σ_c |a_rc·w_c|)`, row by row. Not `‖A‖∞·‖w‖∞`,
+/// which pairs the densest row with the largest entry anywhere, so one huge
+/// multiplier reads as a floor on every row (deb7, gh#1202: `3.3e-2` from a
+/// `1.16e10` pair, against `5e-4` on the row that pair sits in).
+fn rounding_floor(a: &[Number], b: &[Number], nrows: usize, k: usize, w: &[Number]) -> Number {
+    100.0
+        * Number::EPSILON
+        * (0..nrows)
+            .map(|row| {
+                let ar = &a[row * k..(row + 1) * k];
+                b[row].abs() + ar.iter().zip(w).map(|(x, y)| (x * y).abs()).sum::<Number>()
+            })
+            .fold(0.0_f64, Number::max)
+}
+
 /// `min ½‖A·w + b‖²` subject to `w_c ≥ 0` where `constrained[c]`, by a
 /// proximal-point iteration `w⁺ = argmin ½‖A·w + b‖² + ½μ‖w − w_k‖²` started
 /// at `w0`. Each step is a strictly convex bound-constrained QP, solved by a
@@ -494,8 +576,12 @@ const STALL_STEPS: usize = 3;
 /// this converges to it; on a degenerate one, to a solution near `w0`.
 /// `None` when `budget` runs out first.
 ///
+/// When the residual stops halving, `μ` is cut ×100 (to `1e-12·max diag`
+/// at the least) and the free block refactored.
+///
 /// It returns the iterate with the smallest residual `‖A·w + b‖∞`, as soon
-/// as that is down to the rounding floor `100·ε·‖A‖∞·‖w‖∞`, or once it is
+/// as that is down to the rounding floor `100·ε·max_r (|b_r| + Σ_c |a_rc·w_c|)`,
+/// or once it is
 /// under `accept` (the caller's acceptance target) and has not halved in
 /// [`STALL_STEPS`] steps — or when the step itself vanishes.
 /// The step test alone is not reachable in floating point once the
@@ -537,22 +623,14 @@ fn solve_sign_constrained_ls(
         }
     }
     let max_diag = (0..k).fold(0.0_f64, |m, p| m.max(ata[p * k + p]));
-    let mu = 1e-6 * max_diag.max(1e-300);
+    let col_norm = max_diag.sqrt();
+    let mut mu = 1e-6 * max_diag.max(1e-300);
+    let mu_min = 1e-12 * max_diag.max(1e-300);
     let mut h = ata;
     for p in 0..k {
         h[p * k + p] += mu;
     }
-    let norm_a = (0..nrows)
-        .map(|row| {
-            a[row * k..(row + 1) * k]
-                .iter()
-                .map(|x| x.abs())
-                .sum::<Number>()
-        })
-        .fold(0.0_f64, Number::max);
-    let floor = |w: &[Number]| -> Number {
-        100.0 * Number::EPSILON * norm_a * w.iter().fold(0.0_f64, |m, x| m.max(x.abs()))
-    };
+    let floor = |w: &[Number]| rounding_floor(a, b, nrows, k, w);
     let resid = |w: &[Number]| -> Number {
         (0..nrows)
             .map(|row| {
@@ -579,10 +657,16 @@ fn solve_sign_constrained_ls(
             .fold(0.0_f64, |m, (p, q)| m.max((p - q).abs()));
         let size = next.iter().fold(1.0_f64, |m, p| m.max(p.abs()));
         w = next;
-        if !budget.charge(2.0 * (nrows * k) as f64) {
+        if !budget.charge(4.0 * (nrows * k) as f64) {
             return None;
         }
-        let r = resid(&w);
+        let res: Vec<Number> = (0..nrows)
+            .map(|row| {
+                let ar = &a[row * k..(row + 1) * k];
+                b[row] + ar.iter().zip(&w).map(|(x, y)| x * y).sum::<Number>()
+            })
+            .collect();
+        let r = res.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
         if r < best.0 {
             best = (r, w.clone());
         }
@@ -592,7 +676,28 @@ fn solve_sign_constrained_ls(
         recent.push(r);
         let stalled = recent.len() > STALL_STEPS && r > 0.5 * recent[0];
         let at_floor = best.0 <= floor(&best.1);
-        if step <= 1e-15 * size || at_floor || (best.0 <= accept && stalled) {
+        if step <= 1e-15 * size
+            || at_floor
+            || ls_optimal(a, &res, nrows, k, constrained, &w, col_norm)
+        {
+            break;
+        }
+        if stalled && mu > mu_min {
+            // Each step removes only `μ/(σ²+μ)` of the error along a
+            // direction of singular value `σ`: where `σ²` is far below `μ`
+            // the iteration crawls (deb7, gh#1202: ×0.97 a step, from
+            // `σ² ≈ 3e-8·max diag` against `μ = 1e-6·max diag`). Weaken
+            // the proximal term and refactor, rather than stop.
+            let next_mu = (mu * 1e-2).max(mu_min);
+            for p in 0..k {
+                h[p * k + p] += next_mu - mu;
+            }
+            mu = next_mu;
+            fac = FreeFactor::new(k);
+            recent.clear();
+            continue;
+        }
+        if best.0 <= accept && stalled {
             break;
         }
     }
@@ -899,6 +1004,7 @@ mod tests {
         let o = reattribute(&v, &mut lam, &mut zl, &mut zu, Budget::default());
         assert!(!o.rolled_back, "{o:?}");
         assert_eq!(o.n_spurious, 1);
+        assert!(!o.restarted, "{o:?}");
         assert!((lam[0] - 2.0).abs() < 1e-10, "λ = {lam:?}");
         assert!((zl[0] - 10.0).abs() < 1e-10, "z_L = {zl:?}");
         assert_eq!(zl[1], 0.0);
@@ -956,6 +1062,89 @@ mod tests {
             "{lam:?}"
         );
         assert_eq!((zl, zu), (vec![0.0, 0.0], vec![0.0, 0.0]));
+    }
+
+    /// Two equalities with the same gradient at `x*` (rows 0 and 1, both
+    /// `x0 = 0`), and `x0 − x1 = 0` tying them to `x1`, whose derived lower
+    /// bound carries the reduced solve's spurious `z_L = 1`. Only `λ0 + λ1`
+    /// is determined (`= −2`, with `λ2 = 1`). `pair` is the reduced
+    /// solve's split, which sums to `−1` (it had `λ2 = 0` and the spurious
+    /// `z_L = 1` instead), so the reduced point is exactly stationary.
+    fn parallel_pair(pair: (Number, Number)) -> (Outcome, Vec<Number>) {
+        let jac = [(0, 0, 1.0), (1, 0, 1.0), (2, 0, 1.0), (2, 1, -1.0)];
+        let v = KktView {
+            x: &[0.0, 0.0],
+            g: &[0.0, 0.0, 0.0],
+            grad_f: &[1.0, 1.0],
+            jac: &jac,
+            x_l: &[-1e19, -1e19],
+            x_u: &[1e19, 1e19],
+            g_l: &[0.0, 0.0, 0.0],
+            g_u: &[0.0, 0.0, 0.0],
+            derived_l: &[false, true],
+            derived_u: &[false, false],
+        };
+        let mut lam = vec![pair.0, pair.1, 0.0];
+        let (mut zl, mut zu) = (vec![0.0, 1.0], vec![0.0, 0.0]);
+        let o = reattribute(&v, &mut lam, &mut zl, &mut zu, Budget::default());
+        assert!(!o.rolled_back, "{o:?}");
+        assert_eq!(zl, vec![0.0, 0.0]);
+        let r = residual(&v, &lam, &zl, &zu);
+        assert!(r.iter().all(|x| x.abs() < 1e-8), "{r:?} λ = {lam:?}");
+        assert!((lam[2] - 1.0).abs() < 1e-8 && (lam[0] + lam[1] + 2.0).abs() < 1e-8);
+        (o, lam)
+    }
+
+    /// gh#1202 (deb7): a cancelling `±1e10` split cannot be honoured at
+    /// working precision — rounding there alone exceeds the target — so the
+    /// solve starts from zero and returns small multipliers.
+    #[test]
+    fn a_split_past_working_precision_is_not_kept() {
+        let (o, lam) = parallel_pair((1e10, -1e10 - 1.0));
+        assert!(o.restarted, "{o:?}");
+        assert!(lam[0].abs() < 10.0 && lam[1].abs() < 10.0, "{lam:?}");
+    }
+
+    /// The other branch: a moderate split is kept as nearly as stays valid —
+    /// the proximal iteration projects `(3, −4)` onto `λ0 + λ1 = −2`.
+    #[test]
+    fn a_split_within_working_precision_is_kept() {
+        let (o, lam) = parallel_pair((3.0, -4.0));
+        assert!(!o.restarted, "{o:?}");
+        assert!(
+            (lam[0] - 2.5).abs() < 1e-6 && (lam[1] + 4.5).abs() < 1e-6,
+            "{lam:?}"
+        );
+    }
+
+    /// [`ls_optimal`]: optimal at an inconsistent least-squares optimum,
+    /// and at a sign-constrained one held at zero; not elsewhere; and never
+    /// claimed on a zero residual (the floor test's case).
+    #[test]
+    fn least_squares_optimality_by_branch() {
+        // A = [1; 1], b = [−1, 1]: the optimum is w = 0, residual (−1, 1).
+        let a = [1.0, 1.0];
+        assert!(ls_optimal(&a, &[-1.0, 1.0], 2, 1, &[false], &[0.0], 1.0));
+        // w = 0.5 is not the optimum.
+        assert!(!ls_optimal(&a, &[-0.5, 1.5], 2, 1, &[false], &[0.5], 1.0));
+        // A = [1], b = [1], w ≥ 0: the gradient pushes below zero, so w = 0
+        // is optimal for the constrained problem, not for the free one.
+        assert!(ls_optimal(&[1.0], &[1.0], 1, 1, &[true], &[0.0], 1.0));
+        assert!(!ls_optimal(&[1.0], &[1.0], 1, 1, &[false], &[0.0], 1.0));
+        // A zero residual is left to the floor test.
+        assert!(!ls_optimal(&a, &[0.0, 0.0], 2, 1, &[false], &[1.0], 1.0));
+    }
+
+    /// [`rounding_floor`] is per row: a huge entry raises the floor of the
+    /// rows it appears in, not of every row.
+    #[test]
+    fn the_rounding_floor_is_per_row() {
+        // Row 0 touches w0 = 1e10, row 1 only w1 = 1.
+        let a = [1.0, 0.0, 0.0, 1.0];
+        let f = rounding_floor(&a, &[0.0, 0.0], 2, 2, &[1e10, 1.0]);
+        assert_eq!(f, 100.0 * Number::EPSILON * 1e10);
+        let g = rounding_floor(&a, &[0.0, 0.0], 2, 2, &[1.0, 1.0]);
+        assert_eq!(g, 100.0 * Number::EPSILON);
     }
 
     /// Deterministic pseudo-random numbers in `[-1, 1)`.

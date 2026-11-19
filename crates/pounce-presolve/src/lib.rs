@@ -1202,6 +1202,7 @@ impl PresolveTnlp {
                 n_unknowns = out.n_unknowns,
                 residual_before = out.residual_before,
                 residual_after = out.residual_after,
+                restarted = out.restarted,
                 "presolve postsolve: re-attributed derived-bound multipliers"
             );
         }

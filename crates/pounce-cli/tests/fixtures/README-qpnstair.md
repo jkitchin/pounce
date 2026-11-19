@@ -12,7 +12,7 @@ recovery's proximal-point loop on a 499-multiplier component with
 non-unique multipliers, whose residual floors at about `2e-9` while the
 multipliers are about `9e4`. That is the branch the loop's stopping rule
 has to get right, and no synthetic fixture in the repository reaches it.
-`crates/pounce-cli/tests/issue_1202_qpnstair_dual_recovery.rs` pins it.
+`crates/pounce-cli/tests/issue_1202_derived_bound_dual_recovery.rs` pins it.
 
 **Provenance.** Converted from the AMPL source
 
