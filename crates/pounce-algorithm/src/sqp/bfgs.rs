@@ -295,13 +295,19 @@ impl DampedBfgs {
             // it fired after a wildly backtracked early step, the restart's
             // `γ` was far too small in most directions, the following steps
             // ran to `‖p‖ ~ 1e5` at `α ~ 1e-7`, and the solve stopped at
-            // `f = 7.52` after 11 iterations instead of reaching 1.6. Both
-            // conditions are needed. An ill-conditioned problem shows
-            // `sᵀy ≫ sᵀBs` along fresh directions with nothing stale about
-            // the scale: on `palmer8e` (bounds only) the ratio test alone threw
-            // away the curvature its fit needs and the solve ran out of
-            // iterations at `f = 0.067`. Without nonlinear constraints the
-            // multipliers do not enter `∇²L` at all, and nothing re-sizes.
+            // `f = 7.52` after 11 iterations instead of reaching 1.6.
+            //
+            // The multiplier condition scopes the rule to its cause. An
+            // ill-conditioned problem shows `sᵀy ≫ sᵀBs` along fresh
+            // directions with nothing stale about the scale, and without
+            // nonlinear constraints the multipliers do not enter `∇²L` at all,
+            // so nothing is shifted there. With the restart the condition was
+            // load-bearing: the ratio test alone re-sized `palmer8e` (bounds
+            // only) into `Maximum_Iterations_Exceeded` at `f = 0.067`. The
+            // shift survives the ratio test alone on `palmer8e`, so the
+            // condition is now a scope, pinned by
+            // `a_steep_pair_alone_does_not_resize` and
+            // `without_multipliers_nothing_resizes`.
             let stale = match (lambda_g, self.sized_lambda.as_deref()) {
                 (Some(l), Some(l0)) if l.len() == l0.len() => {
                     let base = l0.iter().fold(1.0_f64, |a, v| a.max(v.abs()));

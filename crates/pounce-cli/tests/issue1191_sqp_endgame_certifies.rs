@@ -93,9 +93,10 @@ fn assert_certified(name: &str, f_star: f64, rel: f64) -> serde_json::Value {
 
 #[test]
 fn palmer8e_takes_the_step_phi_cannot_resolve() {
-    // Also the "bounds only" branch of the BFGS re-sizing rule: its fit is
-    // ill-conditioned, fresh directions show `sᵀy ≫ sᵀBs`, and a ratio-only
-    // trigger re-sized it into `Maximum_Iterations_Exceeded` at f = 0.067.
+    // Also the "bounds only" side of the BFGS shift: its fit is
+    // ill-conditioned, so fresh directions show `sᵀy ≫ sᵀBs`. Restarting `B`
+    // at `γI` on the ratio test alone (an earlier version of the rule) ended
+    // it `Maximum_Iterations_Exceeded` at f = 0.067.
     assert_certified("cute_palmer8e.nl", 6.339_307_43e-3, 1e-8);
 }
 
