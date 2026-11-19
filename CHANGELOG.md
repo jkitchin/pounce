@@ -145,10 +145,11 @@ changes.
   before the sphere constraint's multiplier settled. The curvature then
   grew 20× in every direction the steps had not explored, the steps
   overshot there, and the run hit the 200-iteration cap at the optimum. It
-  now certifies in 50 iterations (the exact Hessian takes 33). A re-size
-  needs both a step that shows the model short of the curvature by more than
-  10× and multipliers that have moved since the last sizing, so models
-  without nonlinear constraints are unaffected.
+  now certifies in 52 iterations (the exact Hessian takes 33). The fix
+  raises the model's curvature by the smallest uniform amount that agrees
+  with the latest step. It applies only when a step shows the model short of
+  the curvature by more than 10× and the multipliers have moved since the
+  last sizing, so models without nonlinear constraints are unaffected.
 - **The active-set SQP no longer takes uphill steps from a feasible
   point, stalls at a non-stationary start, or ends `Internal_Error` with no
   `x` when started on negative curvature (gh#1173).** Under the default

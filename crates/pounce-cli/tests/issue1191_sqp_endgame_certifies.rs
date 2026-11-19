@@ -37,10 +37,10 @@
 //! between 1e-6 and 1e-4. The n = 1000 model hit the 200-iteration cap on
 //! the corpus `.nl`, and certified at 197 on this transcription (`main`),
 //! against 25 for real L-BFGS and 33 for the exact Hessian. `DampedBfgs` now
-//! re-sizes when the multipliers have moved and a pair shows `B` short of the
-//! curvature by more than 10×: 197 → 50.
+//! shifts `B` up when the multipliers have moved and a pair shows it short of
+//! the curvature by more than 10×: 197 → 52.
 //! The fixture is the same model at n = 400 (`main`: 135 iterations; now
-//! 60), small enough for CI.
+//! 66), small enough for CI.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -124,6 +124,6 @@ fn gilbert_resizes_a_bfgs_scale_the_multipliers_made_stale() {
         .unwrap_or(u64::MAX);
     assert!(
         iters <= 90,
-        "gilbert (n = 400): {iters} iterations (60 with re-sizing, 135 without)"
+        "gilbert (n = 400): {iters} iterations (66 with the shift, 135 without)"
     );
 }

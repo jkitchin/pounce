@@ -25,7 +25,7 @@
 use crate::sqp::qp_assembly::Triplet;
 use pounce_common::types::{Index, Number};
 
-/// A curvature pair with `sᵀy > RESIZE_RATIO · sᵀBs` re-sizes `B` (see
+/// A curvature pair with `sᵀy > RESIZE_RATIO · sᵀBs` shifts `B` up (see
 /// [`DampedBfgs::update_sy`]).
 const RESIZE_RATIO: Number = 10.0;
 /// ... and only once the constraint multipliers have moved by more than this
@@ -286,8 +286,16 @@ impl DampedBfgs {
             // So when the multipliers have moved since the sizing (by more
             // than `RESIZE_LAMBDA_MOVE` of their size then), a pair showing
             // `B` short of the curvature along `s` by more than
-            // `RESIZE_RATIO` re-runs the sizing from it: `B` restarts from
-            // `γI` with `γ = sᵀy/sᵀs`, and this pair is the first update. Both
+            // `RESIZE_RATIO` shifts `B` by `δI`, `δ = (sᵀy − sᵀBs)/sᵀs`, the
+            // smallest isotropic shift that makes `B` agree with the pair along
+            // `s`, and the update then proceeds as usual. A shift only ever
+            // raises curvature, which is what the trigger says is missing.
+            // Restarting from `γI` instead (`γ = sᵀy/sᵀs`) also discarded
+            // what `B` had learned: on `eigenb2` (n = 110, 55 nonlinear rows)
+            // it fired after a wildly backtracked early step, the restart's
+            // `γ` was far too small in most directions, the following steps
+            // ran to `‖p‖ ~ 1e5` at `α ~ 1e-7`, and the solve stopped at
+            // `f = 7.52` after 11 iterations instead of reaching 1.6. Both
             // conditions are needed. An ill-conditioned problem shows
             // `sᵀy ≫ sᵀBs` along fresh directions with nothing stale about
             // the scale: on `palmer8e` (bounds only) the ratio test alone threw
@@ -307,15 +315,15 @@ impl DampedBfgs {
             };
             if stale && s_bs > 1e-14 && s_y > RESIZE_RATIO * s_bs {
                 let s_s: Number = s.iter().map(|v| v * v).sum();
-                let gamma = s_y / s_s;
+                let delta = (s_y - s_bs) / s_s;
                 self.sized_lambda = lambda_g.map(<[Number]>::to_vec);
                 for i in 0..self.n {
-                    for j in 0..=i {
-                        self.set(i, j, if i == j { gamma } else { 0.0 });
-                    }
+                    self.set(i, i, self.get(i, i) + delta);
                 }
-                bs = s.iter().map(|v| gamma * v).collect();
-                s_bs = gamma * s_s;
+                for (b, v) in bs.iter_mut().zip(s) {
+                    *b += delta * v;
+                }
+                s_bs = s_y;
             }
 
             // Powell damping.
@@ -384,8 +392,9 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_scale_is_resized_when_the_multipliers_have_moved() {
-        // λ went 0 → 17: the untouched axis 2 restarts at the new scale.
+    fn a_stale_scale_is_shifted_up_when_the_multipliers_have_moved() {
+        // λ went 0 → 17: δ = (20 − 1)/1 = 19 lifts the untouched axis 2 to
+        // the new scale.
         let b = stale_then_steep(Some(&[17.0]));
         assert!(
             (diag(&b, 2) - 20.0).abs() < 1e-12,
@@ -397,6 +406,22 @@ mod tests {
             "axis 1: {}",
             diag(&b, 1)
         );
+    }
+
+    #[test]
+    fn the_shift_keeps_curvature_already_learned() {
+        // `eigenb2` (gh#1191 review): restarting from `γI` threw away the
+        // large curvature `B` had learned. Axis 2 learns 1e4 while the
+        // multipliers are still near the sizing's; then a stale pair along
+        // axis 1 fires. A shift keeps axis 2 at ≥ 1e4, where a restart at
+        // `γ = 20` would have dropped it to 20.
+        let mut b = DampedBfgs::new(3);
+        b.update_sy_at(&[1.0, 0.0, 0.0], &[1.0, 0.0, 0.0], Some(&[0.0]));
+        b.update_sy_at(&[0.0, 0.0, 1.0], &[0.0, 0.0, 1e4], Some(&[0.2]));
+        assert!((diag(&b, 2) - 1e4).abs() < 1e-8, "learned: {}", diag(&b, 2));
+        b.update_sy_at(&[0.0, 1.0, 0.0], &[0.0, 20.0, 0.0], Some(&[17.0]));
+        assert!(diag(&b, 2) >= 1e4, "axis 2 lowered to {}", diag(&b, 2));
+        assert!((diag(&b, 1) - 20.0).abs() < 1e-8, "axis 1: {}", diag(&b, 1));
     }
 
     #[test]

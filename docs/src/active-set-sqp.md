@@ -746,8 +746,9 @@ nonlinear constraints the Lagrangian's curvature moves with the multipliers,
 so that first scale can go stale in every unexplored direction. When the
 multipliers have moved by more than half their size since the last sizing,
 and a step shows `B` short of the curvature along it by more than 10×, the
-update re-sizes from that step and starts over (gh#1191). On `gilbert`
-(n = 1000) that took a 197-iteration run to 50.
+update first shifts `B` up by the smallest multiple of `I` that agrees with
+that step (gh#1191). A shift only raises curvature, so what `B` has learned
+is kept. On `gilbert` (n = 1000) that took a 197-iteration run to 52.
 
 What the lift does not change is the cost of an active-set walk. A cold QP
 needs about one pivot per constraint that becomes active, and each pivot is a
