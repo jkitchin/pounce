@@ -4021,9 +4021,16 @@ fn run_convex_qp(
     let obj_const = prob.obj_constant + obj_nl_const;
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
-    let ipm_tol = convex_opts.tol;
-    let backend = move || -> Box<dyn SparseSymLinearSolverInterface> {
-        Box::new(pounce_feral::FeralSolverInterface::for_convex_ipm(ipm_tol))
+    // The IPM's backend is built per problem: whether static pivoting is on
+    // depends on the solve's `tol` and on the free-column fraction of the
+    // (presolved) problem actually factored. See `for_convex_ipm`.
+    let ipm_backend = |p: &pounce_convex::QpProblem, tol: f64| {
+        let free = p.free_column_fraction();
+        move || -> Box<dyn SparseSymLinearSolverInterface> {
+            Box::new(pounce_feral::FeralSolverInterface::for_convex_ipm(
+                tol, free,
+            ))
+        }
     };
     // The active-set QP takes an indefinite `P` and reads inertia off the
     // factorization, so it keeps feral's default (delayed) pivoting: the
@@ -4099,9 +4106,9 @@ fn run_convex_qp(
         match debug_hook.filter(|_| !use_active_set) {
             Some(hook) => {
                 let mut h = hook.borrow_mut();
-                solve_qp_ipm_debug(p, o, &mut *h, backend)
+                solve_qp_ipm_debug(p, o, &mut *h, ipm_backend(p, o.tol))
             }
-            None => solve_qp_ipm(p, o, backend),
+            None => solve_qp_ipm(p, o, ipm_backend(p, o.tol)),
         }
     };
     // What presolve did, held back until we know this solve is the one that
@@ -4536,7 +4543,7 @@ fn run_convex_qp(
                         collect_iterates: false,
                         ..o
                     },
-                    backend,
+                    ipm_backend(&qp, o.tol),
                 )
             })
         })
@@ -4732,7 +4739,13 @@ fn run_convex_qp(
     // is why the step is missing" rather than a silently absent suffix — which
     // is the issue #196 failure mode in a new place.
     if let Some(pins) = &sens_pins {
-        match pounce_cli::convex_sens::perturbed_x(&qp, &sol, &solve_opts(), pins, backend) {
+        match pounce_cli::convex_sens::perturbed_x(
+            &qp,
+            &sol,
+            &solve_opts(),
+            pins,
+            ipm_backend(&qp, solve_opts().tol),
+        ) {
             Ok(x_pert) => {
                 qp_bound_suffixes.push(pounce_cli::convex_sens::sens_suffix(x_pert));
             }

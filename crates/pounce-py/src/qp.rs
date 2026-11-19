@@ -38,11 +38,16 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
     Box::new(FeralSolverInterface::new())
 }
 
-/// The convex interior point's backend: static pivoting on at `tol >= 1e-10`
-/// (see [`FeralSolverInterface::for_convex_ipm`]). The CLI's convex path uses
-/// the same constructor, so both frontends factor the same way.
-fn ipm_backend(tol: f64) -> impl Fn() -> Box<dyn SparseSymLinearSolverInterface> + Copy {
-    move || Box::new(FeralSolverInterface::for_convex_ipm(tol))
+/// The convex interior point's backend for problem `p`: static pivoting on at
+/// `tol >= 1e-10` when at most 1% of `p`'s columns are free (see
+/// [`FeralSolverInterface::for_convex_ipm`]). The CLI's convex path uses the
+/// same constructor, so both frontends factor the same way.
+fn ipm_backend(
+    p: &QpProblem,
+    tol: f64,
+) -> impl Fn() -> Box<dyn SparseSymLinearSolverInterface> + Copy {
+    let free = p.free_column_fraction();
+    move || Box::new(FeralSolverInterface::for_convex_ipm(tol, free))
 }
 
 /// Transparent `Send` shim used to move a non-`Send` value (a factorization /
@@ -749,7 +754,7 @@ pub fn solve_qp<'py>(
                     collect_iterates: false,
                     ..o
                 };
-                solve_qp_ipm(&prob.inner, &ro, ipm_backend(ro.tol))
+                solve_qp_ipm(&prob.inner, &ro, ipm_backend(&prob.inner, ro.tol))
             })
         })
     };
@@ -766,14 +771,14 @@ pub fn solve_qp<'py>(
                 pounce_convex::crossover::clear_report();
                 let (sol, pre, lift) = match &warm {
                     Some(w) => (
-                        solve_qp_ipm_warm(&prob.inner, &o, w, ipm_backend(o.tol)),
+                        solve_qp_ipm_warm(&prob.inner, &o, w, ipm_backend(&prob.inner, o.tol)),
                         None,
                         None,
                     ),
                     None if presolve_on => {
                         let (sol, pre, lift) =
                             solve_presolved_with_ray(&prob.inner, &o, |p, po| {
-                                solve_qp_ipm(p, po, ipm_backend(po.tol))
+                                solve_qp_ipm(p, po, ipm_backend(p, po.tol))
                             });
                         (
                             demote_unverified_optimal(&prob.inner, &o, sol),
@@ -782,7 +787,7 @@ pub fn solve_qp<'py>(
                         )
                     }
                     None => (
-                        solve_qp_ipm(&prob.inner, &o, ipm_backend(o.tol)),
+                        solve_qp_ipm(&prob.inner, &o, ipm_backend(&prob.inner, o.tol)),
                         None,
                         None,
                     ),

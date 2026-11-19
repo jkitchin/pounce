@@ -133,11 +133,16 @@ changes.
   which it factored on its scalar, single-threaded kernel. On MIPLIB
   `rmatr200-p5` one factorization took 266 s, against 0.1 s for the earlier
   iterations. The convex KKT is quasi-definite, so the convex IPM now runs
-  FERAL with static pivoting when `tol ≥ 1e-10`
-  (`FeralSolverInterface::for_convex_ipm`). Below that it keeps delayed
-  pivoting, because static pivoting caps accuracy near `1e-13`: NETLIB ISRAEL
-  at `tol=1e-16` reached `2e-13` with it. `POUNCE_FERAL_STATIC_PIVOTING` still
-  overrides. The CLI and Python convex paths both use it. The active-set and
+  FERAL with static pivoting when `tol ≥ 1e-10` and at most 1% of the
+  columns are free (`FeralSolverInterface::for_convex_ipm`). Below that
+  tolerance it keeps delayed pivoting, because static pivoting caps accuracy
+  near `1e-13`: NETLIB ISRAEL at `tol=1e-16` reached `2e-13` with it. Above
+  1% free columns it also keeps delayed pivoting. A free column's pivot has
+  no barrier term, so on an LP it is the regularization alone. Static
+  pivoting there slowed the DC-OPF models, whose bus angles are ~89% of the
+  columns: `case_ACTIVSg10k` went from 15 s to 57 s, and `case_SyntheticUSA`
+  lost its infeasibility certificate. Delayed pivoting does not cascade on
+  them. `POUNCE_FERAL_STATIC_PIVOTING` still overrides. The CLI and Python convex paths both use it. The active-set and
   NLP paths are unchanged.
 - **False `DualInfeasible` on a bounded LP** (MIPLIB `leo2`, gh#1193). The
   HSDE recession test tested the iterate `x` as the ray. On a model whose

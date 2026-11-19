@@ -950,6 +950,26 @@ pub(crate) fn pivot_counts(solver: &Solver) -> Option<(usize, usize)> {
 /// turns static pivoting on; see there.
 pub const STATIC_PIVOT_MIN_TOL: f64 = 1e-10;
 
+/// The largest fraction of free columns for which
+/// [`FeralSolverInterface::for_convex_ipm`] turns static pivoting on; see
+/// there.
+pub const STATIC_PIVOT_MAX_FREE_FRACTION: f64 = 0.01;
+
+/// The static-pivoting decision of [`FeralSolverInterface::for_convex_ipm`],
+/// apart from the environment: an explicit setting wins; otherwise on exactly
+/// when `tol >= STATIC_PIVOT_MIN_TOL` and at most
+/// `STATIC_PIVOT_MAX_FREE_FRACTION` of the columns are free.
+pub fn convex_ipm_static_pivoting(
+    explicit: Option<bool>,
+    tol: f64,
+    free_fraction: f64,
+) -> Option<bool> {
+    explicit.or_else(|| {
+        (tol >= STATIC_PIVOT_MIN_TOL && free_fraction <= STATIC_PIVOT_MAX_FREE_FRACTION)
+            .then_some(true)
+    })
+}
+
 /// Everything POUNCE records about one successful factorization. Shared
 /// by the monolithic backend and the Schur backend's eliminated block.
 /// Every read is `O(n)` or cheaper — negligible next to the factor.
@@ -1173,11 +1193,23 @@ impl FeralSolverInterface {
     /// accuracy near 1e-13 (measured: `lp_israel` at `tol = 1e-16` goes from
     /// 1.9e-16 to 2.0e-13). Below `STATIC_PIVOT_MIN_TOL` the caller asked for
     /// more than that, so delayed pivoting stays.
-    pub fn for_convex_ipm(tol: f64) -> Self {
+    ///
+    /// It also stays when more than `STATIC_PIVOT_MAX_FREE_FRACTION` of the
+    /// columns are free (`free_fraction`, from
+    /// `QpProblem::free_column_fraction`). A free column's `(x, x)` pivot has
+    /// no barrier term — on an LP it is the regularization alone — so the
+    /// quasi-definite margin there is `δ_w`, and force-accepting it in place
+    /// is exactly what static pivoting does. Measured on the DC-OPF models,
+    /// whose bus angles are ~89% of the columns: `case_ACTIVSg10k` 15 s → 57
+    /// s and `case_ACTIVSg25k` 23 s → 74 s (both handed to the NLP fallback),
+    /// `case_ACTIVSg70k` 97 s → over 300 s, and the infeasible
+    /// `case_SyntheticUSA` lost its certificate (112 s → 200 iterations, KKT
+    /// error 1.4e9). Delayed pivoting does not cascade on them (nnz(L) within
+    /// 1.09× of the first factorization through SyntheticUSA's solve, against
+    /// 11–69× on rmatr200-p5 and waihi, which have no free column).
+    pub fn for_convex_ipm(tol: f64, free_fraction: f64) -> Self {
         let mut cfg = FeralConfig::from_env();
-        if cfg.static_pivoting.is_none() && tol >= STATIC_PIVOT_MIN_TOL {
-            cfg.static_pivoting = Some(true);
-        }
+        cfg.static_pivoting = convex_ipm_static_pivoting(cfg.static_pivoting, tol, free_fraction);
         Self::with_config(cfg)
     }
 
@@ -2841,6 +2873,27 @@ mod tests {
     /// The pounce default leaves static pivoting unset (`None`), so the
     /// backend inherits feral's SSIDS-style delayed-pivot default and the
     /// numeric path is unchanged unless a caller opts in.
+    /// Every branch of the convex-IPM rule: on only when the tolerance is
+    /// loose enough *and* the free columns are few; an explicit setting wins
+    /// both ways; the boundaries are inclusive.
+    #[test]
+    fn convex_ipm_static_pivoting_rule() {
+        let f = convex_ipm_static_pivoting;
+        assert_eq!(f(None, 1e-8, 0.0), Some(true));
+        assert_eq!(
+            f(None, STATIC_PIVOT_MIN_TOL, STATIC_PIVOT_MAX_FREE_FRACTION),
+            Some(true)
+        );
+        // tol tighter than 1e-10: delayed pivoting (accuracy cap ~1e-13).
+        assert_eq!(f(None, 1e-12, 0.0), None);
+        // DC-OPF-like: most columns free → delayed pivoting.
+        assert_eq!(f(None, 1e-8, 0.887), None);
+        assert_eq!(f(None, 1e-8, 0.0101), None);
+        // Explicit setting wins in both directions.
+        assert_eq!(f(Some(false), 1e-8, 0.0), Some(false));
+        assert_eq!(f(Some(true), 1e-12, 0.9), Some(true));
+    }
+
     #[test]
     fn default_static_pivoting_is_none() {
         assert_eq!(FeralConfig::default().static_pivoting, None);
