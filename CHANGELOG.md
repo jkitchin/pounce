@@ -125,11 +125,19 @@ changes.
   against `tol = 1e-8`. On `palmer8e` the last step's predicted objective
   change was below the objective's round-off, so the line search was comparing
   noise. A step like that is now taken at full length, provided it does not
-  raise the constraint violation. On `hs99exp` the last steps were below
-  round-off in `x`, and the stall limit counted them as a stall although each
-  divided the residual by four. Steps that keep cutting the residual below
-  their run's best no longer count. Both now end `Solve_Succeeded` at the
-  same objective, in 134 and 60 iterations.
+  raise the constraint violation. It now ends `Solve_Succeeded` at the same
+  objective in 134 iterations. A run of steps below round-off in `x` that
+  keeps cutting the residual is also no longer counted as a stall.
+- **The active-set SQP's stopping test scales the stationarity residual by
+  the multipliers, as Ipopt's does (gh#1191).** `sqp_tol` is now compared
+  with the residual divided by `s_d = max(100, mean |λ|)/100`. The unscaled
+  residual must still meet `sqp_dual_inf_tol`. With large multipliers the
+  residual has a round-off floor above an absolute `1e-8`. `hs99exp`
+  (`f ≈ −1e9`, `s_d ≈ 91`) sat at 4e-8 to 1e-7, and certified only when the
+  noise happened to dip below `tol`, which on the CUTE corpus `.nl` it never
+  did. It now certifies at iteration 55. A solve can only stop at the same
+  iterate or an earlier one, and models whose multipliers average at most 100
+  are unaffected.
 - **The dense quasi-Newton SQP Hessian re-sizes when the constraint
   multipliers make its scale stale (gh#1191).** At `n ≤ 1000`,
   `hessian_approximation=limited-memory` runs a dense damped BFGS, which set

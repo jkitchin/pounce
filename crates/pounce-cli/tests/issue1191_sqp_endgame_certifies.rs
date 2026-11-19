@@ -5,24 +5,28 @@
 //! Both are endgames that gh#1173's filter rules (PR #1190) judged on
 //! quantities that had stopped carrying information:
 //!
-//! * **`hs99exp`**: `r`, `q` reach `1e7`, so the last steps of a superlinear
-//!   endgame are below round-off in `x`. Those are "tiny steps", taken
-//!   unjudged, and two in a row were treated as a stall. Yet each one still
-//!   divided the stationarity residual by four (`5.8e-7 → 1.4e-7 → 3.0e-8`),
-//!   and the limit fired one step short of `tol = 1e-8`. A run of tiny
-//!   steps that brings the residual 10% below its best is now progress, not
-//!   a stall.
+//! * **`hs99exp`**: `f = −r₈² ≈ −1e9`, with multipliers whose mean is about
+//!   9e3. In its endgame the stationarity residual has a round-off floor of
+//!   4e-8 – 1e-7, above the absolute `tol = 1e-8` the SQP compared it with, so
+//!   it certified only when noise dipped below `tol`: on one variable ordering
+//!   at iteration 60, and on the corpus `.nl` not at all. The test now divides
+//!   the residual by Ipopt's multiplier scale `s_d` (≈ 91 here) before
+//!   comparing with `tol`, and every ordering certifies at iteration 55. (Its
+//!   last steps are also below round-off in `x`, which is what first looked
+//!   like the cause. The tiny-step stall rule that came out of that is pinned
+//!   by `pounce-algorithm`'s `sqp::filter::tiny_step_streak_tests`, since no
+//!   fixture here reaches it any more.)
 //! * **`palmer8e`**: at stationarity 1.7e-8 the step's predicted change
 //!   `∇fᵀp = −1.2e-18` is below `φ`'s resolution (`10·ε·|φ| = 1.4e-17`), and
 //!   `φ` moved by `±1e-15` of evaluation noise at every trial length. Armijo
 //!   compared the noise and backtracked to failure. Such a "φ-tiny" step is
 //!   now taken at full length, provided it does not raise `θ`.
 //!
-//! The fixtures are pyomo transcriptions of Vanderbei's CUTE `.mod` files
-//! (`hs99exp` with the fixed `r₁ = q₁ = s₁ = 0` substituted, as AMPL's
-//! presolve does). Both legs failed on `5463adb` exactly as the issue
-//! reports on the corpus `.nl` (`palmer8e` 134 iterations,
-//! `hs99exp` 57).
+//! The fixtures are pyomo transcriptions of Vanderbei's CUTE `.mod` files.
+//! `cute_hs99exp.nl` keeps the fixed `r₁ = q₁ = s₁` as variables bounded to
+//! `[0, 0]` (31 variables), and orders the columns as AMPL does, since the
+//! corpus was written with `presolve 0`. Both failed on `5463adb` as the
+//! issue reports (`palmer8e` at 134 iterations, `hs99exp` at 57).
 //!
 //! **`gilbert`**, the issue's third model, is a different defect.
 //! `hessian_approximation=limited-memory` at `n ≤ sqp_dense_hessian_max_n`
@@ -95,8 +99,18 @@ fn palmer8e_takes_the_step_phi_cannot_resolve() {
 }
 
 #[test]
-fn hs99exp_tiny_steps_that_make_progress_are_not_a_stall() {
-    assert_certified("cute_hs99exp.nl", -1.008_062_5e9, 1e-10);
+fn hs99exp_certifies_under_the_multiplier_scaled_stationarity_test() {
+    let r = assert_certified("cute_hs99exp.nl", -1.008_062_5e9, 1e-10);
+    // Without `s_d` this fixture still certifies, by luck, when the residual
+    // dips below the absolute `tol` at iteration 60 (the corpus file never
+    // does). The iteration count is what tells the two apart.
+    let iters = r["statistics"]["iteration_count"]
+        .as_u64()
+        .unwrap_or(u64::MAX);
+    assert!(
+        iters <= 57,
+        "hs99exp: {iters} iterations (55 under the scaled test; 60 by luck without it)"
+    );
 }
 
 #[test]

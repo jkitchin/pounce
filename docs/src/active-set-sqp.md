@@ -134,7 +134,7 @@ mirror `SqpOptions::default()`.
 | `sqp_globalization`     | `filter`    | `filter` or `l1-elastic` (Fletcher-Leyffer / Han-Powell) |
 | `sqp_hessian`           | `exact`     | `exact`, `damped-bfgs`, or `lbfgs`                 |
 | `sqp_max_iter`          | `200`       | outer iteration cap                                |
-| `sqp_tol`               | `1e-8`      | stationarity tolerance (max-norm)                  |
+| `sqp_tol`               | `1e-8`      | stationarity tolerance (max-norm, divided by Ipopt's multiplier scale `s_d`) |
 | `sqp_constr_viol_tol`   | `1e-6`      | constraint-violation tolerance                     |
 | `sqp_dual_inf_tol`      | `1e-4`      | dual-infeasibility tolerance                       |
 | `sqp_l1_penalty`        | `1.0`       | initial ν (Han-Powell only)                        |
