@@ -76,6 +76,10 @@ pub struct SqpFilter {
     /// Stationarity residual of the previous outer iterate, as reported to
     /// [`SqpFilter::observe_stationarity`].
     last_stationarity: Option<Number>,
+    /// Smallest stationarity residual seen since the current run of tiny
+    /// steps began, starting from the iterate the first one was taken at.
+    /// Progress is measured against it, not against the previous iterate.
+    streak_best: Option<Number>,
 }
 
 impl SqpFilter {
@@ -87,13 +91,15 @@ impl SqpFilter {
             theta_min: None,
             tiny_steps: 0,
             last_stationarity: None,
+            streak_best: None,
         }
     }
 
     /// Report the stationarity residual of the iterate the next search
-    /// starts from. A tiny step that cut it to at most
-    /// `TINY_STEP_PROGRESS` of the previous iterate's made progress and does
-    /// not count toward the `MAX_TINY_STEPS` stall limit (gh#1191).
+    /// starts from. A run of tiny steps that has cut it to at most
+    /// `TINY_STEP_PROGRESS` of the smallest residual seen since the run
+    /// began made progress, and its count toward the `MAX_TINY_STEPS` stall
+    /// limit starts over (gh#1191).
     ///
     /// The limit's premise is that a step below round-off in `x` repeated
     /// without convergence means the iteration has stalled. That is true of
@@ -103,15 +109,46 @@ impl SqpFilter {
     /// while each still divides the residual by four
     /// (`5.8e-7 → 1.4e-7 → 3.0e-8`). The limit ended that run
     /// `Search_Direction_Becomes_Too_Small` one step short of `tol`.
+    ///
+    /// The reference is the run's best residual, not the previous iterate's:
+    /// against the previous iterate, a residual that bounces by more than 2×
+    /// (`1e-7 → 3e-7 → 1e-7 → …`) would reset the count on every down-swing,
+    /// and the limit would never fire on the oscillation it exists to stop.
     pub fn observe_stationarity(&mut self, stationarity: Number) {
+        let finite = stationarity.is_finite().then_some(stationarity);
         if self.tiny_steps > 0
-            && self
-                .last_stationarity
-                .is_some_and(|prev| stationarity <= TINY_STEP_PROGRESS * prev)
+            && let Some(s) = finite
         {
-            self.tiny_steps = 0;
+            match self.streak_best {
+                Some(best) if s <= TINY_STEP_PROGRESS * best => {
+                    self.tiny_steps = 0;
+                    self.streak_best = None;
+                }
+                Some(best) => self.streak_best = Some(best.min(s)),
+                None => {}
+            }
         }
-        self.last_stationarity = stationarity.is_finite().then_some(stationarity);
+        self.last_stationarity = finite;
+    }
+
+    /// May the search take one more tiny step unjudged?
+    fn tiny_step_allowed(&self) -> bool {
+        self.tiny_steps < MAX_TINY_STEPS
+    }
+
+    /// Count a tiny step taken unjudged. The first of a run records the
+    /// residual of the iterate it starts from as the run's best.
+    fn take_tiny_step(&mut self) {
+        if self.tiny_steps == 0 {
+            self.streak_best = self.last_stationarity;
+        }
+        self.tiny_steps += 1;
+    }
+
+    /// An accepted, judged step ends any run of tiny steps.
+    fn end_tiny_streak(&mut self) {
+        self.tiny_steps = 0;
+        self.streak_best = None;
     }
 
     /// Is `(θ, φ)` not dominated by any filter entry?
@@ -163,14 +200,22 @@ const ETA_PHI: Number = 1e-4;
 const TINY_STEP_TOL: Number = 10.0 * Number::EPSILON;
 /// Consecutive tiny steps after which the search reports failure.
 const MAX_TINY_STEPS: u32 = 2;
-/// A tiny step that divides the stationarity residual by at least this
-/// factor's inverse is progress, not a stall (see
-/// [`SqpFilter::observe_stationarity`]).
-const TINY_STEP_PROGRESS: Number = 0.5;
+/// A run of tiny steps that brings the stationarity residual to at most
+/// this fraction of the run's best is progress, not a stall (see
+/// [`SqpFilter::observe_stationarity`]). A 10% margin, not a halving:
+/// `hs99exp`'s endgame bounces at the noise floor
+/// (`2.96e-8 → 6.98e-8 → 1.71e-8 → 2.40e-9`), and its third step beats the
+/// run's best by 0.58×, which a halving rule refuses one step before
+/// convergence. An oscillation never beats its best at any margin.
+const TINY_STEP_PROGRESS: Number = 0.9;
 /// Largest rise in `φ` a φ-tiny step may carry, relative to `1 + |φ|`
 /// (`√ε`; see [`filter_line_search`]). It is a guard against a step whose
 /// first-order prediction is tiny but whose second-order change is not, not
 /// a round-off estimate: the noise it admits on `palmer8e` is `1e-15`.
+/// Being relative, it is large in absolute terms when `|φ|` is: at
+/// `|φ| ≈ 1e9` (`hs99exp`) an unjudged step may raise `f` by about 15. That
+/// is the scale of `tol` relative to `φ`, and such a step's `|∇fᵀp|` is
+/// already below `10·ε·|φ|`; it is not an absolute bound.
 const PHI_TINY_MAX_RISE: Number = 1.5e-8;
 
 /// Is `α·p` below round-off relative to `x` in every component?
@@ -271,14 +316,14 @@ pub fn filter_line_search<N: SqpProblemSpec>(
     // in `x` cannot be judged by comparing `f` and `θ` — the comparison is
     // noise — and what it carries is the QP's multipliers, which is how an
     // SQP finishes at a primal that is already optimal. Take it unjudged.
-    // Two in a row that neither converge nor halve the stationarity residual
-    // (see `SqpFilter::observe_stationarity`) mean the iteration has
-    // stalled, and the search reports failure rather than repeating it:
+    // Two in a row that neither converge nor cut the stationarity residual
+    // below the run's best (see `SqpFilter::observe_stationarity`) mean the
+    // iteration has stalled, and the search reports failure rather than repeating it:
     // `jit1_node` (limited-memory) otherwise sat at the interior point's
     // objective for 160 iterations of `‖αp‖ ≈ 2e-19`.
     if step_is_tiny(x, p, 1.0) {
-        if filter.tiny_steps < MAX_TINY_STEPS {
-            filter.tiny_steps += 1;
+        if filter.tiny_step_allowed() {
+            filter.take_tiny_step();
             let x_new: Vec<Number> = x.iter().zip(p.iter()).map(|(a, d)| a + d).collect();
             let f_new = nlp.eval_f(&x_new);
             let c_new = nlp.eval_c(&x_new);
@@ -384,11 +429,11 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         if first_trial
             && phi_tiny
             && trial_is_evaluable
-            && filter.tiny_steps < MAX_TINY_STEPS
+            && filter.tiny_step_allowed()
             && theta_trial <= theta_curr
             && phi_trial - phi_curr <= PHI_TINY_MAX_RISE * (1.0 + phi_curr.abs())
         {
-            filter.tiny_steps += 1;
+            filter.take_tiny_step();
             return LineSearchResult {
                 alpha,
                 nu: current_nu,
@@ -413,7 +458,7 @@ pub fn filter_line_search<N: SqpProblemSpec>(
             if !f_type {
                 filter.add(theta_curr, phi_curr);
             }
-            filter.tiny_steps = 0;
+            filter.end_tiny_streak();
             return LineSearchResult {
                 alpha,
                 nu: current_nu,
@@ -473,7 +518,7 @@ pub fn filter_line_search<N: SqpProblemSpec>(
                                 if !f_type {
                                     filter.add(theta_curr, phi_curr);
                                 }
-                                filter.tiny_steps = 0;
+                                filter.end_tiny_streak();
                                 return LineSearchResult {
                                     alpha: 1.0,
                                     nu: current_nu,
@@ -501,5 +546,69 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         c_new: last_c,
         success: false,
         soc_duals: None,
+    }
+}
+
+#[cfg(test)]
+mod tiny_step_streak_tests {
+    //! The stall limit on tiny steps, driven by a scripted residual sequence
+    //! (gh#1191 review). The CLI fixtures reach a monotone endgame
+    //! (`hs99exp`) and a flat one (`jit1_node`), not an oscillating one.
+    use super::*;
+
+    /// Feed `residuals[0]` as the iterate a tiny step is taken from, then
+    /// each later entry as the iterate it lands on, taking another tiny step
+    /// while the limit allows. Returns the number of tiny steps taken before
+    /// the limit refused one (or all of them, if it never did).
+    fn tiny_steps_taken(residuals: &[Number]) -> usize {
+        let mut f = SqpFilter::new();
+        for (k, &s) in residuals.iter().enumerate() {
+            f.observe_stationarity(s);
+            if !f.tiny_step_allowed() {
+                return k;
+            }
+            f.take_tiny_step();
+        }
+        residuals.len()
+    }
+
+    #[test]
+    fn an_oscillating_residual_trips_the_limit() {
+        // Against the previous iterate, every down-swing to 1e-7 more than
+        // halves 3e-7 and reset the count, so this ran to `max_iter`.
+        let bounce: Vec<Number> = (0..20)
+            .map(|k| if k % 2 == 0 { 1e-7 } else { 3e-7 })
+            .collect();
+        assert_eq!(tiny_steps_taken(&bounce), MAX_TINY_STEPS as usize);
+    }
+
+    #[test]
+    fn a_flat_residual_trips_the_limit() {
+        assert_eq!(tiny_steps_taken(&[2e-7; 20]), MAX_TINY_STEPS as usize);
+    }
+
+    #[test]
+    fn a_residual_that_keeps_falling_never_trips_it() {
+        // `hs99exp`'s endgame divides it by about four per step.
+        let fall: Vec<Number> = (0..20).map(|k| 1e-6 * 0.25_f64.powi(k)).collect();
+        assert_eq!(tiny_steps_taken(&fall), fall.len());
+    }
+
+    #[test]
+    fn a_dip_below_the_run_best_resets_it_and_starts_a_new_run() {
+        // 1e-6 → 9.5e-7 (count 2, best 9.5e-7) would be refused next;
+        // instead the landing point 4e-7 beats 0.9 × the best, so the run
+        // starts over from it, and two flat steps later the limit fires.
+        let seq = [1e-6, 9.5e-7, 4e-7, 4e-7, 4e-7, 4e-7];
+        assert_eq!(tiny_steps_taken(&seq), 4);
+    }
+
+    #[test]
+    fn hs99exp_noise_floor_bounce_is_progress() {
+        // `hs99exp`'s measured endgame residuals from iteration 55. Its last
+        // tiny steps rise and fall at the noise floor; `tol = 1e-8` is
+        // reached at the last entry.
+        let seq = [5.81e-7, 1.37e-7, 2.96e-8, 6.98e-8, 1.71e-8, 2.40e-9];
+        assert_eq!(tiny_steps_taken(&seq), seq.len());
     }
 }

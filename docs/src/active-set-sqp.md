@@ -694,7 +694,8 @@ has nothing to measure there. A *tiny* step is below round-off in `x`
 raise the constraint violation. Both are how an SQP finishes at a point that
 is already optimal: the step carries the QP's multipliers, and comparing `f`
 would compare evaluation noise. Two such steps in a row that neither
-converge nor halve the stationarity residual end the solve
+converge nor bring the stationarity residual 10% below its best since the
+first of them end the solve
 `Search_Direction_Becomes_Too_Small` (gh#1191).
 
 `sqp_globalization = l1-elastic` is the SNOPT-style Han-Powell

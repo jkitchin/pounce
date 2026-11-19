@@ -127,8 +127,8 @@ changes.
   noise. A step like that is now taken at full length, provided it does not
   raise the constraint violation. On `hs99exp` the last steps were below
   round-off in `x`, and the stall limit counted them as a stall although each
-  divided the residual by four. A step that halves the residual no longer
-  counts. Both now end `Solve_Succeeded` at the same objective, in 134 and 60
+  divided the residual by four. Steps that keep cutting the residual below
+  their run's best no longer count. Both now end `Solve_Succeeded` at the same objective, in 134 and 60
   iterations. `gilbert`, reported with them, still stops at the 200-iteration
   cap. Its endgame is a slow limited-memory convergence, not this stall; see
   `dev-notes/known-limitations.md`.

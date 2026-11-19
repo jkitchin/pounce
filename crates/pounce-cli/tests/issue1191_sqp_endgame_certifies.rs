@@ -9,8 +9,9 @@
 //!   endgame are below round-off in `x`. Those are "tiny steps", taken
 //!   unjudged, and two in a row were treated as a stall. Yet each one still
 //!   divided the stationarity residual by four (`5.8e-7 → 1.4e-7 → 3.0e-8`),
-//!   and the limit fired one step short of `tol = 1e-8`. A tiny step that
-//!   halves the residual is now progress, not a stall.
+//!   and the limit fired one step short of `tol = 1e-8`. A run of tiny
+//!   steps that brings the residual 10% below its best is now progress, not
+//!   a stall.
 //! * **`palmer8e`**: at stationarity 1.7e-8 the step's predicted change
 //!   `∇fᵀp = −1.2e-18` is below `φ`'s resolution (`10·ε·|φ| = 1.4e-17`), and
 //!   `φ` moved by `±1e-15` of evaluation noise at every trial length. Armijo
