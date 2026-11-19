@@ -393,10 +393,10 @@ asks for these corrections) would also do it.
 
 ---
 
-## Active-set QP: δ-shifted steps can still climb on solve noise (gh#1195)
+## Active-set QP: working-set steps can climb on solve noise (gh#1195)
 
-*Measured on `claude/pounce-issue-1195-owd2q0` at `3ecb57b` against `main` at
-`9c0ab66`. Recorded 2026-11-19.*
+*Measured on `claude/pounce-issue-1195-owd2q0` against `main` at `9c0ab66`.
+Recorded 2026-11-19.*
 
 **What happens.** A working-set step should never raise the QP objective:
 with the reduced Hessian made positive definite by a shift `δ ≥ 0`,
@@ -405,47 +405,48 @@ the elastic penalty's size (10⁶ and up), and a KKT residual near round-off
 times those multipliers can flip the sign of a computed step. Replaying the
 229 step and correction QPs of `pooling_rt2stp`'s forced-SQP limited-memory
 run (each from its own warm start, without gh#1195's correction bounds),
-45 250 full steps raised the objective. Taken, such a step moves `x` uphill,
-and a drop/re-add cycle that moves `x` on every lap is one Bland's rule
-cannot end.
+45 250 full steps raised the objective, most of them δ-shifted, many outside
+phase 1. Taken, such a step moves `x` uphill, and a drop/re-add cycle that
+moves `x` on every lap is one Bland's rule cannot end. Where the cost showed
+— the SQP's second-order-correction QP — it is bounded instead (gh#1195,
+PR #1198); the steps themselves are still taken.
 
-**What is fixed.** An *unshifted* step that climbs is now taken as a null
-step on the refactor path's elastic phase (`raises_the_objective`): there
-the arithmetic is exact (`−pᵀHp < 0`), so climbing can only be solve error,
-and the point already minimizes the model on its working set. The cycles
-that change can leave at a fixed `x` are ended by the refactor path's copy of
-the Schur path's cycle guard. On 200 generated convex elastic QPs (refactor
-path): `Optimal` 172 → 174 (3 from `MaxIter`, 1 the other way, seed 87),
-working-set changes −22%, time −16%, no objective worse.
+**What was tried and dropped.** Reading a climbing step as a null step
+(stationary on its working set, read the multipliers):
 
-**What is not.** Most of the 45 250 climbing steps above are δ-shifted, and
-those are left alone. Their true descent `δ‖p‖²` can be smaller than the
-noise while the point is not stationary, so the null-step reading is wrong
-for them. Refusing them cut `haverly_multistart_t3_brf0`'s elastic pass short
-of a proximal crawl that was still lowering the objective (14 → 22 SQP
-iterations). The guard also stays off the Schur-update path (3 of 300
-generated QPs better, 3 worse; Maros-Meszaros `QSCFXM1` 4242 → 9861 iterations
-on one correct refusal that reordered its pivots) and outside phase 1
-(`hs13_bigstart` turned from success to `Search_Direction_Becomes_Too_Small`:
-at its cusp the climbing "step" is pure error, but the SQP had come to depend
-on taking it). Where the cost of these steps showed — the SQP's correction
-QP — it is bounded instead (gh#1195, PR #1198).
+- *Every step.* `hs13_bigstart` (limited-memory, forced SQP) turned from
+  success to `Search_Direction_Becomes_Too_Small`: at its cusp, two nearly
+  parallel active rows in two variables, the climbing "step" is pure error,
+  but the SQP had come to depend on taking it. `deb7` went `MaxIter` at
+  iteration 1 until steps with a pin-repair right-hand side were excluded.
+- *δ-shifted steps.* Their true descent `δ‖p‖²` can be smaller than the noise
+  while the point is not stationary: refusing them cut
+  `haverly_multistart_t3_brf0`'s elastic pass short of a proximal crawl that
+  was still lowering the objective (14 → 22 SQP iterations).
+- *Unshifted steps of the elastic phase, refactor path* — the one case where
+  the arithmetic is exact. It left an unshifted fixed-point cycle (a bound
+  dropped on a wrong-sign multiplier, re-added at `α = 0` by the shifted step
+  after it; 10 795 working-set changes, 42 s on one `pooling_rt2stp` step QP)
+  that needed the Schur path's cycle guard copied to the refactor path. With
+  both: on 200 generated convex elastic QPs, 174 `Optimal` instead of 172 (3
+  better, 1 worse), working-set changes −22%, time −16%;
+  `manyineq_concave_qp` under `qp-active-set` 22727 → 6058 iterations; but
+  `pooling_rt2stp` (limited-memory, forced SQP) `MaxIter`/200 at −3134.83 →
+  `Search_Direction_Becomes_Too_Small`/128 at −3126.96, and the replay's
+  climbing-step count barely moved (45 250 → 47 412), since most of those
+  steps are shifted. Dropped as a small and uncertain gain, unmeasured on
+  `benchmarks/qp`.
+- *The same on the Schur-update path.* 3 of 300 generated QPs better, 3
+  worse; Maros-Meszaros `QSCFXM1` 4242 → 9861 iterations on one correct
+  refusal that reordered its pivots at a degenerate vertex.
+- *Iterative refinement.* Every solve is already refined by the backend
+  against the original matrix; what is left is conditioning.
 
-**What moved on the fixture corpus.** `scripts/sweep-fixtures.sh`, both legs:
-default options empty; `solver_selection=qp-active-set`,
-`manyineq_concave_qp` 22727 → 6058 iterations (same objective);
-`algorithm=active-set-sqp`, `cc:opf_vv_lower_knee_held` 62 → 61 lowered
-iterations and `pooling_rt2stp` (limited-memory) `MaxIter`/200 at
-f = −3134.83 → `Search_Direction_Becomes_Too_Small`/128 at −3126.96 in 37 s
-instead of 60 s. That model fails on both; the default arm solves it at
-−3273.95.
-
-**How to tell whether a fix works.** A remedy for the shifted case has to
-keep `haverly_multistart_t3_brf0` (limited-memory, forced SQP) at 14
-iterations while lowering the climbing-step count on the `pooling_rt2stp`
-replay. Iterative refinement does not reach it: every solve is already
-refined by the backend against the original matrix, so what is left is
-conditioning, not an unrefined solve.
+**How to tell whether a fix works.** The climbing-step count on the
+`pooling_rt2stp` replay falls well below 45 250, `haverly_multistart_t3_brf0`
+(limited-memory, forced SQP) stays at 14 iterations, `hs13_bigstart` still
+succeeds, and `benchmarks/qp` under `solver_selection=qp-active-set` does not
+move against `main`.
 ---
 
 ## MPCC: four MacMPEC answers stay complementary only to ~7e-5

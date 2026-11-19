@@ -1539,9 +1539,6 @@ impl ParametricActiveSetSolver {
         // the pass is the compact path, so the backend's view of that matrix
         // costs at most one inertia ladder per pass.
         let mut soft_ok = n + m >= SOFT_DROP_MIN_DIM;
-        // Cycle guard state (see the guard at the end of the loop body).
-        let mut streak_obj = Number::NAN;
-        let mut seen_sets: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
 
         for _iter in 0..opts.max_iter {
             crate::deadline::charge_iteration();
@@ -1761,12 +1758,7 @@ impl ParametricActiveSetSolver {
             }
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
-            // A climbing unshifted step of the elastic phase 1 is a null step
-            // too (`raises_the_objective`, gh#1195).
-            let floor = (prev_was_null_step && p_inf > NULL_STEP_GAIN * prev_p_inf)
-                || (self.pin_repair
-                    && delta == 0.0
-                    && raises_the_objective(&x, &hx, qp.g, &rhs[..n]));
+            let floor = prev_was_null_step && p_inf > NULL_STEP_GAIN * prev_p_inf;
             prev_was_null_step = false;
             prev_p_inf = p_inf;
 
@@ -2094,13 +2086,9 @@ impl ParametricActiveSetSolver {
                     candidates.len()
                 );
             }
-            #[cfg(test)]
-            let q_before = quad_objective(qp, &x);
             for (xi, &pi) in x.iter_mut().zip(p.iter()) {
                 *xi += alpha * pi;
             }
-            #[cfg(test)]
-            uphill_ledger::note(q_before, quad_objective(qp, &x));
 
             // Only an unshifted Newton step lands on the working set's
             // minimizer; a δ-shifted one is a proximal step, and the next one
@@ -2164,34 +2152,6 @@ impl ParametricActiveSetSolver {
                     }
                 }
                 expand_tol = opts.expand_tol_initial;
-            }
-
-            // Cycle guard, the Schur path's (gh#974): meeting the same working
-            // set again at the same objective means the loop is going round a
-            // cycle, and the rest of the budget cannot change that. A pass
-            // that does ends as on `max_iter`. gh#1195: at a vertex where an
-            // unshifted step is solve noise (`raises_the_objective`), the
-            // drop it reads can be undone at once — a bound dropped on a
-            // wrong-sign multiplier, re-added at `α = 0` by the shifted step
-            // that follows — and the pair repeated 1180 times a pass, ten
-            // passes in a row, 42 s on one of `pooling_rt2stp`'s step QPs.
-            // Bland's rule cannot end a cycle with one candidate in it.
-            let cycle_obj = quad_objective(qp, &x);
-            if cycle_obj == streak_obj {
-                let count = seen_sets.entry(working_set_key(&working)).or_insert(0);
-                *count += 1;
-                if *count >= CYCLE_REPEAT_LIMIT {
-                    if trace {
-                        eprintln!(
-                            "[qp] it={_iter} CYCLE: working set repeated at obj={cycle_obj:.12e}; \
-                             pass ends"
-                        );
-                    }
-                    break;
-                }
-            } else {
-                streak_obj = cycle_obj;
-                seen_sets.clear();
             }
 
             // Anti-stall monitor: latch into Bland's rule once the
@@ -7231,49 +7191,6 @@ fn ray_is_unbounded_descent(
 /// solved for; `delta` is the shift that produced it. `delta == 0`
 /// returns 1.0 without touching the data, so every non-shifted solve
 /// keeps bit-identical behaviour.
-/// Whether the step `p` from `x` raises the QP model's objective to first
-/// order by more than its round-off, `∇q(x)ᵀp > 1e-9·(1 + |q(x)|)`, with
-/// `hx = H x`.
-///
-/// For an **unshifted** working-set step this is never true in exact
-/// arithmetic: `p` solves `H p + A_Wᵀ λ = −∇q(x)`, `A_W p = 0`, with the
-/// reduced `H` positive definite (inertia control certified it without a
-/// shift), so `∇q(x)ᵀp = −pᵀHp < 0` for any `p ≠ 0`. A computed `p` that
-/// climbs is the solve's error: the true step is zero to the precision the
-/// system allows, `x` already minimizes the model on its working set, and the
-/// caller reads the multipliers instead of stepping, as for a null step. The
-/// null-step guard misses it when the previous step was shifted, which it
-/// deliberately does not arm after (gh#1042).
-///
-/// The refactor path applies it only to unshifted steps of the elastic phase 1
-/// (gh#1195), where the error is largest: multipliers of the elastic penalty's size
-/// (10⁶ and up) times a KKT residual near round-off gave `pooling_rt2stp`'s
-/// correction QPs steps that climbed and a drop/re-add cycle in which `x`
-/// moved on every lap, so Bland's rule could not end it. Not to shifted
-/// steps, whose true descent `δ‖p‖²` can be smaller than the same noise
-/// while the point is not stationary: refusing them cut `haverly`'s elastic
-/// pass short of a proximal crawl that was still lowering the objective.
-/// Not outside phase 1, where at a near-degenerate vertex (`hs13`'s cusp,
-/// two nearly parallel active rows in two variables) the climbing "step" is
-/// equally pure error but the SQP above had come to depend on taking it. And
-/// not on the Schur-update path, which refactors before it trusts a short
-/// step anyway: there the same test changed 6 of 300 generated elastic QPs,
-/// 3 from `MaxIter` to `Optimal` and 3 the other way, and sent Maros-Meszaros
-/// `QSCFXM1` from 4242 to 9861 iterations on a single (correct) refusal that
-/// reordered its pivots at a degenerate vertex.
-fn raises_the_objective(x: &[Number], hx: &[Number], g: &[Number], p: &[Number]) -> bool {
-    let slope: Number = p
-        .iter()
-        .zip(hx.iter().zip(g.iter()))
-        .map(|(pi, (hxi, gi))| pi * (hxi + gi))
-        .sum();
-    let q: Number = x
-        .iter()
-        .zip(hx.iter().zip(g.iter()))
-        .map(|(xi, (hxi, gi))| xi * (0.5 * hxi + gi))
-        .sum();
-    slope > 1e-9 * (1.0 + q.abs())
-}
 
 fn model_step_cap(
     h: &pounce_linalg::triplet::SymTMatrix,
@@ -8310,28 +8227,6 @@ mod over_n_rank_repair_tests {
 /// without trusting the accounting it checks (gh#1042). Cold calls are left
 /// out: the cold entry into elastic wraps the passes below it, and its stats
 /// are already theirs.
-#[cfg(test)]
-pub(crate) mod uphill_ledger {
-    //! Test-only count of refactor-path steps that raised the QP objective by
-    //! more than round-off (gh#1195). A working-set step on a PSD QP never
-    //! does in exact arithmetic.
-    use std::cell::Cell;
-
-    thread_local! {
-        static COUNT: Cell<u64> = const { Cell::new(0) };
-    }
-
-    pub(crate) fn take() -> u64 {
-        COUNT.with(|c| c.replace(0))
-    }
-
-    pub(crate) fn note(q_before: f64, q_after: f64) {
-        if q_after > q_before + 1e-9 * (1.0 + q_before.abs()) {
-            COUNT.with(|c| c.set(c.get() + 1));
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod pass_ledger {
     use super::{QpError, QpSolution};

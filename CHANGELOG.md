@@ -127,19 +127,6 @@ changes.
   solve ended `LinearSolverFailure` and the SQP stopped. After such a failure
   the selection is now redone at the probe's rank, which drops a bound and
   keeps the equality.
-- **The active-set QP solver no longer takes unshifted elastic-phase steps
-  that raise the objective (gh#1195).** In the elastic phase 1 the multipliers
-  reach the penalty's size, and a solve residual near round-off could flip a
-  step that must go downhill into one that climbs; the cycles this fed moved
-  `x` every lap, which Bland's rule cannot stop. Such a step is now read as a
-  null step, and a pass that meets the same working set at the same objective
-  repeatedly ends as on `max_iter`, as the Schur path's already did. On 200
-  generated convex elastic QPs: 174 solved to optimality instead of 172, 22%
-  fewer working-set changes, 16% less time, no objective worse.
-  `manyineq_concave_qp` under `solver_selection=qp-active-set` takes 6058
-  iterations instead of 22727. δ-shifted steps can still climb on the same
-  noise; that is recorded, with measurements, in
-  `dev-notes/known-limitations.md`.
 - **The active-set SQP no longer spends seconds on a second-order correction
   it then throws away (gh#1195).** When the filter rejects a full step, the
   SQP re-solves the step QP to correct it. That correction QP had the step
