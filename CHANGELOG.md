@@ -129,6 +129,12 @@ changes.
   at 40.5 s. A skipped `mu_strategy` fallback is recorded
   (`mu_strategy_fallback.skipped_for_time`). A limit the caller did not set
   stays unset; the scale audit used to write an unset one back as caller-set.
+  The adaptive-mu budget pin (`adaptive_mu_budget_pin_fraction`, pounce#753)
+  still measures the fraction of each solve's *own* share of that limit,
+  `Deadline::share_spent_fraction`: measured from the run's start instead, a
+  `mu_strategy` fallback flipped to adaptive with a fifth of the run left
+  read 80% spent on its first check and pinned to fixed mode at once, so it
+  never ran the free-mode oracle it was retried for.
 - **The ladder reports the run's total time** (gh#1176). Each `Total seconds in
   POUNCE` line covers one solve, so a laddered run's console ended on the last
   rung's time: 24.9 s printed on a 174 s run. The ladder now ends with a line

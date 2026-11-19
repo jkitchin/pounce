@@ -49,6 +49,11 @@ struct DeadlineInner {
     cpu_start: Number,
     max_wall: Number,
     max_cpu: Number,
+    /// When this deadline was built. Equal to `wall_start` / `cpu_start`
+    /// for [`Deadline::new`]; later than them for [`Deadline::starting_at`],
+    /// where the difference is what earlier legs of the run already spent.
+    share_wall_start: Number,
+    share_cpu_start: Number,
 }
 
 impl Deadline {
@@ -57,12 +62,15 @@ impl Deadline {
     /// for both budgets are `1e6`, i.e. effectively unbounded; a caller
     /// that passes those gets a deadline that never trips in practice.
     pub fn new(max_wall: Number, max_cpu: Number) -> Self {
+        let (wall_start, cpu_start) = (wallclock_time(), cpu_time());
         Self {
             inner: Rc::new(DeadlineInner {
-                wall_start: wallclock_time(),
-                cpu_start: cpu_time(),
+                wall_start,
+                cpu_start,
                 max_wall,
                 max_cpu,
+                share_wall_start: wall_start,
+                share_cpu_start: cpu_start,
             }),
         }
     }
@@ -84,8 +92,49 @@ impl Deadline {
                 cpu_start,
                 max_wall,
                 max_cpu,
+                share_wall_start: wallclock_time(),
+                share_cpu_start: cpu_time(),
             }),
         }
+    }
+
+    /// How much of *this solve's share* of the budget has been spent, as a
+    /// fraction in `[0, ∞)`: the larger of the CPU and wall fractions. The
+    /// share is what the run had left when this deadline was built, so for
+    /// [`Self::new`] it is the whole budget and this is `elapsed / max`.
+    ///
+    /// [`Self::exceeded`] and the `remaining_*` readings answer "is the
+    /// run's limit crossed", measured from the run's origin. This answers
+    /// "how far into its own allowance is this solve", which is what a
+    /// policy that changes strategy part-way through a solve (the adaptive
+    /// mu budget pin, pounce#753) needs. Measured from the run's origin
+    /// instead, a re-solve that began with 20% of the run left would read
+    /// 80% spent on its first iteration (gh#1176 review).
+    ///
+    /// `0` for a budget that is not a usable positive number ("no limit was
+    /// expressed"); infinite for a share already exhausted when the
+    /// deadline was built.
+    pub fn share_spent_fraction(&self) -> Number {
+        let frac = |max: Number, start: Number, share_start: Number, now: Number| {
+            if !(max.is_finite() && max > 0.0) {
+                return 0.0;
+            }
+            let share = max - (share_start - start);
+            if share > 0.0 {
+                ((now - share_start) / share).max(0.0)
+            } else {
+                Number::INFINITY
+            }
+        };
+        let i = &self.inner;
+        let cpu = frac(i.max_cpu, i.cpu_start, i.share_cpu_start, cpu_time());
+        let wall = frac(
+            i.max_wall,
+            i.wall_start,
+            i.share_wall_start,
+            wallclock_time(),
+        );
+        cpu.max(wall)
     }
 
     /// Return `Some(kind)` if either budget has been crossed, else
@@ -796,6 +845,30 @@ pub fn time_linear_system<T>(phase: LinearSystemPhase, f: impl FnOnce() -> T) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn share_spent_fraction_measures_the_solves_own_share() {
+        // `new`: the share is the whole budget.
+        let d = Deadline::new(1e6, 1e6);
+        assert!(d.share_spent_fraction() < 1e-3);
+        // gh#1176: a leg built 80 s into a 100 s run has a 20 s share, of
+        // which it has spent ~nothing -- while the run's limit still reads
+        // ~20 s left.
+        let d = Deadline::starting_at(100.0, 100.0, wallclock_time() - 80.0, cpu_time() - 80.0);
+        assert!(
+            d.share_spent_fraction() < 1e-2,
+            "{}",
+            d.share_spent_fraction()
+        );
+        assert!(d.remaining_wall() < 21.0 && d.remaining_wall() > 19.0);
+        // A leg built after the run's limit passed has no share at all.
+        let d = Deadline::starting_at(10.0, 10.0, wallclock_time() - 20.0, cpu_time() - 20.0);
+        assert_eq!(d.share_spent_fraction(), Number::INFINITY);
+        assert!(d.exceeded().is_some());
+        // No usable budget, no fraction.
+        let d = Deadline::starting_at(0.0, Number::INFINITY, wallclock_time(), cpu_time());
+        assert_eq!(d.share_spent_fraction(), 0.0);
+    }
 
     #[test]
     fn deadline_unbounded_never_trips() {
