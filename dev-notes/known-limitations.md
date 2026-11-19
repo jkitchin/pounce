@@ -341,63 +341,111 @@ handover lines above are the check.
 
 ---
 
-## Active-set SQP: `ssebnln` (limited-memory) fails slower, in second-order-correction QPs that run to the cap (gh#1191, tracked in gh#1195)
+## Active-set SQP: `ssebnln` (limited-memory) fails slower than it did before gh#1191
 
-*Measured on `claude/eloquent-knuth-1ypxda` at `5b1724e` against `main` at
-`5463adb`, forced `algorithm=active-set-sqp hessian_approximation=limited-memory`,
-`RUST_LOG=pounce::sqp::qp=debug` for the QP lines. Recorded 2026-11-19.*
+*First measured on `claude/eloquent-knuth-1ypxda` at `5b1724e` against `main`
+at `5463adb`; updated on `main` at `9c0ab66`, after gh#1195's correction-QP
+bounds (PR #1198). Forced `algorithm=active-set-sqp
+hessian_approximation=limited-memory`, `RUST_LOG=pounce::sqp::qp=debug` for
+the QP lines. Recorded 2026-11-19.*
 
-**What is worse.** `ssebnln` fails on both binaries
+**What is worse.** `ssebnln` fails before and after gh#1191
 (`Search_Direction_Becomes_Too_Small`, f ≈ 1.617063e7; the exact leg solves
-it in 3 iterations at 16170600). It now takes longer to fail:
+it in 3 iterations at 16170600). gh#1191 made it fail later:
 
-| machine | `main` | `5b1724e` |
+| | iterations | cloud session |
 |---|---|---|
-| maintainer, idle | 78 iterations, 18 s | 144 iterations, 384 s |
-| cloud session | 80 iterations, 41 s | 95 iterations, 76 s |
+| `main` before gh#1191 (`5463adb`) | 80 | 33 s |
+| gh#1191, before gh#1195's bounds | 95 | 61 s |
+| `main` with both (`9c0ab66`) | 95 | 38 s |
 
-On the maintainer's machine 384 s is past `sweep-fixtures.sh`'s 300 s cap,
-so the sweep line reads `NO_JSON`. The iteration counts differ between
-machines, which is the mark of a round-off-sensitive path through a
-degenerate endgame. Stationarity there is 1e10 to 5e17, and the multipliers
-are diverging.
+(On the maintainer's machine the middle row was 144 iterations and 384 s,
+past `sweep-fixtures.sh`'s 300 s cap. The iteration counts differ between
+machines, the mark of a round-off-sensitive path through a degenerate
+endgame: stationarity there is 1e10 to 5e17, and the multipliers diverge.)
 
 **Cause.** The trajectories agree to iteration 63. There the damped BFGS's
 stale-scale shift (gh#1191 fix 2) fires with `sᵀy/sᵀBs = 12.8`, just over its
-threshold of 10, because the diverging multipliers have moved. It fires again
-at 70. The new trajectory then reaches **second-order-correction QPs that run
-to the step budget** (`(n+m)·10 = 2880` iterations) before being discarded:
-- 19.2 s (554 working-set changes, 3322 refactors);
-- 17.8 s (474 working-set changes, 3251 refactors).
+threshold of 10, because the diverging multipliers have moved, and again at
+70. The new trajectory is 15 iterations longer, and it reaches two
+second-order-correction QPs that cannot be had cheaply.
 
-Those two are 37 s of the 76 s run. `main`'s trajectory stops at 80 before
-reaching any.
+**What gh#1195 fixed.** Those two correction QPs ran to the step QP's budget
+in every pass of the QP's elastic phase and its recovery stages: 3322 and
+3251 refactors, 15.6 s and 12.6 s, then discarded. The correction QP now gets
+one pass's iteration budget in total, and a pass that goes a tenth of it
+without improving ends early (`soc_qp_options`). They stop after 791 and 712
+refactors, 3.4 s and 3.1 s. The four correction QPs that come back usable on
+this model are unchanged.
 
-**This exposure is not new.** The SOC QP is given the step QP's whole
-iteration budget. On `main`, across the fixture corpus under forced SQP,
-these SOC QPs already end at the cap:
-- `pooling_rt2stp` (lbfgs): two QPs, 17.8 s and 17.9 s.
-- `square_flowsheet_resto` and `opf_vv_lower_knee_held` (lbfgs): repeatedly,
-  1–4 s each.
+**What remains.** 38 s against 33 s, and the gap is the two capped
+corrections: they still cost 6.5 s, and without them the 95 iterations take
+about 31.5 s. Both end on the stall bound, after about 900 of their 2880
+iterations; a tighter bound that would end them sooner would also cut usable
+corrections elsewhere (`pooling_rt2stp`'s took 0.6 of the budget).
 
-**What was tried.** I looked for a cap for the SOC QP. On the corpus,
-successful SOC QPs need up to 333 working-set changes (`ssebnln` itself,
-then `jit1_node` and `jit1_boxed` at about 176). One of those 333-change
-corrections followed a step QP that needed 0, so a budget relative to the
-step QP would cut a correction that works. SOC QPs that hit the cap or come
-back infeasible range from 71 to 1243 changes, overlapping the successful
-ones. No threshold separates the two sets, so none was taken here.
+**How to tell whether a fix works.** `ssebnln` (limited-memory, forced SQP)
+fails in 33 s or less on the cloud session, with the debug lines for its four
+usable correction QPs still reading `optimal`, and the fixture corpus's other
+usable corrections (`pooling_rt2stp`, `jit1_node`) still reading `optimal` too.
+Fixing the SQP's endgame (why the multipliers diverge, so the trajectory never
+asks for these corrections) would also do it.
 
-**How to tell whether a fix works.** Bound the SOC QP's cost by something
-other than a working-set count, for example wall time relative to the step
-QP that preceded it, or a check for no progress in the QP's elastic phase.
-The checks:
-- `ssebnln` (lbfgs) fails in `main`'s time or better.
-- `pooling_rt2stp` (lbfgs) loses its two 18 s SOCs.
-- None of the six successful SOCs above is cut: the debug lines for
-  `pooling_rt2stp`, `jit1_node`, `jit1_boxed` and `ssebnln` must still read
-  `optimal`.
+---
 
+## Active-set QP: δ-shifted steps can still climb on solve noise (gh#1195)
+
+*Measured on `claude/pounce-issue-1195-owd2q0` at `3ecb57b` against `main` at
+`9c0ab66`. Recorded 2026-11-19.*
+
+**What happens.** A working-set step should never raise the QP objective:
+with the reduced Hessian made positive definite by a shift `δ ≥ 0`,
+`∇q(x)ᵀp = −pᵀ(H + δI)p < 0`. In the elastic phase 1 the multipliers are of
+the elastic penalty's size (10⁶ and up), and a KKT residual near round-off
+times those multipliers can flip the sign of a computed step. Replaying the
+229 step and correction QPs of `pooling_rt2stp`'s forced-SQP limited-memory
+run (each from its own warm start, without gh#1195's correction bounds),
+45 250 full steps raised the objective. Taken, such a step moves `x` uphill,
+and a drop/re-add cycle that moves `x` on every lap is one Bland's rule
+cannot end.
+
+**What is fixed.** An *unshifted* step that climbs is now taken as a null
+step on the refactor path's elastic phase (`raises_the_objective`): there
+the arithmetic is exact (`−pᵀHp < 0`), so climbing can only be solve error,
+and the point already minimizes the model on its working set. The cycles
+that change can leave at a fixed `x` are ended by the refactor path's copy of
+the Schur path's cycle guard. On 200 generated convex elastic QPs (refactor
+path): `Optimal` 172 → 174 (3 from `MaxIter`, 1 the other way, seed 87),
+working-set changes −22%, time −16%, no objective worse.
+
+**What is not.** Most of the 45 250 climbing steps above are δ-shifted, and
+those are left alone. Their true descent `δ‖p‖²` can be smaller than the
+noise while the point is not stationary, so the null-step reading is wrong
+for them. Refusing them cut `haverly_multistart_t3_brf0`'s elastic pass short
+of a proximal crawl that was still lowering the objective (14 → 22 SQP
+iterations). The guard also stays off the Schur-update path (3 of 300
+generated QPs better, 3 worse; Maros-Meszaros `QSCFXM1` 4242 → 9861 iterations
+on one correct refusal that reordered its pivots) and outside phase 1
+(`hs13_bigstart` turned from success to `Search_Direction_Becomes_Too_Small`:
+at its cusp the climbing "step" is pure error, but the SQP had come to depend
+on taking it). Where the cost of these steps showed — the SQP's correction
+QP — it is bounded instead (gh#1195, PR #1198).
+
+**What moved on the fixture corpus.** `scripts/sweep-fixtures.sh`, both legs:
+default options empty; `solver_selection=qp-active-set`,
+`manyineq_concave_qp` 22727 → 6058 iterations (same objective);
+`algorithm=active-set-sqp`, `cc:opf_vv_lower_knee_held` 62 → 61 lowered
+iterations and `pooling_rt2stp` (limited-memory) `MaxIter`/200 at
+f = −3134.83 → `Search_Direction_Becomes_Too_Small`/128 at −3126.96 in 37 s
+instead of 60 s. That model fails on both; the default arm solves it at
+−3273.95.
+
+**How to tell whether a fix works.** A remedy for the shifted case has to
+keep `haverly_multistart_t3_brf0` (limited-memory, forced SQP) at 14
+iterations while lowering the climbing-step count on the `pooling_rt2stp`
+replay. Iterative refinement does not reach it: every solve is already
+refined by the backend against the original matrix, so what is left is
+conditioning, not an unrefined solve.
 ---
 
 ## MPCC: four MacMPEC answers stay complementary only to ~7e-5
