@@ -7191,7 +7191,6 @@ fn ray_is_unbounded_descent(
 /// solved for; `delta` is the shift that produced it. `delta == 0`
 /// returns 1.0 without touching the data, so every non-shifted solve
 /// keeps bit-identical behaviour.
-
 fn model_step_cap(
     h: &pounce_linalg::triplet::SymTMatrix,
     g: &[Number],
