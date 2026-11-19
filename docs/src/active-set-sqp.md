@@ -134,7 +134,7 @@ mirror `SqpOptions::default()`.
 | `sqp_globalization`     | `filter`    | `filter` or `l1-elastic` (Fletcher-Leyffer / Han-Powell) |
 | `sqp_hessian`           | `exact`     | `exact`, `damped-bfgs`, or `lbfgs`                 |
 | `sqp_max_iter`          | `200`       | outer iteration cap                                |
-| `sqp_tol`               | `1e-8`      | stationarity tolerance (max-norm)                  |
+| `sqp_tol`               | `1e-8`      | stationarity tolerance (max-norm, divided by Ipopt's multiplier scale `s_d`) |
 | `sqp_constr_viol_tol`   | `1e-6`      | constraint-violation tolerance                     |
 | `sqp_dual_inf_tol`      | `1e-4`      | dual-infeasibility tolerance                       |
 | `sqp_l1_penalty`        | `1.0`       | initial ν (Han-Powell only)                        |
@@ -687,6 +687,17 @@ lower the objective by an Armijo fraction of `∇fᵀp` (and still be
 acceptable to the filter), so an iterate with no constraint violation
 never takes an uphill step.
 
+Two kinds of step are taken without the objective test, because the test
+has nothing to measure there. A *tiny* step is below round-off in `x`
+(Ipopt's `tiny_step_tol` rule). A *φ-tiny* step predicts an objective change
+`|∇fᵀp|` below the objective's own round-off. A φ-tiny step must still not
+raise the constraint violation. Both are how an SQP finishes at a point that
+is already optimal: the step carries the QP's multipliers, and comparing `f`
+would compare evaluation noise. Two such steps in a row that neither
+converge nor bring the stationarity residual 10% below its best since the
+first of them end the solve
+`Search_Direction_Becomes_Too_Small` (gh#1191).
+
 `sqp_globalization = l1-elastic` is the SNOPT-style Han-Powell
 merit `φ(x; ν) = f(x) + ν · violation(x)` with adaptive ν. The
 new `sqp_l1_penalty_safety` (default 0.1) and `sqp_l1_penalty_max`
@@ -728,6 +739,16 @@ frontend and the CasADi plugin set on their own when no exact Hessian exists —
 selects `damped-bfgs` at or below the ceiling (the more robust update on small
 models, issue #358) and the lifted `lbfgs` above it. Before gh#1054 it selected
 the dense update at every size.
+
+`damped-bfgs` sets its scale `B₀ = γI` once, from the first step's
+curvature, and an update corrects `B` only along the steps it sees. With
+nonlinear constraints the Lagrangian's curvature moves with the multipliers,
+so that first scale can go stale in every unexplored direction. When the
+multipliers have moved by more than half their size since the last sizing,
+and a step shows `B` short of the curvature along it by more than 10×, the
+update first shifts `B` up by the smallest multiple of `I` that agrees with
+that step (gh#1191). A shift only raises curvature, so what `B` has learned
+is kept. On `gilbert` (n = 1000) that took a 197-iteration run to 52.
 
 What the lift does not change is the cost of an active-set walk. A cold QP
 needs about one pivot per constraint that becomes active, and each pivot is a
