@@ -40,7 +40,8 @@ pub struct QpOptions {
     /// can reach — homotopy, elastic phase-1 (reduced-row and full-row), its
     /// penalty-escalation passes, the recovery solve, seeded retries — gets
     /// its own `max_iter`, so one solve can make several times this many
-    /// working-set changes. [`Self::max_working_set_changes`] caps the whole.
+    /// working-set changes. [`Self::max_working_set_changes`] and
+    /// [`Self::max_total_iter`] cap the whole.
     pub max_iter: u32,
     /// Solve-wide cap on working-set changes: every change made by every pass
     /// of one top-level solve (see [`Self::max_iter`] for the passes) counts
@@ -55,6 +56,40 @@ pub struct QpOptions {
     ///
     /// `None` (the default): no solve-wide cap; only the per-pass `max_iter`.
     pub max_working_set_changes: Option<u32>,
+    /// Solve-wide cap on pivot-loop iterations: every iteration of every pass
+    /// of one top-level solve counts against it — the iterations each pass's
+    /// [`Self::max_iter`] counts, summed. Every iteration within the budget
+    /// runs to completion, and a solve that asks for one more stops at the top
+    /// of it, as it does on
+    /// [`Self::max_working_set_changes`]: no pass after it starts, no
+    /// truncated pass is read as a verdict, and it reports `QpStatus::MaxIter`.
+    ///
+    /// It differs from the change budget on the iterations that change
+    /// nothing: δ-shifted proximal steps and other unblocked steps that leave
+    /// the working set as it was. A solve can make thousands of those in an
+    /// elastic phase 1 that is going nowhere, at a factorization or more each,
+    /// while its working set barely moves (gh#1195: 5137 iterations for 619
+    /// changes).
+    ///
+    /// `None` (the default): no solve-wide cap; only the per-pass `max_iter`.
+    pub max_total_iter: Option<u32>,
+    /// Per-pass no-progress cap: a pass of the pivot loop whose objective has
+    /// gone this many consecutive iterations without improving on the best it
+    /// has reached ends there, exactly as it would on [`Self::max_iter`] —
+    /// `QpStatus::MaxIter` from that pass, and the stage that ran it carries
+    /// on as it does after any pass that ran out. "Improving" is the test the
+    /// refactor path's anti-stall Bland latch applies (relative `1e-9` plus
+    /// absolute `1e-12`), and the count runs on past that latch.
+    ///
+    /// A bound for a caller that wants an answer only if it comes cheaply,
+    /// not a convergence test: a pass can sit still for a while and then
+    /// finish, so a pass cut here is one the caller has decided not to wait
+    /// for. It does not see a pass that crawls — improving by just more than
+    /// the test's margin on every iteration — which is what
+    /// [`Self::max_total_iter`] bounds.
+    ///
+    /// `None` (the default): no such cap.
+    pub max_stall_iters: Option<u32>,
     pub feas_tol: Number,
     pub opt_tol: Number,
     /// Maximum number of Schur-complement rank-1 updates before a
@@ -270,6 +305,8 @@ impl Default for QpOptions {
             algorithm: QpAlgorithm::default(),
             max_iter: 200,
             max_working_set_changes: None,
+            max_total_iter: None,
+            max_stall_iters: None,
             feas_tol: 1e-9,
             opt_tol: 1e-9,
             max_schur_updates_before_refactor: 50,

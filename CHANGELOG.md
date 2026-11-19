@@ -150,6 +150,22 @@ changes.
   active, so `x1` sits `1e-7` inside its declared upper bound `0.5`. It was
   reported `z_U = 12.3`, with stationarity `10.7` against the original
   model.
+- **The active-set SQP no longer spends seconds on a second-order correction
+  it then throws away (gh#1195).** When the filter rejects a full step, the
+  SQP re-solves the step QP to correct it. That correction QP had the step
+  QP's iteration budget for every pass of its pivot loop, and when its warm
+  start pinned infeasible it ran through the elastic phase 1 and its recovery
+  passes, each with the full budget, to end `MaxIter` and be discarded. On
+  `pooling_rt2stp` with `hessian_approximation=limited-memory` two such
+  corrections took 4572 and 5144 KKT refactorizations (9–18 s, by machine);
+  they now stop after 728 and 1092 (about 2 s). The correction now gets one
+  pass's budget across all its passes, and a pass that goes a tenth of that
+  budget without improving ends early. Every correction on the fixture corpus that
+  came back usable still does, and `scripts/sweep-fixtures.sh` diffs empty
+  under default options and under `algorithm=active-set-sqp`, on both
+  Hessian legs. `pounce-qp` gains the two bounds as
+  `QpOptions::max_total_iter` and `QpOptions::max_stall_iters`; both are off
+  by default.
 - **`presolve=yes` no longer hangs after the solve has converged, and
   `max_wall_time` now covers postsolve** (gh#1196). Recovering the original
   problem's multipliers for bounds presolve derived could run unbounded:
