@@ -70,8 +70,12 @@ pub struct SqpFilter {
     /// iterate this filter sees. `None` until then.
     theta_min: Option<Number>,
     /// Consecutive tiny full steps accepted without a line search (see
-    /// [`filter_line_search`]); reset by any other accepted step.
+    /// [`filter_line_search`]); reset by any other accepted step, and by
+    /// [`SqpFilter::observe_stationarity`] when a tiny step made progress.
     tiny_steps: u32,
+    /// Stationarity residual of the previous outer iterate, as reported to
+    /// [`SqpFilter::observe_stationarity`].
+    last_stationarity: Option<Number>,
 }
 
 impl SqpFilter {
@@ -82,7 +86,32 @@ impl SqpFilter {
             gamma_phi: 1e-5,
             theta_min: None,
             tiny_steps: 0,
+            last_stationarity: None,
         }
+    }
+
+    /// Report the stationarity residual of the iterate the next search
+    /// starts from. A tiny step that cut it to at most
+    /// `TINY_STEP_PROGRESS` of the previous iterate's made progress and does
+    /// not count toward the `MAX_TINY_STEPS` stall limit (gh#1191).
+    ///
+    /// The limit's premise is that a step below round-off in `x` repeated
+    /// without convergence means the iteration has stalled. That is true of
+    /// `jit1_node`, whose tiny steps leave the residual where it was, and
+    /// false of `hs99exp` (limited-memory): its variables reach `1e7`, so
+    /// the last steps of a superlinear endgame are below round-off in `x`
+    /// while each still divides the residual by four
+    /// (`5.8e-7 → 1.4e-7 → 3.0e-8`). The limit ended that run
+    /// `Search_Direction_Becomes_Too_Small` one step short of `tol`.
+    pub fn observe_stationarity(&mut self, stationarity: Number) {
+        if self.tiny_steps > 0
+            && self
+                .last_stationarity
+                .is_some_and(|prev| stationarity <= TINY_STEP_PROGRESS * prev)
+        {
+            self.tiny_steps = 0;
+        }
+        self.last_stationarity = stationarity.is_finite().then_some(stationarity);
     }
 
     /// Is `(θ, φ)` not dominated by any filter entry?
@@ -134,6 +163,15 @@ const ETA_PHI: Number = 1e-4;
 const TINY_STEP_TOL: Number = 10.0 * Number::EPSILON;
 /// Consecutive tiny steps after which the search reports failure.
 const MAX_TINY_STEPS: u32 = 2;
+/// A tiny step that divides the stationarity residual by at least this
+/// factor's inverse is progress, not a stall (see
+/// [`SqpFilter::observe_stationarity`]).
+const TINY_STEP_PROGRESS: Number = 0.5;
+/// Largest rise in `φ` a φ-tiny step may carry, relative to `1 + |φ|`
+/// (`√ε`; see [`filter_line_search`]). It is a guard against a step whose
+/// first-order prediction is tiny but whose second-order change is not, not
+/// a round-off estimate: the noise it admits on `palmer8e` is `1e-15`.
+const PHI_TINY_MAX_RISE: Number = 1.5e-8;
 
 /// Is `α·p` below round-off relative to `x` in every component?
 fn step_is_tiny(x: &[Number], p: &[Number], alpha: Number) -> bool {
@@ -233,10 +271,11 @@ pub fn filter_line_search<N: SqpProblemSpec>(
     // in `x` cannot be judged by comparing `f` and `θ` — the comparison is
     // noise — and what it carries is the QP's multipliers, which is how an
     // SQP finishes at a primal that is already optimal. Take it unjudged.
-    // Two in a row without convergence means the iteration has stalled, and
-    // the search reports failure rather than repeating it: `jit1_node`
-    // (limited-memory) otherwise sat at the interior point's objective for
-    // 160 iterations of `‖αp‖ ≈ 2e-19`.
+    // Two in a row that neither converge nor halve the stationarity residual
+    // (see `SqpFilter::observe_stationarity`) mean the iteration has
+    // stalled, and the search reports failure rather than repeating it:
+    // `jit1_node` (limited-memory) otherwise sat at the interior point's
+    // objective for 160 iterations of `‖αp‖ ≈ 2e-19`.
     if step_is_tiny(x, p, 1.0) {
         if filter.tiny_steps < MAX_TINY_STEPS {
             filter.tiny_steps += 1;
@@ -265,7 +304,20 @@ pub fn filter_line_search<N: SqpProblemSpec>(
             soc_duals: None,
         };
     }
-    filter.tiny_steps = 0;
+
+    // φ-tiny step (gh#1191): the predicted first-order change of the full
+    // step, `|∇fᵀp|`, is below the round-off slack of `φ` itself. Armijo then
+    // asks for a decrease `φ` cannot represent, and the trial's measured
+    // change is evaluation noise. On `palmer8e` (limited-memory), at
+    // stationarity 1.7e-8 against `tol = 1e-8`, the step had
+    // `∇fᵀp = −1.2e-18` against a slack of `1.4e-17`, and `φ` moved by
+    // `±1e-15` at every trial length: the search took `α = 1/32` when the
+    // noise happened to fall negative, then backtracked to failure. Like a
+    // tiny step it is taken unjudged in `φ`, counted toward the same stall
+    // limit, but it must not raise `θ`, and its rise in `φ` must stay below
+    // `PHI_TINY_MAX_RISE·(1 + |φ|)`. A trial that fails either is judged
+    // as any other.
+    let phi_tiny = grad_p.is_finite() && grad_p.abs() <= slack;
 
     let mut alpha = 1.0_f64;
     let mut x_trial = vec![0.0; x.len()];
@@ -329,6 +381,24 @@ pub fn filter_line_search<N: SqpProblemSpec>(
         // such information: it says the model could not be evaluated there.
         let trial_is_evaluable =
             !f_trial.is_nan() && !theta_trial.is_nan() && !c_trial.iter().any(|v| v.is_nan());
+        if first_trial
+            && phi_tiny
+            && trial_is_evaluable
+            && filter.tiny_steps < MAX_TINY_STEPS
+            && theta_trial <= theta_curr
+            && phi_trial - phi_curr <= PHI_TINY_MAX_RISE * (1.0 + phi_curr.abs())
+        {
+            filter.tiny_steps += 1;
+            return LineSearchResult {
+                alpha,
+                nu: current_nu,
+                x_new: x_trial,
+                f_new: f_trial,
+                c_new: c_trial,
+                success: true,
+                soc_duals: None,
+            };
+        }
         // f-type: Armijo on φ. h-type: sufficient progress in θ or φ
         // against the *current* iterate, and not dominated by the filter.
         let verdict = if trial_is_evaluable {
@@ -343,6 +413,7 @@ pub fn filter_line_search<N: SqpProblemSpec>(
             if !f_type {
                 filter.add(theta_curr, phi_curr);
             }
+            filter.tiny_steps = 0;
             return LineSearchResult {
                 alpha,
                 nu: current_nu,
@@ -402,6 +473,7 @@ pub fn filter_line_search<N: SqpProblemSpec>(
                                 if !f_type {
                                     filter.add(theta_curr, phi_curr);
                                 }
+                                filter.tiny_steps = 0;
                                 return LineSearchResult {
                                     alpha: 1.0,
                                     nu: current_nu,

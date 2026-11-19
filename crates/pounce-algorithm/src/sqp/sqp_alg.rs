@@ -456,6 +456,9 @@ impl SqpAlgorithm {
             );
             final_stationarity = kkt.stationarity;
             final_constr_viol = kkt.constr_viol;
+            // Lets the filter tell a tiny step that made progress from a stall
+            // (gh#1191; see `SqpFilter::observe_stationarity`).
+            self.filter.observe_stationarity(kkt.stationarity);
 
             // Fired BEFORE this iteration's Lagrangian Hessian is evaluated, as
             // on the interior-point arm (callback after acceptance, before the

@@ -117,6 +117,21 @@ changes.
   variable.
 
 ### Fixed
+- **The active-set SQP certifies an optimum it has reached where the
+  objective can no longer tell steps apart (gh#1191).** Under
+  `algorithm=active-set-sqp hessian_approximation=limited-memory`,
+  `palmer8e` and `hs99exp` (CUTE) reached their optima and stopped
+  `Search_Direction_Becomes_Too_Small` at stationarity 1.7e-8 and 3.0e-8,
+  against `tol = 1e-8`. On `palmer8e` the last step's predicted objective
+  change was below the objective's round-off, so the line search was comparing
+  noise. A step like that is now taken at full length, provided it does not
+  raise the constraint violation. On `hs99exp` the last steps were below
+  round-off in `x`, and the stall limit counted them as a stall although each
+  divided the residual by four. A step that halves the residual no longer
+  counts. Both now end `Solve_Succeeded` at the same objective, in 134 and 60
+  iterations. `gilbert`, reported with them, still stops at the 200-iteration
+  cap. Its endgame is a slow limited-memory convergence, not this stall; see
+  `dev-notes/known-limitations.md`.
 - **The active-set SQP no longer takes uphill steps from a feasible
   point, stalls at a non-stationary start, or ends `Internal_Error` with no
   `x` when started on negative curvature (gh#1173).** Under the default

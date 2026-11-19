@@ -687,6 +687,16 @@ lower the objective by an Armijo fraction of `∇fᵀp` (and still be
 acceptable to the filter), so an iterate with no constraint violation
 never takes an uphill step.
 
+Two kinds of step are taken without the objective test, because the test
+has nothing to measure there. A *tiny* step is below round-off in `x`
+(Ipopt's `tiny_step_tol` rule). A *φ-tiny* step predicts an objective change
+`|∇fᵀp|` below the objective's own round-off. A φ-tiny step must still not
+raise the constraint violation. Both are how an SQP finishes at a point that
+is already optimal: the step carries the QP's multipliers, and comparing `f`
+would compare evaluation noise. Two such steps in a row that neither
+converge nor halve the stationarity residual end the solve
+`Search_Direction_Becomes_Too_Small` (gh#1191).
+
 `sqp_globalization = l1-elastic` is the SNOPT-style Han-Powell
 merit `φ(x; ν) = f(x) + ν · violation(x)` with adaptive ν. The
 new `sqp_l1_penalty_safety` (default 0.1) and `sqp_l1_penalty_max`

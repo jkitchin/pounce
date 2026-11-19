@@ -253,6 +253,24 @@ these is a wrong answer.
   forced L-BFGS SQP reaches.
 - **`cc:design_cent_3`, `ipm_sqp_handover=yes`: lowered-solve iterations
   524 → 614**, same answer and verdict.
+- **`gilbert` (CUTE, n = 1000), limited-memory: `Solve_Succeeded` at 145
+  iterations → `Maximum_Iterations_Exceeded` at 200, at the optimum
+  `f = 482.0273`** (gh#1191, which fixed `palmer8e` and `hs99exp` from the
+  same report). Measured on a pyomo transcription of the `.mod`, cap lifted
+  with `sqp_max_iter=1000`. `main` at `8632d06`: 145 iterations. PR #1190's
+  head: 197. With gh#1191's endgame rules: 204. Exact Hessian: 33 on every
+  binary. This is not a refused final step. Stationarity alternates between
+  ~1e-6 and ~1e-8 on successive iterations for 25–55 iterations on *both*
+  binaries, and the filter refuses the full step on 43% (base) and 41% (now)
+  of iterations. The base landed a low phase below `tol` sooner. The two
+  trajectories part at iteration 24. There `θ₀ = 5e4` puts Ipopt's
+  `θ_min = 1e-4·θ₀` at 5, so steps at `θ ≈ 1–2` are f-type. They halve on
+  Armijo and do not augment the filter, so the run reaches `f ≈ 482.027`
+  about 30 iterations later than the base. What limits the endgame is
+  L-BFGS's rate on `∇²L = diag(((n+1−i)/n)²) + λI` with six pairs in 1000
+  dimensions. The corpus report's 200 and this transcription's 197 are the
+  same run on either side of the cap. A fix should certify `gilbert` well
+  inside 200 on both, not at 199.
 - **Vanderbei exact leg at `42dd480d`: `catena`, `hanging`, `kiwcresc`,
   `polak2`, `polak6`** stopped at iteration 0 with
   `Search_Direction_Becomes_Too_Small` and now run 175–200 iterations (to
