@@ -133,6 +133,15 @@ changes.
   pass `pounce verify --require-optimal` (stationarity `1.7e-7`), and so do
   those of `deb7` (684 multipliers), which also rolled back before. The
   warning on a rollback now says which limit was hit.
+- **A dual recovery that runs out of work no longer gives up on the
+  duals.** gh#1196 bounded the dense recovery with a flop allowance and the
+  solve's deadline, and rolled back when either ran out. A dense solve that
+  spends its flops with time left now hands the component to the sparse
+  solve, which gets the same allowance under the same deadline. Vanderbei
+  `qpnstair` used to roll back to duals with stationarity `2.8e4` against
+  the original model; they now verify at `4.0e-10`. MINLPLib `cesam2log`
+  goes from `9.9e-10` to `1.6e-10`. A crossed deadline still rolls back at
+  once.
 - **`presolve=yes` no longer leaves a multiplier on a declared bound with
   real slack.** When the iterate sat on a bound presolve had derived, and
   that bound was strictly tighter than the declared one, the declared bound
@@ -141,6 +150,22 @@ changes.
   active, so `x1` sits `1e-7` inside its declared upper bound `0.5`. It was
   reported `z_U = 12.3`, with stationarity `10.7` against the original
   model.
+- **The active-set SQP no longer spends seconds on a second-order correction
+  it then throws away (gh#1195).** When the filter rejects a full step, the
+  SQP re-solves the step QP to correct it. That correction QP had the step
+  QP's iteration budget for every pass of its pivot loop, and when its warm
+  start pinned infeasible it ran through the elastic phase 1 and its recovery
+  passes, each with the full budget, to end `MaxIter` and be discarded. On
+  `pooling_rt2stp` with `hessian_approximation=limited-memory` two such
+  corrections took 4572 and 5144 KKT refactorizations (9–18 s, by machine);
+  they now stop after 728 and 1092 (about 2 s). The correction now gets one
+  pass's budget across all its passes, and a pass that goes a tenth of that
+  budget without improving ends early. Every correction on the fixture corpus that
+  came back usable still does, and `scripts/sweep-fixtures.sh` diffs empty
+  under default options and under `algorithm=active-set-sqp`, on both
+  Hessian legs. `pounce-qp` gains the two bounds as
+  `QpOptions::max_total_iter` and `QpOptions::max_stall_iters`; both are off
+  by default.
 - **`presolve=yes` no longer hangs after the solve has converged, and
   `max_wall_time` now covers postsolve** (gh#1196). Recovering the original
   problem's multipliers for bounds presolve derived could run unbounded:

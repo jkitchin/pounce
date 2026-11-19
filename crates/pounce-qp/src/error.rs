@@ -58,8 +58,9 @@ pub enum QpError {
     /// before the working-set machinery lands).
     UnsupportedFeature(String),
     /// **Internal cancellation signal**: a solve-wide budget — the wall-clock
-    /// deadline (`QpOptions::time_limit`) or the working-set change budget
-    /// (`QpOptions::max_working_set_changes`) — ran out inside a routine whose
+    /// deadline (`QpOptions::time_limit`), the working-set change budget
+    /// (`QpOptions::max_working_set_changes`) or the iteration budget
+    /// (`QpOptions::max_total_iter`) — ran out inside a routine whose
     /// success value would otherwise be indistinguishable from a real
     /// result — chiefly
     /// [`factorize_with_inertia_control`](crate::solver::ParametricActiveSetSolver),

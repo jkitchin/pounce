@@ -702,6 +702,7 @@ impl ParametricActiveSetSolver {
         let mut n_changes: u32 = 0;
 
         for _iter in 0..opts.max_iter {
+            crate::deadline::charge_iteration();
             if crate::deadline::expired() {
                 return Ok(cut_off_solution(
                     qp,
@@ -998,6 +999,7 @@ impl ParametricActiveSetSolver {
 
         // ---- 4. Active-set inner loop ----
         for _iter in 0..opts.max_iter {
+            crate::deadline::charge_iteration();
             if crate::deadline::expired() {
                 return Ok(cut_off_solution(
                     qp,
@@ -1539,6 +1541,7 @@ impl ParametricActiveSetSolver {
         let mut soft_ok = n + m >= SOFT_DROP_MIN_DIM;
 
         for _iter in 0..opts.max_iter {
+            crate::deadline::charge_iteration();
             if crate::deadline::expired() {
                 return Ok(cut_off_solution(
                     qp,
@@ -2144,7 +2147,10 @@ impl ParametricActiveSetSolver {
             // so it is scale-invariant (the elastic phase-1 objective is
             // ~γ·infeasibility, often 1e7+). Once latched it stays
             // latched; Bland then guarantees finite termination.
-            if !force_bland {
+            //
+            // With `max_stall_iters` set the count runs on past the latch,
+            // and a pass that reaches it ends here as on `max_iter` (gh#1195).
+            if !force_bland || opts.max_stall_iters.is_some() {
                 let obj_now = quad_objective(qp, &x);
                 // The first iteration sets the reference. Written as a
                 // comparison against `best_obj = +∞` this was
@@ -2164,6 +2170,15 @@ impl ParametricActiveSetSolver {
                     stall_iters += 1;
                     if stall_iters >= STALL_LIMIT {
                         force_bland = true;
+                    }
+                    if opts.max_stall_iters.is_some_and(|k| stall_iters >= k) {
+                        if trace {
+                            eprintln!(
+                                "[qp] stalled: {stall_iters} iterations without improving on \
+                                 obj={best_obj:.12e}; pass ends (max_stall_iters)"
+                            );
+                        }
+                        break;
                     }
                 }
             }
@@ -3945,6 +3960,10 @@ impl ParametricActiveSetSolver {
         let mut streak_obj = Number::NAN;
         let mut seen_sets: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
         let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
+        // `QpOptions::max_stall_iters`, by the refactor path's improvement
+        // test; this path has no Bland latch to share the count with.
+        let mut best_obj = Number::INFINITY;
+        let mut stall_iters: u32 = 0;
         // The same guard for the stationarity prune below, which `continue`s
         // before the one above can see it. It keeps its own record, and
         // compares objectives to round-off rather than bit for bit: between
@@ -3981,6 +4000,7 @@ impl ParametricActiveSetSolver {
             };
         }
         'iters: for _iter in 0..opts.max_iter {
+            crate::deadline::charge_iteration();
             if crate::deadline::expired() {
                 return Ok(cut_off_solution(
                     qp,
@@ -4556,6 +4576,23 @@ impl ParametricActiveSetSolver {
             } else {
                 streak_obj = obj_now;
                 seen_sets.clear();
+            }
+            if let Some(limit) = opts.max_stall_iters {
+                if !best_obj.is_finite() || obj_now < best_obj - 1e-9 * best_obj.abs() - 1e-12 {
+                    best_obj = obj_now;
+                    stall_iters = 0;
+                } else {
+                    stall_iters += 1;
+                    if stall_iters >= limit {
+                        if trace {
+                            eprintln!(
+                                "[qp] stalled: {stall_iters} iterations without improving on \
+                                 obj={best_obj:.12e}; pass ends (max_stall_iters)"
+                            );
+                        }
+                        break;
+                    }
+                }
             }
 
             // Null-iteration bookkeeping. A blocker means the working set grew,
@@ -5767,7 +5804,7 @@ impl QpSolver for ParametricActiveSetSolver {
         ws: Option<&QpWarmStart>,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
-        let _deadline = crate::deadline::enter(opts.time_limit, opts.max_working_set_changes);
+        let _deadline = crate::deadline::enter(opts);
         // The second-order pass sits *here*, outside `solve_scoped`, for two
         // reasons. It is the one place every route through the engine — box,
         // equality-only, equality-plus-bounds, general, Schur, elastic,
@@ -5788,7 +5825,7 @@ impl QpSolver for ParametricActiveSetSolver {
         qp_new: &QpProblem,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
-        let _deadline = crate::deadline::enter(opts.time_limit, opts.max_working_set_changes);
+        let _deadline = crate::deadline::enter(opts);
         let out = self.solve_parametric_scoped(qp_prev, sol_prev, qp_new, opts);
         let mut out = soften_deadline(qp_new, Some(&sol_prev.x), out);
         // Every route through `solve_parametric_scoped` stamps its own source,
@@ -5812,7 +5849,7 @@ impl QpSolver for ParametricActiveSetSolver {
         working: &crate::working_set::WorkingSet,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
-        let _deadline = crate::deadline::enter(opts.time_limit, opts.max_working_set_changes);
+        let _deadline = crate::deadline::enter(opts);
         let out = self.solve_with_working_set_scoped(qp, working, opts);
         soften_deadline(qp, None, out)
     }
@@ -6200,7 +6237,7 @@ impl ParametricActiveSetSolver {
         working: &crate::working_set::WorkingSet,
         opts: &QpOptions,
     ) -> Result<Option<QpSolution>, QpError> {
-        let _deadline = crate::deadline::enter(opts.time_limit, opts.max_working_set_changes);
+        let _deadline = crate::deadline::enter(opts);
         self.pin_prunes = false;
         let pinned = self.warm_start_from_working_set(qp, working, opts);
         self.pin_prunes = true;

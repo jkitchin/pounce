@@ -114,7 +114,7 @@ impl PresolveOptions {
     /// All-default settings, matching the registered defaults.
     pub fn defaults() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             bound_tightening: true,
             redundant_constraint_removal: true,
             linear_eq_reduction: false,
@@ -226,12 +226,11 @@ pub fn register_options(reg: &RegisteredOptions) -> Result<(), SolverException> 
     reg.add_bool_option(
         "presolve",
         "Master switch for algorithmic NLP preprocessing.",
-        true,
+        false,
         "If yes, wraps the user TNLP with a presolve layer that may \
          tighten variable bounds, drop redundant constraints, and \
          detect rank-deficient equality blocks before the IPM starts. \
-         On by default; with `presolve=no` the per-pass options below are \
-         dormant. \
+         Off by default; the per-pass options below are then dormant. \
          A removed singleton row that tightened a variable bound gets that \
          bound's multiplier back as its row multiplier; a removed row with \
          several free columns may still be returned with a zero row \
@@ -481,7 +480,7 @@ mod tests {
         let reg = reg_with_presolve();
         let opts = OptionsList::with_registered(reg);
         let p = PresolveOptions::from_options_list(&opts).unwrap();
-        assert!(p.enabled);
+        assert!(!p.enabled);
         assert!(p.bound_tightening);
         assert!(p.redundant_constraint_removal);
         assert!(!p.linear_eq_reduction);
