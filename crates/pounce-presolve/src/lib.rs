@@ -1165,6 +1165,8 @@ impl PresolveTnlp {
             g_u: &s.decl_g_u,
             derived_l: &derived_l,
             derived_u: &derived_u,
+            solve_x_l: &s.bounds.x_l,
+            solve_x_u: &s.bounds.x_u,
         };
         let out = dual_recovery::reattribute(&view, lambda, z_l, z_u);
         if out.rolled_back {

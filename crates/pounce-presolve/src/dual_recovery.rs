@@ -41,9 +41,9 @@
 //! keeps it), and anything the residual does not reach.
 //!
 //! A component up to [`MAX_UNKNOWNS`] multipliers is solved dense first, by
-//! the proximal active-set method below. Past that, or when the dense solve
-//! does not close the residual (its normal equations square the Jacobian's
-//! conditioning), the sparse solve takes it: a quasi-definite augmented
+//! the proximal active-set method below, within [`DENSE_WORK_BUDGET`]. Past
+//! that, or when the dense solve does not close the residual (its normal
+//! equations square the Jacobian's conditioning), the sparse solve takes it: a quasi-definite augmented
 //! system factored by FERAL, with unit-norm columns
 //! ([`solve_sign_constrained_ls_sparse`]). gh#1176's distillation column is
 //! the case for it: 1587 multipliers over 1477 variables, Jacobian entries
@@ -66,9 +66,19 @@
 use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 
 /// Most multipliers the dense recovery solve will take on. Past it -- or
-/// when the dense solve does not close the residual -- the sparse solve
+/// when the dense solve does not close the residual, or runs out of
+/// [`DENSE_WORK_BUDGET`] -- the sparse solve
 /// ([`solve_sign_constrained_ls_sparse`]) takes the component instead.
-pub(crate) const MAX_UNKNOWNS: usize = 600;
+///
+/// It was 600. The dense solve refactors `H_FF` at every active-set change,
+/// inside a proximal loop of up to 200 steps, so its cost grows like `k³`
+/// times the number of active-set changes: MINLPLib's `cesam2log`,
+/// `pooling_digabel19` and `kall_circlesrectangles_c6r39` never returned
+/// from postsolve under `presolve=yes`, past any `max_wall_time`.
+pub(crate) const MAX_UNKNOWNS: usize = 64;
+/// Floating-point operations (counted as `n³/3` per Cholesky) the dense
+/// solve may spend before it gives the component to the sparse solve.
+pub(crate) const DENSE_WORK_BUDGET: Number = 2e9;
 /// Most multipliers / variables one component may span at all. Far past any
 /// model a postsolve should spend a factorization on; the sparse solve's cost
 /// is one sparse `LDLᵀ` of size `vars + unknowns`.
@@ -91,6 +101,10 @@ pub(crate) struct KktView<'a> {
     /// declared one (or the declared one is absent).
     pub derived_l: &'a [bool],
     pub derived_u: &'a [bool],
+    /// The box the solver actually saw: presolve's bounds, declared ones
+    /// included where presolve kept them.
+    pub solve_x_l: &'a [Number],
+    pub solve_x_u: &'a [Number],
 }
 
 /// What [`reattribute`] did.
@@ -164,12 +178,41 @@ pub(crate) fn reattribute(
     let n = v.x.len();
     let m = v.g.len();
     let mut out = Outcome::default();
-    if z_l.len() != n || z_u.len() != n || lambda.len() != m || v.grad_f.len() != n {
+    if z_l.len() != n
+        || z_u.len() != n
+        || lambda.len() != m
+        || v.grad_f.len() != n
+        || v.solve_x_l.len() != n
+        || v.solve_x_u.len() != n
+    {
         return out;
     }
     // A spurious entry: a derived side the original does not have active.
-    let declared_active_l = |j: usize| lower_bound_present(v.x_l[j]) && on_bound(v.x[j], v.x_l[j]);
-    let declared_active_u = |j: usize| upper_bound_present(v.x_u[j]) && on_bound(v.x[j], v.x_u[j]);
+    //
+    // A declared side within `on_bound` of `x*` is still not active when the
+    // iterate sits on a strictly tighter bound presolve derived on that side
+    // and is clearly nearer it: the solver never saw the declared bound, and
+    // the gap between the two is real slack. MINLPLib `ex6_2_14` is the case:
+    // `x0 + x1 = 0.5`, `x0 ≥ 1e-7` active, so `x1` sits on the derived
+    // `x1 ≤ 0.5 − 1e-7`, `1e-7` inside its declared `0.5`. Counted active, that
+    // declared bound kept the derived multiplier (`z_U = 12.3` at slack `9e-8`)
+    // where the original problem's whole multiplier is on `x0 ≥ 1e-7` through
+    // the row, and `pounce verify` read stationarity `10.7`. Equal bounds (the
+    // degenerate pair) are not "clearly nearer" either way, so the declared
+    // bound keeps its multiplier there, as before.
+    let on_derived_instead = |j: usize, decl: Number, solve: Number| -> bool {
+        (v.x[j] - solve).abs() < 0.5 * (v.x[j] - decl).abs()
+    };
+    let declared_active_l = |j: usize| {
+        lower_bound_present(v.x_l[j])
+            && on_bound(v.x[j], v.x_l[j])
+            && !(v.derived_l[j] && on_derived_instead(j, v.x_l[j], v.solve_x_l[j]))
+    };
+    let declared_active_u = |j: usize| {
+        upper_bound_present(v.x_u[j])
+            && on_bound(v.x[j], v.x_u[j])
+            && !(v.derived_u[j] && on_derived_instead(j, v.x_u[j], v.solve_x_u[j]))
+    };
     let mut spurious: Vec<usize> = Vec::new();
     for j in 0..n {
         let sl = v.derived_l[j] && z_l[j].is_finite() && z_l[j] != 0.0 && !declared_active_l(j);
@@ -367,10 +410,11 @@ pub(crate) fn reattribute(
                 a[row * k + c] += v;
             }
         }
-        let w = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &w0);
-        let res = residual_of(&w);
-        if res <= target {
-            accepted = Some((w, res));
+        if let Some(w) = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &w0) {
+            let res = residual_of(&w);
+            if res <= target {
+                accepted = Some((w, res));
+            }
         }
     }
     if accepted.is_none()
@@ -582,7 +626,8 @@ fn solve_sign_constrained_ls(
     k: usize,
     constrained: &[bool],
     w0: &[Number],
-) -> Vec<Number> {
+) -> Option<Vec<Number>> {
+    let mut work = 0.0;
     // Normal matrix and AᵀB.
     let mut ata = vec![0.0; k * k];
     let mut atb = vec![0.0; k];
@@ -608,7 +653,7 @@ fn solve_sign_constrained_ls(
     for _ in 0..200 {
         // c = Aᵀb − μ w_k
         let c: Vec<Number> = (0..k).map(|p| atb[p] - mu * w[p]).collect();
-        let next = box_qp(&h, &c, k, constrained, &w);
+        let next = box_qp(&h, &c, k, constrained, &w, &mut work)?;
         let step = next
             .iter()
             .zip(&w)
@@ -619,7 +664,7 @@ fn solve_sign_constrained_ls(
             break;
         }
     }
-    w
+    Some(w)
 }
 
 /// `min ½ wᵀHw + cᵀw` s.t. `w_c ≥ 0` where `constrained[c]`, `H` SPD,
@@ -630,7 +675,8 @@ fn box_qp(
     k: usize,
     constrained: &[bool],
     start: &[Number],
-) -> Vec<Number> {
+    work: &mut Number,
+) -> Option<Vec<Number>> {
     let mut w: Vec<Number> = start.to_vec();
     let mut fixed: Vec<bool> = (0..k).map(|p| constrained[p] && w[p] <= 0.0).collect();
     for p in 0..k {
@@ -652,8 +698,12 @@ fn box_qp(
                     hf[r * nf + s] = h[p * k + q];
                 }
             }
+            *work += (nf as Number).powi(3) / 3.0;
+            if *work > DENSE_WORK_BUDGET {
+                return None;
+            }
             if !cholesky_solve(&mut hf, &mut rhs, nf) {
-                return w;
+                return Some(w);
             }
             for (r, &p) in free.iter().enumerate() {
                 cand[p] = rhs[r];
@@ -679,7 +729,7 @@ fn box_qp(
             }
             match worst {
                 Some((p, _)) => fixed[p] = false,
-                None => return w,
+                None => return Some(w),
             }
         } else {
             // Step toward the candidate as far as feasibility allows.
@@ -709,7 +759,7 @@ fn box_qp(
             }
         }
     }
-    w
+    Some(w)
 }
 
 /// In-place Cholesky solve of the SPD `n×n` system `m·x = rhs`; `rhs` is
@@ -772,6 +822,8 @@ mod tests {
             g_u: &[0.0],
             derived_l: &[false, true],
             derived_u: &[false, false],
+            solve_x_l: &[4.0, 2.0],
+            solve_x_u: &[1e19, 1e19],
         };
         let (mut lam, mut zl, mut zu) = (vec![-8.0], vec![0.0, 20.0], vec![0.0, 0.0]);
         let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
@@ -830,6 +882,8 @@ mod tests {
             g_u: &g_u,
             derived_l: &derived_l,
             derived_u: &derived_u,
+            solve_x_l: &vec![4.0; n],
+            solve_x_u: &x_u,
         };
         let mut lam = vec![0.0; n - 1];
         let mut zl = vec![4.0; n];
@@ -864,6 +918,47 @@ mod tests {
         }
     }
 
+    /// MINLPLib `ex6_2_14`'s geometry. `min 3·x0 + x1` s.t. `x0 + x1 = 0.5`,
+    /// both in `[1e-7, 0.5]`: `x* = (1e-7, 0.5 − 1e-7)`. Presolve derived
+    /// `x1 ≤ 0.5 − 1e-7` from the row, and the reduced solve put `z_U = 2` on
+    /// it (`λ = −3`). The declared `x1 ≤ 0.5` is within `on_bound` of `x*` but
+    /// is not active: `x1` sits on the derived bound, `1e-7` inside it. The
+    /// original problem's multipliers are unique: `λ = −1`, `z_L(x0) = 2`,
+    /// nothing on `x1`.
+    #[test]
+    fn a_declared_bound_the_iterate_only_nears_through_a_derived_one_is_not_active() {
+        let jac = [(0, 0, 1.0), (0, 1, 1.0)];
+        let lo = 1e-7;
+        let v = KktView {
+            x: &[lo, 0.5 - lo],
+            g: &[0.5],
+            grad_f: &[3.0, 1.0],
+            jac: &jac,
+            x_l: &[lo, lo],
+            x_u: &[0.5, 0.5],
+            g_l: &[0.5],
+            g_u: &[0.5],
+            derived_l: &[false, false],
+            derived_u: &[true, true],
+            solve_x_l: &[lo, lo],
+            solve_x_u: &[0.5 - lo, 0.5 - lo],
+        };
+        let (mut lam, mut zl, mut zu) = (vec![-3.0], vec![0.0, 0.0], vec![0.0, 2.0]);
+        let r0 = residual(&v, &lam, &zl, &zu);
+        assert!(r0.iter().all(|x| x.abs() < 1e-12), "fixture: {r0:?}");
+        let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
+        assert!(!o.rolled_back, "{o:?}");
+        assert_eq!(
+            zu,
+            vec![0.0, 0.0],
+            "a multiplier stayed on x1 ≤ 0.5 at slack 1e-7"
+        );
+        assert!((lam[0] + 1.0).abs() < 1e-9, "λ = {lam:?}");
+        assert!((zl[0] - 2.0).abs() < 1e-9, "z_L = {zl:?}");
+        let r = residual(&v, &lam, &zl, &zu);
+        assert!(r.iter().all(|x| x.abs() < 1e-9), "{r:?}");
+    }
+
     #[test]
     fn a_declared_active_bound_keeps_its_multiplier() {
         let jac = [(0, 0, 1.0), (0, 1, -2.0)];
@@ -878,6 +973,8 @@ mod tests {
             g_u: &[0.0],
             derived_l: &[false, true],
             derived_u: &[false, false],
+            solve_x_l: &[4.0, 2.0],
+            solve_x_u: &[1e19, 1e19],
         };
         let (mut lam, mut zl, mut zu) = (vec![-8.0], vec![0.0, 20.0], vec![0.0, 0.0]);
         let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
@@ -903,6 +1000,8 @@ mod tests {
             g_u: &[0.5, 2.0],
             derived_l: &[true, false],
             derived_u: &[true, true],
+            solve_x_l: &[0.5, -1e19],
+            solve_x_u: &[0.5, 1.5],
         };
         let (mut lam, mut zl, mut zu) = (vec![0.0, 0.0], vec![0.0, 0.0], vec![0.0, 3.0]);
         let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
