@@ -2329,6 +2329,16 @@ impl IpoptApplication {
         // clears (gh#983 review item 1: `warnings`; `sqp_warm_working_set_applied`)
         // that patched the same leak one field at a time.
         *self.statistics.borrow_mut() = SolveStatistics::new();
+        // The row-scaling verdict belongs to this solve too. The reset at the
+        // top of `optimize_constrained` covers a solve that reaches it; one
+        // that bails before, in the presolve wrapper's setup (an inner TNLP
+        // that declines `get_bounds_info` there), returned with the previous
+        // solve's `Some(false)` standing. That stale verdict is exactly what
+        // the ℓ₁ outer loop must never read as fact (gh#794 review round 2).
+        // With `presolve` on by default every solve takes that route, which
+        // is how `row_scaling_active_is_cleared_when_a_later_solve_bails_early`
+        // found it.
+        self.row_scaling_active.set(None);
         if !self.run_clock_held.get() {
             self.run_clock.set((
                 pounce_common::utils::wallclock_time(),
