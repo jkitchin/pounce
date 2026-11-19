@@ -41,14 +41,15 @@
 //! keeps it), and anything the residual does not reach.
 //!
 //! A component up to [`MAX_UNKNOWNS`] multipliers is solved dense first, by
-//! the proximal active-set method below, within [`DENSE_WORK_BUDGET`]. Past
-//! that, or when the dense solve does not close the residual (its normal
-//! equations square the Jacobian's conditioning), the sparse solve takes it: a quasi-definite augmented
-//! system factored by FERAL, with unit-norm columns
-//! ([`solve_sign_constrained_ls_sparse`]). gh#1176's distillation column is
-//! the case for it: 1587 multipliers over 1477 variables, Jacobian entries
-//! from `1e-10` to `5e4`. A recovery that does not close stationarity leaves
-//! the duals exactly as the solver reported them and says so through
+//! the proximal active-set method below, within the recovery's [`Budget`].
+//! Past that cap, or when the dense solve does not close the residual (its
+//! normal equations square the Jacobian's conditioning), the sparse solve
+//! takes it: a quasi-definite augmented system factored by FERAL, with
+//! unit-norm columns ([`solve_sign_constrained_ls_sparse`]), charged to the
+//! same budget. gh#1176's distillation column is the case for it: 1587
+//! multipliers over 1477 variables, Jacobian entries from `1e-10` to `5e4`.
+//! A recovery that does not close stationarity, or spends its budget,
+//! leaves the duals exactly as the solver reported them and says so through
 //! [`Outcome`].
 //!
 //! Activity is geometric, at `x*`, and so are the multipliers: the solve
@@ -63,27 +64,25 @@
 //! module: `PresolveTnlp::finalize_solution` recognises the served warm
 //! start coming back and reports the supplied duals (`crate::warm_echo`).
 
+use pounce_common::timing::Deadline;
 use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 
-/// Most multipliers the dense recovery solve will take on. Past it -- or
-/// when the dense solve does not close the residual, or runs out of
-/// [`DENSE_WORK_BUDGET`] -- the sparse solve
-/// ([`solve_sign_constrained_ls_sparse`]) takes the component instead.
-///
-/// It was 600. The dense solve refactors `H_FF` at every active-set change,
-/// inside a proximal loop of up to 200 steps, so its cost grows like `k³`
-/// times the number of active-set changes: MINLPLib's `cesam2log`,
-/// `pooling_digabel19` and `kall_circlesrectangles_c6r39` never returned
-/// from postsolve under `presolve=yes`, past any `max_wall_time`.
-pub(crate) const MAX_UNKNOWNS: usize = 64;
-/// Floating-point operations (counted as `n³/3` per Cholesky) the dense
-/// solve may spend before it gives the component to the sparse solve.
-pub(crate) const DENSE_WORK_BUDGET: Number = 2e9;
+/// Most multipliers one dense recovery solve will take on.
+pub(crate) const MAX_UNKNOWNS: usize = 600;
+/// Most variables one connected component may span before the dense solve
+/// gives it to the sparse one.
+pub(crate) const MAX_COMPONENT_VARS: usize = 5000;
 /// Most multipliers / variables one component may span at all. Far past any
-/// model a postsolve should spend a factorization on; the sparse solve's cost
-/// is one sparse `LDLᵀ` of size `vars + unknowns`.
-pub(crate) const MAX_COMPONENT_UNKNOWNS: usize = 2_000_000;
-pub(crate) const MAX_COMPONENT_VARS: usize = 2_000_000;
+/// component a postsolve should factor; the sparse solve's cost is one
+/// sparse `LDLᵀ` of size `vars + unknowns`, charged to the [`Budget`].
+pub(crate) const MAX_SPARSE_UNKNOWNS: usize = 2_000_000;
+pub(crate) const MAX_SPARSE_VARS: usize = 2_000_000;
+/// Most floating-point operations one recovery may spend, all proximal
+/// steps and active-set iterations together (gh#1196). A few seconds of
+/// dense work at the worst: about forty full refactorizations at
+/// [`MAX_UNKNOWNS`], and thousands of active-set changes once the factor
+/// is being updated rather than rebuilt.
+pub(crate) const MAX_WORK_FLOPS: f64 = 3e9;
 
 /// Read-only view of the original problem at the postsolved point.
 pub(crate) struct KktView<'a> {
@@ -120,12 +119,16 @@ pub(crate) struct Outcome {
     pub residual_before: Number,
     pub residual_after: Number,
     /// `true` when the duals were left untouched because the component was
-    /// past the caps or the solve did not reduce the residual.
+    /// past the caps, the solve ran out of its work budget, or it did not
+    /// reduce the residual.
     pub rolled_back: bool,
-    /// The rollback was the size cap, not the residual test.
+    /// `true` when the roll-back was the work budget or the deadline
+    /// running out ([`Budget`], gh#1196).
+    pub budget_exhausted: bool,
+    /// The roll-back was the component's size, past every solve's cap.
     pub over_cap: bool,
-    /// Unknowns and variables the component reached (at the cap, where the
-    /// walk stopped).
+    /// Multipliers and variables the component reached (where the walk
+    /// stopped, when it was past the cap).
     pub component_unknowns: usize,
     pub component_vars: usize,
 }
@@ -174,6 +177,7 @@ pub(crate) fn reattribute(
     lambda: &mut [Number],
     z_l: &mut [Number],
     z_u: &mut [Number],
+    mut budget: Budget<'_>,
 ) -> Outcome {
     let n = v.x.len();
     let m = v.g.len();
@@ -313,7 +317,7 @@ pub(crate) fn reattribute(
                 }
             }
         }
-        if unknowns.len() > MAX_COMPONENT_UNKNOWNS || vars.len() > MAX_COMPONENT_VARS {
+        if unknowns.len() > MAX_SPARSE_UNKNOWNS || vars.len() > MAX_SPARSE_VARS {
             over_cap = true;
             break;
         }
@@ -397,32 +401,49 @@ pub(crate) fn reattribute(
     // Accept the recovery only when it actually closes stationarity: to the
     // solver's own residual, or to a level no tolerance would notice.
     let target = (10.0 * out.residual_before).max(1e-8 * scale);
+    let spent =
+        |lambda: &mut [Number], z_l: &mut [Number], z_u: &mut [Number], mut out: Outcome| {
+            restore(lambda, z_l, z_u);
+            out.rolled_back = true;
+            out.budget_exhausted = true;
+            out.residual_after = out.residual_before;
+            out.n_spurious = 0;
+            out.n_unknowns = 0;
+            out
+        };
 
     // Small components: the dense proximal active-set solve, which keeps as
-    // much of the reduced solve's attribution as stays valid. It forms
-    // `AᵀA`, so it squares the Jacobian's conditioning; a component whose
-    // dense solve does not close the residual goes to the sparse solve too.
+    // much of the reduced solve's attribution as stays valid. It forms `AᵀA`,
+    // squaring the Jacobian's conditioning, so a component whose dense solve
+    // does not close the residual goes to the sparse solve too. Spending the
+    // budget stops the recovery outright, sparse solve included (gh#1196).
     let mut accepted: Option<(Vec<Number>, Number)> = None;
-    if k <= MAX_UNKNOWNS {
+    if k <= MAX_UNKNOWNS && nv <= MAX_COMPONENT_VARS {
         let mut a = vec![0.0; nv * k];
         for (c, col) in cols.iter().enumerate() {
             for &(row, v) in col {
                 a[row * k + c] += v;
             }
         }
-        if let Some(w) = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &w0) {
-            let res = residual_of(&w);
-            if res <= target {
-                accepted = Some((w, res));
-            }
-        }
-    }
-    if accepted.is_none()
-        && let Some(w) = solve_sign_constrained_ls_sparse(&cols, &b, nv, &constrained, &w0)
-    {
+        let Some(w) = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &w0, &mut budget)
+        else {
+            return spent(lambda, z_l, z_u, out);
+        };
         let res = residual_of(&w);
         if res <= target {
             accepted = Some((w, res));
+        }
+    }
+    if accepted.is_none() {
+        match solve_sign_constrained_ls_sparse(&cols, &b, nv, &constrained, &w0, &mut budget) {
+            Err(SparseStop::Budget) => return spent(lambda, z_l, z_u, out),
+            Err(SparseStop::Failed) => {}
+            Ok(w) => {
+                let res = residual_of(&w);
+                if res <= target {
+                    accepted = Some((w, res));
+                }
+            }
         }
     }
     let Some((w, res_after)) = accepted else {
@@ -445,53 +466,60 @@ pub(crate) fn reattribute(
     out
 }
 
+/// Why [`solve_sign_constrained_ls_sparse`] gave up.
+enum SparseStop {
+    /// The recovery's [`Budget`] (flops or deadline) ran out.
+    Budget,
+    /// The factorization failed or the signs did not settle.
+    Failed,
+}
+
 /// The same problem as [`solve_sign_constrained_ls`] -- `min ½‖A·w + b‖²`
 /// with `w_c ≥ 0` where `constrained[c]`, as near `w0` as the solution set
-/// allows -- for components too large, or too ill-conditioned, for the dense
-/// normal equations (gh#1176: 1587 multipliers over 1477 variables, Jacobian
-/// entries from `1e-10` to `5e4`, which `AᵀA` squares past double precision).
+/// allows -- for components past the dense cap, or too ill-conditioned for
+/// the dense normal equations (gh#1176: 1587 multipliers over 1477 variables,
+/// Jacobian entries from `1e-10` to `5e4`, which `AᵀA` squares past double
+/// precision).
 ///
-/// Each proximal step `min ½‖A·d + ρ‖² + ½δ‖d‖²` (`ρ` the current residual)
-/// is the quasi-definite augmented system
+/// Columns are scaled to unit norm (`A = Â·D`, solved in `ŵ = D·w`), a
+/// positive scaling that keeps every sign constraint and lets one
+/// regularization `δ` mean the same thing for every column; unscaled, the
+/// iteration below converged sublinearly on the column. Each proximal step
+/// `min ½‖Â·d + ρ‖² + ½δ‖d‖²` (`ρ` the current residual) is the
+/// quasi-definite augmented system
 ///
 /// ```text
-///   [ −I   A  ] [r]   [−ρ]
-///   [ Aᵀ   δI ] [d] = [ 0]
+///   [ −I   Â  ] [r]   [−ρ]
+///   [ Âᵀ   δI ] [d] = [ 0]
 /// ```
 ///
 /// factored once by FERAL and re-solved for each step: no `AᵀA` is formed,
-/// and directions `A` cannot see (degenerate multipliers) take no step, so
-/// they keep `w0`'s attribution. Sign constraints by elimination: a column
-/// whose multiplier comes out with the wrong sign is fixed at 0 and the
-/// system refactored, a few rounds at most. `None` when the factorization
-/// fails or the signs do not settle; the caller's residual test decides the
-/// rest.
+/// and directions `Â` cannot see (degenerate multipliers) take no step, so
+/// they keep `w0`'s attribution. Signs by elimination: a column whose
+/// multiplier comes out with the wrong sign is fixed at 0 and the system
+/// refactored, a few rounds at most. Every factorization and solve is
+/// charged to `budget`.
 fn solve_sign_constrained_ls_sparse(
     cols: &[Vec<(usize, Number)>],
     b: &[Number],
     nrows: usize,
     constrained: &[bool],
     w0: &[Number],
-) -> Option<Vec<Number>> {
-    let w0_raw = w0;
+    budget: &mut Budget<'_>,
+) -> Result<Vec<Number>, SparseStop> {
     use pounce_common::types::Index;
     use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
     use pounce_linsol::status::ESymSolverStatus;
 
     let k = cols.len();
-    // Unit columns: `A = Â·D`, `D = diag(‖a_c‖)`, solved in `ŵ = D·w`. A
-    // positive scaling keeps every sign constraint, and one regularization
-    // `δ` then means the same thing for every column -- with the raw columns
-    // (norms here span many orders) a `δ` small enough for the weakest
-    // column left the strongest converging at a crawl, and the reverse.
     let norms: Vec<Number> = cols
         .iter()
         .map(|c| c.iter().map(|(_, a)| a * a).sum::<Number>().sqrt())
         .collect();
     if norms.iter().any(|v| !v.is_finite()) {
-        return None;
+        return Err(SparseStop::Failed);
     }
-    let cols: Vec<Vec<(usize, Number)>> = cols
+    let scaled: Vec<Vec<(usize, Number)>> = cols
         .iter()
         .zip(&norms)
         .map(|(c, &d)| {
@@ -502,19 +530,23 @@ fn solve_sign_constrained_ls_sparse(
             }
         })
         .collect();
-    let cols = &cols;
-    let w0: Vec<Number> = w0
-        .iter()
-        .zip(&norms)
-        .map(|(&w, &d)| w * d.max(0.0))
-        .collect();
+    let cols = &scaled;
     let delta = 1e-10;
-    let mut w = w0.to_vec();
+    let residual = |w: &[Number]| -> Vec<Number> {
+        let mut acc = b.to_vec();
+        for (c, col) in cols.iter().enumerate() {
+            for &(row, a) in col {
+                acc[row] += a * w[c];
+            }
+        }
+        acc
+    };
+    let norm = |v: &[Number]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+    let mut w: Vec<Number> = w0.iter().zip(&norms).map(|(&w, &d)| w * d).collect();
     let mut allowed = vec![true; k];
     for _round in 0..20 {
         let free: Vec<usize> = (0..k).filter(|&c| allowed[c]).collect();
-        let kf = free.len();
-        let dim = nrows + kf;
+        let dim = nrows + free.len();
         // Lower triangle, 1-based triplets.
         let mut ia: Vec<Index> = Vec::new();
         let mut ja: Vec<Index> = Vec::new();
@@ -535,26 +567,26 @@ fn solve_sign_constrained_ls_sparse(
             ja.push(rowp);
             vals.push(delta);
         }
+        // A sparse factorization of a quasi-definite matrix this size: an
+        // order-of-magnitude charge, so the flop allowance and the deadline
+        // bound this path as they bound the dense one.
+        let nnz = vals.len() as f64;
+        if !budget.charge(50.0 * nnz) {
+            return Err(SparseStop::Budget);
+        }
         let mut solver = pounce_feral::FeralSolverInterface::serial();
         if solver.initialize_structure(dim as Index, ia.len() as Index, &ia, &ja)
             != ESymSolverStatus::Success
         {
-            return None;
+            return Err(SparseStop::Failed);
         }
         solver.values_array_mut().copy_from_slice(&vals);
-        let residual = |w: &[Number]| -> Vec<Number> {
-            let mut acc = b.to_vec();
-            for (c, col) in cols.iter().enumerate() {
-                for &(row, a) in col {
-                    acc[row] += a * w[c];
-                }
-            }
-            acc
-        };
-        let norm = |v: &[Number]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
         let mut best = norm(&residual(&w));
         let mut first = true;
         for _step in 0..200 {
+            if !budget.charge(10.0 * nnz) {
+                return Err(SparseStop::Budget);
+            }
             let rho = residual(&w);
             let mut rhs = vec![0.0; dim];
             for i in 0..nrows {
@@ -563,7 +595,7 @@ fn solve_sign_constrained_ls_sparse(
             let st = solver.multi_solve(first, &ia, &ja, 1, &mut rhs, false, 0);
             first = false;
             if st != ESymSolverStatus::Success {
-                return None;
+                return Err(SparseStop::Failed);
             }
             let mut trial = w.clone();
             for (p, &c) in free.iter().enumerate() {
@@ -571,21 +603,17 @@ fn solve_sign_constrained_ls_sparse(
             }
             let res = norm(&residual(&trial));
             if !res.is_finite() {
-                return None;
+                return Err(SparseStop::Failed);
             }
-            let moved = free
-                .iter()
-                .enumerate()
-                .fold(0.0_f64, |m, (p, _)| m.max(rhs[nrows + p].abs()));
+            let moved = (0..free.len()).fold(0.0_f64, |m, p| m.max(rhs[nrows + p].abs()));
             let size = trial.iter().fold(1.0_f64, |m, x| m.max(x.abs()));
             w = trial;
             if res >= best * (1.0 - 1e-3) || moved <= 1e-15 * size {
-                best = best.min(res);
                 break;
             }
             best = res;
         }
-        // Signs: fix the worst violators at zero and solve again.
+        // Signs: fix the violators at zero and solve again.
         let scale = w.iter().fold(1.0_f64, |m, x| m.max(x.abs()));
         let tol = 1e-12 * scale;
         let violators: Vec<usize> = (0..k)
@@ -598,20 +626,54 @@ fn solve_sign_constrained_ls_sparse(
         }
         if violators.is_empty() {
             // Back to `w = D⁻¹·ŵ`; a column with no entries keeps its start.
-            return Some(
-                w.iter()
-                    .zip(&norms)
-                    .zip(w0_raw)
-                    .map(|((&wh, &d), &w0c)| if d > 0.0 { wh / d } else { w0c })
-                    .collect(),
-            );
+            return Ok(w
+                .iter()
+                .zip(&norms)
+                .zip(w0)
+                .map(|((&wh, &d), &w0c)| if d > 0.0 { wh / d } else { w0c })
+                .collect());
         }
         for c in violators {
             allowed[c] = false;
             w[c] = 0.0;
         }
     }
-    None
+    Err(SparseStop::Failed)
+}
+
+/// What one recovery may spend: a flop allowance and, optionally, the
+/// solve's own deadline (gh#1196).
+///
+/// The unknowns cap ([`MAX_UNKNOWNS`]) bounds the size of one dense solve,
+/// not how many of them run: the proximal-point loop takes up to 200 steps,
+/// and each is an active-set QP whose iteration count grows with the number
+/// of sign changes. Uncapped, Vanderbei `qpnstair` (`presolve=yes`) spent
+/// 838 s here after the interior-point solve had converged, past a 10 s
+/// `max_wall_time`. Spending the budget is the same outcome as a component
+/// past the caps: the reduced solve's duals are kept, `rolled_back` is set.
+pub(crate) struct Budget<'a> {
+    flops: f64,
+    deadline: Option<&'a Deadline>,
+}
+
+impl Default for Budget<'_> {
+    fn default() -> Self {
+        Self::new(MAX_WORK_FLOPS, None)
+    }
+}
+
+impl<'a> Budget<'a> {
+    pub(crate) fn new(flops: f64, deadline: Option<&'a Deadline>) -> Self {
+        Self { flops, deadline }
+    }
+
+    /// Charge `flops` of work about to be done; `false` once the allowance
+    /// or the deadline is spent. Called at the granularity of one
+    /// active-set iteration, so the overshoot is one such iteration.
+    fn charge(&mut self, flops: f64) -> bool {
+        self.flops -= flops;
+        self.flops >= 0.0 && self.deadline.is_none_or(|d| d.exceeded().is_none())
+    }
 }
 
 /// `min ½‖A·w + b‖²` subject to `w_c ≥ 0` where `constrained[c]`, by a
@@ -619,6 +681,7 @@ fn solve_sign_constrained_ls_sparse(
 /// at `w0`. Each step is a strictly convex bound-constrained QP, solved by a
 /// primal active-set method. On a consistent system with a unique solution
 /// this converges to it; on a degenerate one, to a solution near `w0`.
+/// `None` when `budget` runs out first.
 fn solve_sign_constrained_ls(
     a: &[Number],
     b: &[Number],
@@ -626,9 +689,13 @@ fn solve_sign_constrained_ls(
     k: usize,
     constrained: &[bool],
     w0: &[Number],
+    budget: &mut Budget<'_>,
 ) -> Option<Vec<Number>> {
-    let mut work = 0.0;
     // Normal matrix and AᵀB.
+    let nnz = a.iter().filter(|&&x| x != 0.0).count() as f64;
+    if !budget.charge(2.0 * nnz * k as f64) {
+        return None;
+    }
     let mut ata = vec![0.0; k * k];
     let mut atb = vec![0.0; k];
     for row in 0..nrows {
@@ -645,15 +712,19 @@ fn solve_sign_constrained_ls(
     }
     let max_diag = (0..k).fold(0.0_f64, |m, p| m.max(ata[p * k + p]));
     let mu = 1e-6 * max_diag.max(1e-300);
-    let mut h = ata.clone();
+    let mut h = ata;
     for p in 0..k {
         h[p * k + p] += mu;
     }
+    // One factor of the free block, carried across the proximal steps (H
+    // does not change between them, and neither, near convergence, does the
+    // active set) and updated, not rebuilt, as the active set moves.
+    let mut fac = FreeFactor::new(k);
     let mut w = w0.to_vec();
     for _ in 0..200 {
         // c = Aᵀb − μ w_k
         let c: Vec<Number> = (0..k).map(|p| atb[p] - mu * w[p]).collect();
-        let next = box_qp(&h, &c, k, constrained, &w, &mut work)?;
+        let next = box_qp(&h, &c, k, constrained, &w, &mut fac, budget)?;
         let step = next
             .iter()
             .zip(&w)
@@ -667,15 +738,200 @@ fn solve_sign_constrained_ls(
     Some(w)
 }
 
+/// Cholesky factor `L·Lᵀ = H_FF` of the free block of a `k×k` SPD `H`, for
+/// an ordered free set `idx`, kept up to date as indices leave (a column
+/// rotation sweep, `O(nf²)`) and join (one appended row, `O(nf²)`), instead
+/// of refactored from scratch (`O(nf³)`) on every active-set change.
+struct FreeFactor {
+    k: usize,
+    /// Free indices, in factor order.
+    idx: Vec<usize>,
+    /// `pos[p]` = position of `p` in `idx`, or `usize::MAX`.
+    pos: Vec<usize>,
+    /// Row-major lower triangle, stride `k`.
+    l: Vec<Number>,
+    /// Up/down-dates since the last full factorization.
+    updates: usize,
+    /// Whether `idx`/`l` describe a valid factor at all.
+    valid: bool,
+}
+
+impl FreeFactor {
+    fn new(k: usize) -> Self {
+        Self {
+            k,
+            idx: Vec::new(),
+            pos: vec![usize::MAX; k],
+            l: vec![0.0; k * k],
+            updates: 0,
+            valid: false,
+        }
+    }
+
+    /// Factor `H_FF` for the free set `free` from scratch.
+    fn refactor(&mut self, h: &[Number], free: &[usize], budget: &mut Budget<'_>) -> Option<bool> {
+        let (k, nf) = (self.k, free.len());
+        if !budget.charge((nf as f64).powi(3) / 3.0 + nf as f64) {
+            return None;
+        }
+        self.idx.clear();
+        self.pos.iter_mut().for_each(|p| *p = usize::MAX);
+        self.valid = false;
+        self.updates = 0;
+        for &p in free {
+            self.pos[p] = self.idx.len();
+            self.idx.push(p);
+        }
+        let l = &mut self.l;
+        for j in 0..nf {
+            let mut d = h[free[j] * k + free[j]];
+            for q in 0..j {
+                d -= l[j * k + q] * l[j * k + q];
+            }
+            if !(d > 0.0) {
+                return Some(false);
+            }
+            let d = d.sqrt();
+            l[j * k + j] = d;
+            for i in (j + 1)..nf {
+                let mut s = h[free[i] * k + free[j]];
+                for q in 0..j {
+                    s -= l[i * k + q] * l[j * k + q];
+                }
+                l[i * k + j] = s / d;
+            }
+        }
+        self.valid = true;
+        Some(true)
+    }
+
+    /// Drop index `p` from the free set.
+    fn remove(&mut self, p: usize) {
+        let (k, nf) = (self.k, self.idx.len());
+        let r = self.pos[p];
+        let l = &mut self.l;
+        // Shift rows r+1.. up by one; row t (new) has entries in 0..=t+1.
+        for t in r..nf - 1 {
+            for q in 0..=(t + 1) {
+                l[t * k + q] = l[(t + 1) * k + q];
+            }
+        }
+        // Restore lower-triangularity: rotate columns (t, t+1) to zero the
+        // superdiagonal entry of row t. Column rotations keep L·Lᵀ.
+        for t in r..nf - 1 {
+            let (x, y) = (l[t * k + t], l[t * k + t + 1]);
+            let rho = x.hypot(y);
+            if rho == 0.0 {
+                continue;
+            }
+            let (c, s) = (x / rho, y / rho);
+            for u in t..nf - 1 {
+                let (a, b) = (l[u * k + t], l[u * k + t + 1]);
+                l[u * k + t] = c * a + s * b;
+                l[u * k + t + 1] = -s * a + c * b;
+            }
+            l[t * k + t + 1] = 0.0;
+        }
+        self.idx.remove(r);
+        self.pos[p] = usize::MAX;
+        for (i, &q) in self.idx.iter().enumerate().skip(r) {
+            self.pos[q] = i;
+        }
+        self.updates += 1;
+    }
+
+    /// Append index `p` to the free set; `false` when the new pivot is not
+    /// numerically positive (the caller refactors).
+    fn append(&mut self, h: &[Number], p: usize) -> bool {
+        let (k, nf) = (self.k, self.idx.len());
+        let l = &mut self.l;
+        // Solve L·x = H[idx, p] into row nf.
+        for i in 0..nf {
+            let mut s = h[self.idx[i] * k + p];
+            for q in 0..i {
+                s -= l[i * k + q] * l[nf * k + q];
+            }
+            l[nf * k + i] = s / l[i * k + i];
+        }
+        let hpp = h[p * k + p];
+        let mut d = hpp;
+        for q in 0..nf {
+            d -= l[nf * k + q] * l[nf * k + q];
+        }
+        if !(d > 1e-12 * hpp.abs()) {
+            return false;
+        }
+        l[nf * k + nf] = d.sqrt();
+        self.pos[p] = nf;
+        self.idx.push(p);
+        self.updates += 1;
+        true
+    }
+
+    /// Bring the factor to the free set `!fixed`, by updates when that is
+    /// cheaper and safe, else from scratch. `Some(false)`: `H_FF` is not
+    /// numerically SPD.
+    fn sync(&mut self, h: &[Number], fixed: &[bool], budget: &mut Budget<'_>) -> Option<bool> {
+        let free: Vec<usize> = (0..self.k).filter(|&p| !fixed[p]).collect();
+        let nf = free.len() as f64;
+        if self.valid && self.updates < 64 {
+            let leave: Vec<usize> = self.idx.iter().copied().filter(|&p| fixed[p]).collect();
+            let join: Vec<usize> = free
+                .iter()
+                .copied()
+                .filter(|&p| self.pos[p] == usize::MAX)
+                .collect();
+            let changes = (leave.len() + join.len()) as f64;
+            if changes == 0.0 {
+                return Some(true);
+            }
+            if 2.0 * changes * nf < nf / 3.0 * nf {
+                if !budget.charge(2.0 * changes * nf * nf) {
+                    return None;
+                }
+                for &p in &leave {
+                    self.remove(p);
+                }
+                if join.iter().all(|&p| self.append(h, p)) {
+                    return Some(true);
+                }
+            }
+        }
+        self.refactor(h, &free, budget)
+    }
+
+    /// Solve `H_FF·x = rhs` (in factor order) in place.
+    fn solve(&self, rhs: &mut [Number]) {
+        let (k, nf) = (self.k, self.idx.len());
+        let l = &self.l;
+        for i in 0..nf {
+            let mut s = rhs[i];
+            for q in 0..i {
+                s -= l[i * k + q] * rhs[q];
+            }
+            rhs[i] = s / l[i * k + i];
+        }
+        for i in (0..nf).rev() {
+            let mut s = rhs[i];
+            for q in (i + 1)..nf {
+                s -= l[q * k + i] * rhs[q];
+            }
+            rhs[i] = s / l[i * k + i];
+        }
+    }
+}
+
 /// `min ½ wᵀHw + cᵀw` s.t. `w_c ≥ 0` where `constrained[c]`, `H` SPD,
-/// started from the feasible `start`. Primal active-set method.
+/// started from the feasible `start`. Primal active-set method. `None` when
+/// `budget` runs out first.
 fn box_qp(
     h: &[Number],
     c: &[Number],
     k: usize,
     constrained: &[bool],
     start: &[Number],
-    work: &mut Number,
+    fac: &mut FreeFactor,
+    budget: &mut Budget<'_>,
 ) -> Option<Vec<Number>> {
     let mut w: Vec<Number> = start.to_vec();
     let mut fixed: Vec<bool> = (0..k).map(|p| constrained[p] && w[p] <= 0.0).collect();
@@ -685,30 +941,23 @@ fn box_qp(
         }
     }
     for _ in 0..(10 * k + 50) {
-        let free: Vec<usize> = (0..k).filter(|&p| !fixed[p]).collect();
         // Solve H_FF p_F = −c_F (fixed entries are 0).
-        let nf = free.len();
+        if !fac.sync(h, &fixed, budget)? {
+            return Some(w);
+        }
+        let nf = fac.idx.len();
+        if !budget.charge(2.0 * (nf * nf + k * k) as f64) {
+            return None;
+        }
         let mut cand = vec![0.0; k];
         if nf > 0 {
-            let mut hf = vec![0.0; nf * nf];
-            let mut rhs = vec![0.0; nf];
-            for (r, &p) in free.iter().enumerate() {
-                rhs[r] = -c[p];
-                for (s, &q) in free.iter().enumerate() {
-                    hf[r * nf + s] = h[p * k + q];
-                }
-            }
-            *work += (nf as Number).powi(3) / 3.0;
-            if *work > DENSE_WORK_BUDGET {
-                return None;
-            }
-            if !cholesky_solve(&mut hf, &mut rhs, nf) {
-                return Some(w);
-            }
-            for (r, &p) in free.iter().enumerate() {
+            let mut rhs: Vec<Number> = fac.idx.iter().map(|&p| -c[p]).collect();
+            fac.solve(&mut rhs);
+            for (r, &p) in fac.idx.iter().enumerate() {
                 cand[p] = rhs[r];
             }
         }
+        let free = &fac.idx;
         let infeasible = free.iter().any(|&p| constrained[p] && cand[p] < 0.0);
         if !infeasible {
             w = cand;
@@ -735,7 +984,7 @@ fn box_qp(
             // Step toward the candidate as far as feasibility allows.
             let mut alpha = 1.0_f64;
             let mut block = None;
-            for &p in &free {
+            for &p in free {
                 if constrained[p] && cand[p] < 0.0 {
                     let t = w[p] / (w[p] - cand[p]);
                     if t < alpha {
@@ -744,14 +993,14 @@ fn box_qp(
                     }
                 }
             }
-            for &p in &free {
+            for &p in free {
                 w[p] += alpha * (cand[p] - w[p]);
             }
             if let Some(p) = block {
                 fixed[p] = true;
                 w[p] = 0.0;
             }
-            for &p in &free {
+            for &p in free {
                 if constrained[p] && w[p] <= 0.0 {
                     fixed[p] = true;
                     w[p] = 0.0;
@@ -760,44 +1009,6 @@ fn box_qp(
         }
     }
     Some(w)
-}
-
-/// In-place Cholesky solve of the SPD `n×n` system `m·x = rhs`; `rhs` is
-/// overwritten with `x`. `false` if `m` is not numerically SPD.
-fn cholesky_solve(m: &mut [Number], rhs: &mut [Number], n: usize) -> bool {
-    for j in 0..n {
-        let mut d = m[j * n + j];
-        for p in 0..j {
-            d -= m[j * n + p] * m[j * n + p];
-        }
-        if !(d > 0.0) {
-            return false;
-        }
-        let d = d.sqrt();
-        m[j * n + j] = d;
-        for i in (j + 1)..n {
-            let mut s = m[i * n + j];
-            for p in 0..j {
-                s -= m[i * n + p] * m[j * n + p];
-            }
-            m[i * n + j] = s / d;
-        }
-    }
-    for i in 0..n {
-        let mut s = rhs[i];
-        for p in 0..i {
-            s -= m[i * n + p] * rhs[p];
-        }
-        rhs[i] = s / m[i * n + i];
-    }
-    for i in (0..n).rev() {
-        let mut s = rhs[i];
-        for p in (i + 1)..n {
-            s -= m[p * n + i] * rhs[p];
-        }
-        rhs[i] = s / m[i * n + i];
-    }
-    true
 }
 
 #[cfg(test)]
@@ -822,11 +1033,11 @@ mod tests {
             g_u: &[0.0],
             derived_l: &[false, true],
             derived_u: &[false, false],
-            solve_x_l: &[4.0, 2.0],
+            solve_x_l: &[4.0, -1e19],
             solve_x_u: &[1e19, 1e19],
         };
         let (mut lam, mut zl, mut zu) = (vec![-8.0], vec![0.0, 20.0], vec![0.0, 0.0]);
-        let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
+        let o = reattribute(&v, &mut lam, &mut zl, &mut zu, Budget::default());
         assert!(!o.rolled_back, "{o:?}");
         assert_eq!(o.n_spurious, 1);
         assert!((lam[0] - 2.0).abs() < 1e-10, "λ = {lam:?}");
@@ -838,12 +1049,12 @@ mod tests {
 
     /// A multiplier on a declared bound the derived one ties with stays put
     /// (the incumbent keeps a degenerate pair), and nothing else moves.
-    /// gh#1176: a component past the dense solve's reach. `min ½Σx_j²` over a
-    /// chain `s_i·(x_i − x_{i+1}) ≤ 0` (all active at `x* = 4`) with the
-    /// declared `x_0 ≥ 4`; presolve derived `x_j ≥ 4` for every other `j`
-    /// and the reduced solve put the whole multiplier on those derived
-    /// bounds. The original problem's multipliers are unique:
-    /// `s_i·λ_i = 4(n−1−i)` and `z_L(x_0) = 4n`.
+    /// gh#1176: a component past the dense cap. `min ½Σx_j²` over a chain
+    /// `s_i·(x_i − x_{i+1}) ≤ 0` (all active at `x* = 4`) with the declared
+    /// `x_0 ≥ 4`; presolve derived `x_j ≥ 4` for every other `j` and the
+    /// reduced solve put the whole multiplier on those derived bounds. The
+    /// original problem's multipliers are unique: `s_i·λ_i = 4(n−1−i)` and
+    /// `z_L(x_0) = 4n`.
     ///
     /// 700 unknowns is past [`MAX_UNKNOWNS`], where the recovery used to roll
     /// back and report the derived-bound multipliers. The row scales `s_i`
@@ -871,6 +1082,7 @@ mod tests {
         let mut derived_l = vec![true; n];
         derived_l[0] = false;
         let derived_u = vec![false; n];
+        let solve_x_l = vec![4.0; n];
         let v = KktView {
             x: &x,
             g: &g,
@@ -882,17 +1094,14 @@ mod tests {
             g_u: &g_u,
             derived_l: &derived_l,
             derived_u: &derived_u,
-            solve_x_l: &vec![4.0; n],
+            solve_x_l: &solve_x_l,
             solve_x_u: &x_u,
         };
         let mut lam = vec![0.0; n - 1];
         let mut zl = vec![4.0; n];
         let mut zu = vec![0.0; n];
-        assert!(
-            n - 1 + 1 > MAX_UNKNOWNS,
-            "the fixture must be past the dense cap"
-        );
-        let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
+        assert!(n > MAX_UNKNOWNS, "the fixture must be past the dense cap");
+        let o = reattribute(&v, &mut lam, &mut zl, &mut zu, Budget::default());
         assert!(!o.rolled_back, "{o:?}");
         assert_eq!(o.n_spurious, n - 1);
         let r = residual(&v, &lam, &zl, &zu);
@@ -946,7 +1155,7 @@ mod tests {
         let (mut lam, mut zl, mut zu) = (vec![-3.0], vec![0.0, 0.0], vec![0.0, 2.0]);
         let r0 = residual(&v, &lam, &zl, &zu);
         assert!(r0.iter().all(|x| x.abs() < 1e-12), "fixture: {r0:?}");
-        let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
+        let o = reattribute(&v, &mut lam, &mut zl, &mut zu, Budget::default());
         assert!(!o.rolled_back, "{o:?}");
         assert_eq!(
             zu,
@@ -977,7 +1186,7 @@ mod tests {
             solve_x_u: &[1e19, 1e19],
         };
         let (mut lam, mut zl, mut zu) = (vec![-8.0], vec![0.0, 20.0], vec![0.0, 0.0]);
-        let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
+        let o = reattribute(&v, &mut lam, &mut zl, &mut zu, Budget::default());
         assert_eq!(o, Outcome::default());
         assert_eq!((lam, zl), (vec![-8.0], vec![0.0, 20.0]));
     }
@@ -1000,16 +1209,217 @@ mod tests {
             g_u: &[0.5, 2.0],
             derived_l: &[true, false],
             derived_u: &[true, true],
-            solve_x_l: &[0.5, -1e19],
-            solve_x_u: &[0.5, 1.5],
+            solve_x_l: &[-1e19, -1e19],
+            solve_x_u: &[1e19, 1e19],
         };
         let (mut lam, mut zl, mut zu) = (vec![0.0, 0.0], vec![0.0, 0.0], vec![0.0, 3.0]);
-        let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
+        let o = reattribute(&v, &mut lam, &mut zl, &mut zu, Budget::default());
         assert!(!o.rolled_back, "{o:?}");
         assert!(
             (lam[0] + 3.0).abs() < 1e-10 && (lam[1] - 3.0).abs() < 1e-10,
             "{lam:?}"
         );
         assert_eq!((zl, zu), (vec![0.0, 0.0], vec![0.0, 0.0]));
+    }
+
+    /// Deterministic pseudo-random numbers in `[-1, 1)`.
+    fn lcg(seed: &mut u64) -> Number {
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((*seed >> 11) as Number / (1u64 << 53) as Number) * 2.0 - 1.0
+    }
+
+    /// gh#1196: a component near [`MAX_UNKNOWNS`] whose sign-constrained
+    /// solve needs many active-set changes — the branch `qpnstair` reaches.
+    /// `nrow` inequality rows, all active at their upper side (`λ ≥ 0`), over
+    /// `nvar` variables, every row touching the seed variable 0 (so one BFS
+    /// takes them all in). The reduced solve's `λ` starts strictly positive
+    /// everywhere and `∇f` is random, so most of the `λ ≥ 0` have to be
+    /// driven onto the bound one blocking step at a time.
+    struct Stair {
+        nvar: usize,
+        jac: Vec<(usize, usize, Number)>,
+        grad_f: Vec<Number>,
+        x: Vec<Number>,
+        g: Vec<Number>,
+        x_l: Vec<Number>,
+        x_u: Vec<Number>,
+        g_l: Vec<Number>,
+        g_u: Vec<Number>,
+        derived_l: Vec<bool>,
+        derived_u: Vec<bool>,
+    }
+
+    impl Stair {
+        fn new(nvar: usize, nrow: usize) -> Self {
+            let mut seed = 1196;
+            let mut jac = Vec::new();
+            for i in 0..nrow {
+                jac.push((i, 0, 1.0 + 0.5 * lcg(&mut seed)));
+                for t in 0..4 {
+                    let j = 1 + (i * 7 + t * 131 + (i * i) % 17) % (nvar - 1);
+                    jac.push((i, j, lcg(&mut seed)));
+                }
+            }
+            let grad_f = (0..nvar).map(|_| 5.0 * lcg(&mut seed)).collect();
+            let mut derived_l = vec![false; nvar];
+            derived_l[0] = true;
+            Self {
+                nvar,
+                jac,
+                grad_f,
+                x: vec![0.0; nvar],
+                g: vec![1.0; nrow],
+                x_l: vec![-1e19; nvar],
+                x_u: vec![1e19; nvar],
+                g_l: vec![-1e19; nrow],
+                g_u: vec![1.0; nrow],
+                derived_l,
+                derived_u: vec![false; nvar],
+            }
+        }
+
+        fn view(&self) -> KktView<'_> {
+            KktView {
+                x: &self.x,
+                g: &self.g,
+                grad_f: &self.grad_f,
+                jac: &self.jac,
+                x_l: &self.x_l,
+                x_u: &self.x_u,
+                g_l: &self.g_l,
+                g_u: &self.g_u,
+                derived_l: &self.derived_l,
+                derived_u: &self.derived_u,
+                solve_x_l: &self.x_l,
+                solve_x_u: &self.x_u,
+            }
+        }
+
+        /// Reduced-solve duals: every `λ` positive, and the spurious mass
+        /// on the derived `x0 ≥ ·`.
+        fn duals(&self) -> (Vec<Number>, Vec<Number>, Vec<Number>) {
+            let mut zl = vec![0.0; self.nvar];
+            zl[0] = 50.0;
+            (vec![1.0; self.g.len()], zl, vec![0.0; self.nvar])
+        }
+    }
+
+    /// The slow branch completes inside the default budget — the factor is
+    /// updated, not rebuilt, per active-set change — and its answer is a
+    /// valid multiplier set: right signs, stationarity no worse than the
+    /// acceptance target.
+    #[test]
+    fn a_component_near_the_cap_with_many_active_set_changes_is_affordable() {
+        let p = Stair::new(400, MAX_UNKNOWNS - 10);
+        let (mut lam, mut zl, mut zu) = p.duals();
+        let o = reattribute(&p.view(), &mut lam, &mut zl, &mut zu, Budget::default());
+        assert!(!o.budget_exhausted, "{o:?}");
+        assert_eq!(o.n_unknowns, MAX_UNKNOWNS - 10, "{o:?}");
+        if !o.rolled_back {
+            assert!(lam.iter().all(|&l| l >= 0.0), "a λ ≥ 0 went negative");
+            assert_eq!(zl[0], 0.0);
+            let zeroed = lam.iter().filter(|&&l| l == 0.0).count();
+            assert!(
+                zeroed > 50,
+                "only {zeroed} λ reached their bound: not the slow branch"
+            );
+        }
+    }
+
+    /// Out of budget, the recovery stops and keeps the reduced solve's
+    /// duals exactly, and says why.
+    #[test]
+    fn a_spent_work_budget_rolls_back_to_the_reduced_duals() {
+        let p = Stair::new(400, MAX_UNKNOWNS - 10);
+        let (lam0, zl0, zu0) = p.duals();
+        let (mut lam, mut zl, mut zu) = p.duals();
+        let o = reattribute(
+            &p.view(),
+            &mut lam,
+            &mut zl,
+            &mut zu,
+            Budget::new(1e6, None),
+        );
+        assert!(o.rolled_back && o.budget_exhausted, "{o:?}");
+        assert_eq!(o.n_spurious, 0);
+        assert_eq!((lam, zl, zu), (lam0, zl0, zu0));
+    }
+
+    /// The solve's deadline stops the recovery too: a solve that is already
+    /// out of time spends none of it in postsolve.
+    #[test]
+    fn a_crossed_deadline_rolls_back_to_the_reduced_duals() {
+        let p = Stair::new(400, MAX_UNKNOWNS - 10);
+        let (lam0, zl0, zu0) = p.duals();
+        let (mut lam, mut zl, mut zu) = p.duals();
+        let d = Deadline::new(0.0, 0.0);
+        let o = reattribute(
+            &p.view(),
+            &mut lam,
+            &mut zl,
+            &mut zu,
+            Budget::new(MAX_WORK_FLOPS, Some(&d)),
+        );
+        assert!(o.rolled_back && o.budget_exhausted, "{o:?}");
+        assert_eq!((lam, zl, zu), (lam0, zl0, zu0));
+    }
+
+    /// The up/down-dated factor equals a fresh factorization of the same
+    /// free block, through a mix of removals and appends.
+    #[test]
+    fn factor_updates_match_a_fresh_factorization() {
+        let k = 12;
+        let mut seed = 7;
+        let a: Vec<Number> = (0..k * k).map(|_| lcg(&mut seed)).collect();
+        let mut h = vec![0.0; k * k];
+        for p in 0..k {
+            for q in 0..k {
+                for r in 0..k {
+                    h[p * k + q] += a[r * k + p] * a[r * k + q];
+                }
+            }
+            h[p * k + p] += 0.1;
+        }
+        let mut budget = Budget::default();
+        let mut fac = FreeFactor::new(k);
+        let all: Vec<usize> = (0..k).collect();
+        assert_eq!(fac.refactor(&h, &all, &mut budget), Some(true));
+        for &p in &[3, 0, 11, 6] {
+            fac.remove(p);
+        }
+        for &p in &[11, 0] {
+            assert!(fac.append(&h, p));
+        }
+        fac.remove(5);
+        let order = fac.idx.clone();
+        let nf = order.len();
+        // L·Lᵀ reproduces H on the free set, in factor order.
+        for r in 0..nf {
+            for s in 0..nf {
+                let llt: Number = (0..=r.min(s))
+                    .map(|q| fac.l[r * k + q] * fac.l[s * k + q])
+                    .sum();
+                let hv = h[order[r] * k + order[s]];
+                assert!(
+                    (llt - hv).abs() < 1e-10 * (1.0 + hv.abs()),
+                    "({r},{s}): {llt} vs {hv}"
+                );
+            }
+            for q in (r + 1)..nf {
+                assert_eq!(fac.l[r * k + q], 0.0, "not lower triangular at ({r},{q})");
+            }
+        }
+        // And solves agree with a fresh factor of that block.
+        let mut fresh = FreeFactor::new(k);
+        assert_eq!(fresh.refactor(&h, &order, &mut budget), Some(true));
+        let rhs0: Vec<Number> = (0..nf).map(|_| lcg(&mut seed)).collect();
+        let (mut x1, mut x2) = (rhs0.clone(), rhs0);
+        fac.solve(&mut x1);
+        fresh.solve(&mut x2);
+        for (u, v) in x1.iter().zip(&x2) {
+            assert!((u - v).abs() < 1e-9 * (1.0 + v.abs()), "{x1:?} vs {x2:?}");
+        }
     }
 }

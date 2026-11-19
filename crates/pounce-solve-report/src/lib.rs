@@ -363,6 +363,25 @@ pub struct SecondOpinionInfo {
     pub rung_iteration_counts: Vec<usize>,
     /// Base plus every rung: what the solve actually cost.
     pub total_iteration_count: usize,
+    /// Wall-clock seconds of the base solve, from the caller's
+    /// `optimize_tnlp` to its return, internal re-solves included (gh#1176). `None` in reports written before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub base_wallclock_secs: Option<f64>,
+    /// Wall-clock seconds between the base solve and the first rung, the
+    /// ladder's probes. `None` in reports written before the field existed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub probe_wallclock_secs: Option<f64>,
+    /// Wall-clock seconds each rung in `tried` took, same order.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub rung_wallclock_secs: Vec<f64>,
+    /// Base, probes and every rung, in wall-clock seconds. The `statistics` block's
+    /// time is the reported solve's alone.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub total_wallclock_secs: Option<f64>,
+    /// Rungs not run because the caller's `max_wall_time` / `max_cpu_time`
+    /// was already spent.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub skipped_for_time: Vec<String>,
 }
 
 /// Serializable mirror of [`pounce_linsol::summary::LinearSolverSummary`].
