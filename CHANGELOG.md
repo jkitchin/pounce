@@ -10,6 +10,16 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`relative_gap_tol`**, an NLP-arm option, default `0` (off) (gh#1193). The
+  strict convergence test bounds the *largest* complementarity product. The
+  duality gap is their *sum*, about `N·μ`, so on a model with many bounds a
+  run can certify far from the optimum. MIPLIB `neos-4763324-toguru` (160k
+  products) reached `Solve_Succeeded` at a relative gap of `3.1e-6` against
+  `tol=1e-8`. When the option is set, a strict certificate is refused while
+  the relative gap is above it, for at most 30 extra iterations, and the
+  monotone μ update may go below its usual floor. The LP → NLP fallback sets
+  it to `tol` unless the caller set it. NETLIB TUFF at `tol=1e-12` now wins
+  the gh#1183 comparison on the NLP arm (`4.8e-13`, was `3.9e-9`).
 - **A custom linear solver, from any frontend, and block labels for it**
   (gh#1175). `linear_solver=custom` with `custom_linear_solver_lib=<path>`
   loads a shared library that exports `pounce_linear_solver()`, returning a
@@ -117,6 +127,41 @@ changes.
   variable.
 
 ### Fixed
+- **Convex LP time-outs from FERAL's delayed-pivot cascade** (gh#1193). Near
+  convergence the `-s/z` pivots of active bound rows fall below the pivot
+  threshold. FERAL delayed tens of thousands of them into a dense root front,
+  which it factored on its scalar, single-threaded kernel. On MIPLIB
+  `rmatr200-p5` one factorization took 266 s, against 0.1 s for the earlier
+  iterations. The convex KKT is quasi-definite, so the convex IPM now runs
+  FERAL with static pivoting when `tol ≥ 1e-8` (the default) and at most 1%
+  of the columns are free (`FeralSolverInterface::for_convex_ipm`). At a
+  tighter `tol` it keeps delayed pivoting, because static pivoting costs
+  accuracy there: NETLIB ISRAEL at `tol=1e-16` reached `2e-13` with it, and
+  the gh#1000 blend LP with its objective scaled by `1e-6` stalled at
+  `tol=1e-10` (200 iterations, against 68 delayed). Above
+  1% free columns it also keeps delayed pivoting. A free column's pivot has
+  no barrier term, so on an LP it is the regularization alone. Static
+  pivoting there slowed the DC-OPF models, whose bus angles are ~89% of the
+  columns: `case_ACTIVSg10k` went from 15 s to 57 s, and `case_SyntheticUSA`
+  lost its infeasibility certificate. Delayed pivoting does not cascade on
+  them. `POUNCE_FERAL_STATIC_PIVOTING` still overrides. The CLI and Python convex paths both use it. The active-set and
+  NLP paths are unchanged.
+- **False `DualInfeasible` on a bounded LP** (MIPLIB `leo2`, gh#1193). The
+  HSDE recession test tested the iterate `x` as the ray. On a model whose
+  boxed columns sit at a finite offset while one free column grows, the
+  slacks scale with `‖x‖∞` and hide that offset. The ray must now also pass
+  the test after projection onto the columns' sign-feasible directions
+  (`sign_projected_direction`). leo2 now solves at a relative gap of
+  `1.6e-9`. Before, it took 100 s and ended at acceptable level through the
+  NLP fallback.
+- **Farkas certificates polished to the equality rows** (gh#1193). An
+  infeasibility ray is returned from the last HSDE iterate, so its residual
+  `Aᵀy` stopped at that iterate's level. On the infeasible DC-OPF
+  `case_SyntheticUSA` that level was `6.4e-5` after normalizing `bᵀy = −1`.
+  `certificate::polish_farkas` removes the residual with a minimum-norm
+  correction of `y` through the equality rows. It keeps the polished ray only
+  when it verifies better than the original. The CLI and Python QP paths both
+  apply it.
 - **The active-set SQP no longer spends seconds on a second-order correction
   it then throws away (gh#1195).** When the filter rejects a full step, the
   SQP re-solves the step QP to correct it. That correction QP had the step

@@ -473,6 +473,126 @@ pub fn farkas_certificate(
     })
 }
 
+/// Polish a Farkas certificate by projecting its stationarity residual out
+/// through the equality rows.
+///
+/// An IPM ray is only as exact as the iterate it was read from: a model with
+/// many free columns (DC-OPF's bus angles) leaves `Aᵀy + Gᵀz` nonzero on
+/// them at about the level the embedding stopped at, which the relative
+/// check accepts but which is large next to `|value|`. Since `y` is free in
+/// sign, the residual on a column set `F` can be removed exactly by the
+/// minimum-norm correction `dy = −A_F t`, `(A_Fᵀ A_F) t = q_F`, which leaves
+/// `z` (and so the dual cone) untouched. It is solved as the quasi-definite
+/// system `[I, A_F; A_Fᵀ, −δI]` (three solves: one plus two refinements).
+///
+/// `F` is every column with neither bound plus every column that carries a
+/// residual now. The polished ray is re-checked from scratch by
+/// [`farkas_certificate`] and returned only when it verifies and its
+/// residual relative to `|value|` is smaller; otherwise `cert` comes back
+/// unchanged. Nothing about the verdict changes.
+pub fn polish_farkas<F>(
+    prob: &QpProblem,
+    cones: &[ConeSpec],
+    cert: FarkasCertificate,
+    make_backend: F,
+) -> FarkasCertificate
+where
+    F: FnOnce() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface>,
+{
+    use pounce_common::types::Index;
+    if cert.residual == 0.0 || prob.m_eq() == 0 {
+        return cert;
+    }
+    let n = prob.n;
+    let m = prob.m_eq();
+    let resid = |y: &[f64], z: &[f64]| -> Vec<f64> {
+        let mut q = vec![0.0; n];
+        prob.at_mul(y, &mut q);
+        prob.gt_mul(z, &mut q);
+        q
+    };
+    // The orthant z the check used (it clips); a conic z is passed as is.
+    let q0 = resid(&cert.y, &cert.z);
+    let mut fpos = vec![usize::MAX; n];
+    let mut fcols = Vec::new();
+    for j in 0..n {
+        let free = !has_lb(prob, j) && !has_ub(prob, j);
+        let bad = (q0[j] > 0.0 && !has_lb(prob, j)) || (q0[j] < 0.0 && !has_ub(prob, j));
+        if free || bad {
+            fpos[j] = fcols.len();
+            fcols.push(j);
+        }
+    }
+    let nf = fcols.len();
+    if nf == 0 {
+        return cert;
+    }
+    // A_F, and its scale for the regularization.
+    let mut entries: Vec<(usize, usize, f64)> = Vec::new();
+    let mut amax = 0.0_f64;
+    for t in &prob.a {
+        if fpos[t.col] != usize::MAX && t.val != 0.0 {
+            // Row block: y (0..m); column block: t (m..m+nf).
+            entries.push((m + fpos[t.col], t.row, t.val));
+            amax = amax.max(t.val.abs());
+        }
+    }
+    if entries.is_empty() {
+        return cert;
+    }
+    let delta = (amax * amax).max(1.0) * 1e-14;
+    for i in 0..m {
+        entries.push((i, i, 1.0));
+    }
+    for k in 0..nf {
+        entries.push((m + k, m + k, -delta));
+    }
+    entries.sort_unstable_by_key(|e| (e.0, e.1));
+    let mut airn: Vec<Index> = Vec::with_capacity(entries.len());
+    let mut ajcn: Vec<Index> = Vec::with_capacity(entries.len());
+    let mut vals: Vec<f64> = Vec::with_capacity(entries.len());
+    for (r, c, v) in entries {
+        if airn.last() == Some(&((r + 1) as Index)) && ajcn.last() == Some(&((c + 1) as Index)) {
+            if let Some(last) = vals.last_mut() {
+                *last += v;
+            }
+        } else {
+            airn.push((r + 1) as Index);
+            ajcn.push((c + 1) as Index);
+            vals.push(v);
+        }
+    }
+    let dim = m + nf;
+    let Ok(mut fact) =
+        pounce_linsol::Factorization::new(dim as Index, airn, ajcn, vals, make_backend())
+    else {
+        return cert;
+    };
+    let mut y = cert.y.clone();
+    for _ in 0..3 {
+        let q = resid(&y, &cert.z);
+        // [I, A_F; A_Fᵀ, −δI] [dy; t] = [0; −q_F]  ⇒  A_Fᵀ dy ≈ −q_F.
+        let mut rhs = vec![0.0; dim];
+        for (k, &j) in fcols.iter().enumerate() {
+            rhs[m + k] = -q[j];
+        }
+        if fact.solve_one(&mut rhs).is_err() || rhs.iter().any(|v| !v.is_finite()) {
+            break;
+        }
+        for i in 0..m {
+            y[i] += rhs[i];
+        }
+    }
+    let rel = |c: &FarkasCertificate| c.residual / c.value.abs().max(f64::MIN_POSITIVE);
+    match farkas_certificate(prob, cones, &y, &cert.z) {
+        Some(p) if p.verified && (!cert.verified || rel(&p) < rel(&cert)) => FarkasCertificate {
+            source: cert.source,
+            ..p
+        },
+        _ => cert,
+    }
+}
+
 fn scale_of(vs: &[&[f64]]) -> f64 {
     let s = vs.iter().fold(0.0_f64, |m, v| m.max(inf_norm(v)));
     if s > 0.0 { s } else { 1.0 }
@@ -707,6 +827,56 @@ mod tests {
             iters: 0,
             iterates: Vec::new(),
         }
+    }
+
+    fn feral() -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
+        Box::new(pounce_feral::FeralSolverInterface::new())
+    }
+
+    /// A free "angle" column in two equality rows, `x₀ + x₁ = 0` and
+    /// `−x₀ + x₁ = 0`, plus `x₁ ≥ 1` as a row: infeasible. The exact ray is
+    /// `y = (½, ½)·s`, `z = s`. A perturbed `y` leaves a residual on the free
+    /// column `x₀` that the relative check still accepts; the polish removes
+    /// it through the equality rows without touching `z`.
+    fn angle_model() -> QpProblem {
+        QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![0.0, 0.0],
+            a: vec![
+                Triplet::new(0, 0, 1.0),
+                Triplet::new(0, 1, 1.0),
+                Triplet::new(1, 0, -1.0),
+                Triplet::new(1, 1, 1.0),
+            ],
+            b: vec![0.0, 0.0],
+            g: vec![Triplet::new(0, 1, -1.0)],
+            h: vec![-1.0],
+            lb: vec![NEG_INF, NEG_INF],
+            ub: vec![POS_INF, POS_INF],
+        }
+    }
+
+    #[test]
+    fn polish_removes_free_column_residual() {
+        let p = angle_model();
+        let c = farkas_certificate(&p, &[], &[0.5 + 1e-6, 0.5], &[1.0]).unwrap();
+        assert!(c.verified && c.residual > 1e-7, "{c:?}");
+        let z0 = c.z.clone();
+        let polished = polish_farkas(&p, &[], c.clone(), feral);
+        assert!(polished.verified, "{polished:?}");
+        assert!(polished.residual <= 1e-14, "{polished:?}");
+        assert!(polished.residual / polished.value.abs() < c.residual / c.value.abs());
+        assert_eq!(polished.z, z0, "z (the dual cone part) is not moved");
+    }
+
+    /// The other branch: an exact ray is returned unchanged.
+    #[test]
+    fn polish_leaves_exact_ray_alone() {
+        let p = angle_model();
+        let c = farkas_certificate(&p, &[], &[0.5, 0.5], &[1.0]).unwrap();
+        assert_eq!(c.residual, 0.0);
+        assert_eq!(polish_farkas(&p, &[], c.clone(), feral), c);
     }
 
     /// `x₀ ≤ 0`, `x₀ ≥ 1` as rows: `z = (1, 1)` is exact.
