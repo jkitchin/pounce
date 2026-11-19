@@ -341,6 +341,65 @@ handover lines above are the check.
 
 ---
 
+## Active-set SQP: `ssebnln` (limited-memory) fails slower, in second-order-correction QPs that run to the cap (gh#1191)
+
+*Measured on `claude/eloquent-knuth-1ypxda` at `5b1724e` against `main` at
+`5463adb`, forced `algorithm=active-set-sqp hessian_approximation=limited-memory`,
+`RUST_LOG=pounce::sqp::qp=debug` for the QP lines. Recorded 2026-11-19.*
+
+**What is worse.** `ssebnln` fails on both binaries
+(`Search_Direction_Becomes_Too_Small`, f ≈ 1.617063e7; the exact leg solves
+it in 3 iterations at 16170600). It now takes longer to fail:
+
+| machine | `main` | `5b1724e` |
+|---|---|---|
+| maintainer, idle | 78 iterations, 18 s | 144 iterations, 384 s |
+| cloud session | 80 iterations, 41 s | 95 iterations, 76 s |
+
+On the maintainer's machine 384 s is past `sweep-fixtures.sh`'s 300 s cap,
+so the sweep line reads `NO_JSON`. The iteration counts differ between
+machines, which is the mark of a round-off-sensitive path through a
+degenerate endgame. Stationarity there is 1e10 to 5e17, and the multipliers
+are diverging.
+
+**Cause.** The trajectories agree to iteration 63. There the damped BFGS's
+stale-scale shift (gh#1191 fix 2) fires with `sᵀy/sᵀBs = 12.8`, just over its
+threshold of 10, because the diverging multipliers have moved. It fires again
+at 70. The new trajectory then reaches **second-order-correction QPs that run
+to the step budget** (`(n+m)·10 = 2880` iterations) before being discarded:
+- 19.2 s (554 working-set changes, 3322 refactors);
+- 17.8 s (474 working-set changes, 3251 refactors).
+
+Those two are 37 s of the 76 s run. `main`'s trajectory stops at 80 before
+reaching any.
+
+**This exposure is not new.** The SOC QP is given the step QP's whole
+iteration budget. On `main`, across the fixture corpus under forced SQP,
+these SOC QPs already end at the cap:
+- `pooling_rt2stp` (lbfgs): two QPs, 17.8 s and 17.9 s.
+- `square_flowsheet_resto` and `opf_vv_lower_knee_held` (lbfgs): repeatedly,
+  1–4 s each.
+
+**What was tried.** I looked for a cap for the SOC QP. On the corpus,
+successful SOC QPs need up to 333 working-set changes (`ssebnln` itself,
+then `jit1_node` and `jit1_boxed` at about 176). One of those 333-change
+corrections followed a step QP that needed 0, so a budget relative to the
+step QP would cut a correction that works. SOC QPs that hit the cap or come
+back infeasible range from 71 to 1243 changes, overlapping the successful
+ones. No threshold separates the two sets, so none was taken here.
+
+**How to tell whether a fix works.** Bound the SOC QP's cost by something
+other than a working-set count, for example wall time relative to the step
+QP that preceded it, or a check for no progress in the QP's elastic phase.
+The checks:
+- `ssebnln` (lbfgs) fails in `main`'s time or better.
+- `pooling_rt2stp` (lbfgs) loses its two 18 s SOCs.
+- None of the six successful SOCs above is cut: the debug lines for
+  `pooling_rt2stp`, `jit1_node`, `jit1_boxed` and `ssebnln` must still read
+  `optimal`.
+
+---
+
 ## MPCC: four MacMPEC answers stay complementary only to ~7e-5
 
 *Measured on `mpcc/cost-sweep-report` (after `df3fbd12`), MacMPEC through
