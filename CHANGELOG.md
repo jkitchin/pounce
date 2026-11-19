@@ -117,6 +117,22 @@ changes.
   variable.
 
 ### Fixed
+- **`presolve=yes` reports the original problem's duals on Vanderbei
+  `qpnstair`** (gh#1202). After gh#1196 the multipliers on bounds presolve
+  derived were no longer re-attributed to the original model there, so the
+  reported duals put multiplier mass on bounds the model does not have
+  active: bound-projected stationarity `2.8e4`, bound complementarity `0.21`
+  against `presolve=no`'s `2.2e-3`. The recovery ran out of its work budget
+  because it never stopped. Its residual had met the acceptance target at
+  step 15 and reached the rounding floor by step 27, but its stop test was a
+  relative step of `1e-15`, which floating point does not reach at
+  multipliers of `9e4`. It now stops at the rounding floor, or when an
+  acceptable residual stops falling: `qpnstair` re-attributes 301
+  multipliers in `3.4e8` flops, about a tenth of the budget. The roll-back
+  warning now names its cause and what it measured (component past the
+  cap, no multiplier to carry the residual, work budget, or residual not
+  reduced). Across the fixture corpus the only other roll-back is `deb7`,
+  unchanged: its component reaches 602 multipliers against the 600 cap.
 - **`presolve=yes` no longer hangs after the solve has converged, and
   `max_wall_time` now covers postsolve** (gh#1196). Recovering the original
   problem's multipliers for bounds presolve derived could run unbounded:

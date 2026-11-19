@@ -108,6 +108,61 @@ pub(crate) struct Outcome {
     /// `true` when the roll-back was the work budget or the deadline
     /// running out ([`Budget`], gh#1196).
     pub budget_exhausted: bool,
+    /// Which branch rolled back, with what it measured (gh#1202); `None`
+    /// when nothing was rolled back.
+    pub cause: Option<RollBack>,
+}
+
+/// Why [`reattribute`] kept the reduced problem's duals (gh#1202). Each
+/// cause wants a different fix, so the warning names it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RollBack {
+    /// The component the residual reaches is past [`MAX_UNKNOWNS`] or
+    /// [`MAX_COMPONENT_VARS`]: the counts the breadth-first search had
+    /// reached when it stopped (lower bounds on the full component).
+    Caps { unknowns: usize, vars: usize },
+    /// No active row or declared bound the residual reaches can carry it:
+    /// there is nothing to solve for.
+    NoMultipliers { vars: usize },
+    /// The flop allowance or the solve's deadline ran out ([`Budget`]).
+    Budget { unknowns: usize },
+    /// The solve finished, but its residual missed the acceptance target.
+    Residual {
+        unknowns: usize,
+        attempted: Number,
+        target: Number,
+    },
+}
+
+impl std::fmt::Display for RollBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            RollBack::Caps { unknowns, vars } => write!(
+                f,
+                "component past the dense cap (reached {unknowns} multipliers / {vars} \
+                 variables; caps {MAX_UNKNOWNS} / {MAX_COMPONENT_VARS})"
+            ),
+            RollBack::NoMultipliers { vars } => write!(
+                f,
+                "no active row or declared bound reaches the residual \
+                 ({vars} variables)"
+            ),
+            RollBack::Budget { unknowns } => write!(
+                f,
+                "work budget or deadline spent ({unknowns} multipliers, \
+                 {MAX_WORK_FLOPS:.0e} flops)"
+            ),
+            RollBack::Residual {
+                unknowns,
+                attempted,
+                target,
+            } => write!(
+                f,
+                "residual not reduced ({unknowns} multipliers; reached {attempted:.3e}, \
+                 needed {target:.3e})"
+            ),
+        }
+    }
 }
 
 /// Is `v` on the bound `b`, to the tolerance an interior-point solution
@@ -279,6 +334,14 @@ pub(crate) fn reattribute(
     if over_cap || unknowns.is_empty() {
         restore(lambda, z_l, z_u);
         out.rolled_back = true;
+        out.cause = Some(if over_cap {
+            RollBack::Caps {
+                unknowns: unknowns.len(),
+                vars: vars.len(),
+            }
+        } else {
+            RollBack::NoMultipliers { vars: vars.len() }
+        });
         out.residual_after = out.residual_before;
         out.n_spurious = 0;
         return out;
@@ -334,10 +397,15 @@ pub(crate) fn reattribute(
             *bv -= a[row * k + c] * current;
         }
     }
-    let Some(w) = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &w0, &mut budget) else {
+    // Accept the recovery only when it actually closes stationarity: to the
+    // solver's own residual, or to a level no tolerance would notice.
+    let target = (10.0 * out.residual_before).max(1e-8 * scale);
+    let Some(w) = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &w0, target, &mut budget)
+    else {
         restore(lambda, z_l, z_u);
         out.rolled_back = true;
         out.budget_exhausted = true;
+        out.cause = Some(RollBack::Budget { unknowns: k });
         out.residual_after = out.residual_before;
         out.n_spurious = 0;
         out.n_unknowns = 0;
@@ -352,12 +420,14 @@ pub(crate) fn reattribute(
             acc.abs()
         })
         .fold(0.0_f64, Number::max);
-    // Accept the recovery only when it actually closes stationarity: to the
-    // solver's own residual, or to a level no tolerance would notice.
-    let target = (10.0 * out.residual_before).max(1e-8 * scale);
     if !(res_after <= target) {
         restore(lambda, z_l, z_u);
         out.rolled_back = true;
+        out.cause = Some(RollBack::Residual {
+            unknowns: k,
+            attempted: res_after,
+            target,
+        });
         out.residual_after = out.residual_before;
         out.n_spurious = 0;
         out.n_unknowns = 0;
@@ -410,12 +480,30 @@ impl<'a> Budget<'a> {
     }
 }
 
+/// Proximal steps a residual already under the caller's acceptance target
+/// gets to halve before the iteration counts as stalled.
+const STALL_STEPS: usize = 3;
+
 /// `min ½‖A·w + b‖²` subject to `w_c ≥ 0` where `constrained[c]`, by a
 /// proximal-point iteration `w⁺ = argmin ½‖A·w + b‖² + ½μ‖w − w_k‖²` started
 /// at `w0`. Each step is a strictly convex bound-constrained QP, solved by a
 /// primal active-set method. On a consistent system with a unique solution
 /// this converges to it; on a degenerate one, to a solution near `w0`.
 /// `None` when `budget` runs out first.
+///
+/// It returns the iterate with the smallest residual `‖A·w + b‖∞`, as soon
+/// as that is down to the rounding floor `100·ε·‖A‖∞·‖w‖∞`, or once it is
+/// under `accept` (the caller's acceptance target) and has not halved in
+/// [`STALL_STEPS`] steps — or when the step itself vanishes.
+/// The step test alone is not reachable in floating point once the
+/// multipliers are large: on Vanderbei `qpnstair` (`‖w‖∞ ≈ 9e4`) the
+/// residual contracts ×0.44 per step to a floor of `2e-9` by step 27, while
+/// the step stalls near `4e-7` — `4e-12` relative against the `1e-15` the
+/// test asks for. The remaining 170 steps iterated rounding noise, and the
+/// active-set QP cycled on near-zero entries to its iteration cap, `1e10`
+/// flops a step: the whole [`MAX_WORK_FLOPS`] allowance, three times over,
+/// on a recovery that had met its acceptance target at step 15.
+#[allow(clippy::too_many_arguments)]
 fn solve_sign_constrained_ls(
     a: &[Number],
     b: &[Number],
@@ -423,6 +511,7 @@ fn solve_sign_constrained_ls(
     k: usize,
     constrained: &[bool],
     w0: &[Number],
+    accept: Number,
     budget: &mut Budget<'_>,
 ) -> Option<Vec<Number>> {
     // Normal matrix and AᵀB.
@@ -450,11 +539,33 @@ fn solve_sign_constrained_ls(
     for p in 0..k {
         h[p * k + p] += mu;
     }
+    let norm_a = (0..nrows)
+        .map(|row| {
+            a[row * k..(row + 1) * k]
+                .iter()
+                .map(|x| x.abs())
+                .sum::<Number>()
+        })
+        .fold(0.0_f64, Number::max);
+    let floor = |w: &[Number]| -> Number {
+        100.0 * Number::EPSILON * norm_a * w.iter().fold(0.0_f64, |m, x| m.max(x.abs()))
+    };
+    let resid = |w: &[Number]| -> Number {
+        (0..nrows)
+            .map(|row| {
+                let ar = &a[row * k..(row + 1) * k];
+                (b[row] + ar.iter().zip(w).map(|(x, y)| x * y).sum::<Number>()).abs()
+            })
+            .fold(0.0_f64, Number::max)
+    };
     // One factor of the free block, carried across the proximal steps (H
     // does not change between them, and neither, near convergence, does the
     // active set) and updated, not rebuilt, as the active set moves.
     let mut fac = FreeFactor::new(k);
     let mut w = w0.to_vec();
+    let mut best = (resid(&w), w.clone());
+    // Residuals of the last few steps, newest last.
+    let mut recent: Vec<Number> = Vec::with_capacity(STALL_STEPS + 1);
     for _ in 0..200 {
         // c = Aᵀb − μ w_k
         let c: Vec<Number> = (0..k).map(|p| atb[p] - mu * w[p]).collect();
@@ -465,11 +576,24 @@ fn solve_sign_constrained_ls(
             .fold(0.0_f64, |m, (p, q)| m.max((p - q).abs()));
         let size = next.iter().fold(1.0_f64, |m, p| m.max(p.abs()));
         w = next;
-        if step <= 1e-15 * size {
+        if !budget.charge(2.0 * (nrows * k) as f64) {
+            return None;
+        }
+        let r = resid(&w);
+        if r < best.0 {
+            best = (r, w.clone());
+        }
+        if recent.len() > STALL_STEPS {
+            recent.remove(0);
+        }
+        recent.push(r);
+        let stalled = recent.len() > STALL_STEPS && r > 0.5 * recent[0];
+        let at_floor = best.0 <= floor(&best.1);
+        if step <= 1e-15 * size || at_floor || (best.0 <= accept && stalled) {
             break;
         }
     }
-    Some(w)
+    Some(best.1)
 }
 
 /// Cholesky factor `L·Lᵀ = H_FF` of the free block of a `k×k` SPD `H`, for
@@ -950,8 +1074,79 @@ mod tests {
             Budget::new(1e6, None),
         );
         assert!(o.rolled_back && o.budget_exhausted, "{o:?}");
+        assert!(matches!(o.cause, Some(RollBack::Budget { .. })), "{o:?}");
         assert_eq!(o.n_spurious, 0);
         assert_eq!((lam, zl, zu), (lam0, zl0, zu0));
+    }
+
+    /// gh#1202: a roll-back names its branch, with what it measured — each
+    /// wants a different fix, and the warning used to list all three.
+    #[test]
+    fn a_component_past_the_cap_names_the_cap() {
+        let p = Stair::new(400, MAX_UNKNOWNS + 50);
+        let (lam0, zl0, zu0) = p.duals();
+        let (mut lam, mut zl, mut zu) = p.duals();
+        let o = reattribute(&p.view(), &mut lam, &mut zl, &mut zu, Budget::default());
+        assert!(o.rolled_back && !o.budget_exhausted, "{o:?}");
+        match o.cause {
+            Some(RollBack::Caps { unknowns, vars }) => {
+                assert!(unknowns > MAX_UNKNOWNS, "{o:?}");
+                assert!(vars > 1, "{o:?}");
+            }
+            c => panic!("expected a cap roll-back, got {c:?}"),
+        }
+        assert!(o.cause.unwrap().to_string().contains("dense cap"));
+        assert_eq!((lam, zl, zu), (lam0, zl0, zu0));
+    }
+
+    /// One variable, `∇f = 3`, the whole multiplier on a derived `x0 ≥ 0`
+    /// the model does not declare. `row` adds `x0 ≤ 1`, active: it can only
+    /// take `λ ≥ 0`, which pushes the residual the wrong way.
+    fn single(row: bool) -> (Outcome, RollBack) {
+        let jac: Vec<(usize, usize, Number)> = if row { vec![(0, 0, 1.0)] } else { vec![] };
+        let m = usize::from(row);
+        let v = KktView {
+            x: &[1.0],
+            g: &[1.0][..m],
+            grad_f: &[3.0],
+            jac: &jac,
+            x_l: &[-1e19],
+            x_u: &[1e19],
+            g_l: &[-1e19][..m],
+            g_u: &[1.0][..m],
+            derived_l: &[true],
+            derived_u: &[false],
+        };
+        let mut lam = vec![0.0; m];
+        let (mut zl, mut zu) = (vec![3.0], vec![0.0]);
+        let o = reattribute(&v, &mut lam, &mut zl, &mut zu, Budget::default());
+        assert!(o.rolled_back, "{o:?}");
+        assert_eq!(zl, vec![3.0], "a roll-back must keep the reduced duals");
+        let c = o.cause.expect("a roll-back names its cause");
+        (o, c)
+    }
+
+    #[test]
+    fn a_residual_nothing_can_carry_names_that() {
+        let (_, c) = single(false);
+        assert_eq!(c, RollBack::NoMultipliers { vars: 1 });
+    }
+
+    #[test]
+    fn a_residual_the_signs_forbid_closing_names_the_residual() {
+        let (o, c) = single(true);
+        assert!(!o.budget_exhausted);
+        match c {
+            RollBack::Residual {
+                unknowns: 1,
+                attempted,
+                target,
+            } => assert!(
+                attempted > target && (attempted - 3.0).abs() < 1e-9,
+                "{c:?}"
+            ),
+            c => panic!("expected a residual roll-back, got {c:?}"),
+        }
     }
 
     /// The solve's deadline stops the recovery too: a solve that is already

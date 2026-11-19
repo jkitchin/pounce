@@ -1185,11 +1185,14 @@ impl PresolveTnlp {
             dual_recovery::Budget::new(dual_recovery::MAX_WORK_FLOPS, self.deadline.as_ref());
         let out = dual_recovery::reattribute(&view, lambda, z_l, z_u, budget);
         if out.rolled_back {
+            let cause = out
+                .cause
+                .map_or_else(|| "unknown cause".to_string(), |c| c.to_string());
             tracing::warn!(
                 target: "pounce_presolve",
+                residual_before = out.residual_before,
                 "presolve postsolve: multipliers on derived bounds could not be \
-                 re-attributed to the original problem (component past the dense cap, \
-                 work budget or deadline spent, or residual not reduced); the reported \
+                 re-attributed to the original problem: {cause}; the reported \
                  duals keep the reduced problem's attribution"
             );
         } else if out.n_spurious > 0 {
