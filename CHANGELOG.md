@@ -117,6 +117,41 @@ changes.
   variable.
 
 ### Fixed
+- **`max_wall_time` and `max_cpu_time` bound the whole run, second-opinion
+  ladder included** (gh#1176). Every solve built its own deadline from those
+  options, so the `mu_strategy` fallback re-solve, the dual-divergence retry,
+  the scale-audit re-solve, crossover and each ladder rung started a new full
+  allowance. On the issue's 2594-variable distillation column,
+  `max_wall_time=40` ran for 112 s (26 s base, then 21 + 40 + 0 + 25 s of
+  rungs). Every deadline is now measured from the start of the caller's
+  solve, so each re-solve gets what is left of the run. When nothing is left,
+  the remaining rungs are skipped and the log names them; the same column stops
+  at 40.5 s. A skipped `mu_strategy` fallback is recorded
+  (`mu_strategy_fallback.skipped_for_time`). A limit the caller did not set
+  stays unset; the scale audit used to write an unset one back as caller-set.
+  The adaptive-mu budget pin (`adaptive_mu_budget_pin_fraction`, pounce#753)
+  still measures the fraction of each solve's *own* share of that limit,
+  `Deadline::share_spent_fraction`: measured from the run's start instead, a
+  `mu_strategy` fallback flipped to adaptive with a fifth of the run left
+  read 80% spent on its first check and pinned to fixed mode at once, so it
+  never ran the free-mode oracle it was retried for.
+- **The ladder reports the run's total time** (gh#1176). Each `Total seconds in
+  POUNCE` line covers one solve, so a laddered run's console ended on the last
+  rung's time: 24.9 s printed on a 174 s run. The ladder now ends with a line
+  giving the whole run's wall time, split into the base solve, the ladder's
+  setup and the re-solves. The solve report's `second_opinion` block adds
+  `base_wallclock_secs`, `probe_wallclock_secs`, `rung_wallclock_secs`,
+  `total_wallclock_secs` and `skipped_for_time`.
+- **The perturbed-start rung no longer dies at iteration 0 on a model that is
+  undefined near its start** (gh#1176). `start_point_perturbation` kept the
+  displaced point inside the bounds, but it never checked that the model could
+  be evaluated there. On the distillation column, the `1e-2` shift made 28
+  constraint rows NaN for every seed tried, and the rung returned
+  `Invalid_Number_Detected` in 0.003 s without testing anything. The displaced
+  point is now evaluated once. If the result is not finite, the displacement is
+  halved toward the start, in the same direction, up to ten times. On the
+  column, two halvings evaluate cleanly. A draw that evaluates the first time
+  is unchanged bit for bit, and the ladder logs any halving.
 - **The active-set SQP certifies an optimum it has reached where the
   objective can no longer tell steps apart (gh#1191).** Under
   `algorithm=active-set-sqp hessian_approximation=limited-memory`,
