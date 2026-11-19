@@ -127,6 +127,39 @@ changes.
   variable.
 
 ### Fixed
+- **`presolve=yes` reports the original model's duals on large and
+  ill-conditioned models** (gh#1176). When bound tightening derives a bound
+  that ends up active, the reduced solve may put the multiplier on it.
+  Postsolve moves that multiplier back to the original rows and bounds by a
+  least-squares solve over the affected component. That solve was dense and
+  capped at 600 multipliers. Past the cap, or when its normal equations lost
+  the answer to conditioning, it rolled back and wrote the derived-bound
+  multipliers to the `.sol`. Those are not multipliers of the model the user
+  wrote. On the catalytic-distillation column from gh#1176 (1547 variables)
+  the reported duals had a stationarity residual of `3.0e2` and bound
+  complementarity of `6.0e4`. Components past the cap, and those the dense
+  solve cannot close, now go to a sparse solve: a quasi-definite augmented
+  system factored by FERAL, with unit-norm columns. The column's duals now
+  pass `pounce verify --require-optimal` (stationarity `1.7e-7`), and so do
+  those of `deb7` (684 multipliers), which also rolled back before. The
+  warning on a rollback now says which limit was hit.
+- **A dual recovery that runs out of work no longer gives up on the
+  duals.** gh#1196 bounded the dense recovery with a flop allowance and the
+  solve's deadline, and rolled back when either ran out. A dense solve that
+  spends its flops with time left now hands the component to the sparse
+  solve, which gets the same allowance under the same deadline. Vanderbei
+  `qpnstair` used to roll back to duals with stationarity `2.8e4` against
+  the original model; they now verify at `4.0e-10`. MINLPLib `cesam2log`
+  goes from `9.9e-10` to `1.6e-10`. A crossed deadline still rolls back at
+  once.
+- **`presolve=yes` no longer leaves a multiplier on a declared bound with
+  real slack.** When the iterate sat on a bound presolve had derived, and
+  that bound was strictly tighter than the declared one, the declared bound
+  still counted as active whenever it was within `1e-6` relative, and kept
+  the multiplier. MINLPLib `ex6_2_14` has `x0 + x1 = 0.5` with `x0 ≥ 1e-7`
+  active, so `x1` sits `1e-7` inside its declared upper bound `0.5`. It was
+  reported `z_U = 12.3`, with stationarity `10.7` against the original
+  model.
 - **Convex LP time-outs from FERAL's delayed-pivot cascade** (gh#1193). Near
   convergence the `-s/z` pivots of active bound rows fall below the pivot
   threshold. FERAL delayed tens of thousands of them into a dense root front,
