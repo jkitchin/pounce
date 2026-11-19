@@ -133,6 +133,21 @@ changes.
   pass `pounce verify --require-optimal` (stationarity `1.7e-7`), and so do
   those of `deb7` (684 multipliers), which also rolled back before. The
   warning on a rollback now says which limit was hit.
+- **`presolve=yes` no longer hangs after a converged solve.** The dense
+  dual recovery refactored its normal matrix at every active-set change. On
+  a component of a few hundred multipliers it ran for minutes, past any
+  `max_wall_time`. MINLPLib `cesam2log`, `pooling_digabel19` and
+  `kall_circlesrectangles_c6r39` never returned. The dense path now takes
+  at most 64 multipliers within a fixed work budget, and the sparse solve
+  takes the rest. `cesam2log` now finishes in 0.04 s.
+- **`presolve=yes` no longer leaves a multiplier on a declared bound with
+  real slack.** When the iterate sat on a bound presolve had derived, and
+  that bound was strictly tighter than the declared one, the declared bound
+  still counted as active whenever it was within `1e-6` relative, and kept
+  the multiplier. MINLPLib `ex6_2_14` has `x0 + x1 = 0.5` with `x0 ≥ 1e-7`
+  active, so `x1` sits `1e-7` inside its declared upper bound `0.5`. It was
+  reported `z_U = 12.3`, with stationarity `10.7` against the original
+  model.
 - **The active-set SQP no longer takes uphill steps from a feasible
   point, stalls at a non-stationary start, or ends `Internal_Error` with no
   `x` when started on negative curvature (gh#1173).** Under the default
