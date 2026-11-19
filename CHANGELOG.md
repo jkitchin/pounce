@@ -146,6 +146,16 @@ changes.
   variable.
 
 ### Fixed
+- **The active-set QP solver no longer stops on an inertia-ladder error at a
+  working set its own rank test called independent (gh#1195).** When the
+  rank probe dropped an equality row, the re-selection that keeps equalities
+  in preference to bounds decided rank by a test about four orders tighter
+  than the probe's, and kept rows the KKT factorization could not pivot on at
+  any shift. On `pooling_rt2stp`'s SQP step QPs (balance rows whose bilinear
+  entries had fallen to about 6e-9, their other variables at bounds) the
+  solve ended `LinearSolverFailure` and the SQP stopped. After such a failure
+  the selection is now redone at the probe's rank, which drops a bound and
+  keeps the equality.
 - **`presolve=yes` reports the original model's duals on large and
   ill-conditioned models** (gh#1176). When bound tightening derives a bound
   that ends up active, the reduced solve may put the multiplier on it.
