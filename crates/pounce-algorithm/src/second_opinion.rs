@@ -456,10 +456,13 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
     // `PRESOLVE_RUNG_LABEL`). Skipped when the failing solve already ran
     // with presolve, where it would only repeat it.
     if infeasible && avail.presolve_retry_enabled && !avail.already_presolved {
-        rungs.push(SecondOpinionRung {
-            label: PRESOLVE_RUNG_LABEL,
-            assignments: Vec::new(),
-        });
+        rungs.insert(
+            0,
+            SecondOpinionRung {
+                label: PRESOLVE_RUNG_LABEL,
+                assignments: Vec::new(),
+            },
+        );
     }
     rungs
 }
