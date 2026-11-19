@@ -1539,6 +1539,9 @@ impl ParametricActiveSetSolver {
         // the pass is the compact path, so the backend's view of that matrix
         // costs at most one inertia ladder per pass.
         let mut soft_ok = n + m >= SOFT_DROP_MIN_DIM;
+        // Cycle guard state (see the guard at the end of the loop body).
+        let mut streak_obj = Number::NAN;
+        let mut seen_sets: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
 
         for _iter in 0..opts.max_iter {
             crate::deadline::charge_iteration();
@@ -1675,6 +1678,19 @@ impl ParametricActiveSetSolver {
                         &active_cons,
                         &active_bounds,
                     );
+                    // Nothing pruned: retry at the probe's rank before giving up
+                    // (gh#1195; `independent_active_subset_at_probe_rank`).
+                    let (kc, kb) =
+                        if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
+                            independent_active_subset_at_probe_rank(
+                                &mut self.linsol,
+                                qp,
+                                &active_cons,
+                                &active_bounds,
+                            )
+                        } else {
+                            (kc, kb)
+                        };
                     if kc.len() == active_cons.len() && kb.len() == active_bounds.len() {
                         return Err(e);
                     }
@@ -2148,6 +2164,34 @@ impl ParametricActiveSetSolver {
                     }
                 }
                 expand_tol = opts.expand_tol_initial;
+            }
+
+            // Cycle guard, the Schur path's (gh#974): meeting the same working
+            // set again at the same objective means the loop is going round a
+            // cycle, and the rest of the budget cannot change that. A pass
+            // that does ends as on `max_iter`. gh#1195: at a vertex where an
+            // unshifted step is solve noise (`raises_the_objective`), the
+            // drop it reads can be undone at once — a bound dropped on a
+            // wrong-sign multiplier, re-added at `α = 0` by the shifted step
+            // that follows — and the pair repeated 1180 times a pass, ten
+            // passes in a row, 42 s on one of `pooling_rt2stp`'s step QPs.
+            // Bland's rule cannot end a cycle with one candidate in it.
+            let cycle_obj = quad_objective(qp, &x);
+            if cycle_obj == streak_obj {
+                let count = seen_sets.entry(working_set_key(&working)).or_insert(0);
+                *count += 1;
+                if *count >= CYCLE_REPEAT_LIMIT {
+                    if trace {
+                        eprintln!(
+                            "[qp] it={_iter} CYCLE: working set repeated at obj={cycle_obj:.12e}; \
+                             pass ends"
+                        );
+                    }
+                    break;
+                }
+            } else {
+                streak_obj = cycle_obj;
+                seen_sets.clear();
             }
 
             // Anti-stall monitor: latch into Bland's rule once the
@@ -5062,9 +5106,30 @@ pub(crate) fn checked_independent_active_subset(
     active_bounds: &[usize],
 ) -> Option<(Vec<usize>, Vec<usize>)> {
     let started = Instant::now();
-    let res = checked_independent_active_subset_inner(linsol, qp, active_cons, active_bounds);
+    let res =
+        checked_independent_active_subset_inner(linsol, qp, active_cons, active_bounds, false);
     linsol.note_rank_test_time(started.elapsed());
     res
+}
+
+/// [`independent_active_subset`] for a working set whose KKT matrix has just
+/// failed to factor at every inertia shift and in which the ordinary test
+/// found nothing to prune (gh#1195): a precedence re-selection that keeps more
+/// rows than the sparse probe found independent is redone at the probe's own
+/// floor (`PROBE_SIGMA_FLOOR`). Elsewhere the ordinary selection stands — a
+/// row the probe flags is not always one the factorization rejects, and
+/// redoing it there changed solves that were working (`ssebnln`'s fourth step
+/// QP).
+pub(crate) fn independent_active_subset_at_probe_rank(
+    linsol: &mut LinearSolver,
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+) -> (Vec<usize>, Vec<usize>) {
+    let started = Instant::now();
+    let res = checked_independent_active_subset_inner(linsol, qp, active_cons, active_bounds, true);
+    linsol.note_rank_test_time(started.elapsed());
+    res.unwrap_or_else(|| (active_cons.to_vec(), active_bounds.to_vec()))
 }
 
 fn checked_independent_active_subset_inner(
@@ -5072,6 +5137,7 @@ fn checked_independent_active_subset_inner(
     qp: &QpProblem,
     active_cons: &[usize],
     active_bounds: &[usize],
+    at_probe_rank: bool,
 ) -> Option<(Vec<usize>, Vec<usize>)> {
     let (kc, kb) = independent_active_subset_any(linsol, qp, active_cons, active_bounds)?;
 
@@ -5174,15 +5240,16 @@ fn checked_independent_active_subset_inner(
     // KKT factorization also cannot pivot on. Rows between the two are kept
     // here and are singular there, and when the re-selection keeps more rows
     // than the probe found independent, it hands back a set no inertia shift
-    // can factor: the caller has no other recovery and ends the solve on an
-    // inertia-ladder error. gh#1195: pooling's balance rows carry bilinear
+    // can factor: the pivot loop has no other recovery and ends the solve on
+    // an inertia-ladder error. gh#1195: pooling's balance rows carry bilinear
     // entries that had fallen to ~6e-9 at the iterate, and with their other
     // variables at bounds each was dependent to the probe (the active rows'
     // smallest singular value 6.8e-16) and independent to Gram-Schmidt, three
     // times over its tolerance. Such a selection is redone at the probe's
     // floor, so that the precedence decides which member of the dependency
-    // goes and the probe's rank decides how many.
-    if keep_c.len() + keep_b.len() > kc.len() + kb.len() {
+    // goes and the probe's rank decides how many. Only when the caller asks:
+    // see `independent_active_subset_at_probe_rank`.
+    if at_probe_rank && keep_c.len() + keep_b.len() > kc.len() + kb.len() {
         let a_max = {
             let mut active = vec![false; qp.m];
             active_cons.iter().for_each(|&i| active[i] = true);
@@ -8296,16 +8363,20 @@ pub(crate) mod pass_ledger {
 #[cfg(test)]
 mod issue1195_rank_test_agreement {
     //! gh#1195: when the sparse probe drops an equality row, the precedence
-    //! re-selection keeps the equality and drops a bound instead — but it used
-    //! to decide rank by its own, much tighter test, and kept rows the probe
-    //! (and the KKT factorization, which pivots by the same LU) call
-    //! dependent. The set it returned could not be factored at any inertia
-    //! shift, and the solve ended on an inertia-ladder error.
+    //! re-selection keeps the equality and drops a bound instead — but it
+    //! decides rank by its own, much tighter test, and keeps rows the probe
+    //! calls dependent. When the KKT factorization calls them dependent too,
+    //! no inertia shift can factor the set, and the solve used to end on an
+    //! inertia-ladder error; the pivot loop now asks again at the probe's
+    //! rank.
     //!
     //! The shape is pooling's: an equality row whose variables all sit at
     //! bounds except one, with a coefficient (`c`) between the two tests'
     //! floors, next to a row with a large entry that sets the probe's scale.
-    use super::{LinearSolver, checked_independent_active_subset, independent_active_subset_any};
+    use super::{
+        LinearSolver, checked_independent_active_subset, independent_active_subset_any,
+        independent_active_subset_at_probe_rank,
+    };
     use crate::{HessianInertia, QpProblem};
     use pounce_feral::FeralSolverInterface;
     use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
@@ -8356,9 +8427,14 @@ mod issue1195_rank_test_agreement {
                         return; // this (c, big) is outside the band; nothing to test
                     }
                     let rank = pc.len() + pb.len();
-                    let (kc, kb) =
+                    // The ordinary selection keeps them all, which is the
+                    // set the factorization cannot pivot on.
+                    let (oc, ob) =
                         checked_independent_active_subset(&mut linsol(), qp, &cons, &bounds)
                             .unwrap();
+                    assert_eq!(oc.len() + ob.len(), 6, "big={big} c={c}: precondition");
+                    let (kc, kb) =
+                        independent_active_subset_at_probe_rank(&mut linsol(), qp, &cons, &bounds);
                     assert_eq!(kc, vec![0, 1], "big={big} c={c}: both equalities stay");
                     assert!(
                         kc.len() + kb.len() <= rank,
