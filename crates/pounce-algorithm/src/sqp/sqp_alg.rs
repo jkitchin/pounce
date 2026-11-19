@@ -385,6 +385,10 @@ impl SqpAlgorithm {
         // the objective Hessian *is* the Lagrangian Hessian and the probe
         // is exact. Otherwise leave the identity seed alone and let the
         // rank-2 updates (which see the true `∇L`) do the work.
+        // Whether the constraints' curvature can move `∇²L` with the
+        // multipliers; the probe below settles it when it runs. Read by the
+        // damped BFGS's re-sizing rule (gh#1191).
+        let mut nonlinear_constraints = m > 0;
         if bfgs.is_some() || lbfgs.is_some() {
             let g0 = nlp.eval_grad_f(&iter.x);
             let g_norm = g0.iter().map(|v| v * v).sum::<Number>().sqrt();
@@ -411,6 +415,7 @@ impl SqpAlgorithm {
                             (a - c).abs() <= 1e-12 * scale
                         })
                 };
+                nonlinear_constraints = !linear_constraints;
                 if linear_constraints {
                     let g1 = nlp.eval_grad_f(&x_probe);
                     let s_y: Number = step
@@ -519,7 +524,10 @@ impl SqpAlgorithm {
                     if let Some((s, y)) =
                         curvature_pair(prev_point.as_ref(), &iter, &grad_f, &jac_c, n)
                     {
-                        bfgs.update_sy(&s, &y);
+                        // `y` is formed at `iter.lambda_g` (see
+                        // `curvature_pair`).
+                        let lambda = nonlinear_constraints.then_some(iter.lambda_g.as_slice());
+                        bfgs.update_sy_at(&s, &y, lambda);
                     }
                     bfgs.as_triplet()
                 }

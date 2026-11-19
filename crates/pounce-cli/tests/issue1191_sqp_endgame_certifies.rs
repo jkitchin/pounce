@@ -24,11 +24,18 @@
 //! reports on the corpus `.nl` (`palmer8e` 134 iterations,
 //! `hs99exp` 57).
 //!
-//! **Not covered: `gilbert`**, the issue's third model. It is not the same
-//! failure. Its limited-memory endgame (n = 1000) alternates stationarity
-//! between ~1e-6 and ~1e-8 for tens of iterations on both binaries. The base
-//! happened to land a low phase below `tol` at iteration 145, and this branch
-//! certifies at 204, past the 200 cap. See `dev-notes/known-limitations.md`.
+//! **`gilbert`**, the issue's third model, is a different defect.
+//! `hessian_approximation=limited-memory` at `n ≤ sqp_dense_hessian_max_n`
+//! (1000) runs the dense damped BFGS. That BFGS sized `B₀ = γI` once, at the
+//! first pair (`γ = 0.81`), before the sphere constraint's multiplier settled
+//! at 17.7. The true curvature is about 18 in every direction, and every
+//! direction no step explored kept curvature about 1. Stationarity bounced
+//! between 1e-6 and 1e-4, and the n = 1000 corpus model certified at 204
+//! iterations (`main`), against 25 for real L-BFGS and 33 for the exact
+//! Hessian. `DampedBfgs` now re-sizes when the multipliers have moved and a
+//! pair shows `B` short of the curvature by more than 10×: 204 → 50.
+//! The fixture is the same model at n = 400 (`main`: 135 iterations; now
+//! 60), small enough for CI.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -61,7 +68,7 @@ fn solve(name: &str) -> serde_json::Value {
     serde_json::from_str(&text).expect("parse JSON report")
 }
 
-fn assert_certified(name: &str, f_star: f64, rel: f64) {
+fn assert_certified(name: &str, f_star: f64, rel: f64) -> serde_json::Value {
     let r = solve(name);
     let status = r["solution"]["status"].as_str().unwrap_or("<none>");
     let f = r["solution"]["objective"].as_f64().unwrap_or(f64::NAN);
@@ -76,14 +83,32 @@ fn assert_certified(name: &str, f_star: f64, rel: f64) {
         (f - f_star).abs() <= rel * f_star.abs(),
         "{name}: f = {f}, expected {f_star}"
     );
+    r
 }
 
 #[test]
 fn palmer8e_takes_the_step_phi_cannot_resolve() {
+    // Also the "bounds only" branch of the BFGS re-sizing rule: its fit is
+    // ill-conditioned, fresh directions show `sᵀy ≫ sᵀBs`, and a ratio-only
+    // trigger re-sized it into `Maximum_Iterations_Exceeded` at f = 0.067.
     assert_certified("cute_palmer8e.nl", 6.339_307_43e-3, 1e-8);
 }
 
 #[test]
 fn hs99exp_tiny_steps_that_make_progress_are_not_a_stall() {
     assert_certified("cute_hs99exp.nl", -1.008_062_5e9, 1e-10);
+}
+
+#[test]
+fn gilbert_resizes_a_bfgs_scale_the_multipliers_made_stale() {
+    let r = assert_certified("cute_gilbert_n400.nl", 188.729_094_5, 1e-8);
+    // `main` certifies too, at 135; what the stale scale costs is
+    // iterations, so that is what is pinned.
+    let iters = r["statistics"]["iteration_count"]
+        .as_u64()
+        .unwrap_or(u64::MAX);
+    assert!(
+        iters <= 90,
+        "gilbert (n = 400): {iters} iterations (60 with re-sizing, 135 without)"
+    );
 }

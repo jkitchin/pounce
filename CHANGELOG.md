@@ -128,10 +128,19 @@ changes.
   raise the constraint violation. On `hs99exp` the last steps were below
   round-off in `x`, and the stall limit counted them as a stall although each
   divided the residual by four. Steps that keep cutting the residual below
-  their run's best no longer count. Both now end `Solve_Succeeded` at the same objective, in 134 and 60
-  iterations. `gilbert`, reported with them, still stops at the 200-iteration
-  cap. Its endgame is a slow limited-memory convergence, not this stall; see
-  `dev-notes/known-limitations.md`.
+  their run's best no longer count. Both now end `Solve_Succeeded` at the
+  same objective, in 134 and 60 iterations.
+- **The dense quasi-Newton SQP Hessian re-sizes when the constraint
+  multipliers make its scale stale (gh#1191).** At `n ≤ 1000`,
+  `hessian_approximation=limited-memory` runs a dense damped BFGS, which set
+  its scale once, from the first step. On `gilbert` (CUTE, n = 1000) that was
+  before the sphere constraint's multiplier settled. The curvature then
+  grew 20× in every direction the steps had not explored, the steps
+  overshot there, and the run hit the 200-iteration cap at the optimum. It
+  now certifies in 50 iterations (the exact Hessian takes 33). A re-size
+  needs both a step that shows the model short of the curvature by more than
+  10× and multipliers that have moved since the last sizing, so models
+  without nonlinear constraints are unaffected.
 - **The active-set SQP no longer takes uphill steps from a feasible
   point, stalls at a non-stationary start, or ends `Internal_Error` with no
   `x` when started on negative curvature (gh#1173).** Under the default

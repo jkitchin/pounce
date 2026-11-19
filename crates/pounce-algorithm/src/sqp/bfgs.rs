@@ -25,6 +25,13 @@
 use crate::sqp::qp_assembly::Triplet;
 use pounce_common::types::{Index, Number};
 
+/// A curvature pair with `sᵀy > RESIZE_RATIO · sᵀBs` re-sizes `B` (see
+/// [`DampedBfgs::update_sy`]).
+const RESIZE_RATIO: Number = 10.0;
+/// ... and only once the constraint multipliers have moved by more than this
+/// fraction of their max-norm (at least 1) since `B` was last sized.
+const RESIZE_LAMBDA_MOVE: Number = 0.5;
+
 pub struct DampedBfgs {
     n: usize,
     /// Lower-triangle row-major storage:
@@ -38,6 +45,9 @@ pub struct DampedBfgs {
     /// `sᵀy > 0` arrives, at which point `B` is rescaled from the
     /// identity to `γI` and this flips to `true`.
     sized: bool,
+    /// Constraint multipliers at the last sizing, when the caller supplies
+    /// them (nonlinear constraints only; see [`Self::update_sy_at`]).
+    sized_lambda: Option<Vec<Number>>,
     /// Pre-computed sparsity pattern for `as_triplet`. Fixed:
     /// every (i, j) with `i ≥ j`. 1-based.
     h_irow: Vec<Index>,
@@ -65,6 +75,7 @@ impl DampedBfgs {
             prev_x: None,
             prev_grad_lag: None,
             sized: false,
+            sized_lambda: None,
             h_irow,
             h_jcol,
         }
@@ -196,6 +207,14 @@ impl DampedBfgs {
     /// of [`Self::update`] cannot express because it stores the previous
     /// `∇L` as evaluated at the previous multiplier.
     pub fn update_sy(&mut self, s: &[Number], y: &[Number]) {
+        self.update_sy_at(s, y, None);
+    }
+
+    /// [`Self::update_sy`], told the constraint multipliers `y` was formed
+    /// at. Pass them only when the constraints are nonlinear: they are what
+    /// moves the Lagrangian's curvature, `∇²f + Σλᵢ∇²cᵢ`, and so what can make
+    /// the sizing stale (see the re-sizing rule below). `None` never re-sizes.
+    pub fn update_sy_at(&mut self, s: &[Number], y: &[Number], lambda_g: Option<&[Number]>) {
         assert_eq!(s.len(), self.n, "BFGS::update_sy: s.len() != n");
         assert_eq!(y.len(), self.n, "BFGS::update_sy: y.len() != n");
         {
@@ -237,15 +256,66 @@ impl DampedBfgs {
                 // ratio was degenerate (leave B = I in that rare case) —
                 // we only ever size on the first curvature pair.
                 self.sized = true;
+                self.sized_lambda = lambda_g.map(<[Number]>::to_vec);
             }
 
             // bs = B · s
-            let bs: Vec<Number> = (0..self.n)
+            let mut bs: Vec<Number> = (0..self.n)
                 .map(|i| (0..self.n).map(|j| self.get(i, j) * s[j]).sum())
                 .collect();
 
-            let s_bs: Number = s.iter().zip(bs.iter()).map(|(a, b)| a * b).sum();
+            let mut s_bs: Number = s.iter().zip(bs.iter()).map(|(a, b)| a * b).sum();
             let s_y: Number = s.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
+
+            // Re-sizing. The one-time sizing above is a Rayleigh quotient of
+            // the Lagrangian's curvature at the multipliers of the FIRST
+            // pair, and a damped BFGS update corrects `B` only along the
+            // steps it is shown: every direction no step has explored keeps
+            // that first scale. When the curvature moves with the multipliers
+            // the scale goes stale, and the unexplored directions overshoot
+            // by the ratio. `gilbert` (CUTE, n = 1000, gh#1191): sized at
+            // `γ = 0.81` before the sphere's multiplier settled at 17.7, the
+            // true curvature is ≈ 18 in every direction, `B`'s smallest
+            // diagonal was still ≈ 1 at iteration 200, and 45 of its 204 pairs
+            // showed `sᵀy > 10·sᵀBs`. Stationarity bounced between 1e-6 and
+            // 1e-4 for 50 iterations, and it certified at 204 against 25 for
+            // L-BFGS (which re-scales from every pair) and 33 for the exact
+            // Hessian.
+            //
+            // So when the multipliers have moved since the sizing (by more
+            // than `RESIZE_LAMBDA_MOVE` of their size then), a pair showing
+            // `B` short of the curvature along `s` by more than
+            // `RESIZE_RATIO` re-runs the sizing from it: `B` restarts from
+            // `γI` with `γ = sᵀy/sᵀs`, and this pair is the first update. Both
+            // conditions are needed. An ill-conditioned problem shows
+            // `sᵀy ≫ sᵀBs` along fresh directions with nothing stale about
+            // the scale: on `palmer8e` (bounds only) the ratio test alone threw
+            // away the curvature its fit needs and the solve ran out of
+            // iterations at `f = 0.067`. Without nonlinear constraints the
+            // multipliers do not enter `∇²L` at all, and nothing re-sizes.
+            let stale = match (lambda_g, self.sized_lambda.as_deref()) {
+                (Some(l), Some(l0)) if l.len() == l0.len() => {
+                    let base = l0.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+                    let moved = l
+                        .iter()
+                        .zip(l0)
+                        .fold(0.0_f64, |a, (u, v)| a.max((u - v).abs()));
+                    moved > RESIZE_LAMBDA_MOVE * base
+                }
+                _ => false,
+            };
+            if stale && s_bs > 1e-14 && s_y > RESIZE_RATIO * s_bs {
+                let s_s: Number = s.iter().map(|v| v * v).sum();
+                let gamma = s_y / s_s;
+                self.sized_lambda = lambda_g.map(<[Number]>::to_vec);
+                for i in 0..self.n {
+                    for j in 0..=i {
+                        self.set(i, j, if i == j { gamma } else { 0.0 });
+                    }
+                }
+                bs = s.iter().map(|v| gamma * v).collect();
+                s_bs = gamma * s_s;
+            }
 
             // Powell damping.
             let theta = if s_y >= 0.2 * s_bs {
@@ -301,6 +371,52 @@ mod tests {
 
     fn diag(b: &DampedBfgs, i: usize) -> Number {
         b.get(i, i)
+    }
+
+    /// gh#1191: sized at curvature 1 along axis 0 with multiplier 0, then a
+    /// pair along the unexplored axis 1 carrying curvature 20.
+    fn stale_then_steep(lambda_now: Option<&[Number]>) -> DampedBfgs {
+        let mut b = DampedBfgs::new(3);
+        b.update_sy_at(&[1.0, 0.0, 0.0], &[1.0, 0.0, 0.0], Some(&[0.0]));
+        b.update_sy_at(&[0.0, 1.0, 0.0], &[0.0, 20.0, 0.0], lambda_now);
+        b
+    }
+
+    #[test]
+    fn a_stale_scale_is_resized_when_the_multipliers_have_moved() {
+        // λ went 0 → 17: the untouched axis 2 restarts at the new scale.
+        let b = stale_then_steep(Some(&[17.0]));
+        assert!(
+            (diag(&b, 2) - 20.0).abs() < 1e-12,
+            "axis 2: {}",
+            diag(&b, 2)
+        );
+        assert!(
+            (diag(&b, 1) - 20.0).abs() < 1e-12,
+            "axis 1: {}",
+            diag(&b, 1)
+        );
+    }
+
+    #[test]
+    fn a_steep_pair_alone_does_not_resize() {
+        // Same pair, multipliers unmoved: an ill-conditioned problem's fresh
+        // direction, not a stale scale. Axis 2 keeps the first sizing.
+        let b = stale_then_steep(Some(&[0.2]));
+        assert!((diag(&b, 2) - 1.0).abs() < 1e-12, "axis 2: {}", diag(&b, 2));
+        assert!(
+            (diag(&b, 1) - 20.0).abs() < 1e-12,
+            "axis 1: {}",
+            diag(&b, 1)
+        );
+    }
+
+    #[test]
+    fn without_multipliers_nothing_resizes() {
+        // Linear constraints or none: `∇²L = ∇²f`, so the caller passes no
+        // multipliers and the sizing is never stale.
+        let b = stale_then_steep(None);
+        assert!((diag(&b, 2) - 1.0).abs() < 1e-12, "axis 2: {}", diag(&b, 2));
     }
 
     #[test]

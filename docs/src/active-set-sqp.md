@@ -740,6 +740,15 @@ selects `damped-bfgs` at or below the ceiling (the more robust update on small
 models, issue #358) and the lifted `lbfgs` above it. Before gh#1054 it selected
 the dense update at every size.
 
+`damped-bfgs` sets its scale `B₀ = γI` once, from the first step's
+curvature, and an update corrects `B` only along the steps it sees. With
+nonlinear constraints the Lagrangian's curvature moves with the multipliers,
+so that first scale can go stale in every unexplored direction. When the
+multipliers have moved by more than half their size since the last sizing,
+and a step shows `B` short of the curvature along it by more than 10×, the
+update re-sizes from that step and starts over (gh#1191). On `gilbert`
+(n = 1000) that took a 204-iteration run to 50.
+
 What the lift does not change is the cost of an active-set walk. A cold QP
 needs about one pivot per constraint that becomes active, and each pivot is a
 sparse solve over the whole model, so a cold start on a model with thousands of
