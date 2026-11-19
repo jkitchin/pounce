@@ -291,6 +291,56 @@ these is a wrong answer.
 
 ---
 
+## Active-set SQP: what the multiplier-scaled stopping test costs (gh#1191)
+
+*Measured on `claude/eloquent-knuth-1ypxda` at `e6d8b03` against `main` at
+`5463adb`: `scripts/sweep-fixtures.sh`, both legs, under the default options,
+`algorithm=active-set-sqp`, `crossover=yes` and `ipm_sqp_handover=yes`.
+Recorded 2026-11-19.*
+
+**The change.** The SQP's stopping test compared the raw stationarity
+residual with `sqp_tol`. It now divides the residual by Ipopt's multiplier
+scale, `s_d = max(100, mean |λ|)/100`, first. The raw residual must still meet
+`sqp_dual_inf_tol`. This was a deliberate choice: with large multipliers the
+residual has a round-off floor above an absolute `1e-8`. `hs99exp`
+(`s_d ≈ 91`) sat at 4e-8 to 1e-7, and certified only when noise happened to
+dip below `tol`, which on the CUTE corpus `.nl` it never did.
+`hs71_obj1e8` also certifies now, on both legs. A solve can stop only at the
+same iterate or an earlier one.
+
+### What is worse
+
+The cost is accuracy where the SQP is a polish. Under
+`ipm_sqp_handover=yes`, the polishing SQP now stops at an earlier, less tightly
+converged iterate. All of these were `Solve_Succeeded` before and still are:
+
+| fixture | `main` objective / dual inf | now |
+|---|---|---|
+| `deb7` (exact) | 97.55993795 / 7.5e-6 | 97.55998637 / 5.4e-7 |
+| `mu_fallback_point_floor` (lbfgs) | −38315031.51 / 2.9e-11 | −38315032.24 / 5.9e-5 |
+| `cc:opf_vv_lower_knee` (exact) | −0.3954730647 / 3e-15 | −0.3954687711 / 1.2e-6 |
+
+The first two each improve one residual and give up the other. `deb7`'s
+objective rises by 5e-7 relative, with a smaller dual infeasibility.
+`mu_fallback_point_floor`'s objective falls, while its dual infeasibility
+rises to 5.9e-5. `opf_vv_lower_knee` loses on both: its objective moves by
+1e-5 relative, and its natural residual rises from 0 to 7.8e-11.
+
+Under `crossover=yes` three objectives move, all still `Solve_Succeeded`:
+- `deb7`: 97.55996651 → 97.55993795.
+- `pooling_rt2stp` (lbfgs): −3273.954895 → −3273.954992.
+- `mpcc_qpec_small_biactive`: 6.7e-74 → 5.3e-17.
+
+### How to tell whether a fix works
+
+Holding the handover's polish to the absolute test while keeping `s_d` for a
+forced `algorithm=active-set-sqp` solve would recover the three handover
+answers. It must keep `hs99exp` and `hs71_obj1e8` certifying on the forced
+leg (`crates/pounce-cli/tests/issue1191_sqp_endgame_certifies.rs`). The three
+handover lines above are the check.
+
+---
+
 ## MPCC: four MacMPEC answers stay complementary only to ~7e-5
 
 *Measured on `mpcc/cost-sweep-report` (after `df3fbd12`), MacMPEC through
