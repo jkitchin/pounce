@@ -54,6 +54,15 @@ pub struct SecondOpinionRung {
     pub assignments: Vec<String>,
 }
 
+/// Label of rung 6, the presolve re-solve (gh#1176). It carries no option
+/// assignment: the driver wraps the model in the presolve layer for this rung
+/// itself, because the CLI, `pounce-rs` and WASM frontends materialize
+/// presolve outside the application, so writing `presolve yes` would change
+/// nothing for them. Frontends key on it to take the rung's answer from
+/// `finalize_solution`, which presolve's postsolve has already lifted back to
+/// the original problem.
+pub const PRESOLVE_RUNG_LABEL: &str = "presolve=yes";
+
 /// Which failure opened the ladder. Not every rung is evidence about every
 /// failure: an `Invalid_Number_Detected` is a statement about the *callbacks*
 /// at a point, and re-running the same callbacks at the same point under a
@@ -179,6 +188,11 @@ pub struct SecondOpinionAvailability {
     /// only the application holds after the solve, so it cannot be computed
     /// in [`SecondOpinionAvailability::from_options`].
     pub baseline_saddle_escape_found: bool,
+    /// `infeasibility_presolve_retry`, rung 6's own enable.
+    pub presolve_retry_enabled: bool,
+    /// The failing solve already ran with `presolve=yes`, so rung 6 would
+    /// re-run it.
+    pub already_presolved: bool,
     /// `feral_scaling` tag naming the baseline's *resolved* scaling strategy.
     /// `None` under `ScalingStrategy::External`, which drops rungs 2 and 3.
     ///
@@ -302,6 +316,34 @@ pub struct SecondOpinionAvailability {
 ///    tangency row between them reads `0 = 4` with an exactly zero gradient,
 ///    and rungs 2–4 all end at the same kind of point.
 ///
+/// 6. **`presolve=yes` — the model as presolve sees it**
+///    (`infeasibility_presolve_retry`, on by default; gh#1176). Local
+///    infeasibility only, and only when the failing solve ran without
+///    presolve. Presolve's bound tightening derives finite bounds that the
+///    model implies but does not declare, and those bounds keep the interior
+///    point's first steps physical. Measured on gh#1176's catalytic
+///    distillation column (1547 variables): without them the first steps are
+///    `1e5`–`1e6` long, the solve spends 2660 of its 2839 iterations in
+///    restoration with the Hessian regularization near `1e18`, and rungs 1–5
+///    all end infeasible too. With them it solves in 85 iterations to
+///    CONOPT's objective (23914.5174), and `pounce verify` confirms the point
+///    feasible on the original model. The Wächter–Biegler textbook example
+///    (`issue981_wachter_biegler`) is the same failure in three variables:
+///    the default solve settles at `x1 = -1`, violation 1.5, and every other
+///    rung agrees; with presolve it reaches the optimum `x1 = 1`.
+///
+///    Not a default change. Presolve on by default fails 37 workspace tests
+///    and costs Vanderbei three models (708 → 705 solved), so it is not a
+///    free improvement on the models that already solve. This rung only runs
+///    on a solve that has already failed and survived rungs 1–5, so a model
+///    that solves today, or that an earlier rung recovers, runs exactly as
+///    before. A genuinely infeasible model pays one more solve, usually short
+///    because presolve shrinks it, and a presolve *proof* of infeasibility
+///    from this rung is not promoted: only a converged re-solve is.
+///
+///    It is **appended**, for the reason rung 5 is: an earlier rung that
+///    settles a ladder still settles it first.
+///
 /// Rungs are **not** cumulative: the driver restores the baseline before each
 /// rung, so rung 2 runs without rung 1's scaling and rung 3 without either
 /// earlier knob. That reset is load-bearing, not tidiness: on gh #524's
@@ -404,6 +446,18 @@ pub fn second_opinion_rungs(avail: SecondOpinionAvailability) -> Vec<SecondOpini
     if infeasible && avail.saddle_escape_retry_enabled && avail.baseline_saddle_escape_found {
         rungs.push(SecondOpinionRung {
             label: crate::infeasibility_saddle::SADDLE_ESCAPE_RUNG_LABEL,
+            assignments: Vec::new(),
+        });
+    }
+    // 6. Re-solve the model as presolve sees it (gh#1176).
+    //
+    // Local infeasibility only, appended last, and no assignment: the driver
+    // wraps the model in the presolve layer for this rung itself (see
+    // `PRESOLVE_RUNG_LABEL`). Skipped when the failing solve already ran
+    // with presolve, where it would only repeat it.
+    if infeasible && avail.presolve_retry_enabled && !avail.already_presolved {
+        rungs.push(SecondOpinionRung {
+            label: PRESOLVE_RUNG_LABEL,
             assignments: Vec::new(),
         });
     }
@@ -676,6 +730,14 @@ impl SecondOpinionAvailability {
                 .map(|(v, _found)| v)
                 .unwrap_or(true),
             baseline_saddle_escape_found: false,
+            presolve_retry_enabled: options
+                .get_bool_value("infeasibility_presolve_retry", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(true),
+            already_presolved: options
+                .get_bool_value("presolve", "")
+                .map(|(v, _found)| v)
+                .unwrap_or(false),
             baseline_scaling,
             // `mu_strategy` has exactly two registered values, so "not
             // adaptive" is "monotone" and there is no third case to guess at.
@@ -715,6 +777,11 @@ mod scaling_retry_tests {
             // is gated on a measurement, and the tests written before it keep
             // asserting the ladders they asserted then.
             baseline_saddle_escape_found: false,
+            // Off for the same reason: rung 6 is appended to every
+            // local-infeasibility ladder, and the tests that are about it
+            // switch it on explicitly.
+            presolve_retry_enabled: false,
+            already_presolved: false,
             baseline_scaling: Some("auto"),
         }
     }
@@ -1175,6 +1242,93 @@ mod scaling_retry_tests {
                 "feral_increase_quality=no",
             ],
         );
+    }
+
+    /// Rung 6 (gh#1176): appended last to a local-infeasibility ladder, so
+    /// every rung that settles a ladder today still settles it first.
+    #[test]
+    fn the_presolve_rung_is_appended_last_on_local_infeasibility() {
+        let rungs = second_opinion_rungs(SecondOpinionAvailability {
+            trigger: SecondOpinionTrigger::LocalInfeasibility,
+            baseline_quality_escalations: 1,
+            baseline_saddle_escape_found: true,
+            presolve_retry_enabled: true,
+            ..avail()
+        });
+        let labels = rungs.iter().map(|r| r.label).collect::<Vec<_>>();
+        assert_eq!(
+            labels.last(),
+            Some(&super::PRESOLVE_RUNG_LABEL),
+            "{labels:?}"
+        );
+        assert_eq!(labels.len(), 6, "{labels:?}");
+        // It changes no option itself: the driver wraps the model.
+        assert!(rungs.last().unwrap().assignments.is_empty());
+    }
+
+    /// Each branch of its gate: switched off, already presolved, and every
+    /// trigger other than local infeasibility.
+    #[test]
+    fn the_presolve_rung_is_gated_on_its_option_the_baseline_and_the_trigger() {
+        let has = |a: SecondOpinionAvailability| {
+            second_opinion_rungs(a)
+                .iter()
+                .any(|r| r.label == super::PRESOLVE_RUNG_LABEL)
+        };
+        let on = SecondOpinionAvailability {
+            presolve_retry_enabled: true,
+            ..avail()
+        };
+        assert!(has(on));
+        assert!(!has(SecondOpinionAvailability {
+            presolve_retry_enabled: false,
+            ..on
+        }));
+        assert!(!has(SecondOpinionAvailability {
+            already_presolved: true,
+            ..on
+        }));
+        for trigger in [
+            SecondOpinionTrigger::RestorationFailure,
+            SecondOpinionTrigger::IterationLimit,
+            SecondOpinionTrigger::StepComputationError,
+            SecondOpinionTrigger::InvalidNumber,
+            SecondOpinionTrigger::UnreleasedHandback,
+        ] {
+            assert!(
+                !has(SecondOpinionAvailability { trigger, ..on }),
+                "{trigger:?}"
+            );
+        }
+    }
+
+    /// `from_options` reads both gates: the rung's own option (default on)
+    /// and whether the failing solve ran with presolve.
+    #[test]
+    fn the_presolve_rung_reads_its_option_and_the_baseline_presolve() {
+        let reg = pounce_common::reg_options::RegisteredOptions::default();
+        crate::upstream_options::register_all_upstream_options(&reg).unwrap();
+        pounce_presolve::register_options(&reg).unwrap();
+        let reg = std::rc::Rc::new(reg);
+        let read = |opts: &OptionsList| {
+            SecondOpinionAvailability::from_options(
+                opts,
+                SecondOpinionTrigger::LocalInfeasibility,
+                0,
+            )
+        };
+        let base = OptionsList::with_registered(std::rc::Rc::clone(&reg));
+        let a = read(&base);
+        assert!(a.presolve_retry_enabled && !a.already_presolved, "{a:?}");
+        let mut off = base.clone();
+        off.set_string_value("infeasibility_presolve_retry", "no", true, false)
+            .unwrap();
+        assert!(!read(&off).presolve_retry_enabled);
+        let mut presolved = base.clone();
+        presolved
+            .set_string_value("presolve", "yes", true, false)
+            .unwrap();
+        assert!(read(&presolved).already_presolved);
     }
 
     /// And the gate holds on that trigger too: a local-infeasibility verdict

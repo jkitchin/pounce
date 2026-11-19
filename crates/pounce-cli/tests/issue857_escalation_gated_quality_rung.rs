@@ -481,11 +481,15 @@ fn a_baseline_that_already_declined_the_escalation_gets_no_rung() {
 /// rung's promotion anything.
 #[test]
 fn the_new_rung_is_last_so_an_earlier_promotion_is_unchanged() {
+    // Rung 6 (`presolve=yes`, gh#1176) is appended after rung 4 on every
+    // local-infeasibility ladder; it is off here so the claim stays the one
+    // this test is about, rung 4's place behind the rungs before it.
     let run = solve(
         "circle_parabola_t0p5.nl",
         &[
             "hessian_approximation=limited-memory",
             "limited_memory_initialization=scalar2",
+            "infeasibility_presolve_retry=no",
         ],
     );
     let lines = ladder_lines(&run.out);
@@ -722,7 +726,11 @@ fn the_stand_down_does_not_reach_a_restoration_failure() {
 /// below is that branch, and it is the test — not a duplicate of the first.
 #[test]
 fn an_escalating_infeasibility_verdict_opens_the_quality_rung() {
-    let run = solve("infeasible_square_scaled_1em4.nl", &[]);
+    // Rung 6 (`presolve=yes`, gh#1176) off: this test counts rung 4.
+    let run = solve(
+        "infeasible_square_scaled_1em4.nl",
+        &["infeasibility_presolve_retry=no"],
+    );
     let lines = ladder_lines(&run.out);
     assert!(
         lines
@@ -749,7 +757,11 @@ fn an_escalating_infeasibility_verdict_opens_the_quality_rung() {
 /// nothing for it.
 #[test]
 fn an_infeasibility_verdict_that_never_escalated_keeps_three_rungs() {
-    let run = solve("issue_372_infeasible_bounds.nl", &[]);
+    // Rung 6 (`presolve=yes`, gh#1176) off: this test counts rung 4.
+    let run = solve(
+        "issue_372_infeasible_bounds.nl",
+        &["infeasibility_presolve_retry=no"],
+    );
     let lines = ladder_lines(&run.out);
     assert!(
         lines

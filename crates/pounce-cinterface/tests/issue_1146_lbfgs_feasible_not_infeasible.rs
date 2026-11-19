@@ -206,6 +206,7 @@ fn solve_with(
             "infeasibility_perturbed_start_retry",
             "feral_increase_quality_retry",
             "infeasibility_saddle_escape_retry",
+            "infeasibility_presolve_retry",
         ] {
             set_str(prob, rung, "no");
         }

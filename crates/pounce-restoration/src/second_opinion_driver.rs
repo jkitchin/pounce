@@ -40,8 +40,8 @@ use pounce_algorithm::application::{
 };
 use pounce_algorithm::infeasibility_saddle::SADDLE_ESCAPE_RUNG_LABEL;
 use pounce_algorithm::second_opinion::{
-    SecondOpinionAvailability, SecondOpinionTrigger, resolve_scaling_retry_outcome,
-    scaling_retry_promoted, second_opinion_rungs,
+    PRESOLVE_RUNG_LABEL, SecondOpinionAvailability, SecondOpinionTrigger,
+    resolve_scaling_retry_outcome, scaling_retry_promoted, second_opinion_rungs,
 };
 use pounce_algorithm::square_system;
 use pounce_common::types::{Index, Number};
@@ -387,8 +387,31 @@ pub fn run_second_opinion_ladder(
             bff_mint,
         ));
 
+        // Rung 6 solves the model through the presolve layer (gh#1176). It is
+        // wrapped here rather than switched on by option, because the CLI,
+        // `pounce-rs` and WASM materialize presolve outside the application
+        // and mark it applied, so `presolve yes` would change nothing for
+        // them. Outside the gate, so the gate sees presolve's postsolved
+        // answer in the original problem's space, and a frontend that reads
+        // `finalize_solution` gets the original model's duals. The
+        // application does not wrap a second time: the `presolve` option is
+        // still the baseline's `no`, which is what opened the rung.
+        let solve_tnlp: Rc<RefCell<dyn TNLP>> = if rung.label == PRESOLVE_RUNG_LABEL {
+            match presolve_wrapper(&app, Rc::clone(&gated)) {
+                Some(w) => w,
+                None => {
+                    report(&format!(
+                        "pounce: {} could not read the presolve options; skipping it.",
+                        rung.label
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            Rc::clone(&gated)
+        };
         let rung_wall0 = pounce_common::utils::wallclock_time();
-        retry_status = app.optimize_tnlp(Rc::clone(&gated));
+        retry_status = app.optimize_tnlp(solve_tnlp);
         rung_wallclock_secs.push(pounce_common::utils::wallclock_time() - rung_wall0);
         retry_stats = app.statistics();
         if let Some(line) = app
@@ -539,6 +562,30 @@ pub fn run_second_opinion_ladder(
         rung_wallclock_secs,
         skipped_for_time,
     }
+}
+
+/// Rung 6's model: `tnlp` behind the presolve layer, configured from the
+/// rung's options with presolve switched on, and with postsolve's dual
+/// recovery bounded by the rung's own time limit (`charge_rung` has already
+/// written the run's remainder there), as the CLI bounds its own presolve
+/// (gh#1196). `None` when the presolve options do not parse.
+fn presolve_wrapper(
+    app: &IpoptApplication,
+    tnlp: Rc<RefCell<dyn TNLP>>,
+) -> Option<Rc<RefCell<dyn TNLP>>> {
+    let mut opts = pounce_presolve::PresolveOptions::from_options_list(app.options()).ok()?;
+    opts.enabled = true;
+    let limit = |name: &str| {
+        app.options()
+            .get_numeric_value(name, "")
+            .map_or(1e6, |(v, _)| v)
+    };
+    let mut p = pounce_presolve::PresolveTnlp::new(tnlp, opts);
+    p.set_deadline(Some(pounce_common::timing::Deadline::new(
+        limit("max_wall_time"),
+        limit("max_cpu_time"),
+    )));
+    Some(Rc::new(RefCell::new(p)))
 }
 
 /// The base solve's wall time: the whole `optimize_tnlp` when the
@@ -1241,6 +1288,8 @@ mod tests {
             baseline_quality_escalations: 0,
             saddle_escape_retry_enabled: true,
             baseline_saddle_escape_found: false,
+            presolve_retry_enabled: false,
+            already_presolved: false,
             baseline_scaling: Some("auto"),
         });
         assert_eq!(rungs.len(), 3, "{:?}", rung_labels(&rungs));
@@ -1299,6 +1348,8 @@ mod tests {
             baseline_quality_escalations: 2,
             saddle_escape_retry_enabled: true,
             baseline_saddle_escape_found: false,
+            presolve_retry_enabled: false,
+            already_presolved: false,
             baseline_scaling: Some("auto"),
         });
         assert_eq!(rungs.len(), 2, "{:?}", rung_labels(&rungs));

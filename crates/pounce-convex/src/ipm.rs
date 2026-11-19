@@ -6429,110 +6429,179 @@ pub(crate) fn detect_infeasibility_with(
     }
 
     // --- Dual infeasibility / unboundedness (recession direction d = x) ---
-    let x_norm = inf_norm(x);
-    if x_norm > 0.0 {
-        let mut pd = vec![0.0; n];
-        prob.p_mul(x, &mut pd);
-        let mut ad = vec![0.0; prob.m_eq()];
-        prob.a_mul(x, &mut ad);
-        let mut gd = vec![0.0; prob.m_ineq()];
-        prob.g_mul(x, &mut gd);
-        let cd = dot(&prob.c, x);
-        // Recession condition `−Gd ∈ K` (orthant ⇒ componentwise `Gd ≤ 0`;
-        // SOC/PSD ⇒ true cone membership). Checked, not componentwise, so a
-        // direction that merely has `Gd ≤ 0` but `−Gd ∉ K` is rejected.
-        let gd_ok = primal_recession_ok(&gd, ctol * x_norm);
-        // `d` is a recession direction of the *quadratic* iff the objective
-        // stays downhill along it forever: `f(x+td) = f + t·cᵀd + ½t²·dᵀPd →
-        // −∞`. Since a convex QP has `P ⪰ 0`, that requires **zero directional
-        // curvature** `dᵀPd = 0` (any `dᵀPd > 0` makes the quadratic term
-        // dominate, so the objective has a finite minimum along `d` and the
-        // problem is bounded there) together with `cᵀd < 0`.
-        //
-        // The quantity to test is the *normalized* directional curvature
-        // `dᵀPd/‖d‖²` — the curvature per unit length along `d`, an
-        // eigenvalue-scale number that a diverging iterate (`‖d‖ → ∞`) cannot
-        // inflate. Two earlier residual tests were both wrong on a mixed-scale
-        // Hessian:
-        //   * `‖Pd‖ ≤ rtol·‖d‖` collapses to `‖P‖ ≤ rtol` (‖d‖ cancels), so any
-        //     strictly-convex QP with `‖P‖ < rtol` read as unbounded (gh #273).
-        //   * `‖Pd‖ ≤ rtol·‖d‖·‖P‖` (gh #290) fixes the *uniform* small case but
-        //     still fails when `P`'s eigenvalues span many orders: normalizing
-        //     by the single global scale `‖P‖ = max|P|` cannot express
-        //     `d ∈ null(P)`. For `P = diag(1e6, 1e-12)` the descent ray `d = e₁`
-        //     has genuine per-unit curvature `dᵀPd/‖d‖² = 1e-12 > 0` (bounded,
-        //     `f* = −5e11`), yet `‖Pd‖ = 1e-12 ≪ rtol·‖P‖ = 1e-16·1e6`, so it
-        //     was falsely certified `DualInfeasible` — a wrong unboundedness
-        //     certificate on a bounded problem. See gh #293.
-        //
-        // Testing `dᵀPd/‖d‖²` against an absolute floor separates the two
-        // regimes cleanly: a *bounded* problem floors the normalized curvature
-        // at its smallest real directional eigenvalue (`1e-12` here, `1e-16` for
-        // the #273 `P = 1e-16` case), while a *genuine* recession drives it to
-        // zero — exactly `0` for an LP or an axis-aligned null block, and, for a
-        // singular `P` whose curved variable is pinned to a bound while the null
-        // variable diverges, `~1e-140` and shrinking. `RECESSION_CURV_TOL` sits
-        // far below every eigenvalue that must be rejected yet vastly above a
-        // true recession's vanishing curvature. See gh #293 (P0/P1/P2).
-        let curv = dot(x, &pd); // dᵀPd (pd = P·d)
-        let d_norm_sq = dot(x, x); // ‖d‖² > 0 (guarded by x_norm > 0)
-        let curv_ok = curv <= RECESSION_CURV_TOL * d_norm_sq;
-        // gh#1143: the slacks above are absolute in the row's own units, so a
-        // row whose coefficients sit below the slack is invisible to them.
-        // `1e-14·x₀ ≤ −1` beside `x₀ ≥ 0` (infeasible) read the HSDE ray
-        // `d = (297, 420)` as a recession direction — `(Gd)₀ = 3e-12` passes
-        // `≤ 1e-7·‖d‖` — and the LP was reported unbounded after 2 iterations.
-        // Scale each row's slack by that row's own size when it is below 1,
-        // exactly as the active-set engine's `ray_certifies_unbounded` does
-        // (gh#1034). Rows of norm ≥ 1 keep the slack they had, so this only
-        // ever rejects a certificate the old test accepted.
-        //
-        // Equality rows are cone-independent. Inequality rows are tested per
-        // row when they belong to a nonnegative-orthant block (`nonneg_rows`),
-        // whatever else the cone holds: gating on a whole-problem orthant flag
-        // left the false verdict standing on the same model plus one unrelated
-        // SOC block. SOC/PSD/exp/power block rows stay with the cone test —
-        // their membership is not a per-row property.
-        //
-        // Evaluated only once every other recession condition holds — i.e. on
-        // a candidate certificate, not on every iterate — so the O(nnz) row
-        // norms are not paid per iteration.
-        let rows_ok = |resid: &[f64],
-                       rows: &[crate::qp::Triplet],
-                       m: usize,
-                       tol: f64,
-                       two_sided: bool,
-                       mask: Option<&[bool]>| {
-            let norms = crate::active_set::row_inf_norms(rows, m);
-            resid
-                .iter()
-                .zip(&norms)
-                .enumerate()
-                .filter(|(i, _)| mask.is_none_or(|mk| mk.get(*i).copied().unwrap_or(false)))
-                .all(|(_, (&v, &nrm))| {
-                    let v = if two_sided { v.abs() } else { v };
-                    v <= tol * x_norm * nrm.min(1.0)
-                })
-        };
-        if cd < -ctol * x_norm
-            && curv_ok
-            && inf_norm(&ad) <= rtol * x_norm
-            && gd_ok
-            && rows_ok(&ad, &prob.a, prob.m_eq(), rtol, true, None)
-            && rows_ok(
-                &gd,
-                &prob.g,
-                prob.m_ineq(),
-                ctol,
-                false,
-                Some(&nonneg_rows()),
-            )
-        {
+    //
+    // The test below is run twice: on the iterate `x` itself, and on `x` with
+    // every component a single-coefficient row forbids projected to zero (see
+    // [`sign_projected_direction`]). Both must pass.
+    //
+    // gh (leo2): the slacks are absolute multiples of `‖d‖∞`, and `d = x` is
+    // the iterate, not a direction — it carries the finite point the ray
+    // starts from. When one free column runs away, every boxed column's
+    // finite offset sits `‖x_box‖/‖x‖` below that slack and is read as a
+    // zero ray component. On MIPLIB `leo2` (11099 of 11100 columns boxed in
+    // `[0, 1]`, the free one an objective epigraph tied to the boxed columns
+    // by an equality row) the HSDE iterate at iteration 4 had `‖x‖∞ = 1.4e4`
+    // (scaled) in the free column and the boxed columns below `1e-7·‖x‖`,
+    // and was certified unbounded (reported objective −4.8e7) on a bounded
+    // LP. A boxed
+    // column admits no recession component at all, and with it removed
+    // `Ad = −e₀` on the epigraph row: the projected direction fails by ten
+    // orders. On a genuine ray the projection only drops the finite offset,
+    // which the iterate's own norm already dwarfs, so it passes as well.
+    let nonneg = std::cell::OnceCell::new();
+    let nonneg_rows = std::cell::RefCell::new(Some(nonneg_rows));
+    let mask = || -> &Vec<bool> {
+        nonneg.get_or_init(|| (nonneg_rows.borrow_mut().take().expect("init once"))())
+    };
+    let recession_ok = |x: &[f64]| -> bool {
+        let x_norm = inf_norm(x);
+        if x_norm > 0.0 {
+            let mut pd = vec![0.0; n];
+            prob.p_mul(x, &mut pd);
+            let mut ad = vec![0.0; prob.m_eq()];
+            prob.a_mul(x, &mut ad);
+            let mut gd = vec![0.0; prob.m_ineq()];
+            prob.g_mul(x, &mut gd);
+            let cd = dot(&prob.c, x);
+            // Recession condition `−Gd ∈ K` (orthant ⇒ componentwise `Gd ≤ 0`;
+            // SOC/PSD ⇒ true cone membership). Checked, not componentwise, so a
+            // direction that merely has `Gd ≤ 0` but `−Gd ∉ K` is rejected.
+            let gd_ok = primal_recession_ok(&gd, ctol * x_norm);
+            // `d` is a recession direction of the *quadratic* iff the objective
+            // stays downhill along it forever: `f(x+td) = f + t·cᵀd + ½t²·dᵀPd →
+            // −∞`. Since a convex QP has `P ⪰ 0`, that requires **zero directional
+            // curvature** `dᵀPd = 0` (any `dᵀPd > 0` makes the quadratic term
+            // dominate, so the objective has a finite minimum along `d` and the
+            // problem is bounded there) together with `cᵀd < 0`.
+            //
+            // The quantity to test is the *normalized* directional curvature
+            // `dᵀPd/‖d‖²` — the curvature per unit length along `d`, an
+            // eigenvalue-scale number that a diverging iterate (`‖d‖ → ∞`) cannot
+            // inflate. Two earlier residual tests were both wrong on a mixed-scale
+            // Hessian:
+            //   * `‖Pd‖ ≤ rtol·‖d‖` collapses to `‖P‖ ≤ rtol` (‖d‖ cancels), so any
+            //     strictly-convex QP with `‖P‖ < rtol` read as unbounded (gh #273).
+            //   * `‖Pd‖ ≤ rtol·‖d‖·‖P‖` (gh #290) fixes the *uniform* small case but
+            //     still fails when `P`'s eigenvalues span many orders: normalizing
+            //     by the single global scale `‖P‖ = max|P|` cannot express
+            //     `d ∈ null(P)`. For `P = diag(1e6, 1e-12)` the descent ray `d = e₁`
+            //     has genuine per-unit curvature `dᵀPd/‖d‖² = 1e-12 > 0` (bounded,
+            //     `f* = −5e11`), yet `‖Pd‖ = 1e-12 ≪ rtol·‖P‖ = 1e-16·1e6`, so it
+            //     was falsely certified `DualInfeasible` — a wrong unboundedness
+            //     certificate on a bounded problem. See gh #293.
+            //
+            // Testing `dᵀPd/‖d‖²` against an absolute floor separates the two
+            // regimes cleanly: a *bounded* problem floors the normalized curvature
+            // at its smallest real directional eigenvalue (`1e-12` here, `1e-16` for
+            // the #273 `P = 1e-16` case), while a *genuine* recession drives it to
+            // zero — exactly `0` for an LP or an axis-aligned null block, and, for a
+            // singular `P` whose curved variable is pinned to a bound while the null
+            // variable diverges, `~1e-140` and shrinking. `RECESSION_CURV_TOL` sits
+            // far below every eigenvalue that must be rejected yet vastly above a
+            // true recession's vanishing curvature. See gh #293 (P0/P1/P2).
+            let curv = dot(x, &pd); // dᵀPd (pd = P·d)
+            let d_norm_sq = dot(x, x); // ‖d‖² > 0 (guarded by x_norm > 0)
+            let curv_ok = curv <= RECESSION_CURV_TOL * d_norm_sq;
+            // gh#1143: the slacks above are absolute in the row's own units, so a
+            // row whose coefficients sit below the slack is invisible to them.
+            // `1e-14·x₀ ≤ −1` beside `x₀ ≥ 0` (infeasible) read the HSDE ray
+            // `d = (297, 420)` as a recession direction — `(Gd)₀ = 3e-12` passes
+            // `≤ 1e-7·‖d‖` — and the LP was reported unbounded after 2 iterations.
+            // Scale each row's slack by that row's own size when it is below 1,
+            // exactly as the active-set engine's `ray_certifies_unbounded` does
+            // (gh#1034). Rows of norm ≥ 1 keep the slack they had, so this only
+            // ever rejects a certificate the old test accepted.
+            //
+            // Equality rows are cone-independent. Inequality rows are tested per
+            // row when they belong to a nonnegative-orthant block (`nonneg_rows`),
+            // whatever else the cone holds: gating on a whole-problem orthant flag
+            // left the false verdict standing on the same model plus one unrelated
+            // SOC block. SOC/PSD/exp/power block rows stay with the cone test —
+            // their membership is not a per-row property.
+            //
+            // Evaluated only once every other recession condition holds — i.e. on
+            // a candidate certificate, not on every iterate — so the O(nnz) row
+            // norms are not paid per iteration.
+            let rows_ok = |resid: &[f64],
+                           rows: &[crate::qp::Triplet],
+                           m: usize,
+                           tol: f64,
+                           two_sided: bool,
+                           mask: Option<&[bool]>| {
+                let norms = crate::active_set::row_inf_norms(rows, m);
+                resid
+                    .iter()
+                    .zip(&norms)
+                    .enumerate()
+                    .filter(|(i, _)| mask.is_none_or(|mk| mk.get(*i).copied().unwrap_or(false)))
+                    .all(|(_, (&v, &nrm))| {
+                        let v = if two_sided { v.abs() } else { v };
+                        v <= tol * x_norm * nrm.min(1.0)
+                    })
+            };
+            if cd < -ctol * x_norm
+                && curv_ok
+                && inf_norm(&ad) <= rtol * x_norm
+                && gd_ok
+                && rows_ok(&ad, &prob.a, prob.m_eq(), rtol, true, None)
+                && rows_ok(&gd, &prob.g, prob.m_ineq(), ctol, false, Some(mask()))
+            {
+                return true;
+            }
+        }
+        false
+    };
+    if recession_ok(x) {
+        let projected = sign_projected_direction(prob, x, mask());
+        if recession_ok(&projected) {
             return Some(QpStatus::DualInfeasible);
         }
     }
 
     None
+}
+
+/// `x` with each component that a single-coefficient row forbids set to zero.
+///
+/// A recession direction `d` must satisfy every row *exactly* in the limit:
+/// a nonnegative-orthant inequality row `a·x_j ≤ h` with one coefficient
+/// forces `a·d_j ≤ 0`, and an equality row `a·x_j = b` forces `d_j = 0`. An
+/// expanded variable bound is such a row, so a column boxed on both sides has
+/// no admissible component at all. The iterate the drivers pass as `d` still
+/// holds its finite position in those columns; this drops it, so the
+/// recession test is applied to the part of `x` that can actually run away.
+fn sign_projected_direction(prob: &QpProblem, x: &[f64], nonneg_rows: &[bool]) -> Vec<f64> {
+    let n = prob.n;
+    // Per row: `Some((col, val))` while exactly one nonzero has been seen.
+    fn singletons(rows: &[crate::qp::Triplet], m: usize) -> Vec<Option<(usize, f64)>> {
+        let mut first: Vec<Option<(usize, f64)>> = vec![None; m];
+        let mut count = vec![0usize; m];
+        for t in rows {
+            if t.row < m && t.val != 0.0 {
+                count[t.row] += 1;
+                first[t.row] = Some((t.col, t.val));
+            }
+        }
+        first
+            .into_iter()
+            .zip(count)
+            .map(|(f, c)| if c == 1 { f } else { None })
+            .collect()
+    }
+    let mut d = x.to_vec();
+    for (col, _) in singletons(&prob.a, prob.m_eq()).into_iter().flatten() {
+        if col < n {
+            d[col] = 0.0;
+        }
+    }
+    for (i, s) in singletons(&prob.g, prob.m_ineq()).into_iter().enumerate() {
+        if let Some((col, val)) = s {
+            if col < n && nonneg_rows.get(i).copied().unwrap_or(false) && val * x[col] > 0.0 {
+                d[col] = 0.0;
+            }
+        }
+    }
+    d
 }
 
 /// Minimum [`FarkasMargin::radius`] — the factor by which an approximate
@@ -7017,6 +7086,53 @@ mod detect_infeasibility_tests {
     use crate::QpOptions;
     use crate::cones::{CompositeCone, ConeSpec};
     use crate::qp::{QpProblem, QpStatus, Triplet};
+
+    /// leo2 (MIPLIB relaxation): a free epigraph column `x₀` tied by one
+    /// equality to a column boxed in `[0, 1]` (bounds as expanded G rows).
+    /// The iterate `(−1e5, 1e-3)` passes the ‖x‖-relative slacks, but a boxed
+    /// column has no recession component: with `d₁ = 0` the equality reads
+    /// `d₀ = 0`, so no ray exists and the LP is bounded.
+    fn leo2_shape(tied: bool) -> QpProblem {
+        QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![1.0, 0.0],
+            a: if tied {
+                vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1e8)]
+            } else {
+                vec![]
+            },
+            b: if tied { vec![0.0] } else { vec![] },
+            g: vec![Triplet::new(0, 1, -1.0), Triplet::new(1, 1, 1.0)],
+            h: vec![0.0, 1.0],
+            lb: vec![],
+            ub: vec![],
+        }
+    }
+
+    #[test]
+    fn leo2_boxed_offset_is_not_a_ray() {
+        let prob = leo2_shape(true);
+        let x = [-1e5, 1e-3];
+        let opts = QpOptions::default();
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &[0.0], &[0.0; 2], &opts),
+            None
+        );
+    }
+
+    /// Other branch: the free column is untied, so `(−1, 0)` is a genuine
+    /// recession ray and the projected direction must still certify.
+    #[test]
+    fn leo2_untied_free_column_is_a_ray() {
+        let prob = leo2_shape(false);
+        let x = [-1e5, 1e-3];
+        let opts = QpOptions::default();
+        assert_eq!(
+            detect_infeasibility(&prob, &x, &[], &[0.0; 2], &opts),
+            Some(QpStatus::DualInfeasible)
+        );
+    }
 
     /// gh#1143 with an unrelated SOC block: rows 0–2 are the issue's orthant
     /// rows (`σ·1e-14·x₀ ≤ σ·(−1)`, `−x₀ ≤ 0`, `−x₁ ≤ 0`), rows 3–4 put

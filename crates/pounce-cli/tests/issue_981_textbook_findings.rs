@@ -83,9 +83,19 @@ fn solve(name: &str, extra: &[&str]) -> SolveReport {
 /// Finding 4. Restoration settles at the local minimizer of the
 /// infeasibility, `x1 = -1` with violation 1.5; the report used to return
 /// `x1 = -1.0885` at 1.588 — where the last restoration *started*.
+///
+/// The verdict is the interior point's own. The second-opinion ladder's
+/// presolve rung (gh#1176) solves this model to its optimum `x1 = 1`, so it
+/// is switched off here: this test is about the point an infeasibility
+/// verdict reports, and needs a run that ends in one.
+/// `the_presolve_rung_recovers_the_wachter_biegler_example` is the
+/// default run.
 #[test]
 fn an_infeasibility_verdict_returns_the_least_infeasible_point() {
-    let r = solve("issue981_wachter_biegler.nl", &[]);
+    let r = solve(
+        "issue981_wachter_biegler.nl",
+        &["infeasibility_presolve_retry=no"],
+    );
     assert_eq!(
         r.solution.status,
         ApplicationReturnStatus::InfeasibleProblemDetected

@@ -1065,6 +1065,8 @@ name = "pounce-presolve"
 version = "0.17.0"
 dependencies = [
  "pounce-common",
+ "pounce-feral",
+ "pounce-linsol",
  "pounce-nlp",
  "tracing",
 ]
@@ -1116,6 +1118,7 @@ dependencies = [
  "pounce-linalg",
  "pounce-linsol",
  "pounce-nlp",
+ "pounce-presolve",
  "pounce-solve-report",
  "tracing",
 ]

@@ -56,6 +56,9 @@ LADDER_OFF = {
     # Rung 5 opens only when the probe finds a saddle, which no model here
     # has, but "the whole ladder off" names it for the same reason.
     "infeasibility_saddle_escape_retry": "no",
+    # Rung 6 (gh#1176), the presolve re-solve: on every local-infeasibility
+    # ladder whose solve ran without presolve.
+    "infeasibility_presolve_retry": "no",
 }
 
 #: The rungs the ladder always has, in order.
@@ -68,6 +71,11 @@ FIXED_RUNGS = [
 #: Rung 4, which undoes a linear-solver quality escalation the base solve
 #: made (gh#857).
 QUALITY_RUNG = "feral_increase_quality=no"
+
+#: Rung 6, the presolve re-solve (gh#1176). Unconditional on a
+#: local-infeasibility verdict from a solve that ran without presolve, and
+#: always last.
+PRESOLVE_RUNG = "presolve=yes"
 
 
 def _solve(obj, n=1, m=1, x0=(0.5,), **options):
@@ -104,6 +112,7 @@ def _expected_rungs(*, without=()):
     rungs = list(FIXED_RUNGS)
     if base["quality_escalations"] >= 1:
         rungs.append(QUALITY_RUNG)
+    rungs.append(PRESOLVE_RUNG)
     return [r for r in rungs if r not in without]
 
 
@@ -133,10 +142,15 @@ def test_each_rung_can_be_turned_off_independently():
         without=("mu_strategy=adaptive",)
     )
     # Rung 4 carries its own switch too, and this is the arm that pins it:
-    # dropping it leaves exactly the three fixed rungs on every platform,
-    # whether or not the base solve escalated.
+    # dropping it leaves exactly the three fixed rungs, then rung 6, on every
+    # platform, whether or not the base solve escalated.
     _, info = _solve(NoRealSolution(), feral_increase_quality_retry="no")
-    assert info["second_opinion"]["tried"] == FIXED_RUNGS
+    assert info["second_opinion"]["tried"] == FIXED_RUNGS + [PRESOLVE_RUNG]
+    # And rung 6 its own.
+    _, info = _solve(NoRealSolution(), infeasibility_presolve_retry="no")
+    assert info["second_opinion"]["tried"] == _expected_rungs(
+        without=(PRESOLVE_RUNG,)
+    )
 
 
 def test_turning_the_whole_ladder_off_restores_upstream_behaviour():
