@@ -385,6 +385,10 @@ impl SqpAlgorithm {
         // the objective Hessian *is* the Lagrangian Hessian and the probe
         // is exact. Otherwise leave the identity seed alone and let the
         // rank-2 updates (which see the true `∇L`) do the work.
+        // Whether the constraints' curvature can move `∇²L` with the
+        // multipliers; the probe below settles it when it runs. Read by the
+        // damped BFGS's re-sizing rule (gh#1191).
+        let mut nonlinear_constraints = m > 0;
         if bfgs.is_some() || lbfgs.is_some() {
             let g0 = nlp.eval_grad_f(&iter.x);
             let g_norm = g0.iter().map(|v| v * v).sum::<Number>().sqrt();
@@ -411,6 +415,7 @@ impl SqpAlgorithm {
                             (a - c).abs() <= 1e-12 * scale
                         })
                 };
+                nonlinear_constraints = !linear_constraints;
                 if linear_constraints {
                     let g1 = nlp.eval_grad_f(&x_probe);
                     let s_y: Number = step
@@ -456,6 +461,9 @@ impl SqpAlgorithm {
             );
             final_stationarity = kkt.stationarity;
             final_constr_viol = kkt.constr_viol;
+            // Lets the filter tell a tiny step that made progress from a stall
+            // (gh#1191; see `SqpFilter::observe_stationarity`).
+            self.filter.observe_stationarity(kkt.stationarity);
 
             // Fired BEFORE this iteration's Lagrangian Hessian is evaluated, as
             // on the interior-point arm (callback after acceptance, before the
@@ -516,7 +524,10 @@ impl SqpAlgorithm {
                     if let Some((s, y)) =
                         curvature_pair(prev_point.as_ref(), &iter, &grad_f, &jac_c, n)
                     {
-                        bfgs.update_sy(&s, &y);
+                        // `y` is formed at `iter.lambda_g` (see
+                        // `curvature_pair`).
+                        let lambda = nonlinear_constraints.then_some(iter.lambda_g.as_slice());
+                        bfgs.update_sy_at(&s, &y, lambda);
                     }
                     bfgs.as_triplet()
                 }
@@ -644,8 +655,23 @@ impl SqpAlgorithm {
             // only reading under which neither option is a no-op. Restores
             // `~5e-9` worst-case accuracy for ~10% more iterations. Same
             // registered-but-inert defect family as gh #360.
-            let stationarity_tol = self.opts.tol.min(self.opts.dual_inf_tol);
-            if kkt.stationarity <= stationarity_tol && kkt.constr_viol <= self.opts.constr_viol_tol
+            //
+            // `tol` is compared with the stationarity residual divided by
+            // Ipopt's multiplier scale `s_d` (see `dual_scale`), and
+            // `dual_inf_tol` with the residual itself, which is how Ipopt
+            // reads the same pair. Until gh#1191 both read the raw residual.
+            // With large multipliers the residual has a round-off floor above
+            // an absolute `tol`: `hs99exp` (`f = −r₈² ≈ −1e9`, `s_d ≈ 91`)
+            // sat at 4e-8 – 1e-7 for its last iterations and certified only
+            // when the noise dipped below 1e-8, which on the corpus `.nl` it
+            // did not. `s_d ≥ 1`, so this certifies at the same iterate or an
+            // earlier one, never a later one; with every `|λ| ≤ 100` on
+            // average, `s_d = 1` and nothing changes, which covers the #358
+            // sweep above.
+            let s_d = dual_scale(&iter.lambda_g, &iter.lambda_x, &xl, &xu);
+            if kkt.stationarity / s_d <= self.opts.tol
+                && kkt.stationarity <= self.opts.dual_inf_tol
+                && kkt.constr_viol <= self.opts.constr_viol_tol
             {
                 // First-order KKT is necessary and not sufficient. Before
                 // reporting success on an indefinite Lagrangian, look for a
@@ -2671,6 +2697,32 @@ pub(crate) fn deadline_remaining(
     (std::time::Duration::from_secs_f64(left), kind)
 }
 
+/// Ipopt's `s_max` (`IpOptErrorConvCheck`, `s_max` option, default 100).
+const DUAL_SCALE_MAX: Number = 100.0;
+
+/// Ipopt's dual scaling factor for the convergence test,
+/// `s_d = max(s_max, Σ|multipliers| / count) / s_max` (`IpIpoptCalculatedQuantities::
+/// ComputeOptimalityErrorScaling`). The multipliers are the constraint rows'
+/// `λ_g` and the bound multipliers `λ_x`; `count` is the number of rows plus
+/// the number of finite variable bounds, which is Ipopt's count less the
+/// slack-bound multipliers this formulation does not have. Always `≥ 1`; `1`
+/// when there is nothing to count, or when the sum is not finite.
+fn dual_scale(lambda_g: &[Number], lambda_x: &[Number], xl: &[Number], xu: &[Number]) -> Number {
+    let bounds = xl.iter().filter(|&&v| v > NLP_LOWER_BOUND_INF).count()
+        + xu.iter().filter(|&&v| v < NLP_UPPER_BOUND_INF).count();
+    let count = lambda_g.len() + bounds;
+    if count == 0 {
+        return 1.0;
+    }
+    let sum: Number = lambda_g.iter().chain(lambda_x).map(|v| v.abs()).sum();
+    let mean = sum / count as Number;
+    if mean.is_finite() {
+        mean.max(DUAL_SCALE_MAX) / DUAL_SCALE_MAX
+    } else {
+        1.0
+    }
+}
+
 pub(crate) fn check_kkt(
     n: usize,
     m: usize,
@@ -2770,7 +2822,7 @@ mod kkt_nan_tests {
     //! clean `KktError`.
     //!
     //! The caller's convergence gate is
-    //! `kkt.stationarity <= stationarity_tol && kkt.constr_viol <= constr_viol_tol`,
+    //! `kkt.stationarity / s_d <= tol && kkt.constr_viol <= constr_viol_tol`,
     //! so anything `check_kkt` reports as `0.0` is reported as converged. Both
     //! of its reductions used to swallow `NaN`:
     //!
@@ -2905,5 +2957,38 @@ mod inf_norm_tests {
         assert_eq!(inf_norm(&[]), 0.0);
         assert_eq!(inf_norm(&[-3.0, 1.0, 2.0]), 3.0);
         assert_eq!(inf_norm(&[f64::INFINITY, 1.0]), f64::INFINITY);
+    }
+}
+
+#[cfg(test)]
+mod dual_scale_tests {
+    //! Ipopt's multiplier scale for the convergence test (gh#1191).
+    use super::*;
+
+    const INF_L: Number = NLP_LOWER_BOUND_INF;
+    const INF_U: Number = NLP_UPPER_BOUND_INF;
+
+    #[test]
+    fn small_multipliers_leave_the_test_unscaled() {
+        assert_eq!(dual_scale(&[50.0, -80.0], &[0.0], &[INF_L], &[INF_U]), 1.0);
+    }
+
+    #[test]
+    fn large_multipliers_scale_by_their_mean_over_s_max() {
+        // Two rows and one finite bound: (3000 + 1000 + 2000) / 3 / 100.
+        let s = dual_scale(
+            &[3000.0, -1000.0],
+            &[2000.0, 0.0],
+            &[0.0, INF_L],
+            &[INF_U, INF_U],
+        );
+        assert!((s - 20.0).abs() < 1e-12, "s_d = {s}");
+    }
+
+    #[test]
+    fn nothing_to_count_or_a_non_finite_sum_is_unscaled() {
+        assert_eq!(dual_scale(&[], &[5e9], &[INF_L], &[INF_U]), 1.0);
+        assert_eq!(dual_scale(&[Number::NAN], &[], &[], &[]), 1.0);
+        assert_eq!(dual_scale(&[Number::INFINITY], &[], &[], &[]), 1.0);
     }
 }

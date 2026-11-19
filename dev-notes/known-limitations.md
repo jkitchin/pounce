@@ -291,6 +291,115 @@ these is a wrong answer.
 
 ---
 
+## Active-set SQP: what the multiplier-scaled stopping test costs (gh#1191)
+
+*Measured on `claude/eloquent-knuth-1ypxda` at `e6d8b03` against `main` at
+`5463adb`: `scripts/sweep-fixtures.sh`, both legs, under the default options,
+`algorithm=active-set-sqp`, `crossover=yes` and `ipm_sqp_handover=yes`.
+Recorded 2026-11-19.*
+
+**The change.** The SQP's stopping test compared the raw stationarity
+residual with `sqp_tol`. It now divides the residual by Ipopt's multiplier
+scale, `s_d = max(100, mean |λ|)/100`, first. The raw residual must still meet
+`sqp_dual_inf_tol`. This was a deliberate choice: with large multipliers the
+residual has a round-off floor above an absolute `1e-8`. `hs99exp`
+(`s_d ≈ 91`) sat at 4e-8 to 1e-7, and certified only when noise happened to
+dip below `tol`, which on the CUTE corpus `.nl` it never did.
+`hs71_obj1e8` also certifies now, on both legs. A solve can stop only at the
+same iterate or an earlier one.
+
+### What is worse
+
+The cost is accuracy where the SQP is a polish. Under
+`ipm_sqp_handover=yes`, the polishing SQP now stops at an earlier, less tightly
+converged iterate. All of these were `Solve_Succeeded` before and still are:
+
+| fixture | `main` objective / dual inf | now |
+|---|---|---|
+| `deb7` (exact) | 97.55993795 / 7.5e-6 | 97.55998637 / 5.4e-7 |
+| `mu_fallback_point_floor` (lbfgs) | −38315031.51 / 2.9e-11 | −38315032.24 / 5.9e-5 |
+| `cc:opf_vv_lower_knee` (exact) | −0.3954730647 / 3e-15 | −0.3954687711 / 1.2e-6 |
+
+The first two each improve one residual and give up the other. `deb7`'s
+objective rises by 5e-7 relative, with a smaller dual infeasibility.
+`mu_fallback_point_floor`'s objective falls, while its dual infeasibility
+rises to 5.9e-5. `opf_vv_lower_knee` loses on both: its objective moves by
+1e-5 relative, and its natural residual rises from 0 to 7.8e-11.
+
+Under `crossover=yes` three objectives move, all still `Solve_Succeeded`:
+- `deb7`: 97.55996651 → 97.55993795.
+- `pooling_rt2stp` (lbfgs): −3273.954895 → −3273.954992.
+- `mpcc_qpec_small_biactive`: 6.7e-74 → 5.3e-17.
+
+### How to tell whether a fix works
+
+Holding the handover's polish to the absolute test while keeping `s_d` for a
+forced `algorithm=active-set-sqp` solve would recover the three handover
+answers. It must keep `hs99exp` and `hs71_obj1e8` certifying on the forced
+leg (`crates/pounce-cli/tests/issue1191_sqp_endgame_certifies.rs`). The three
+handover lines above are the check.
+
+---
+
+## Active-set SQP: `ssebnln` (limited-memory) fails slower, in second-order-correction QPs that run to the cap (gh#1191, tracked in gh#1195)
+
+*Measured on `claude/eloquent-knuth-1ypxda` at `5b1724e` against `main` at
+`5463adb`, forced `algorithm=active-set-sqp hessian_approximation=limited-memory`,
+`RUST_LOG=pounce::sqp::qp=debug` for the QP lines. Recorded 2026-11-19.*
+
+**What is worse.** `ssebnln` fails on both binaries
+(`Search_Direction_Becomes_Too_Small`, f ≈ 1.617063e7; the exact leg solves
+it in 3 iterations at 16170600). It now takes longer to fail:
+
+| machine | `main` | `5b1724e` |
+|---|---|---|
+| maintainer, idle | 78 iterations, 18 s | 144 iterations, 384 s |
+| cloud session | 80 iterations, 41 s | 95 iterations, 76 s |
+
+On the maintainer's machine 384 s is past `sweep-fixtures.sh`'s 300 s cap,
+so the sweep line reads `NO_JSON`. The iteration counts differ between
+machines, which is the mark of a round-off-sensitive path through a
+degenerate endgame. Stationarity there is 1e10 to 5e17, and the multipliers
+are diverging.
+
+**Cause.** The trajectories agree to iteration 63. There the damped BFGS's
+stale-scale shift (gh#1191 fix 2) fires with `sᵀy/sᵀBs = 12.8`, just over its
+threshold of 10, because the diverging multipliers have moved. It fires again
+at 70. The new trajectory then reaches **second-order-correction QPs that run
+to the step budget** (`(n+m)·10 = 2880` iterations) before being discarded:
+- 19.2 s (554 working-set changes, 3322 refactors);
+- 17.8 s (474 working-set changes, 3251 refactors).
+
+Those two are 37 s of the 76 s run. `main`'s trajectory stops at 80 before
+reaching any.
+
+**This exposure is not new.** The SOC QP is given the step QP's whole
+iteration budget. On `main`, across the fixture corpus under forced SQP,
+these SOC QPs already end at the cap:
+- `pooling_rt2stp` (lbfgs): two QPs, 17.8 s and 17.9 s.
+- `square_flowsheet_resto` and `opf_vv_lower_knee_held` (lbfgs): repeatedly,
+  1–4 s each.
+
+**What was tried.** I looked for a cap for the SOC QP. On the corpus,
+successful SOC QPs need up to 333 working-set changes (`ssebnln` itself,
+then `jit1_node` and `jit1_boxed` at about 176). One of those 333-change
+corrections followed a step QP that needed 0, so a budget relative to the
+step QP would cut a correction that works. SOC QPs that hit the cap or come
+back infeasible range from 71 to 1243 changes, overlapping the successful
+ones. No threshold separates the two sets, so none was taken here.
+
+**How to tell whether a fix works.** Bound the SOC QP's cost by something
+other than a working-set count, for example wall time relative to the step
+QP that preceded it, or a check for no progress in the QP's elastic phase.
+The checks:
+- `ssebnln` (lbfgs) fails in `main`'s time or better.
+- `pooling_rt2stp` (lbfgs) loses its two 18 s SOCs.
+- None of the six successful SOCs above is cut: the debug lines for
+  `pooling_rt2stp`, `jit1_node`, `jit1_boxed` and `ssebnln` must still read
+  `optimal`.
+
+---
+
 ## MPCC: four MacMPEC answers stay complementary only to ~7e-5
 
 *Measured on `mpcc/cost-sweep-report` (after `df3fbd12`), MacMPEC through
