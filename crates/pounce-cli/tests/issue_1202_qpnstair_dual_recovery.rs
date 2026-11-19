@@ -22,12 +22,15 @@
 //! null vector), and the recovery keeps the reduced solve's split there.
 //! Everywhere else the two agree to `1.4e-4` against magnitudes of `9e4`.
 //!
-//! What `pounce verify --require-optimal` alone does **not** catch: the
-//! rolled-back `.sol` passed it, because it gates on the residual *with* the
-//! `.sol`'s bound multipliers, and those balance stationarity by sitting on
-//! declared bounds that are not active. The roll-back shows up in the
-//! bound-projected residual (`2.8e4`) and in bound complementarity (`0.21`
-//! against `presolve=no`'s `2.2e-3`), so those are what the test asserts.
+//! The rolled-back `.sol` used to pass `pounce verify --require-optimal`.
+//! That check gated only on the residual *with* the `.sol`'s bound
+//! multipliers, and those balanced stationarity from sides that cannot carry
+//! a multiplier. The largest is `z_U = 2.8e4` on `rgap1`, which has no upper
+//! bound. `verify` now rejects that as a misplaced bound multiplier
+//! (`verify_misplaced_bound_multipliers.rs`). The test also asserts the
+//! bound-projected residual (`2.8e4` when rolled back) and bound
+//! complementarity (`0.21` against `presolve=no`'s `2.2e-3`), which do not
+//! depend on that check.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

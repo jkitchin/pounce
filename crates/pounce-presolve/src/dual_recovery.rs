@@ -8,7 +8,10 @@
 //! original problem has no such bound, so a multiplier on it is not a
 //! multiplier of the original problem at all: written to a `.sol` it fails
 //! `pounce verify --require-optimal` (measured on the example above:
-//! `λ = 8`, `z_L(x1) = 20` against the true `λ = -2`, `z_L(x0) = 10`).
+//! `λ = 8`, `z_L(x1) = 20` against the true `λ = -2`, `z_L(x0) = 10`). That
+//! example fails on its residual. A set that balances the residual from a
+//! side the model does not declare fails too, as a misplaced bound multiplier
+//! (gh#1202; before that it passed).
 //!
 //! # The rule
 //!
