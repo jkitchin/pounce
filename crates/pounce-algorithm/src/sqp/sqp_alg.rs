@@ -1467,10 +1467,8 @@ impl SqpAlgorithm {
                     // the iteration: the step QP and the trial points have
                     // spent part of it since (gh#1061: the correction QP ran
                     // 40–142 s past a wall cap on that stale figure).
-                    let soc_opts = QpOptions {
-                        time_limit: qp_time_limit_now(deadline, qp_opts.time_limit),
-                        ..qp_opts.clone()
-                    };
+                    let soc_opts =
+                        soc_qp_options(qp_opts, qp_time_limit_now(deadline, qp_opts.time_limit));
                     let sol_soc = solve_subproblem_qp(
                         qp_solver,
                         qp_data_ref,
@@ -2654,6 +2652,45 @@ const WARM_ITERS_PER_SEED_ITER: usize = 4;
 /// outside it.
 const IPM_ACTIVE_TOL: Number = 1e-6;
 
+/// The options for the line search's second-order-correction QP: `qp_opts`
+/// with `time_limit`, and two bounds on how long the correction may take
+/// (gh#1195).
+///
+/// The bounds are there because the correction is optional. One that does not
+/// come cheaply is discarded, and the line search backtracks as if it had
+/// never asked. `max_iter` is per pass, and a correction whose warm start pins
+/// infeasible goes through the elastic phase 1, its γ passes and its recovery
+/// solves, each with `max_iter` of its own. Measured, it spends them in two
+/// ways, and each bound answers one:
+///
+/// * **Crawling**: δ-shifted proximal steps that each lower the objective by a
+///   hair, so no pass ever stalls. `pooling_rt2stp`'s two wasted corrections
+///   (limited-memory) ran 4583 and 5137 iterations in all, on a pass budget
+///   of 1180. So the whole solve gets one pass's budget
+///   ([`QpOptions::max_total_iter`]). On the fixture corpus, every correction
+///   that came back `Optimal` used at most 0.6 of it, and every one that used
+///   more than 1.26 was discarded. `jit1_boxed`'s, at 1.23, is `Optimal` but
+///   overshoots `line_search::SOC_MAX_STEP_GROWTH`, so the line search
+///   rejects it unevaluated.
+/// * **Stalling**: `ssebnln`'s wasted corrections, under the BFGS change for
+///   gh#1191, ended in one pass of ~2250 iterations at a flat objective. So a
+///   pass that goes a tenth of the budget (`n + m` at the default) without
+///   improving ends there ([`QpOptions::max_stall_iters`]). The useful
+///   corrections on that model went at most 147 iterations without
+///   improving, with `n + m = 288`.
+///
+/// Both bounds count iterations. Working-set changes do not separate the two
+/// kinds: the useful corrections make up to 333, and some that these bounds
+/// cut make 60. Seconds would give a model a different path on each machine.
+fn soc_qp_options(qp_opts: &QpOptions, time_limit: Option<std::time::Duration>) -> QpOptions {
+    QpOptions {
+        time_limit,
+        max_total_iter: Some(qp_opts.max_iter),
+        max_stall_iters: Some((qp_opts.max_iter / 10).max(1)),
+        ..qp_opts.clone()
+    }
+}
+
 /// A subproblem QP's time limit: what is left of the solve's `deadline` at
 /// this moment, or the QP's `own` limit if that is tighter.
 fn qp_time_limit_now(
@@ -2939,6 +2976,57 @@ mod kkt_nan_tests {
         // Feasibility genuinely holds at this x, and saying so is correct —
         // the flag is about the *primal* iterate, not about the duals.
         assert_eq!(k.constr_viol, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod soc_qp_options_tests {
+    //! gh#1195: the correction QP gets one pass's iteration budget across all
+    //! its passes, and a pass of it ends after a tenth of that budget without
+    //! progress. Everything else is the step QP's.
+    use super::soc_qp_options;
+    use pounce_qp::QpOptions;
+    use std::time::Duration;
+
+    #[test]
+    fn both_bounds_follow_the_pass_budget() {
+        let step = QpOptions {
+            max_iter: 2880,
+            ..QpOptions::default()
+        };
+        let soc = soc_qp_options(&step, Some(Duration::from_secs(7)));
+        assert_eq!(soc.max_iter, 2880);
+        assert_eq!(soc.max_total_iter, Some(2880));
+        assert_eq!(soc.max_stall_iters, Some(288));
+        assert_eq!(soc.time_limit, Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn a_tiny_pass_budget_still_allows_a_stall_of_one() {
+        let step = QpOptions {
+            max_iter: 3,
+            ..QpOptions::default()
+        };
+        let soc = soc_qp_options(&step, None);
+        assert_eq!(soc.max_total_iter, Some(3));
+        assert_eq!(soc.max_stall_iters, Some(1));
+    }
+
+    #[test]
+    fn the_step_qp_options_are_otherwise_kept() {
+        let step = QpOptions {
+            max_iter: 500,
+            use_schur_updates: true,
+            feas_tol: 1e-7,
+            ..QpOptions::default()
+        };
+        let soc = soc_qp_options(&step, None);
+        assert!(soc.use_schur_updates);
+        assert_eq!(soc.feas_tol, 1e-7);
+        assert_eq!(soc.time_limit, None);
+        // The step QP itself is left unbounded by either.
+        assert_eq!(step.max_total_iter, None);
+        assert_eq!(step.max_stall_iters, None);
     }
 }
 
