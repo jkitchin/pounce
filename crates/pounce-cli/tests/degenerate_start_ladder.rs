@@ -15,7 +15,7 @@
 //! quadratic). The second fixture flips the first constraint to
 //! `x² + y² = -25`, which no real point satisfies, so the model is *both*
 //! degenerate at its start and genuinely infeasible — the case where the
-//! ladder must spend all three rungs and still keep its verdict.
+//! ladder must spend every rung and still keep its verdict.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -106,17 +106,21 @@ fn rung_three_recovers_a_model_that_is_only_degenerate() {
 }
 
 /// The counterpart, and the reason the ladder is not simply "retry until it
-/// works": on a model that really has no solution all three rungs are spent
+/// works": on a model that really has no solution every rung is spent
 /// and the verdict stands. A ladder that promoted here would be laundering
 /// failures.
 #[test]
-fn a_genuinely_infeasible_model_survives_all_three_rungs() {
+fn a_genuinely_infeasible_model_survives_every_rung() {
     let (log, sol) = run("degenerate_start_infeasible.nl", "infeas", &[]);
 
+    // Rung 6, `presolve=yes` (gh#1176), runs on every local-infeasibility
+    // ladder whose solve ran without presolve, and must fail here too: a
+    // genuinely infeasible model stays infeasible under presolve.
     for rung in [
         "feral_scaling=mc64",
         "mu_strategy=adaptive",
         "start_point_perturbation=1e-2",
+        "presolve=yes",
     ] {
         assert!(
             log.contains(&format!("{rung} re-solve did not recover")),
@@ -124,16 +128,16 @@ fn a_genuinely_infeasible_model_survives_all_three_rungs() {
         );
     }
     // The model is square (2×2) with a constant objective, so the
-    // square-system stage runs after the three rungs. The start's Jacobian is
+    // square-system stage runs after the option rungs. The start's Jacobian is
     // identically zero, so it stops at once on stationarity and the verdict
-    // still stands — now having survived four attempts.
+    // still stands — now having survived five attempts.
     assert!(
         log.contains("square_system_lm did not recover (Stationary after 0 iteration(s))"),
         "the square-system stage must run and decline honestly:\n{log}",
     );
     assert!(
         log.contains(
-            "keeping the original Infeasible_Problem_Detected verdict; it survived 4 \
+            "keeping the original Infeasible_Problem_Detected verdict; it survived 5 \
              independent re-solve(s)"
         ),
         "the verdict must be kept, and say how many re-solves it survived:\n{log}",
@@ -184,7 +188,7 @@ fn the_ladder_respects_print_level_zero() {
     );
     for line in [
         "rank-deficient there",
-        "re-solving along 3 different trajectories",
+        "re-solving along 4 different trajectories",
         "keeping the original",
     ] {
         assert!(
@@ -196,7 +200,7 @@ fn the_ladder_respects_print_level_zero() {
     let (loud, _) = run("degenerate_start_infeasible.nl", "loud", &["print_level=1"]);
     for line in [
         "rank-deficient there",
-        "re-solving along 3 different trajectories",
+        "re-solving along 4 different trajectories",
         "keeping the original",
     ] {
         assert!(
