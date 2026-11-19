@@ -948,7 +948,7 @@ pub(crate) fn pivot_counts(solver: &Solver) -> Option<(usize, usize)> {
 
 /// The tightest convex-IPM `tol` for which [`FeralSolverInterface::for_convex_ipm`]
 /// turns static pivoting on; see there.
-pub const STATIC_PIVOT_MIN_TOL: f64 = 1e-10;
+pub const STATIC_PIVOT_MIN_TOL: f64 = 1e-8;
 
 /// The largest fraction of free columns for which
 /// [`FeralSolverInterface::for_convex_ipm`] turns static pivoting on; see
@@ -1189,10 +1189,16 @@ impl FeralSolverInterface {
     /// `nnz(L)` 3.0e6 / 0.02 s to 2.0e8 / 266 s (62 041 delayed columns), and
     /// the solve goes from ~300 s to 10.5 s with static pivoting.
     ///
-    /// Static pivoting perturbs tiny pivots, which caps the attainable KKT
-    /// accuracy near 1e-13 (measured: `lp_israel` at `tol = 1e-16` goes from
-    /// 1.9e-16 to 2.0e-13). Below `STATIC_PIVOT_MIN_TOL` the caller asked for
-    /// more than that, so delayed pivoting stays.
+    /// Static pivoting perturbs tiny pivots, which costs accuracy at tight
+    /// tolerances, so below `STATIC_PIVOT_MIN_TOL` (`1e-8`, the default
+    /// `tol`) delayed pivoting stays. The threshold was `1e-10` first, and that
+    /// was measured too loose: `lp_israel` at `tol = 1e-16` goes from 1.9e-16
+    /// to 2.0e-13, and the gh#1000 blend LP with its objective scaled by 1e-6
+    /// (`test_blend_lp_certifies_at_every_objective_scale`) ends
+    /// `optimal_inaccurate` after 200 iterations at `tol = 1e-10`, against 68
+    /// delayed. At `1e-9` the same LP fails at scale 1e-7 (delayed: 118); at
+    /// `1e-8` static was as good as or better than delayed at every scale from
+    /// 1e-10 to 1e6.
     ///
     /// It also stays when more than `STATIC_PIVOT_MAX_FREE_FRACTION` of the
     /// columns are free (`free_fraction`, from
@@ -2884,7 +2890,8 @@ mod tests {
             f(None, STATIC_PIVOT_MIN_TOL, STATIC_PIVOT_MAX_FREE_FRACTION),
             Some(true)
         );
-        // tol tighter than 1e-10: delayed pivoting (accuracy cap ~1e-13).
+        // tol tighter than the default 1e-8: delayed pivoting.
+        assert_eq!(f(None, 1e-9, 0.0), None);
         assert_eq!(f(None, 1e-12, 0.0), None);
         // DC-OPF-like: most columns free → delayed pivoting.
         assert_eq!(f(None, 1e-8, 0.887), None);

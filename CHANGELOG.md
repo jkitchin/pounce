@@ -133,10 +133,12 @@ changes.
   which it factored on its scalar, single-threaded kernel. On MIPLIB
   `rmatr200-p5` one factorization took 266 s, against 0.1 s for the earlier
   iterations. The convex KKT is quasi-definite, so the convex IPM now runs
-  FERAL with static pivoting when `tol ≥ 1e-10` and at most 1% of the
-  columns are free (`FeralSolverInterface::for_convex_ipm`). Below that
-  tolerance it keeps delayed pivoting, because static pivoting caps accuracy
-  near `1e-13`: NETLIB ISRAEL at `tol=1e-16` reached `2e-13` with it. Above
+  FERAL with static pivoting when `tol ≥ 1e-8` (the default) and at most 1%
+  of the columns are free (`FeralSolverInterface::for_convex_ipm`). At a
+  tighter `tol` it keeps delayed pivoting, because static pivoting costs
+  accuracy there: NETLIB ISRAEL at `tol=1e-16` reached `2e-13` with it, and
+  the gh#1000 blend LP with its objective scaled by `1e-6` stalled at
+  `tol=1e-10` (200 iterations, against 68 delayed). Above
   1% free columns it also keeps delayed pivoting. A free column's pivot has
   no barrier term, so on an LP it is the regularization alone. Static
   pivoting there slowed the DC-OPF models, whose bus angles are ~89% of the

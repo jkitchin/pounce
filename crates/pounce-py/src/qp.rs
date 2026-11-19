@@ -39,7 +39,7 @@ fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
 }
 
 /// The convex interior point's backend for problem `p`: static pivoting on at
-/// `tol >= 1e-10` when at most 1% of `p`'s columns are free (see
+/// `tol >= 1e-8` when at most 1% of `p`'s columns are free (see
 /// [`FeralSolverInterface::for_convex_ipm`]). The CLI's convex path uses the
 /// same constructor, so both frontends factor the same way.
 fn ipm_backend(
