@@ -1181,8 +1181,7 @@ impl PresolveTnlp {
             derived_l: &derived_l,
             derived_u: &derived_u,
         };
-        let budget =
-            dual_recovery::Budget::new(dual_recovery::MAX_WORK_FLOPS, self.deadline.as_ref());
+        let budget = dual_recovery::Budget::new(dual_recovery::MAX_WORK, self.deadline.as_ref());
         let out = dual_recovery::reattribute(&view, lambda, z_l, z_u, budget);
         if out.rolled_back {
             let cause = out

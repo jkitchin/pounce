@@ -1065,7 +1065,10 @@ name = "pounce-presolve"
 version = "0.17.0"
 dependencies = [
  "pounce-common",
+ "pounce-feral",
+ "pounce-linalg",
  "pounce-nlp",
+ "pounce-qp",
  "tracing",
 ]
 

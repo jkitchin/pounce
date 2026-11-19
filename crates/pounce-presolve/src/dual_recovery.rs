@@ -47,10 +47,12 @@
 //! same side (a degenerate pair: the declared bound is the incumbent and
 //! keeps it), and anything the residual does not reach.
 //!
-//! The component is solved dense. It is capped ([`MAX_UNKNOWNS`],
-//! [`MAX_COMPONENT_VARS`]); a component past the cap, or a solve that does
-//! not reduce the residual, leaves the duals exactly as the solver reported
-//! them and says so through [`Outcome`].
+//! The component is solved sparse, one strictly convex QP per proximal step
+//! through `pounce-qp` ([`ProxQp`]), with no cap on its size: the work is
+//! bounded by an allowance of active-set changes and the solve's deadline
+//! ([`Budget`]). Running out, a failed step, or a solve that does not reduce
+//! the residual leaves the duals exactly as the solver reported them and
+//! says so through [`Outcome`].
 //!
 //! Activity is geometric, at `x*`, and so are the multipliers: the solve
 //! reads `∇f(x*)`. That is right for a point the solver converged to, where
@@ -65,21 +67,22 @@
 //! start coming back and reports the supplied duals (`crate::warm_echo`).
 
 use pounce_common::timing::Deadline;
-use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
+use pounce_common::types::{
+    NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number, lower_bound_present, upper_bound_present,
+};
+use pounce_feral::FeralSolverInterface;
+use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+use pounce_qp::{
+    BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver, QpOptions, QpProblem,
+    QpSolver, QpStatus, QpWarmStart, WorkingSet,
+};
 
-/// Most multipliers one dense recovery solve will take on. 800 since
-/// gh#1202 (deb7's components are 662 and 684): the largest size at which
-/// `a_component_near_the_cap_with_many_active_set_changes_is_affordable`
-/// still fits [`MAX_WORK_FLOPS`]; 900 does not.
-pub(crate) const MAX_UNKNOWNS: usize = 800;
-/// Most variables one connected component may span.
-pub(crate) const MAX_COMPONENT_VARS: usize = 5000;
-/// Most floating-point operations one recovery may spend, all proximal
-/// steps and active-set iterations together (gh#1196). A few seconds of
-/// dense work at the worst: about forty full refactorizations at
-/// [`MAX_UNKNOWNS`], and thousands of active-set changes once the factor
-/// is being updated rather than rebuilt.
-pub(crate) const MAX_WORK_FLOPS: f64 = 3e9;
+/// Most work one recovery may do, all proximal steps together (gh#1196,
+/// gh#1202), in units of one active-set change on a KKT system of
+/// dimension one: each step's QP is charged `(changes + 1) × dim`. A change
+/// costs a sparse Schur update and the solves around it, which grow with
+/// the KKT system, so a count of changes alone does not bound the time.
+pub(crate) const MAX_WORK: f64 = 2e6;
 
 /// Read-only view of the original problem at the postsolved point.
 pub(crate) struct KktView<'a> {
@@ -105,15 +108,14 @@ pub(crate) struct Outcome {
     /// Spurious multipliers zeroed (non-zero entries on derived sides the
     /// original model does not have active at `x*`).
     pub n_spurious: usize,
-    /// Multipliers the dense solve took on (0 when none was needed).
+    /// Multipliers the solve took on (0 when none was needed).
     pub n_unknowns: usize,
     /// `‖stationarity‖∞` over the component, before (with the spurious
     /// entries in place) and after.
     pub residual_before: Number,
     pub residual_after: Number,
-    /// `true` when the duals were left untouched because the component was
-    /// past the caps, the solve ran out of its work budget, or it did not
-    /// reduce the residual.
+    /// `true` when the duals were left untouched; [`Outcome::cause`] says
+    /// why.
     pub rolled_back: bool,
     /// `true` when the roll-back was the work budget or the deadline
     /// running out ([`Budget`], gh#1196).
@@ -131,15 +133,18 @@ pub(crate) struct Outcome {
 /// cause wants a different fix, so the warning names it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RollBack {
-    /// The component the residual reaches is past [`MAX_UNKNOWNS`] or
-    /// [`MAX_COMPONENT_VARS`]: the counts the breadth-first search had
-    /// reached when it stopped (lower bounds on the full component).
-    Caps { unknowns: usize, vars: usize },
     /// No active row or declared bound the residual reaches can carry it:
     /// there is nothing to solve for.
     NoMultipliers { vars: usize },
-    /// The flop allowance or the solve's deadline ran out ([`Budget`]).
+    /// The active-set allowance or the solve's deadline ran out ([`Budget`]).
     Budget { unknowns: usize },
+    /// A proximal step's QP ended in a status other than optimal, a time
+    /// or iteration limit: its numerics failed. Each step's QP is strictly
+    /// convex and feasible by construction, so no other status is valid.
+    Solver {
+        unknowns: usize,
+        status: &'static str,
+    },
     /// The solve finished, but its residual missed the acceptance target.
     Residual {
         unknowns: usize,
@@ -151,11 +156,6 @@ pub(crate) enum RollBack {
 impl std::fmt::Display for RollBack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            RollBack::Caps { unknowns, vars } => write!(
-                f,
-                "component past the dense cap (reached {unknowns} multipliers / {vars} \
-                 variables; caps {MAX_UNKNOWNS} / {MAX_COMPONENT_VARS})"
-            ),
             RollBack::NoMultipliers { vars } => write!(
                 f,
                 "no active row or declared bound reaches the residual \
@@ -164,7 +164,11 @@ impl std::fmt::Display for RollBack {
             RollBack::Budget { unknowns } => write!(
                 f,
                 "work budget or deadline spent ({unknowns} multipliers, \
-                 {MAX_WORK_FLOPS:.0e} flops)"
+                 {MAX_WORK:.0e} work units)"
+            ),
+            RollBack::Solver { unknowns, status } => write!(
+                f,
+                "a proximal step's QP failed ({unknowns} multipliers; status {status})"
             ),
             RollBack::Residual {
                 unknowns,
@@ -311,7 +315,6 @@ pub(crate) fn reattribute(
             queue.push_back(j);
         }
     }
-    let mut over_cap = false;
     while let Some(j) = queue.pop_front() {
         if declared_active_l(j) {
             unknowns.push((Unknown::ZLower(j), Sign::NonNeg));
@@ -334,10 +337,6 @@ pub(crate) fn reattribute(
                 }
             }
         }
-        if unknowns.len() > MAX_UNKNOWNS || vars.len() > MAX_COMPONENT_VARS {
-            over_cap = true;
-            break;
-        }
     }
     out.residual_before = vars.iter().fold(0.0_f64, |a, &j| a.max(before[j].abs()));
     let restore = |lambda: &mut [Number], z_l: &mut [Number], z_u: &mut [Number]| {
@@ -345,86 +344,71 @@ pub(crate) fn reattribute(
         z_l.copy_from_slice(&zl0);
         z_u.copy_from_slice(&zu0);
     };
-    if over_cap || unknowns.is_empty() {
+    if unknowns.is_empty() {
         restore(lambda, z_l, z_u);
         out.rolled_back = true;
-        out.cause = Some(if over_cap {
-            RollBack::Caps {
-                unknowns: unknowns.len(),
-                vars: vars.len(),
-            }
-        } else {
-            RollBack::NoMultipliers { vars: vars.len() }
-        });
+        out.cause = Some(RollBack::NoMultipliers { vars: vars.len() });
         out.residual_after = out.residual_before;
         out.n_spurious = 0;
         return out;
     }
     out.n_unknowns = unknowns.len();
 
-    // Dense A (|vars| × k) in the transformed variable `w = s·y` so every
-    // sign constraint reads `w ≥ 0`, and b = r − A·w0 so the component's
-    // residual is `A·w + b`.
+    // The component's system `A·w + b`, sparse by column, in the
+    // transformed variable `w = s·y` so every sign constraint reads `w ≥ 0`,
+    // and with `b = r − A·w_current` so the component's residual is
+    // `A·w + b`.
     let nv = vars.len();
     let k = unknowns.len();
-    let mut a = vec![0.0; nv * k];
+    let mut cols: Vec<Vec<(usize, Number)>> = Vec::with_capacity(k);
     let mut w0 = vec![0.0; k];
     let mut constrained = vec![false; k];
+    let mut current = vec![0.0; k];
     for (c, &(u, sign)) in unknowns.iter().enumerate() {
         let s = if sign == Sign::NonPos { -1.0 } else { 1.0 };
         constrained[c] = sign != Sign::Free;
+        let mut col: Vec<(usize, Number)> = Vec::new();
         match u {
             Unknown::Row(i) => {
                 for &(jj, aij) in &by_row[i] {
                     let slot = var_slot[jj];
                     if slot != usize::MAX {
-                        a[slot * k + c] += s * aij;
+                        col.push((slot, s * aij));
                     }
                 }
                 w0[c] = s * lambda[i];
             }
             Unknown::ZLower(j) => {
-                a[var_slot[j] * k + c] = -1.0;
+                col.push((var_slot[j], -1.0));
                 w0[c] = z_l[j];
             }
             Unknown::ZUpper(j) => {
-                a[var_slot[j] * k + c] = 1.0;
+                col.push((var_slot[j], 1.0));
                 w0[c] = z_u[j];
             }
         }
+        current[c] = if w0[c].is_finite() { w0[c] } else { 0.0 };
         if constrained[c] && !(w0[c] >= 0.0) {
             w0[c] = 0.0;
         }
+        cols.push(col);
     }
-    let mut b: Vec<Number> = vars.iter().map(|&j| r[j]).collect();
-    // r was computed with the current (pre-projection) values; express it
-    // against the projected start.
-    for (c, &(u, sign)) in unknowns.iter().enumerate() {
-        let s = if sign == Sign::NonPos { -1.0 } else { 1.0 };
-        let current = match u {
-            Unknown::Row(i) => s * lambda[i],
-            Unknown::ZLower(j) => z_l[j],
-            Unknown::ZUpper(j) => z_u[j],
-        };
-        let current = if current.is_finite() { current } else { 0.0 };
-        for (row, bv) in b.iter_mut().enumerate() {
-            *bv -= a[row * k + c] * current;
-        }
+    let mut sys = LsSystem {
+        nrows: nv,
+        cols,
+        b: vars.iter().map(|&j| r[j]).collect(),
+        constrained,
+    };
+    // `r` was computed with the current (pre-projection) values; express
+    // it against them.
+    let shift = sys.times(&current);
+    for (bv, sv) in sys.b.iter_mut().zip(&shift) {
+        *bv -= sv;
     }
+    let sys = sys;
     // Accept the recovery only when it actually closes stationarity: to the
     // solver's own residual, or to a level no tolerance would notice.
     let target = (10.0 * out.residual_before).max(1e-8 * scale);
-    let resid_of = |w: &[Number]| -> Number {
-        (0..nv)
-            .map(|row| {
-                let mut acc = b[row];
-                for c in 0..k {
-                    acc += a[row * k + c] * w[c];
-                }
-                acc.abs()
-            })
-            .fold(0.0_f64, Number::max)
-    };
     // Anchor at the reduced solve's multipliers, so a degenerate component
     // keeps as much of their attribution as stays valid — unless the
     // anchor cannot be honoured at working precision: when rounding at the
@@ -434,13 +418,28 @@ pub(crate) fn reattribute(
     // same gradient at `x*`; anchored there, the residual crept down ×0.97
     // a step against a floor of `5e-4` and the recovery rolled back, while
     // multipliers of size `1.4e3` close it to `1e-4`.
-    let start = if rounding_floor(&a, &b, nv, k, &w0) > 0.1 * target {
+    let start = if sys.rounding_floor(&w0) > 0.1 * target {
         out.restarted = true;
         vec![0.0; k]
     } else {
         w0
     };
-    let w = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &start, target, &mut budget);
+    let w = match solve_sign_constrained_ls(&sys, &start, target, &mut budget) {
+        Ok(w) => Some(w),
+        Err(Failure::Budget) => None,
+        Err(Failure::Solver(status)) => {
+            restore(lambda, z_l, z_u);
+            out.rolled_back = true;
+            out.cause = Some(RollBack::Solver {
+                unknowns: k,
+                status,
+            });
+            out.residual_after = out.residual_before;
+            out.n_spurious = 0;
+            out.n_unknowns = 0;
+            return out;
+        }
+    };
     let Some(w) = w else {
         restore(lambda, z_l, z_u);
         out.rolled_back = true;
@@ -451,7 +450,11 @@ pub(crate) fn reattribute(
         out.n_unknowns = 0;
         return out;
     };
-    let res_after = resid_of(&w);
+    let res_after = sys
+        .times(&w)
+        .iter()
+        .zip(&sys.b)
+        .fold(0.0_f64, |m, (x, y)| m.max((x + y).abs()));
     if !(res_after <= target) {
         restore(lambda, z_l, z_u);
         out.rolled_back = true;
@@ -477,38 +480,265 @@ pub(crate) fn reattribute(
     out
 }
 
-/// What one recovery may spend: a flop allowance and, optionally, the
-/// solve's own deadline (gh#1196).
+/// What one recovery may spend: an allowance of active-set changes and,
+/// optionally, the solve's own deadline (gh#1196).
 ///
-/// The unknowns cap ([`MAX_UNKNOWNS`]) bounds the size of one dense solve,
-/// not how many of them run: the proximal-point loop takes up to 200 steps,
-/// and each is an active-set QP whose iteration count grows with the number
-/// of sign changes. Uncapped, Vanderbei `qpnstair` (`presolve=yes`) spent
-/// 838 s here after the interior-point solve had converged, past a 10 s
-/// `max_wall_time`. Spending the budget is the same outcome as a component
-/// past the caps: the reduced solve's duals are kept, `rolled_back` is set.
+/// The proximal-point loop takes up to 200 steps, and each is an active-set
+/// QP whose iteration count grows with the number of sign changes. Unbounded,
+/// Vanderbei `qpnstair` (`presolve=yes`) spent 838 s here after the
+/// interior-point solve had converged, past a 10 s `max_wall_time`. Spending
+/// the budget keeps the reduced solve's duals and sets `rolled_back`.
+///
+/// Counted in working-set changes, which the QP reports exactly, so a
+/// recovery's outcome does not depend on the machine it runs on; the
+/// deadline is the one input that does.
 pub(crate) struct Budget<'a> {
-    flops: f64,
+    work: f64,
     deadline: Option<&'a Deadline>,
 }
 
 impl Default for Budget<'_> {
     fn default() -> Self {
-        Self::new(MAX_WORK_FLOPS, None)
+        Self::new(MAX_WORK, None)
     }
 }
 
 impl<'a> Budget<'a> {
-    pub(crate) fn new(flops: f64, deadline: Option<&'a Deadline>) -> Self {
-        Self { flops, deadline }
+    pub(crate) fn new(work: f64, deadline: Option<&'a Deadline>) -> Self {
+        Self { work, deadline }
     }
 
-    /// Charge `flops` of work about to be done; `false` once the allowance
-    /// or the deadline is spent. Called at the granularity of one
-    /// active-set iteration, so the overshoot is one such iteration.
-    fn charge(&mut self, flops: f64) -> bool {
-        self.flops -= flops;
-        self.flops >= 0.0 && self.deadline.is_none_or(|d| d.exceeded().is_none())
+    fn spent(&self) -> bool {
+        !(self.work > 0.0) || self.deadline.is_some_and(|d| d.exceeded().is_some())
+    }
+
+    /// The QP options one step on a KKT system of dimension `dim` may use:
+    /// the changes the remaining allowance pays for as its working-set
+    /// budget, and the remaining wall time as its time limit.
+    fn options(&self, base: &QpOptions, dim: usize) -> QpOptions {
+        let mut o = base.clone();
+        let changes = (self.work / dim.max(1) as f64).floor();
+        o.max_working_set_changes = Some(changes.clamp(0.0, u32::MAX as f64) as u32);
+        // A deadline with no limit reports a finite `1e20` s left
+        // (`max_wall_time`'s default), past the `1.8e19` s a `Duration`
+        // holds: that is no time limit, not a panic.
+        if let Some(d) = self.deadline {
+            o.time_limit = std::time::Duration::try_from_secs_f64(d.remaining_wall().max(0.0)).ok();
+        }
+        o
+    }
+
+    /// Charge one step's QP on a KKT system of dimension `dim`: its
+    /// working-set changes, and one for the step's factorization.
+    fn charge(&mut self, changes: u32, dim: usize) {
+        self.work -= (changes as f64 + 1.0) * dim as f64;
+    }
+}
+
+/// Why [`solve_sign_constrained_ls`] gave up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Failure {
+    /// The [`Budget`] ran out.
+    Budget,
+    /// A step's QP ended in this status.
+    Solver(&'static str),
+}
+
+/// The component's least-squares system `A·w + b`, sparse by column:
+/// `cols[c]` holds unknown `c`'s `(row, value)` entries, a row being one of
+/// the component's variables. `constrained[c]`: `w_c ≥ 0`, else free.
+struct LsSystem {
+    nrows: usize,
+    cols: Vec<Vec<(usize, Number)>>,
+    b: Vec<Number>,
+    constrained: Vec<bool>,
+}
+
+impl LsSystem {
+    fn k(&self) -> usize {
+        self.cols.len()
+    }
+
+    /// `A·w`.
+    fn times(&self, w: &[Number]) -> Vec<Number> {
+        let mut out = vec![0.0; self.nrows];
+        for (col, &wc) in self.cols.iter().zip(w) {
+            if wc != 0.0 {
+                for &(row, a) in col {
+                    out[row] += a * wc;
+                }
+            }
+        }
+        out
+    }
+
+    /// `A·w + b`.
+    fn residual(&self, w: &[Number]) -> Vec<Number> {
+        let mut r = self.times(w);
+        for (x, y) in r.iter_mut().zip(&self.b) {
+            *x += y;
+        }
+        r
+    }
+
+    /// `max_c ‖A_c‖₂`.
+    fn max_col_norm(&self) -> Number {
+        self.cols
+            .iter()
+            .map(|col| col.iter().map(|&(_, a)| a * a).sum::<Number>().sqrt())
+            .fold(0.0_f64, Number::max)
+    }
+
+    /// What rounding alone costs evaluating `A·w + b`:
+    /// `100·ε·max_r (|b_r| + Σ_c |a_rc·w_c|)`, row by row. Not
+    /// `‖A‖∞·‖w‖∞`, which pairs the densest row with the largest entry
+    /// anywhere, so one huge multiplier reads as a floor on every row
+    /// (deb7, gh#1202: `3.3e-2` from a `1.16e10` pair, against `5e-4` on the
+    /// row that pair sits in).
+    fn rounding_floor(&self, w: &[Number]) -> Number {
+        let mut acc: Vec<Number> = self.b.iter().map(|x| x.abs()).collect();
+        for (col, &wc) in self.cols.iter().zip(w) {
+            for &(row, a) in col {
+                acc[row] += (a * wc).abs();
+            }
+        }
+        100.0 * Number::EPSILON * acc.iter().fold(0.0_f64, |m, &x| m.max(x))
+    }
+
+    /// Is `w` optimal for `min ½‖A·w + b‖²` subject to the sign
+    /// constraints, given its residual `res = A·w + b`? The projected
+    /// gradient `Aᵀres` — every free entry, and a constrained entry at zero
+    /// where it pushes below zero — at most `1e-6` of
+    /// `max_c ‖A_c‖₂ · ‖res‖₂`.
+    ///
+    /// This is the stop for an *inconsistent* system, whose residual stays
+    /// above the rounding floor at the optimum: on deb7 (gh#1202) the
+    /// optimum is `1.02e-4` (the primal is accurate to about that), and
+    /// without this test the iteration kept weakening `μ` past it until an
+    /// ill-conditioned active-set QP spent the whole work budget. A
+    /// consistent system stops at the floor first: there `‖res‖₂ → 0` and
+    /// this ratio does not shrink.
+    fn ls_optimal(&self, res: &[Number], w: &[Number], col_norm: Number) -> bool {
+        let rn = res.iter().map(|x| x * x).sum::<Number>().sqrt();
+        if !(rn > 0.0) || !(col_norm > 0.0) {
+            return false;
+        }
+        let mut pg = 0.0_f64;
+        for (c, col) in self.cols.iter().enumerate() {
+            let gp: Number = col.iter().map(|&(row, a)| a * res[row]).sum();
+            let v = if self.constrained[c] && w[c] <= 0.0 {
+                (-gp).max(0.0)
+            } else {
+                gp.abs()
+            };
+            pg = pg.max(v);
+        }
+        pg <= 1e-6 * col_norm * rn
+    }
+}
+
+/// One proximal step as a sparse QP in the *correction* `d = w⁺ − w_k` and
+/// the residual `r`:
+///
+/// ```text
+///   min ½‖r‖² + ½μ‖d‖²   s.t.  r − A·d = r_k,   d_c ≥ −w_k,c where constrained
+/// ```
+///
+/// with `r_k = A·w_k + b` evaluated directly. That is
+/// `min ½‖A·w⁺ + b‖² + ½μ‖w⁺ − w_k‖²` without forming `AᵀA` (dense where `A`
+/// is not, and squaring its conditioning), and in correction form, so the
+/// KKT solve's error scales with `|d|`, which vanishes as the iteration
+/// converges, not with `|w|`: each step is a round of iterative refinement.
+/// Solving for `w⁺` outright left `1.3e-10` of error on a unique `λ = 2`.
+/// `H = diag(μ·I, I)` is positive definite, so every step's QP is strictly
+/// convex, and `(d, r) = (0, r_k)` is feasible for it.
+struct ProxQp {
+    k: usize,
+    nrows: usize,
+    h: SymTMatrix,
+    a: GenTMatrix,
+    xl: Vec<Number>,
+    xu: Vec<Number>,
+}
+
+impl ProxQp {
+    fn new(sys: &LsSystem) -> Self {
+        let (k, nrows) = (sys.k(), sys.nrows);
+        let n = k + nrows;
+        let diag: Vec<i32> = (1..=n as i32).collect();
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as i32, diag.clone(), diag));
+        let mut hv = vec![1.0; n];
+        hv[..k].fill(0.0);
+        h.set_values(&hv);
+        let (mut ir, mut jc, mut val) = (Vec::new(), Vec::new(), Vec::new());
+        for (c, col) in sys.cols.iter().enumerate() {
+            for &(row, a) in col {
+                ir.push(row as i32 + 1);
+                jc.push(c as i32 + 1);
+                val.push(-a);
+            }
+        }
+        for row in 0..nrows {
+            ir.push(row as i32 + 1);
+            jc.push((k + row) as i32 + 1);
+            val.push(1.0);
+        }
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(nrows as i32, n as i32, ir, jc));
+        a.set_values(&val);
+        let mut xl = vec![NLP_LOWER_BOUND_INF; n];
+        for (c, &con) in sys.constrained.iter().enumerate() {
+            if con {
+                xl[c] = 0.0;
+            }
+        }
+        Self {
+            k,
+            nrows,
+            h,
+            a,
+            xl,
+            xu: vec![NLP_UPPER_BOUND_INF; n],
+        }
+    }
+
+    fn set_mu(&mut self, mu: Number) {
+        self.h.values_mut()[..self.k].fill(mu);
+    }
+
+    /// Set up the step from `w_k` (whose sign constraints hold): the lower
+    /// bounds `d_c ≥ −w_k,c`, and the warm start `(d, r) = (0, r_k)` with
+    /// each constrained entry already at zero on its bound. `prev` carries
+    /// the previous step's multipliers, which stay a good guess.
+    fn start(
+        &mut self,
+        sys: &LsSystem,
+        w: &[Number],
+        r_k: &[Number],
+        prev: Option<QpWarmStart>,
+    ) -> QpWarmStart {
+        let n = self.k + self.nrows;
+        let mut working = WorkingSet::cold(n, self.nrows);
+        for (c, &con) in sys.constrained.iter().enumerate() {
+            if con {
+                self.xl[c] = -w[c];
+                if w[c] <= 0.0 {
+                    working.bounds[c] = BoundStatus::AtLower;
+                }
+            }
+        }
+        working.constraints.fill(ConsStatus::Equality);
+        let mut x = vec![0.0; self.k];
+        x.extend_from_slice(r_k);
+        let (lambda_g, lambda_x) = match prev {
+            Some(p) => (p.lambda_g, p.lambda_x),
+            None => (vec![0.0; self.nrows], vec![0.0; n]),
+        };
+        QpWarmStart {
+            x,
+            lambda_g,
+            lambda_x,
+            working,
+        }
     }
 }
 
@@ -516,156 +746,132 @@ impl<'a> Budget<'a> {
 /// gets to halve before the iteration counts as stalled.
 const STALL_STEPS: usize = 3;
 
-/// Is `w` optimal for `min ½‖A·w + b‖²` subject to the sign constraints,
-/// given its residual `res = A·w + b`? The projected gradient `Aᵀres` —
-/// every free entry, and a constrained entry at zero where it pushes below
-/// zero — at most `1e-6` of `max_c ‖A_c‖₂ · ‖res‖₂`.
-///
-/// This is the stop for an *inconsistent* system, whose residual stays above
-/// the rounding floor at the optimum: on deb7 (gh#1202) the optimum is
-/// `1.02e-4` (the primal is accurate to about that), and without this test
-/// the iteration kept weakening `μ` past it until an ill-conditioned
-/// active-set QP spent the whole work budget. A consistent system stops at
-/// the floor first: there `‖res‖₂ → 0` and this ratio does not shrink.
-fn ls_optimal(
-    a: &[Number],
-    res: &[Number],
-    nrows: usize,
-    k: usize,
-    constrained: &[bool],
-    w: &[Number],
-    col_norm: Number,
-) -> bool {
-    let rn = res.iter().map(|x| x * x).sum::<Number>().sqrt();
-    if !(rn > 0.0) || !(col_norm > 0.0) {
-        return false;
-    }
-    let mut pg = 0.0_f64;
-    for p in 0..k {
-        let gp: Number = (0..nrows).map(|row| a[row * k + p] * res[row]).sum();
-        let v = if constrained[p] && w[p] <= 0.0 {
-            (-gp).max(0.0)
-        } else {
-            gp.abs()
-        };
-        pg = pg.max(v);
-    }
-    pg <= 1e-6 * col_norm * rn
-}
-
-/// What rounding alone costs evaluating `A·w + b`:
-/// `100·ε·max_r (|b_r| + Σ_c |a_rc·w_c|)`, row by row. Not `‖A‖∞·‖w‖∞`,
-/// which pairs the densest row with the largest entry anywhere, so one huge
-/// multiplier reads as a floor on every row (deb7, gh#1202: `3.3e-2` from a
-/// `1.16e10` pair, against `5e-4` on the row that pair sits in).
-fn rounding_floor(a: &[Number], b: &[Number], nrows: usize, k: usize, w: &[Number]) -> Number {
-    100.0
-        * Number::EPSILON
-        * (0..nrows)
-            .map(|row| {
-                let ar = &a[row * k..(row + 1) * k];
-                b[row].abs() + ar.iter().zip(w).map(|(x, y)| (x * y).abs()).sum::<Number>()
-            })
-            .fold(0.0_f64, Number::max)
-}
-
-/// `min ½‖A·w + b‖²` subject to `w_c ≥ 0` where `constrained[c]`, by a
+/// `min ½‖A·w + b‖²` subject to `w_c ≥ 0` where constrained, by a
 /// proximal-point iteration `w⁺ = argmin ½‖A·w + b‖² + ½μ‖w − w_k‖²` started
-/// at `w0`. Each step is a strictly convex bound-constrained QP, solved by a
-/// primal active-set method. On a consistent system with a unique solution
-/// this converges to it; on a degenerate one, to a solution near `w0`.
-/// `None` when `budget` runs out first.
+/// at `w0`. Each step is a strictly convex sparse QP ([`ProxQp`]) solved by
+/// `pounce-qp`'s active-set method, warm-started from the step before. On a
+/// consistent system with a unique solution this converges to it; on a
+/// degenerate one, to a solution near `w0`.
 ///
-/// When the residual stops halving, `μ` is cut ×100 (to `1e-12·max diag`
-/// at the least) and the free block refactored.
+/// When the residual stops halving, `μ` is cut ×100 (to `1e-12·max_c ‖A_c‖²`
+/// at the least).
 ///
 /// It returns the iterate with the smallest residual `‖A·w + b‖∞`, as soon
-/// as that is down to the rounding floor `100·ε·max_r (|b_r| + Σ_c |a_rc·w_c|)`,
-/// or once it is
-/// under `accept` (the caller's acceptance target) and has not halved in
-/// [`STALL_STEPS`] steps — or when the step itself vanishes.
+/// as that is down to the rounding floor ([`LsSystem::rounding_floor`]), or
+/// the iterate is a least-squares optimum ([`LsSystem::ls_optimal`]), or
+/// once it is under `accept` (the caller's acceptance target) and has not
+/// halved in [`STALL_STEPS`] steps — or when the step itself vanishes.
 /// The step test alone is not reachable in floating point once the
 /// multipliers are large: on Vanderbei `qpnstair` (`‖w‖∞ ≈ 9e4`) the
 /// residual contracts ×0.44 per step to a floor of `2e-9` by step 27, while
 /// the step stalls near `4e-7` — `4e-12` relative against the `1e-15` the
 /// test asks for. The remaining 170 steps iterated rounding noise, and the
-/// active-set QP cycled on near-zero entries to its iteration cap, `1e10`
-/// flops a step: the whole [`MAX_WORK_FLOPS`] allowance, three times over,
-/// on a recovery that had met its acceptance target at step 15.
-#[allow(clippy::too_many_arguments)]
+/// active-set QP of the time cycled on near-zero entries to its iteration
+/// cap: the whole work allowance, three times over, on a recovery that had
+/// met its acceptance target at step 15.
 fn solve_sign_constrained_ls(
-    a: &[Number],
-    b: &[Number],
-    nrows: usize,
-    k: usize,
-    constrained: &[bool],
+    sys: &LsSystem,
     w0: &[Number],
     accept: Number,
     budget: &mut Budget<'_>,
-) -> Option<Vec<Number>> {
-    // Normal matrix and AᵀB.
-    let nnz = a.iter().filter(|&&x| x != 0.0).count() as f64;
-    if !budget.charge(2.0 * nnz * k as f64) {
-        return None;
-    }
-    let mut ata = vec![0.0; k * k];
-    let mut atb = vec![0.0; k];
-    for row in 0..nrows {
-        let ar = &a[row * k..(row + 1) * k];
-        for p in 0..k {
-            if ar[p] == 0.0 {
-                continue;
-            }
-            atb[p] += ar[p] * b[row];
-            for q in 0..k {
-                ata[p * k + q] += ar[p] * ar[q];
-            }
-        }
-    }
-    let max_diag = (0..k).fold(0.0_f64, |m, p| m.max(ata[p * k + p]));
-    let col_norm = max_diag.sqrt();
-    let mut mu = 1e-6 * max_diag.max(1e-300);
-    let mu_min = 1e-12 * max_diag.max(1e-300);
-    let mut h = ata;
-    for p in 0..k {
-        h[p * k + p] += mu;
-    }
-    let floor = |w: &[Number]| rounding_floor(a, b, nrows, k, w);
-    let resid = |w: &[Number]| -> Number {
-        (0..nrows)
-            .map(|row| {
-                let ar = &a[row * k..(row + 1) * k];
-                (b[row] + ar.iter().zip(w).map(|(x, y)| x * y).sum::<Number>()).abs()
-            })
-            .fold(0.0_f64, Number::max)
+) -> Result<Vec<Number>, Failure> {
+    let k = sys.k();
+    let col_norm = sys.max_col_norm();
+    let max_diag = (col_norm * col_norm).max(1e-300);
+    let mut mu = 1e-6 * max_diag;
+    let mu_min = 1e-12 * max_diag;
+    let mut qp = ProxQp::new(sys);
+    // `(w, r)` and one multiplier per equality row.
+    let kkt_dim = k + 2 * sys.nrows;
+    let base = QpOptions {
+        // The work allowance bounds the solve; a pass may take as many
+        // changes as it has left.
+        max_iter: u32::MAX,
+        use_schur_updates: true,
+        certify_second_order: false,
+        certify_recession_ray: false,
+        ..QpOptions::default()
     };
-    // One factor of the free block, carried across the proximal steps (H
-    // does not change between them, and neither, near convergence, does the
-    // active set) and updated, not rebuilt, as the active set moves.
-    let mut fac = FreeFactor::new(k);
+    let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::serial()));
     let mut w = w0.to_vec();
-    let mut best = (resid(&w), w.clone());
+    let mut res = sys.residual(&w);
+    let mut best = (res.iter().fold(0.0_f64, |m, x| m.max(x.abs())), w.clone());
+    let mut prev: Option<QpWarmStart> = None;
     // Residuals of the last few steps, newest last.
     let mut recent: Vec<Number> = Vec::with_capacity(STALL_STEPS + 1);
     for _ in 0..200 {
-        // c = Aᵀb − μ w_k
-        let c: Vec<Number> = (0..k).map(|p| atb[p] - mu * w[p]).collect();
-        let next = box_qp(&h, &c, k, constrained, &w, &mut fac, budget)?;
+        if budget.spent() {
+            return Err(Failure::Budget);
+        }
+        qp.set_mu(mu);
+        let warm = qp.start(sys, &w, &res, prev.take());
+        let g = vec![0.0; k + sys.nrows];
+        let problem = QpProblem {
+            n: k + sys.nrows,
+            m: sys.nrows,
+            h: &qp.h,
+            g: &g,
+            a: &qp.a,
+            bl: &res,
+            bu: &res,
+            xl: &qp.xl,
+            xu: &qp.xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        // The step solves for a correction against `r_k`, so its
+        // tolerances scale with `r_k`: an absolute `1e-9` read the start as
+        // optimal once `‖r_k‖∞` fell below it, stopping a unique `λ = 2` at
+        // `1.99999999987`.
+        let r_inf = res.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        let tol = (1e-6 * r_inf * col_norm.max(1.0)).max(Number::MIN_POSITIVE);
+        let mut opts = budget.options(&base, kkt_dim);
+        opts.opt_tol = tol;
+        opts.feas_tol = tol;
+        let sol = solver
+            .solve(&problem, Some(&warm), &opts)
+            .map_err(|_| Failure::Solver("error"))?;
+        budget.charge(sol.stats.n_working_set_changes, kkt_dim);
+        match sol.status {
+            QpStatus::Optimal => {}
+            QpStatus::MaxIter | QpStatus::TimeLimit => return Err(Failure::Budget),
+            QpStatus::Infeasible => return Err(Failure::Solver("infeasible")),
+            QpStatus::Unbounded => return Err(Failure::Solver("unbounded")),
+            QpStatus::NumericalError => return Err(Failure::Solver("numerical error")),
+        }
+        // `d_c ≥ −w_c` holds to the QP's feasibility tolerance; make the
+        // sign constraints exact, so every reported multiplier has its sign.
+        // An entry the QP holds on its bound is exactly zero: `w_c + d_c`
+        // there is rounding (`1e-17`), and reading it as off the bound made
+        // the next step's QP re-add it, 14–25 changes a step on `qpnstair`
+        // after the active set had settled.
+        let next: Vec<Number> = w
+            .iter()
+            .zip(&sol.x[..k])
+            .zip(&sys.constrained)
+            .zip(&sol.working.bounds[..k])
+            .map(|(((&wc, &dc), &con), &st)| {
+                if con && st.is_active() {
+                    0.0
+                } else if con {
+                    (wc + dc).max(0.0)
+                } else {
+                    wc + dc
+                }
+            })
+            .collect();
         let step = next
             .iter()
             .zip(&w)
             .fold(0.0_f64, |m, (p, q)| m.max((p - q).abs()));
         let size = next.iter().fold(1.0_f64, |m, p| m.max(p.abs()));
         w = next;
-        if !budget.charge(4.0 * (nrows * k) as f64) {
-            return None;
-        }
-        let res: Vec<Number> = (0..nrows)
-            .map(|row| {
-                let ar = &a[row * k..(row + 1) * k];
-                b[row] + ar.iter().zip(&w).map(|(x, y)| x * y).sum::<Number>()
-            })
-            .collect();
+        prev = Some(QpWarmStart {
+            x: sol.x,
+            lambda_g: sol.lambda_g,
+            lambda_x: sol.lambda_x,
+            working: sol.working,
+        });
+        res = sys.residual(&w);
         let r = res.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
         if r < best.0 {
             best = (r, w.clone());
@@ -675,11 +881,8 @@ fn solve_sign_constrained_ls(
         }
         recent.push(r);
         let stalled = recent.len() > STALL_STEPS && r > 0.5 * recent[0];
-        let at_floor = best.0 <= floor(&best.1);
-        if step <= 1e-15 * size
-            || at_floor
-            || ls_optimal(a, &res, nrows, k, constrained, &w, col_norm)
-        {
+        let at_floor = best.0 <= sys.rounding_floor(&best.1);
+        if step <= 1e-15 * size || at_floor || sys.ls_optimal(&res, &w, col_norm) {
             break;
         }
         if stalled && mu > mu_min {
@@ -687,13 +890,8 @@ fn solve_sign_constrained_ls(
             // direction of singular value `σ`: where `σ²` is far below `μ`
             // the iteration crawls (deb7, gh#1202: ×0.97 a step, from
             // `σ² ≈ 3e-8·max diag` against `μ = 1e-6·max diag`). Weaken
-            // the proximal term and refactor, rather than stop.
-            let next_mu = (mu * 1e-2).max(mu_min);
-            for p in 0..k {
-                h[p * k + p] += next_mu - mu;
-            }
-            mu = next_mu;
-            fac = FreeFactor::new(k);
+            // the proximal term rather than stop.
+            mu = (mu * 1e-2).max(mu_min);
             recent.clear();
             continue;
         }
@@ -701,280 +899,7 @@ fn solve_sign_constrained_ls(
             break;
         }
     }
-    Some(best.1)
-}
-
-/// Cholesky factor `L·Lᵀ = H_FF` of the free block of a `k×k` SPD `H`, for
-/// an ordered free set `idx`, kept up to date as indices leave (a column
-/// rotation sweep, `O(nf²)`) and join (one appended row, `O(nf²)`), instead
-/// of refactored from scratch (`O(nf³)`) on every active-set change.
-struct FreeFactor {
-    k: usize,
-    /// Free indices, in factor order.
-    idx: Vec<usize>,
-    /// `pos[p]` = position of `p` in `idx`, or `usize::MAX`.
-    pos: Vec<usize>,
-    /// Row-major lower triangle, stride `k`.
-    l: Vec<Number>,
-    /// Up/down-dates since the last full factorization.
-    updates: usize,
-    /// Whether `idx`/`l` describe a valid factor at all.
-    valid: bool,
-}
-
-impl FreeFactor {
-    fn new(k: usize) -> Self {
-        Self {
-            k,
-            idx: Vec::new(),
-            pos: vec![usize::MAX; k],
-            l: vec![0.0; k * k],
-            updates: 0,
-            valid: false,
-        }
-    }
-
-    /// Factor `H_FF` for the free set `free` from scratch.
-    fn refactor(&mut self, h: &[Number], free: &[usize], budget: &mut Budget<'_>) -> Option<bool> {
-        let (k, nf) = (self.k, free.len());
-        if !budget.charge((nf as f64).powi(3) / 3.0 + nf as f64) {
-            return None;
-        }
-        self.idx.clear();
-        self.pos.iter_mut().for_each(|p| *p = usize::MAX);
-        self.valid = false;
-        self.updates = 0;
-        for &p in free {
-            self.pos[p] = self.idx.len();
-            self.idx.push(p);
-        }
-        let l = &mut self.l;
-        for j in 0..nf {
-            let mut d = h[free[j] * k + free[j]];
-            for q in 0..j {
-                d -= l[j * k + q] * l[j * k + q];
-            }
-            if !(d > 0.0) {
-                return Some(false);
-            }
-            let d = d.sqrt();
-            l[j * k + j] = d;
-            for i in (j + 1)..nf {
-                let mut s = h[free[i] * k + free[j]];
-                for q in 0..j {
-                    s -= l[i * k + q] * l[j * k + q];
-                }
-                l[i * k + j] = s / d;
-            }
-        }
-        self.valid = true;
-        Some(true)
-    }
-
-    /// Drop index `p` from the free set.
-    fn remove(&mut self, p: usize) {
-        let (k, nf) = (self.k, self.idx.len());
-        let r = self.pos[p];
-        let l = &mut self.l;
-        // Shift rows r+1.. up by one; row t (new) has entries in 0..=t+1.
-        for t in r..nf - 1 {
-            for q in 0..=(t + 1) {
-                l[t * k + q] = l[(t + 1) * k + q];
-            }
-        }
-        // Restore lower-triangularity: rotate columns (t, t+1) to zero the
-        // superdiagonal entry of row t. Column rotations keep L·Lᵀ.
-        for t in r..nf - 1 {
-            let (x, y) = (l[t * k + t], l[t * k + t + 1]);
-            let rho = x.hypot(y);
-            if rho == 0.0 {
-                continue;
-            }
-            let (c, s) = (x / rho, y / rho);
-            for u in t..nf - 1 {
-                let (a, b) = (l[u * k + t], l[u * k + t + 1]);
-                l[u * k + t] = c * a + s * b;
-                l[u * k + t + 1] = -s * a + c * b;
-            }
-            l[t * k + t + 1] = 0.0;
-        }
-        self.idx.remove(r);
-        self.pos[p] = usize::MAX;
-        for (i, &q) in self.idx.iter().enumerate().skip(r) {
-            self.pos[q] = i;
-        }
-        self.updates += 1;
-    }
-
-    /// Append index `p` to the free set; `false` when the new pivot is not
-    /// numerically positive (the caller refactors).
-    fn append(&mut self, h: &[Number], p: usize) -> bool {
-        let (k, nf) = (self.k, self.idx.len());
-        let l = &mut self.l;
-        // Solve L·x = H[idx, p] into row nf.
-        for i in 0..nf {
-            let mut s = h[self.idx[i] * k + p];
-            for q in 0..i {
-                s -= l[i * k + q] * l[nf * k + q];
-            }
-            l[nf * k + i] = s / l[i * k + i];
-        }
-        let hpp = h[p * k + p];
-        let mut d = hpp;
-        for q in 0..nf {
-            d -= l[nf * k + q] * l[nf * k + q];
-        }
-        if !(d > 1e-12 * hpp.abs()) {
-            return false;
-        }
-        l[nf * k + nf] = d.sqrt();
-        self.pos[p] = nf;
-        self.idx.push(p);
-        self.updates += 1;
-        true
-    }
-
-    /// Bring the factor to the free set `!fixed`, by updates when that is
-    /// cheaper and safe, else from scratch. `Some(false)`: `H_FF` is not
-    /// numerically SPD.
-    fn sync(&mut self, h: &[Number], fixed: &[bool], budget: &mut Budget<'_>) -> Option<bool> {
-        let free: Vec<usize> = (0..self.k).filter(|&p| !fixed[p]).collect();
-        let nf = free.len() as f64;
-        if self.valid && self.updates < 64 {
-            let leave: Vec<usize> = self.idx.iter().copied().filter(|&p| fixed[p]).collect();
-            let join: Vec<usize> = free
-                .iter()
-                .copied()
-                .filter(|&p| self.pos[p] == usize::MAX)
-                .collect();
-            let changes = (leave.len() + join.len()) as f64;
-            if changes == 0.0 {
-                return Some(true);
-            }
-            if 2.0 * changes * nf < nf / 3.0 * nf {
-                if !budget.charge(2.0 * changes * nf * nf) {
-                    return None;
-                }
-                for &p in &leave {
-                    self.remove(p);
-                }
-                if join.iter().all(|&p| self.append(h, p)) {
-                    return Some(true);
-                }
-            }
-        }
-        self.refactor(h, &free, budget)
-    }
-
-    /// Solve `H_FF·x = rhs` (in factor order) in place.
-    fn solve(&self, rhs: &mut [Number]) {
-        let (k, nf) = (self.k, self.idx.len());
-        let l = &self.l;
-        for i in 0..nf {
-            let mut s = rhs[i];
-            for q in 0..i {
-                s -= l[i * k + q] * rhs[q];
-            }
-            rhs[i] = s / l[i * k + i];
-        }
-        for i in (0..nf).rev() {
-            let mut s = rhs[i];
-            for q in (i + 1)..nf {
-                s -= l[q * k + i] * rhs[q];
-            }
-            rhs[i] = s / l[i * k + i];
-        }
-    }
-}
-
-/// `min ½ wᵀHw + cᵀw` s.t. `w_c ≥ 0` where `constrained[c]`, `H` SPD,
-/// started from the feasible `start`. Primal active-set method. `None` when
-/// `budget` runs out first.
-fn box_qp(
-    h: &[Number],
-    c: &[Number],
-    k: usize,
-    constrained: &[bool],
-    start: &[Number],
-    fac: &mut FreeFactor,
-    budget: &mut Budget<'_>,
-) -> Option<Vec<Number>> {
-    let mut w: Vec<Number> = start.to_vec();
-    let mut fixed: Vec<bool> = (0..k).map(|p| constrained[p] && w[p] <= 0.0).collect();
-    for p in 0..k {
-        if fixed[p] {
-            w[p] = 0.0;
-        }
-    }
-    for _ in 0..(10 * k + 50) {
-        // Solve H_FF p_F = −c_F (fixed entries are 0).
-        if !fac.sync(h, &fixed, budget)? {
-            return Some(w);
-        }
-        let nf = fac.idx.len();
-        if !budget.charge(2.0 * (nf * nf + k * k) as f64) {
-            return None;
-        }
-        let mut cand = vec![0.0; k];
-        if nf > 0 {
-            let mut rhs: Vec<Number> = fac.idx.iter().map(|&p| -c[p]).collect();
-            fac.solve(&mut rhs);
-            for (r, &p) in fac.idx.iter().enumerate() {
-                cand[p] = rhs[r];
-            }
-        }
-        let free = &fac.idx;
-        let infeasible = free.iter().any(|&p| constrained[p] && cand[p] < 0.0);
-        if !infeasible {
-            w = cand;
-            // Multipliers of the fixed set: the gradient there.
-            let mut worst: Option<(usize, Number)> = None;
-            for p in 0..k {
-                if !fixed[p] {
-                    continue;
-                }
-                let mut gp = c[p];
-                for q in 0..k {
-                    gp += h[p * k + q] * w[q];
-                }
-                let tol = 1e-14 * (h[p * k + p].abs().max(1e-300)).sqrt() * (1.0 + c[p].abs());
-                if gp < -tol && worst.is_none_or(|(_, g)| gp < g) {
-                    worst = Some((p, gp));
-                }
-            }
-            match worst {
-                Some((p, _)) => fixed[p] = false,
-                None => return Some(w),
-            }
-        } else {
-            // Step toward the candidate as far as feasibility allows.
-            let mut alpha = 1.0_f64;
-            let mut block = None;
-            for &p in free {
-                if constrained[p] && cand[p] < 0.0 {
-                    let t = w[p] / (w[p] - cand[p]);
-                    if t < alpha {
-                        alpha = t;
-                        block = Some(p);
-                    }
-                }
-            }
-            for &p in free {
-                w[p] += alpha * (cand[p] - w[p]);
-            }
-            if let Some(p) = block {
-                fixed[p] = true;
-                w[p] = 0.0;
-            }
-            for &p in free {
-                if constrained[p] && w[p] <= 0.0 {
-                    fixed[p] = true;
-                    w[p] = 0.0;
-                }
-            }
-        }
-    }
-    Some(w)
+    Ok(best.1)
 }
 
 #[cfg(test)]
@@ -1117,34 +1042,50 @@ mod tests {
         );
     }
 
-    /// [`ls_optimal`]: optimal at an inconsistent least-squares optimum,
-    /// and at a sign-constrained one held at zero; not elsewhere; and never
-    /// claimed on a zero residual (the floor test's case).
+    /// A one-column system `A = col`, `b`, sign-constrained or not.
+    fn one_col(col: &[Number], b: &[Number], constrained: bool) -> LsSystem {
+        LsSystem {
+            nrows: col.len(),
+            cols: vec![col.iter().copied().enumerate().collect()],
+            b: b.to_vec(),
+            constrained: vec![constrained],
+        }
+    }
+
+    /// [`LsSystem::ls_optimal`]: optimal at an inconsistent least-squares
+    /// optimum, and at a sign-constrained one held at zero; not elsewhere;
+    /// and never claimed on a zero residual (the floor test's case).
     #[test]
     fn least_squares_optimality_by_branch() {
         // A = [1; 1], b = [−1, 1]: the optimum is w = 0, residual (−1, 1).
-        let a = [1.0, 1.0];
-        assert!(ls_optimal(&a, &[-1.0, 1.0], 2, 1, &[false], &[0.0], 1.0));
+        let free = one_col(&[1.0, 1.0], &[-1.0, 1.0], false);
+        assert!(free.ls_optimal(&[-1.0, 1.0], &[0.0], 1.0));
         // w = 0.5 is not the optimum.
-        assert!(!ls_optimal(&a, &[-0.5, 1.5], 2, 1, &[false], &[0.5], 1.0));
+        assert!(!free.ls_optimal(&[-0.5, 1.5], &[0.5], 1.0));
         // A = [1], b = [1], w ≥ 0: the gradient pushes below zero, so w = 0
         // is optimal for the constrained problem, not for the free one.
-        assert!(ls_optimal(&[1.0], &[1.0], 1, 1, &[true], &[0.0], 1.0));
-        assert!(!ls_optimal(&[1.0], &[1.0], 1, 1, &[false], &[0.0], 1.0));
+        assert!(one_col(&[1.0], &[1.0], true).ls_optimal(&[1.0], &[0.0], 1.0));
+        assert!(!one_col(&[1.0], &[1.0], false).ls_optimal(&[1.0], &[0.0], 1.0));
         // A zero residual is left to the floor test.
-        assert!(!ls_optimal(&a, &[0.0, 0.0], 2, 1, &[false], &[1.0], 1.0));
+        assert!(!free.ls_optimal(&[0.0, 0.0], &[1.0], 1.0));
     }
 
-    /// [`rounding_floor`] is per row: a huge entry raises the floor of the
-    /// rows it appears in, not of every row.
+    /// [`LsSystem::rounding_floor`] is per row: a huge entry raises the
+    /// floor of the rows it appears in, not of every row.
     #[test]
     fn the_rounding_floor_is_per_row() {
-        // Row 0 touches w0 = 1e10, row 1 only w1 = 1.
-        let a = [1.0, 0.0, 0.0, 1.0];
-        let f = rounding_floor(&a, &[0.0, 0.0], 2, 2, &[1e10, 1.0]);
-        assert_eq!(f, 100.0 * Number::EPSILON * 1e10);
-        let g = rounding_floor(&a, &[0.0, 0.0], 2, 2, &[1.0, 1.0]);
-        assert_eq!(g, 100.0 * Number::EPSILON);
+        // Row 0 touches w0, row 1 only w1.
+        let sys = LsSystem {
+            nrows: 2,
+            cols: vec![vec![(0, 1.0)], vec![(1, 1.0)]],
+            b: vec![0.0, 0.0],
+            constrained: vec![false, false],
+        };
+        assert_eq!(
+            sys.rounding_floor(&[1e10, 1.0]),
+            100.0 * Number::EPSILON * 1e10
+        );
+        assert_eq!(sys.rounding_floor(&[1.0, 1.0]), 100.0 * Number::EPSILON);
     }
 
     /// Deterministic pseudo-random numbers in `[-1, 1)`.
@@ -1155,7 +1096,7 @@ mod tests {
         ((*seed >> 11) as Number / (1u64 << 53) as Number) * 2.0 - 1.0
     }
 
-    /// gh#1196: a component near [`MAX_UNKNOWNS`] whose sign-constrained
+    /// gh#1196: a large component whose sign-constrained
     /// solve needs many active-set changes — the branch `qpnstair` reaches.
     /// `nrow` inequality rows, all active at their upper side (`λ ≥ 0`), over
     /// `nvar` variables, every row touching the seed variable 0 (so one BFS
@@ -1229,33 +1170,34 @@ mod tests {
         }
     }
 
-    /// The slow branch completes inside the default budget — the factor is
-    /// updated, not rebuilt, per active-set change — and its answer is a
-    /// valid multiplier set: right signs, stationarity no worse than the
-    /// acceptance target.
+    /// The slow branch completes inside the default budget past the old
+    /// dense solve's 600 cap (it took 0.49 s at 800 and could not afford
+    /// 900; this takes 2.0 s, its KKT system having a dense row), and its
+    /// answer is a valid multiplier set: right signs, stationarity no worse
+    /// than the acceptance target. Measured on the same structure: 1.27e6 of
+    /// the 2e6 work units at 800, 1.77e6 at 1000; 2000 runs out (4.5 s) and
+    /// rolls back on the budget.
     #[test]
-    fn a_component_near_the_cap_with_many_active_set_changes_is_affordable() {
-        let p = Stair::new(400, MAX_UNKNOWNS - 10);
+    fn a_large_component_with_many_active_set_changes_is_affordable() {
+        let p = Stair::new(400, 800);
         let (mut lam, mut zl, mut zu) = p.duals();
         let o = reattribute(&p.view(), &mut lam, &mut zl, &mut zu, Budget::default());
-        assert!(!o.budget_exhausted, "{o:?}");
-        assert_eq!(o.n_unknowns, MAX_UNKNOWNS - 10, "{o:?}");
-        if !o.rolled_back {
-            assert!(lam.iter().all(|&l| l >= 0.0), "a λ ≥ 0 went negative");
-            assert_eq!(zl[0], 0.0);
-            let zeroed = lam.iter().filter(|&&l| l == 0.0).count();
-            assert!(
-                zeroed > 50,
-                "only {zeroed} λ reached their bound: not the slow branch"
-            );
-        }
+        assert!(!o.rolled_back, "{o:?}");
+        assert_eq!(o.n_unknowns, 800, "{o:?}");
+        assert!(lam.iter().all(|&l| l >= 0.0), "a λ ≥ 0 went negative");
+        assert_eq!(zl[0], 0.0);
+        let zeroed = lam.iter().filter(|&&l| l == 0.0).count();
+        assert!(
+            zeroed > 50,
+            "only {zeroed} λ reached their bound: not the slow branch"
+        );
     }
 
     /// Out of budget, the recovery stops and keeps the reduced solve's
     /// duals exactly, and says why.
     #[test]
     fn a_spent_work_budget_rolls_back_to_the_reduced_duals() {
-        let p = Stair::new(400, MAX_UNKNOWNS - 10);
+        let p = Stair::new(400, 590);
         let (lam0, zl0, zu0) = p.duals();
         let (mut lam, mut zl, mut zu) = p.duals();
         let o = reattribute(
@@ -1263,31 +1205,11 @@ mod tests {
             &mut lam,
             &mut zl,
             &mut zu,
-            Budget::new(1e6, None),
+            Budget::new(1.0, None),
         );
         assert!(o.rolled_back && o.budget_exhausted, "{o:?}");
         assert!(matches!(o.cause, Some(RollBack::Budget { .. })), "{o:?}");
         assert_eq!(o.n_spurious, 0);
-        assert_eq!((lam, zl, zu), (lam0, zl0, zu0));
-    }
-
-    /// gh#1202: a roll-back names its branch, with what it measured — each
-    /// wants a different fix, and the warning used to list all three.
-    #[test]
-    fn a_component_past_the_cap_names_the_cap() {
-        let p = Stair::new(400, MAX_UNKNOWNS + 50);
-        let (lam0, zl0, zu0) = p.duals();
-        let (mut lam, mut zl, mut zu) = p.duals();
-        let o = reattribute(&p.view(), &mut lam, &mut zl, &mut zu, Budget::default());
-        assert!(o.rolled_back && !o.budget_exhausted, "{o:?}");
-        match o.cause {
-            Some(RollBack::Caps { unknowns, vars }) => {
-                assert!(unknowns > MAX_UNKNOWNS, "{o:?}");
-                assert!(vars > 1, "{o:?}");
-            }
-            c => panic!("expected a cap roll-back, got {c:?}"),
-        }
-        assert!(o.cause.unwrap().to_string().contains("dense cap"));
         assert_eq!((lam, zl, zu), (lam0, zl0, zu0));
     }
 
@@ -1341,11 +1263,30 @@ mod tests {
         }
     }
 
+    /// A deadline with no limit (`Deadline::new(1e20, 1e20)`: `1e20` is
+    /// `max_wall_time`'s registered default) is no limit: the recovery runs. Its remaining
+    /// `1e20` s is past what a `Duration` holds, and converting it panicked
+    /// every recovery on a real solve, which no budget-only test reached.
+    #[test]
+    fn an_unlimited_deadline_does_not_limit_the_recovery() {
+        let p = Stair::new(400, 590);
+        let (mut lam, mut zl, mut zu) = p.duals();
+        let d = Deadline::new(1e20, 1e20);
+        let o = reattribute(
+            &p.view(),
+            &mut lam,
+            &mut zl,
+            &mut zu,
+            Budget::new(MAX_WORK, Some(&d)),
+        );
+        assert!(!o.rolled_back, "{o:?}");
+    }
+
     /// The solve's deadline stops the recovery too: a solve that is already
     /// out of time spends none of it in postsolve.
     #[test]
     fn a_crossed_deadline_rolls_back_to_the_reduced_duals() {
-        let p = Stair::new(400, MAX_UNKNOWNS - 10);
+        let p = Stair::new(400, 590);
         let (lam0, zl0, zu0) = p.duals();
         let (mut lam, mut zl, mut zu) = p.duals();
         let d = Deadline::new(0.0, 0.0);
@@ -1354,66 +1295,9 @@ mod tests {
             &mut lam,
             &mut zl,
             &mut zu,
-            Budget::new(MAX_WORK_FLOPS, Some(&d)),
+            Budget::new(MAX_WORK, Some(&d)),
         );
         assert!(o.rolled_back && o.budget_exhausted, "{o:?}");
         assert_eq!((lam, zl, zu), (lam0, zl0, zu0));
-    }
-
-    /// The up/down-dated factor equals a fresh factorization of the same
-    /// free block, through a mix of removals and appends.
-    #[test]
-    fn factor_updates_match_a_fresh_factorization() {
-        let k = 12;
-        let mut seed = 7;
-        let a: Vec<Number> = (0..k * k).map(|_| lcg(&mut seed)).collect();
-        let mut h = vec![0.0; k * k];
-        for p in 0..k {
-            for q in 0..k {
-                for r in 0..k {
-                    h[p * k + q] += a[r * k + p] * a[r * k + q];
-                }
-            }
-            h[p * k + p] += 0.1;
-        }
-        let mut budget = Budget::default();
-        let mut fac = FreeFactor::new(k);
-        let all: Vec<usize> = (0..k).collect();
-        assert_eq!(fac.refactor(&h, &all, &mut budget), Some(true));
-        for &p in &[3, 0, 11, 6] {
-            fac.remove(p);
-        }
-        for &p in &[11, 0] {
-            assert!(fac.append(&h, p));
-        }
-        fac.remove(5);
-        let order = fac.idx.clone();
-        let nf = order.len();
-        // L·Lᵀ reproduces H on the free set, in factor order.
-        for r in 0..nf {
-            for s in 0..nf {
-                let llt: Number = (0..=r.min(s))
-                    .map(|q| fac.l[r * k + q] * fac.l[s * k + q])
-                    .sum();
-                let hv = h[order[r] * k + order[s]];
-                assert!(
-                    (llt - hv).abs() < 1e-10 * (1.0 + hv.abs()),
-                    "({r},{s}): {llt} vs {hv}"
-                );
-            }
-            for q in (r + 1)..nf {
-                assert_eq!(fac.l[r * k + q], 0.0, "not lower triangular at ({r},{q})");
-            }
-        }
-        // And solves agree with a fresh factor of that block.
-        let mut fresh = FreeFactor::new(k);
-        assert_eq!(fresh.refactor(&h, &order, &mut budget), Some(true));
-        let rhs0: Vec<Number> = (0..nf).map(|_| lcg(&mut seed)).collect();
-        let (mut x1, mut x2) = (rhs0.clone(), rhs0);
-        fac.solve(&mut x1);
-        fresh.solve(&mut x2);
-        for (u, v) in x1.iter().zip(&x2) {
-            assert!((u - v).abs() < 1e-9 * (1.0 + v.abs()), "{x1:?} vs {x2:?}");
-        }
     }
 }

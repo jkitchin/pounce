@@ -116,6 +116,35 @@ changes.
   task-graph driver ignores it. The Python QP path reads the environment
   variable.
 
+### Changed
+- **Presolve's derived-bound dual recovery is solved sparse, with no size
+  cap** (gh#1202 follow-up). It used to hand-roll a dense normal-equations
+  Cholesky and an active-set loop, capped at 600 multipliers (800 after
+  deb7). Each proximal step is now a strictly convex sparse QP solved by
+  `pounce-qp`, in correction form so that each step is a round of iterative
+  refinement. It never forms `AᵀA`. The work bound is now an allowance of
+  `(active-set changes + 1) × KKT dimension` (`MAX_WORK = 2e6`) instead of
+  a flop count, still deterministic. Measured against the dense version:
+  - Every fixture that recovered still recovers. Primal values are
+    identical, and the duals agree to rounding except on deb7 and qpnstair,
+    whose multipliers are not unique. There both answers verify with no
+    misplaced multiplier, and qpnstair's now differs from `presolve=no` on
+    39 variables instead of 50.
+  - Run times: qpnstair 0.69 s (was 0.64 s) and deb7 2.5 s (was 2.2 s).
+  - On a synthetic component whose KKT system has a dense row, 590
+    multipliers take 1.2 s (was 0.16 s), and 800 take 2.0 s (was 0.49 s).
+    Components the dense solve refused (900 and up) are now solved: 1000
+    take 3.2 s, and 2000 exhaust the work allowance after 4.5 s and roll back
+    on the budget.
+
+  Getting there took two fixes, each measured on qpnstair. Entries the QP
+  held on their bound were read back as `1e-17` and re-added every step
+  (587 active-set changes, against 54 once they read as zero), and
+  Schur-complement updates are now enabled (they were off, so every change
+  refactored the KKT system). A deadline with no limit (`max_wall_time`'s
+  default `1e20` s) is now treated as no time limit; converting it to a
+  `Duration` panicked.
+
 ### Fixed
 - **`pounce verify --require-optimal` rejects bound multipliers that cannot
   be multipliers** (gh#1202 follow-up). With the `ipopt_zL_out` /
@@ -161,9 +190,7 @@ changes.
   an inconsistent system, by its projected gradient. Before that last
   change, weakening the proximal term ran an ill-conditioned active-set QP
   into the work budget. The rounding-floor estimate is now per row: one
-  `1e10` entry no longer reads as a floor of `3e-2` everywhere. The cap is
-  800, the largest at which the near-cap adversarial test still fits the
-  work budget. deb7 now re-attributes 70 multipliers to residual `1.02e-4`,
+  `1e10` entry no longer reads as a floor of `3e-2` everywhere. deb7 now re-attributes 70 multipliers to residual `1.02e-4`,
   the least-squares optimum at that point (the solver's own is `1.13e-4`;
   scipy's bounded least squares finds `1.03e-4`). No multiplier sits on a
   side that cannot carry one (`125` before), and bound complementarity is

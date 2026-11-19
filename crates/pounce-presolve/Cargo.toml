@@ -13,6 +13,12 @@ categories = ["mathematics", "algorithms"]
 [dependencies]
 pounce-common.workspace = true
 pounce-nlp.workspace = true
+# Postsolve dual recovery (`dual_recovery`) solves its sign-constrained least
+# squares as a sparse QP per proximal step (gh#1202). Acyclic: none of these
+# reaches pounce-presolve.
+pounce-qp.workspace = true
+pounce-feral.workspace = true
+pounce-linalg.workspace = true
 tracing.workspace = true
 
 [lints]

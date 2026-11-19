@@ -145,7 +145,8 @@ fn qpnstair_presolve_duals_are_re_attributed_to_the_original_model() {
 }
 
 /// deb7: the recovery rolled back twice over. Its component (684
-/// multipliers) was past the 600 cap; past the cap, the solve missed its
+/// multipliers) was past the dense solve's 600 cap (the recovery is now
+/// sparse and uncapped); past the cap, the solve missed its
 /// target (`2.4e-2` against `1.1e-3`). The reduced solve hands over a
 /// cancelling pair `λ = ±1.16e10` on two equalities with the same gradient
 /// at `x*`, and anchored there the iteration could not get below the
