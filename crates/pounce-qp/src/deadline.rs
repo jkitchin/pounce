@@ -1,6 +1,7 @@
 //! Solve-wide budgets for the active-set solver: a monotonic wall-clock
-//! deadline ([`QpOptions::time_limit`]) and a cap on working-set changes
-//! ([`QpOptions::max_working_set_changes`]).
+//! deadline ([`QpOptions::time_limit`]), a cap on working-set changes
+//! ([`QpOptions::max_working_set_changes`]) and a cap on pivot-loop
+//! iterations ([`QpOptions::max_total_iter`]).
 //!
 //! One budget per *top-level* solve: the nested stages a solve can reach —
 //! homotopy, elastic phase-1 and its penalty passes, feasibility/recovery
@@ -8,7 +9,7 @@
 //! it. `max_iter`, by contrast, is a per-pass cap that every one of those
 //! stages gets afresh.
 //!
-//! Running out of either budget is the same event to the solver: every check
+//! Running out of any budget is the same event to the solver: every check
 //! that stops a solve on its deadline — inside the pivot loops and at the
 //! decision points between passes, where a truncated pass must not be read as
 //! a verdict — stops it on a spent change budget too. Only the reported
@@ -16,6 +17,7 @@
 //!
 //! [`QpOptions::time_limit`]: crate::QpOptions::time_limit
 //! [`QpOptions::max_working_set_changes`]: crate::QpOptions::max_working_set_changes
+//! [`QpOptions::max_total_iter`]: crate::QpOptions::max_total_iter
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -27,6 +29,11 @@ thread_local! {
     /// Working-set changes the current top-level solve may still make;
     /// `None` when it has no such cap (or there is no scope).
     static CHANGES_LEFT: Cell<Option<u32>> = const { Cell::new(None) };
+    /// Pivot-loop iterations the current top-level solve may still start;
+    /// `None` when it has no such cap (or there is no scope).
+    static ITERS_LEFT: Cell<Option<u32>> = const { Cell::new(None) };
+    /// Whether an iteration past that budget has been asked for.
+    static ITERS_SPENT: Cell<bool> = const { Cell::new(false) };
     /// When the owning scope started. Used only to report how long a
     /// cancelled solve actually ran (`QpStats::time`), so a timeout is not
     /// recorded as an instantaneous solve.
@@ -65,16 +72,18 @@ pub(crate) struct Guard {
 }
 
 /// Open the solve-wide scope, unless one is already open — a nested entry
-/// point shares the outer solve's budgets and its own `time_limit` and
-/// `max_working_set_changes` are ignored.
-pub(crate) fn enter(limit: Option<Duration>, max_working_set_changes: Option<u32>) -> Guard {
+/// point shares the outer solve's budgets and its own `time_limit`,
+/// `max_working_set_changes` and `max_total_iter` are ignored.
+pub(crate) fn enter(opts: &crate::QpOptions) -> Guard {
     let owner = SCOPE_START.with(|start| {
         if start.get().is_some() {
             false
         } else {
             let now = Instant::now();
-            DEADLINE.with(|slot| slot.set(limit.and_then(|d| now.checked_add(d))));
-            CHANGES_LEFT.with(|slot| slot.set(max_working_set_changes));
+            DEADLINE.with(|slot| slot.set(opts.time_limit.and_then(|d| now.checked_add(d))));
+            CHANGES_LEFT.with(|slot| slot.set(opts.max_working_set_changes));
+            ITERS_LEFT.with(|slot| slot.set(opts.max_total_iter));
+            ITERS_SPENT.with(|slot| slot.set(false));
             start.set(Some(now));
             true
         }
@@ -87,6 +96,8 @@ impl Drop for Guard {
         if self.owner {
             DEADLINE.with(|slot| slot.set(None));
             CHANGES_LEFT.with(|slot| slot.set(None));
+            ITERS_LEFT.with(|slot| slot.set(None));
+            ITERS_SPENT.with(|slot| slot.set(false));
             SCOPE_START.with(|s| s.set(None));
         }
     }
@@ -102,7 +113,7 @@ pub(crate) fn expired() -> bool {
         }
         EXPIRE_AFTER_CHECKS.with(|c| c.set(Some(k - 1)));
     }
-    changes_spent() || time_passed()
+    changes_spent() || iters_spent() || time_passed()
 }
 
 /// The wall-clock deadline has passed.
@@ -118,6 +129,27 @@ fn changes_spent() -> bool {
     CHANGES_LEFT.with(|slot| slot.get() == Some(0))
 }
 
+/// The pivot-loop iteration budget is used up: an iteration past it was
+/// asked for.
+fn iters_spent() -> bool {
+    ITERS_SPENT.with(Cell::get)
+}
+
+/// Charge one pivot-loop iteration to the solve-wide budget. Every pivot loop
+/// calls it at the top of each iteration, just before its own expiry check, so
+/// the budget counts the iterations each pass's `max_iter` counts, summed over
+/// every pass of the solve. An iteration within the budget runs to completion;
+/// the first one past it marks the budget spent, and the check right after
+/// stops the solve there.
+#[inline]
+pub(crate) fn charge_iteration() {
+    ITERS_LEFT.with(|slot| match slot.get() {
+        Some(0) => ITERS_SPENT.with(|spent| spent.set(true)),
+        Some(left) => slot.set(Some(left - 1)),
+        None => {}
+    });
+}
+
 /// Charge one working-set change to the solve-wide budget. Every site that
 /// counts a change in `QpStats::n_working_set_changes` calls this, so the
 /// budget and the reported count measure the same thing.
@@ -131,10 +163,10 @@ pub(crate) fn charge_working_set_change() {
 }
 
 /// The status a solve cut off by [`expired`] reports: `MaxIter` when the
-/// working-set change budget ran out (the solve-wide form of `max_iter`), and
-/// `TimeLimit` when only the clock did.
+/// working-set change or iteration budget ran out (the solve-wide forms of
+/// `max_iter`), and `TimeLimit` when only the clock did.
 pub(crate) fn cut_off_status() -> QpStatus {
-    if changes_spent() && !time_passed() {
+    if (changes_spent() || iters_spent()) && !time_passed() {
         QpStatus::MaxIter
     } else {
         QpStatus::TimeLimit
@@ -142,9 +174,9 @@ pub(crate) fn cut_off_status() -> QpStatus {
 }
 
 /// A pass that ended with `status` was cut off by a solve-wide budget, so its
-/// result is not a verdict: it reports `TimeLimit`, or either budget is now
-/// spent (a change-budget cut reports `MaxIter`, which a pass also reports
-/// when only its own per-pass `max_iter` ran out). Every decision point
+/// result is not a verdict: it reports `TimeLimit`, or a budget is now
+/// spent (a change- or iteration-budget cut reports `MaxIter`, which a pass
+/// also reports when only its own per-pass `max_iter` ran out). Every decision point
 /// between passes tests this, never the status alone.
 pub(crate) fn cut_off(status: QpStatus) -> bool {
     status == QpStatus::TimeLimit || expired()
