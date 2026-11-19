@@ -15,6 +15,7 @@ mod api;
 mod elastic_unit;
 mod hint_signal;
 mod homotopy_unit;
+mod issue1195_uphill;
 mod kkt_unit;
 mod qps_unit;
 mod refinement_unit;

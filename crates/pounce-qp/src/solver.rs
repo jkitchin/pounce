@@ -1745,7 +1745,12 @@ impl ParametricActiveSetSolver {
             }
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
-            let floor = prev_was_null_step && p_inf > NULL_STEP_GAIN * prev_p_inf;
+            // A climbing unshifted step of the elastic phase 1 is a null step
+            // too (`raises_the_objective`, gh#1195).
+            let floor = (prev_was_null_step && p_inf > NULL_STEP_GAIN * prev_p_inf)
+                || (self.pin_repair
+                    && delta == 0.0
+                    && raises_the_objective(&x, &hx, qp.g, &rhs[..n]));
             prev_was_null_step = false;
             prev_p_inf = p_inf;
 
@@ -2073,9 +2078,13 @@ impl ParametricActiveSetSolver {
                     candidates.len()
                 );
             }
+            #[cfg(test)]
+            let q_before = quad_objective(qp, &x);
             for (xi, &pi) in x.iter_mut().zip(p.iter()) {
                 *xi += alpha * pi;
             }
+            #[cfg(test)]
+            uphill_ledger::note(q_before, quad_objective(qp, &x));
 
             // Only an unshifted Newton step lands on the working set's
             // minimizer; a δ-shifted one is a proximal step, and the next one
@@ -4743,6 +4752,13 @@ fn active_slot_count(working: &WorkingSet) -> usize {
         + working.bounds.iter().filter(|s| s.is_active()).count()
 }
 
+/// The singular-value band `pounce_feral::determine_dependent_rows` calls
+/// dependent, relative to the largest entry of the rows it is given: it flags a
+/// pivot at or below `1e-9·s`, and a pivot of that augmented system scales like
+/// `σ²/s`, so `σ ≲ √1e-9·s`. Used to redo a precedence re-selection that
+/// disagrees with the probe's rank (see `checked_independent_active_subset`).
+const PROBE_SIGMA_FLOOR: Number = 3.162_277_660_168_379_5e-5;
+
 /// Relative tolerance for the modified-Gram-Schmidt rank test in
 /// [`independent_active_subset`]. A candidate normal whose component
 /// orthogonal to the already-accepted normals falls below this
@@ -5149,7 +5165,41 @@ fn checked_independent_active_subset_inner(
         }
         return Some((kc, kb));
     }
-    let (mut keep_c, mut keep_b) = independent_with_precedence(qp, &pc, &pb, &other_c, &other_b);
+    let (mut keep_c, mut keep_b) =
+        independent_with_precedence(qp, &pc, &pb, &other_c, &other_b, 0.0);
+    // The dense re-selection decides rank by its own test — Gram-Schmidt, a
+    // residual below `RANK_REL_TOL` of the row's own norm — while the probe
+    // that found the dependency calls a row dependent when its singular value
+    // is below about `PROBE_SIGMA_FLOOR` of the largest entry, the band the
+    // KKT factorization also cannot pivot on. Rows between the two are kept
+    // here and are singular there, and when the re-selection keeps more rows
+    // than the probe found independent, it hands back a set no inertia shift
+    // can factor: the caller has no other recovery and ends the solve on an
+    // inertia-ladder error. gh#1195: pooling's balance rows carry bilinear
+    // entries that had fallen to ~6e-9 at the iterate, and with their other
+    // variables at bounds each was dependent to the probe (the active rows'
+    // smallest singular value 6.8e-16) and independent to Gram-Schmidt, three
+    // times over its tolerance. Such a selection is redone at the probe's
+    // floor, so that the precedence decides which member of the dependency
+    // goes and the probe's rank decides how many.
+    if keep_c.len() + keep_b.len() > kc.len() + kb.len() {
+        let a_max = {
+            let mut active = vec![false; qp.m];
+            active_cons.iter().for_each(|&i| active[i] = true);
+            let (ai, av) = (qp.a.irows(), qp.a.values());
+            (0..av.len())
+                .filter(|&t| active[(ai[t] - 1) as usize])
+                .fold(1.0_f64, |m, t| m.max(av[t].abs()))
+        };
+        (keep_c, keep_b) = independent_with_precedence(
+            qp,
+            &pc,
+            &pb,
+            &other_c,
+            &other_b,
+            PROBE_SIGMA_FLOOR * a_max,
+        );
+    }
     keep_c.sort_unstable();
     keep_b.sort_unstable();
     Some((keep_c, keep_b))
@@ -5207,6 +5257,7 @@ fn independent_with_precedence(
     first_b: &[usize],
     then_c: &[usize],
     then_b: &[usize],
+    abs_floor: Number,
 ) -> (Vec<usize>, Vec<usize>) {
     let n = qp.n;
     let mut zeroed = vec![false; n];
@@ -5234,7 +5285,7 @@ fn independent_with_precedence(
     let mut basis: Vec<Vec<Number>> = Vec::new();
     let mut keep_c = Vec::new();
     for (v, &i) in normals.iter_mut().zip(first_c.iter().chain(then_c)) {
-        if accept_if_independent(v, &mut basis) {
+        if accept_if_independent_above(v, &mut basis, abs_floor) {
             keep_c.push(i);
         }
     }
@@ -5253,7 +5304,7 @@ fn independent_with_precedence(
         let mut r = vec![0.0; n];
         r[j] = 1.0;
         let before = basis.len();
-        if !accept_if_independent(&mut r, &mut basis) {
+        if !accept_if_independent_above(&mut r, &mut basis, abs_floor) {
             continue;
         }
         basis.truncate(before);
@@ -5288,7 +5339,7 @@ fn independent_with_precedence(
             }
         } else {
             for mut q in std::mem::take(&mut basis) {
-                accept_if_independent(&mut q, &mut basis);
+                accept_if_independent_above(&mut q, &mut basis, abs_floor);
             }
         }
     }
@@ -5507,6 +5558,16 @@ fn independent_active_subset_dense(
 /// is linearly independent); otherwise leave `basis` unchanged and
 /// return `false` (linearly dependent / redundant).
 fn accept_if_independent(v: &mut [Number], basis: &mut Vec<Vec<Number>>) -> bool {
+    accept_if_independent_above(v, basis, 0.0)
+}
+
+/// [`accept_if_independent`], except that a residual at or below `abs_floor`
+/// is dependent too, whatever the normal's own size.
+fn accept_if_independent_above(
+    v: &mut [Number],
+    basis: &mut Vec<Vec<Number>>,
+    abs_floor: Number,
+) -> bool {
     let orig = dot(v, v).sqrt();
     if orig == 0.0 {
         return false;
@@ -5522,7 +5583,7 @@ fn accept_if_independent(v: &mut [Number], basis: &mut Vec<Vec<Number>>) -> bool
         }
     }
     let r = dot(v, v).sqrt();
-    if r > RANK_REL_TOL * orig {
+    if r > (RANK_REL_TOL * orig).max(abs_floor) {
         let inv = 1.0 / r;
         basis.push(v.iter().map(|&vi| vi * inv).collect());
         true
@@ -7103,6 +7164,50 @@ fn ray_is_unbounded_descent(
 /// solved for; `delta` is the shift that produced it. `delta == 0`
 /// returns 1.0 without touching the data, so every non-shifted solve
 /// keeps bit-identical behaviour.
+/// Whether the step `p` from `x` raises the QP model's objective to first
+/// order by more than its round-off, `∇q(x)ᵀp > 1e-9·(1 + |q(x)|)`, with
+/// `hx = H x`.
+///
+/// For an **unshifted** working-set step this is never true in exact
+/// arithmetic: `p` solves `H p + A_Wᵀ λ = −∇q(x)`, `A_W p = 0`, with the
+/// reduced `H` positive definite (inertia control certified it without a
+/// shift), so `∇q(x)ᵀp = −pᵀHp < 0` for any `p ≠ 0`. A computed `p` that
+/// climbs is the solve's error: the true step is zero to the precision the
+/// system allows, `x` already minimizes the model on its working set, and the
+/// caller reads the multipliers instead of stepping, as for a null step. The
+/// null-step guard misses it when the previous step was shifted, which it
+/// deliberately does not arm after (gh#1042).
+///
+/// The refactor path applies it only to unshifted steps of the elastic phase 1
+/// (gh#1195), where the error is largest: multipliers of the elastic penalty's size
+/// (10⁶ and up) times a KKT residual near round-off gave `pooling_rt2stp`'s
+/// correction QPs steps that climbed and a drop/re-add cycle in which `x`
+/// moved on every lap, so Bland's rule could not end it. Not to shifted
+/// steps, whose true descent `δ‖p‖²` can be smaller than the same noise
+/// while the point is not stationary: refusing them cut `haverly`'s elastic
+/// pass short of a proximal crawl that was still lowering the objective.
+/// Not outside phase 1, where at a near-degenerate vertex (`hs13`'s cusp,
+/// two nearly parallel active rows in two variables) the climbing "step" is
+/// equally pure error but the SQP above had come to depend on taking it. And
+/// not on the Schur-update path, which refactors before it trusts a short
+/// step anyway: there the same test changed 6 of 300 generated elastic QPs,
+/// 3 from `MaxIter` to `Optimal` and 3 the other way, and sent Maros-Meszaros
+/// `QSCFXM1` from 4242 to 9861 iterations on a single (correct) refusal that
+/// reordered its pivots at a degenerate vertex.
+fn raises_the_objective(x: &[Number], hx: &[Number], g: &[Number], p: &[Number]) -> bool {
+    let slope: Number = p
+        .iter()
+        .zip(hx.iter().zip(g.iter()))
+        .map(|(pi, (hxi, gi))| pi * (hxi + gi))
+        .sum();
+    let q: Number = x
+        .iter()
+        .zip(hx.iter().zip(g.iter()))
+        .map(|(xi, (hxi, gi))| xi * (0.5 * hxi + gi))
+        .sum();
+    slope > 1e-9 * (1.0 + q.abs())
+}
+
 fn model_step_cap(
     h: &pounce_linalg::triplet::SymTMatrix,
     g: &[Number],
@@ -7420,7 +7525,7 @@ mod precedence_tests {
             }
             let (c1, b1) = reference(&rows, n, &c1, &b1, &[], &[]);
             let want = reference(&rows, n, &c1, &b1, &c2, &b2);
-            let got = independent_with_precedence(&qp, &c1, &b1, &c2, &b2);
+            let got = independent_with_precedence(&qp, &c1, &b1, &c2, &b2, 0.0);
             if want.0.len() + want.1.len() < c1.len() + b1.len() + c2.len() + b2.len() {
                 dependent_cases += 1;
             }
@@ -8139,6 +8244,28 @@ mod over_n_rank_repair_tests {
 /// out: the cold entry into elastic wraps the passes below it, and its stats
 /// are already theirs.
 #[cfg(test)]
+pub(crate) mod uphill_ledger {
+    //! Test-only count of refactor-path steps that raised the QP objective by
+    //! more than round-off (gh#1195). A working-set step on a PSD QP never
+    //! does in exact arithmetic.
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn take() -> u64 {
+        COUNT.with(|c| c.replace(0))
+    }
+
+    pub(crate) fn note(q_before: f64, q_after: f64) {
+        if q_after > q_before + 1e-9 * (1.0 + q_before.abs()) {
+            COUNT.with(|c| c.set(c.get() + 1));
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod pass_ledger {
     use super::{QpError, QpSolution};
     use std::cell::RefCell;
@@ -8163,6 +8290,99 @@ pub(crate) mod pass_ledger {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod issue1195_rank_test_agreement {
+    //! gh#1195: when the sparse probe drops an equality row, the precedence
+    //! re-selection keeps the equality and drops a bound instead — but it used
+    //! to decide rank by its own, much tighter test, and kept rows the probe
+    //! (and the KKT factorization, which pivots by the same LU) call
+    //! dependent. The set it returned could not be factored at any inertia
+    //! shift, and the solve ended on an inertia-ladder error.
+    //!
+    //! The shape is pooling's: an equality row whose variables all sit at
+    //! bounds except one, with a coefficient (`c`) between the two tests'
+    //! floors, next to a row with a large entry that sets the probe's scale.
+    use super::{LinearSolver, checked_independent_active_subset, independent_active_subset_any};
+    use crate::{HessianInertia, QpProblem};
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+
+    fn qp_with(c: f64, big: f64, f: impl FnOnce(&QpProblem)) {
+        // Row 0: −0.6108 x₀ + c x₁ + x₂ + x₃ − x₄ = 1;  row 1: big·x₅ + x₁ = 1.
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(
+            2,
+            6,
+            vec![1, 1, 1, 1, 1, 2, 2],
+            vec![1, 2, 3, 4, 5, 6, 2],
+        ));
+        a.set_values(&[-0.6108, c, 1.0, 1.0, -1.0, big, 1.0]);
+        let h = SymTMatrix::new(SymTMatrixSpace::new(6, vec![], vec![]));
+        let g = vec![0.0; 6];
+        let (bl, bu) = (vec![1.0; 2], vec![1.0; 2]);
+        let (xl, xu) = (vec![0.0; 6], vec![10.0; 6]);
+        let qp = QpProblem {
+            n: 6,
+            m: 2,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        f(&qp);
+    }
+
+    fn linsol() -> LinearSolver {
+        LinearSolver::new(Box::new(FeralSolverInterface::new()))
+    }
+
+    #[test]
+    fn the_reselection_keeps_no_more_rows_than_the_probe_found_independent() {
+        for big in [10.0, 100.0, 1e3] {
+            for c in [3e-9, 6.3e-9, 2e-8] {
+                qp_with(c, big, |qp| {
+                    let (cons, bounds) = ([0, 1], [0, 2, 3, 4]);
+                    let (pc, pb) =
+                        independent_active_subset_any(&mut linsol(), qp, &cons, &bounds).unwrap();
+                    // Precondition: the probe calls the equality row dependent,
+                    // which is what sends the selection to the re-selection.
+                    if pc.contains(&0) {
+                        return; // this (c, big) is outside the band; nothing to test
+                    }
+                    let rank = pc.len() + pb.len();
+                    let (kc, kb) =
+                        checked_independent_active_subset(&mut linsol(), qp, &cons, &bounds)
+                            .unwrap();
+                    assert_eq!(kc, vec![0, 1], "big={big} c={c}: both equalities stay");
+                    assert!(
+                        kc.len() + kb.len() <= rank,
+                        "big={big} c={c}: kept {kc:?} {kb:?}, the probe's rank is {rank}"
+                    );
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn the_band_is_reached() {
+        // The test above returns early outside the band; it must not do so
+        // everywhere, or it tests nothing.
+        let mut reached = false;
+        qp_with(3e-9, 10.0, |qp| {
+            let (pc, _) =
+                independent_active_subset_any(&mut linsol(), qp, &[0, 1], &[0, 2, 3, 4]).unwrap();
+            reached = !pc.contains(&0);
+        });
+        assert!(
+            reached,
+            "the probe no longer calls row 0 dependent at c = 3e-9"
+        );
     }
 }
 
