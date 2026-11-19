@@ -1171,9 +1171,13 @@ impl PresolveTnlp {
             tracing::warn!(
                 target: "pounce_presolve",
                 "presolve postsolve: multipliers on derived bounds could not be \
-                 re-attributed to the original problem (component past the dense cap \
-                 or residual not reduced); the reported duals keep the reduced \
-                 problem's attribution"
+                 re-attributed to the original problem ({}; component reached {} \
+                 multipliers over {} variables, residual {:.3e}); the reported duals \
+                 keep the reduced problem's attribution",
+                if out.over_cap { "component past the size cap" } else { "residual not reduced" },
+                out.component_unknowns,
+                out.component_vars,
+                out.residual_before,
             );
         } else if out.n_spurious > 0 {
             tracing::debug!(

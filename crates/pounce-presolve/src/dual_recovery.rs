@@ -40,10 +40,16 @@
 //! same side (a degenerate pair: the declared bound is the incumbent and
 //! keeps it), and anything the residual does not reach.
 //!
-//! The component is solved dense. It is capped ([`MAX_UNKNOWNS`],
-//! [`MAX_COMPONENT_VARS`]); a component past the cap, or a solve that does
-//! not reduce the residual, leaves the duals exactly as the solver reported
-//! them and says so through [`Outcome`].
+//! A component up to [`MAX_UNKNOWNS`] multipliers is solved dense first, by
+//! the proximal active-set method below. Past that, or when the dense solve
+//! does not close the residual (its normal equations square the Jacobian's
+//! conditioning), the sparse solve takes it: a quasi-definite augmented
+//! system factored by FERAL, with unit-norm columns
+//! ([`solve_sign_constrained_ls_sparse`]). gh#1176's distillation column is
+//! the case for it: 1587 multipliers over 1477 variables, Jacobian entries
+//! from `1e-10` to `5e4`. A recovery that does not close stationarity leaves
+//! the duals exactly as the solver reported them and says so through
+//! [`Outcome`].
 //!
 //! Activity is geometric, at `x*`, and so are the multipliers: the solve
 //! reads `∇f(x*)`. That is right for a point the solver converged to, where
@@ -59,10 +65,15 @@
 
 use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 
-/// Most multipliers one dense recovery solve will take on.
+/// Most multipliers the dense recovery solve will take on. Past it -- or
+/// when the dense solve does not close the residual -- the sparse solve
+/// ([`solve_sign_constrained_ls_sparse`]) takes the component instead.
 pub(crate) const MAX_UNKNOWNS: usize = 600;
-/// Most variables one connected component may span.
-pub(crate) const MAX_COMPONENT_VARS: usize = 5000;
+/// Most multipliers / variables one component may span at all. Far past any
+/// model a postsolve should spend a factorization on; the sparse solve's cost
+/// is one sparse `LDLᵀ` of size `vars + unknowns`.
+pub(crate) const MAX_COMPONENT_UNKNOWNS: usize = 2_000_000;
+pub(crate) const MAX_COMPONENT_VARS: usize = 2_000_000;
 
 /// Read-only view of the original problem at the postsolved point.
 pub(crate) struct KktView<'a> {
@@ -97,6 +108,12 @@ pub(crate) struct Outcome {
     /// `true` when the duals were left untouched because the component was
     /// past the caps or the solve did not reduce the residual.
     pub rolled_back: bool,
+    /// The rollback was the size cap, not the residual test.
+    pub over_cap: bool,
+    /// Unknowns and variables the component reached (at the cap, where the
+    /// walk stopped).
+    pub component_unknowns: usize,
+    pub component_vars: usize,
 }
 
 /// Is `v` on the bound `b`, to the tolerance an interior-point solution
@@ -253,7 +270,7 @@ pub(crate) fn reattribute(
                 }
             }
         }
-        if unknowns.len() > MAX_UNKNOWNS || vars.len() > MAX_COMPONENT_VARS {
+        if unknowns.len() > MAX_COMPONENT_UNKNOWNS || vars.len() > MAX_COMPONENT_VARS {
             over_cap = true;
             break;
         }
@@ -264,8 +281,11 @@ pub(crate) fn reattribute(
         z_l.copy_from_slice(&zl0);
         z_u.copy_from_slice(&zu0);
     };
+    out.component_unknowns = unknowns.len();
+    out.component_vars = vars.len();
     if over_cap || unknowns.is_empty() {
         restore(lambda, z_l, z_u);
+        out.over_cap = over_cap;
         out.rolled_back = true;
         out.residual_after = out.residual_before;
         out.n_spurious = 0;
@@ -273,76 +293,102 @@ pub(crate) fn reattribute(
     }
     out.n_unknowns = unknowns.len();
 
-    // Dense A (|vars| × k) in the transformed variable `w = s·y` so every
-    // sign constraint reads `w ≥ 0`, and b = r − A·w0 so the component's
-    // residual is `A·w + b`.
+    // A (|vars| × k), column by column, in the transformed variable `w = s·y`
+    // so every sign constraint reads `w ≥ 0`, and b = r − A·w0 so the
+    // component's residual is `A·w + b`.
     let nv = vars.len();
     let k = unknowns.len();
-    let mut a = vec![0.0; nv * k];
+    let mut cols: Vec<Vec<(usize, Number)>> = Vec::with_capacity(k);
     let mut w0 = vec![0.0; k];
     let mut constrained = vec![false; k];
+    let mut current = vec![0.0; k];
     for (c, &(u, sign)) in unknowns.iter().enumerate() {
         let s = if sign == Sign::NonPos { -1.0 } else { 1.0 };
         constrained[c] = sign != Sign::Free;
+        let mut col: Vec<(usize, Number)> = Vec::new();
         match u {
             Unknown::Row(i) => {
                 for &(jj, aij) in &by_row[i] {
                     let slot = var_slot[jj];
                     if slot != usize::MAX {
-                        a[slot * k + c] += s * aij;
+                        col.push((slot, s * aij));
                     }
                 }
                 w0[c] = s * lambda[i];
             }
             Unknown::ZLower(j) => {
-                a[var_slot[j] * k + c] = -1.0;
+                col.push((var_slot[j], -1.0));
                 w0[c] = z_l[j];
             }
             Unknown::ZUpper(j) => {
-                a[var_slot[j] * k + c] = 1.0;
+                col.push((var_slot[j], 1.0));
                 w0[c] = z_u[j];
             }
         }
+        cols.push(col);
+        // `r` was computed with the current (pre-projection) values; express
+        // it against the projected start below.
+        current[c] = if w0[c].is_finite() { w0[c] } else { 0.0 };
         if constrained[c] && !(w0[c] >= 0.0) {
+            w0[c] = 0.0;
+        }
+        if !w0[c].is_finite() {
             w0[c] = 0.0;
         }
     }
     let mut b: Vec<Number> = vars.iter().map(|&j| r[j]).collect();
-    // r was computed with the current (pre-projection) values; express it
-    // against the projected start.
-    for (c, &(u, sign)) in unknowns.iter().enumerate() {
-        let s = if sign == Sign::NonPos { -1.0 } else { 1.0 };
-        let current = match u {
-            Unknown::Row(i) => s * lambda[i],
-            Unknown::ZLower(j) => z_l[j],
-            Unknown::ZUpper(j) => z_u[j],
-        };
-        let current = if current.is_finite() { current } else { 0.0 };
-        for (row, bv) in b.iter_mut().enumerate() {
-            *bv -= a[row * k + c] * current;
+    for (c, col) in cols.iter().enumerate() {
+        for &(row, a) in col {
+            b[row] -= a * current[c];
         }
     }
-    let w = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &w0);
-    let res_after = (0..nv)
-        .map(|row| {
-            let mut acc = b[row];
-            for c in 0..k {
-                acc += a[row * k + c] * w[c];
+    let residual_of = |w: &[Number]| -> Number {
+        let mut acc = b.clone();
+        for (c, col) in cols.iter().enumerate() {
+            for &(row, a) in col {
+                acc[row] += a * w[c];
             }
-            acc.abs()
-        })
-        .fold(0.0_f64, Number::max);
+        }
+        acc.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+    };
     // Accept the recovery only when it actually closes stationarity: to the
     // solver's own residual, or to a level no tolerance would notice.
     let target = (10.0 * out.residual_before).max(1e-8 * scale);
-    if !(res_after <= target) {
+
+    // Small components: the dense proximal active-set solve, which keeps as
+    // much of the reduced solve's attribution as stays valid. It forms
+    // `AᵀA`, so it squares the Jacobian's conditioning; a component whose
+    // dense solve does not close the residual goes to the sparse solve too.
+    let mut accepted: Option<(Vec<Number>, Number)> = None;
+    if k <= MAX_UNKNOWNS {
+        let mut a = vec![0.0; nv * k];
+        for (c, col) in cols.iter().enumerate() {
+            for &(row, v) in col {
+                a[row * k + c] += v;
+            }
+        }
+        let w = solve_sign_constrained_ls(&a, &b, nv, k, &constrained, &w0);
+        let res = residual_of(&w);
+        if res <= target {
+            accepted = Some((w, res));
+        }
+    }
+    if accepted.is_none()
+        && let Some(w) = solve_sign_constrained_ls_sparse(&cols, &b, nv, &constrained, &w0)
+    {
+        let res = residual_of(&w);
+        if res <= target {
+            accepted = Some((w, res));
+        }
+    }
+    let Some((w, res_after)) = accepted else {
         restore(lambda, z_l, z_u);
         out.rolled_back = true;
         out.residual_after = out.residual_before;
         out.n_spurious = 0;
         out.n_unknowns = 0;
         return out;
-    }
+    };
     for (c, &(u, sign)) in unknowns.iter().enumerate() {
         let s = if sign == Sign::NonPos { -1.0 } else { 1.0 };
         match u {
@@ -353,6 +399,175 @@ pub(crate) fn reattribute(
     }
     out.residual_after = res_after;
     out
+}
+
+/// The same problem as [`solve_sign_constrained_ls`] -- `min ½‖A·w + b‖²`
+/// with `w_c ≥ 0` where `constrained[c]`, as near `w0` as the solution set
+/// allows -- for components too large, or too ill-conditioned, for the dense
+/// normal equations (gh#1176: 1587 multipliers over 1477 variables, Jacobian
+/// entries from `1e-10` to `5e4`, which `AᵀA` squares past double precision).
+///
+/// Each proximal step `min ½‖A·d + ρ‖² + ½δ‖d‖²` (`ρ` the current residual)
+/// is the quasi-definite augmented system
+///
+/// ```text
+///   [ −I   A  ] [r]   [−ρ]
+///   [ Aᵀ   δI ] [d] = [ 0]
+/// ```
+///
+/// factored once by FERAL and re-solved for each step: no `AᵀA` is formed,
+/// and directions `A` cannot see (degenerate multipliers) take no step, so
+/// they keep `w0`'s attribution. Sign constraints by elimination: a column
+/// whose multiplier comes out with the wrong sign is fixed at 0 and the
+/// system refactored, a few rounds at most. `None` when the factorization
+/// fails or the signs do not settle; the caller's residual test decides the
+/// rest.
+fn solve_sign_constrained_ls_sparse(
+    cols: &[Vec<(usize, Number)>],
+    b: &[Number],
+    nrows: usize,
+    constrained: &[bool],
+    w0: &[Number],
+) -> Option<Vec<Number>> {
+    let w0_raw = w0;
+    use pounce_common::types::Index;
+    use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
+    use pounce_linsol::status::ESymSolverStatus;
+
+    let k = cols.len();
+    // Unit columns: `A = Â·D`, `D = diag(‖a_c‖)`, solved in `ŵ = D·w`. A
+    // positive scaling keeps every sign constraint, and one regularization
+    // `δ` then means the same thing for every column -- with the raw columns
+    // (norms here span many orders) a `δ` small enough for the weakest
+    // column left the strongest converging at a crawl, and the reverse.
+    let norms: Vec<Number> = cols
+        .iter()
+        .map(|c| c.iter().map(|(_, a)| a * a).sum::<Number>().sqrt())
+        .collect();
+    if norms.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let cols: Vec<Vec<(usize, Number)>> = cols
+        .iter()
+        .zip(&norms)
+        .map(|(c, &d)| {
+            if d > 0.0 {
+                c.iter().map(|&(i, a)| (i, a / d)).collect()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect();
+    let cols = &cols;
+    let w0: Vec<Number> = w0
+        .iter()
+        .zip(&norms)
+        .map(|(&w, &d)| w * d.max(0.0))
+        .collect();
+    let delta = 1e-10;
+    let mut w = w0.to_vec();
+    let mut allowed = vec![true; k];
+    for _round in 0..20 {
+        let free: Vec<usize> = (0..k).filter(|&c| allowed[c]).collect();
+        let kf = free.len();
+        let dim = nrows + kf;
+        // Lower triangle, 1-based triplets.
+        let mut ia: Vec<Index> = Vec::new();
+        let mut ja: Vec<Index> = Vec::new();
+        let mut vals: Vec<Number> = Vec::new();
+        for i in 0..nrows {
+            ia.push((i + 1) as Index);
+            ja.push((i + 1) as Index);
+            vals.push(-1.0);
+        }
+        for (p, &c) in free.iter().enumerate() {
+            let rowp = (nrows + p + 1) as Index;
+            for &(i, a) in &cols[c] {
+                ia.push(rowp);
+                ja.push((i + 1) as Index);
+                vals.push(a);
+            }
+            ia.push(rowp);
+            ja.push(rowp);
+            vals.push(delta);
+        }
+        let mut solver = pounce_feral::FeralSolverInterface::serial();
+        if solver.initialize_structure(dim as Index, ia.len() as Index, &ia, &ja)
+            != ESymSolverStatus::Success
+        {
+            return None;
+        }
+        solver.values_array_mut().copy_from_slice(&vals);
+        let residual = |w: &[Number]| -> Vec<Number> {
+            let mut acc = b.to_vec();
+            for (c, col) in cols.iter().enumerate() {
+                for &(row, a) in col {
+                    acc[row] += a * w[c];
+                }
+            }
+            acc
+        };
+        let norm = |v: &[Number]| v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        let mut best = norm(&residual(&w));
+        let mut first = true;
+        for _step in 0..200 {
+            let rho = residual(&w);
+            let mut rhs = vec![0.0; dim];
+            for i in 0..nrows {
+                rhs[i] = -rho[i];
+            }
+            let st = solver.multi_solve(first, &ia, &ja, 1, &mut rhs, false, 0);
+            first = false;
+            if st != ESymSolverStatus::Success {
+                return None;
+            }
+            let mut trial = w.clone();
+            for (p, &c) in free.iter().enumerate() {
+                trial[c] += rhs[nrows + p];
+            }
+            let res = norm(&residual(&trial));
+            if !res.is_finite() {
+                return None;
+            }
+            let moved = free
+                .iter()
+                .enumerate()
+                .fold(0.0_f64, |m, (p, _)| m.max(rhs[nrows + p].abs()));
+            let size = trial.iter().fold(1.0_f64, |m, x| m.max(x.abs()));
+            w = trial;
+            if res >= best * (1.0 - 1e-3) || moved <= 1e-15 * size {
+                best = best.min(res);
+                break;
+            }
+            best = res;
+        }
+        // Signs: fix the worst violators at zero and solve again.
+        let scale = w.iter().fold(1.0_f64, |m, x| m.max(x.abs()));
+        let tol = 1e-12 * scale;
+        let violators: Vec<usize> = (0..k)
+            .filter(|&c| allowed[c] && constrained[c] && w[c] < -tol)
+            .collect();
+        for c in 0..k {
+            if constrained[c] && w[c] < 0.0 && w[c] >= -tol {
+                w[c] = 0.0;
+            }
+        }
+        if violators.is_empty() {
+            // Back to `w = D⁻¹·ŵ`; a column with no entries keeps its start.
+            return Some(
+                w.iter()
+                    .zip(&norms)
+                    .zip(w0_raw)
+                    .map(|((&wh, &d), &w0c)| if d > 0.0 { wh / d } else { w0c })
+                    .collect(),
+            );
+        }
+        for c in violators {
+            allowed[c] = false;
+            w[c] = 0.0;
+        }
+    }
+    None
 }
 
 /// `min ½‖A·w + b‖²` subject to `w_c ≥ 0` where `constrained[c]`, by a
@@ -571,6 +786,84 @@ mod tests {
 
     /// A multiplier on a declared bound the derived one ties with stays put
     /// (the incumbent keeps a degenerate pair), and nothing else moves.
+    /// gh#1176: a component past the dense solve's reach. `min ½Σx_j²` over a
+    /// chain `s_i·(x_i − x_{i+1}) ≤ 0` (all active at `x* = 4`) with the
+    /// declared `x_0 ≥ 4`; presolve derived `x_j ≥ 4` for every other `j`
+    /// and the reduced solve put the whole multiplier on those derived
+    /// bounds. The original problem's multipliers are unique:
+    /// `s_i·λ_i = 4(n−1−i)` and `z_L(x_0) = 4n`.
+    ///
+    /// 700 unknowns is past [`MAX_UNKNOWNS`], where the recovery used to roll
+    /// back and report the derived-bound multipliers. The row scales `s_i`
+    /// span `1e-4..1e4`, as the distillation column's did (Jacobian entries
+    /// `1e-10..5e4`): the normal equations square that, and an unscaled
+    /// augmented system converged at a crawl. Every row is an active `≤`
+    /// row, so every row multiplier is sign-constrained (`λ ≥ 0`).
+    #[test]
+    fn a_component_past_the_dense_cap_is_recovered_sparsely() {
+        let n = 700;
+        let s = |i: usize| 10f64.powi((i % 9) as i32 - 4);
+        let mut jac = Vec::new();
+        for i in 0..n - 1 {
+            jac.push((i, i, s(i)));
+            jac.push((i, i + 1, -s(i)));
+        }
+        let x = vec![4.0; n];
+        let g = vec![0.0; n - 1];
+        let grad_f = vec![4.0; n];
+        let mut x_l = vec![-1e19; n];
+        x_l[0] = 4.0;
+        let x_u = vec![1e19; n];
+        let g_l = vec![-1e19; n - 1];
+        let g_u = vec![0.0; n - 1];
+        let mut derived_l = vec![true; n];
+        derived_l[0] = false;
+        let derived_u = vec![false; n];
+        let v = KktView {
+            x: &x,
+            g: &g,
+            grad_f: &grad_f,
+            jac: &jac,
+            x_l: &x_l,
+            x_u: &x_u,
+            g_l: &g_l,
+            g_u: &g_u,
+            derived_l: &derived_l,
+            derived_u: &derived_u,
+        };
+        let mut lam = vec![0.0; n - 1];
+        let mut zl = vec![4.0; n];
+        let mut zu = vec![0.0; n];
+        assert!(
+            n - 1 + 1 > MAX_UNKNOWNS,
+            "the fixture must be past the dense cap"
+        );
+        let o = reattribute(&v, &mut lam, &mut zl, &mut zu);
+        assert!(!o.rolled_back, "{o:?}");
+        assert_eq!(o.n_spurious, n - 1);
+        let r = residual(&v, &lam, &zl, &zu);
+        let worst = r.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        assert!(worst < 1e-7, "stationarity {worst:e}");
+        assert!(
+            (zl[0] - 4.0 * n as f64).abs() < 1e-6 * n as f64,
+            "z_L(x0) = {}",
+            zl[0]
+        );
+        assert!(
+            zl[1..].iter().all(|&z| z == 0.0),
+            "a derived-bound multiplier survived"
+        );
+        for i in 0..n - 1 {
+            let want = 4.0 * (n - 1 - i) as f64 / s(i);
+            assert!(lam[i] >= 0.0, "λ[{i}] = {} has the wrong sign", lam[i]);
+            assert!(
+                (lam[i] - want).abs() <= 1e-6 * want.abs().max(1.0),
+                "λ[{i}] = {} against {want}",
+                lam[i]
+            );
+        }
+    }
+
     #[test]
     fn a_declared_active_bound_keeps_its_multiplier() {
         let jac = [(0, 0, 1.0), (0, 1, -2.0)];

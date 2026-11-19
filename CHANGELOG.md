@@ -117,6 +117,22 @@ changes.
   variable.
 
 ### Fixed
+- **`presolve=yes` reports the original model's duals on large and
+  ill-conditioned models** (gh#1176). When bound tightening derives a bound
+  that ends up active, the reduced solve may put the multiplier on it.
+  Postsolve moves that multiplier back to the original rows and bounds by a
+  least-squares solve over the affected component. That solve was dense and
+  capped at 600 multipliers. Past the cap, or when its normal equations lost
+  the answer to conditioning, it rolled back and wrote the derived-bound
+  multipliers to the `.sol`. Those are not multipliers of the model the user
+  wrote. On the catalytic-distillation column from gh#1176 (1547 variables)
+  the reported duals had a stationarity residual of `3.0e2` and bound
+  complementarity of `6.0e4`. Components past the cap, and those the dense
+  solve cannot close, now go to a sparse solve: a quasi-definite augmented
+  system factored by FERAL, with unit-norm columns. The column's duals now
+  pass `pounce verify --require-optimal` (stationarity `1.7e-7`), and so do
+  those of `deb7` (684 multipliers), which also rolled back before. The
+  warning on a rollback now says which limit was hit.
 - **The active-set SQP no longer takes uphill steps from a feasible
   point, stalls at a non-stationary start, or ends `Internal_Error` with no
   `x` when started on negative curvature (gh#1173).** Under the default
