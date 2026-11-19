@@ -178,10 +178,23 @@ impl TNLP for ProductAndSum {
 /// All-default options — in particular `presolve` stays at its default "no",
 /// the configuration the issue was filed against.
 fn solve(problem: ProductAndSum) -> ApplicationReturnStatus {
+    solve_with(problem, false)
+}
+
+/// `solve`, optionally with `presolve=yes`. Every sweep below runs both legs:
+/// with presolve off nothing here reaches Phase 2's redundant-row removal,
+/// which under an absolute tolerance dropped the down-scaled linear sum row
+/// and reported this model solved (gh #1197).
+fn solve_with(problem: ProductAndSum, presolve: bool) -> ApplicationReturnStatus {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
         .unwrap();
+    if presolve {
+        app.options_mut()
+            .set_string_value("presolve", "yes", true, false)
+            .unwrap();
+    }
     app.initialize().unwrap();
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(problem));
     app.optimize_tnlp(tnlp)
@@ -214,13 +227,15 @@ fn is_success(status: ApplicationReturnStatus) -> bool {
 /// (`Solved_To_Acceptable_Level`).
 #[test]
 fn contradictory_equalities_are_never_reported_solved() {
-    for k in SCALES {
-        let status = solve(ProductAndSum::contradictory(10.0_f64.powi(k)));
-        assert!(
-            !is_success(status),
-            "row scale 1e{k}: `x*y == 1, x + y == 0.5` has no real solution, \
-             yet the solve reported {status:?}"
-        );
+    for presolve in [false, true] {
+        for k in SCALES {
+            let status = solve_with(ProductAndSum::contradictory(10.0_f64.powi(k)), presolve);
+            assert!(
+                !is_success(status),
+                "row scale 1e{k}, presolve={presolve}: `x*y == 1, x + y == 0.5` \
+                 has no real solution, yet the solve reported {status:?}"
+            );
+        }
     }
 }
 
@@ -232,12 +247,14 @@ fn contradictory_equalities_are_never_reported_solved() {
 /// which is why the sweep above asserts the invariant rather than a status.)
 #[test]
 fn contradictory_equalities_are_diagnosed_at_small_row_scales() {
-    for k in [-12, -10, -8, -6] {
-        assert_eq!(
-            solve(ProductAndSum::contradictory(10.0_f64.powi(k))),
-            ApplicationReturnStatus::InfeasibleProblemDetected,
-            "row scale 1e{k}"
-        );
+    for presolve in [false, true] {
+        for k in [-12, -10, -8, -6] {
+            assert_eq!(
+                solve_with(ProductAndSum::contradictory(10.0_f64.powi(k)), presolve),
+                ApplicationReturnStatus::InfeasibleProblemDetected,
+                "row scale 1e{k}, presolve={presolve}"
+            );
+        }
     }
 }
 
@@ -246,12 +263,14 @@ fn contradictory_equalities_are_diagnosed_at_small_row_scales() {
 /// that genuinely has a solution.
 #[test]
 fn feasible_twin_solves_at_every_scale() {
-    for k in SCALES {
-        let status = solve(ProductAndSum::feasible(10.0_f64.powi(k)));
-        assert!(
-            is_success(status),
-            "row scale 1e{k}: `x*y == 1, x + y == 2.5` has the solution \
-             (2, 0.5); got {status:?}"
-        );
+    for presolve in [false, true] {
+        for k in SCALES {
+            let status = solve_with(ProductAndSum::feasible(10.0_f64.powi(k)), presolve);
+            assert!(
+                is_success(status),
+                "row scale 1e{k}, presolve={presolve}: `x*y == 1, x + y == 2.5` \
+                 has the solution (2, 0.5); got {status:?}"
+            );
+        }
     }
 }

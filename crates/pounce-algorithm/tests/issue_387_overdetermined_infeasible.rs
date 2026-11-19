@@ -158,10 +158,23 @@ impl TNLP for TwoEqualities {
 /// Solve with all-default options — in particular `presolve` stays at its
 /// default "no", which is the configuration the issue was filed against.
 fn solve(problem: TwoEqualities) -> ApplicationReturnStatus {
+    solve_with(problem, false)
+}
+
+/// `solve`, optionally with `presolve=yes`. The scale sweeps run both legs:
+/// with presolve off they never reach Phase 2's redundant-row removal, which
+/// dropped both rows at `s = 1e-12` under an absolute tolerance and reported
+/// this infeasible model solved (gh #1197).
+fn solve_with(problem: TwoEqualities, presolve: bool) -> ApplicationReturnStatus {
     let mut app = IpoptApplication::new();
     app.options_mut()
         .set_integer_value("print_level", 0, true, false)
         .unwrap();
+    if presolve {
+        app.options_mut()
+            .set_string_value("presolve", "yes", true, false)
+            .unwrap();
+    }
     app.initialize().unwrap();
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(problem));
     app.optimize_tnlp(tnlp)
@@ -183,13 +196,16 @@ fn contradictory_equalities_are_infeasible_not_dof_error() {
 /// harness sweeps, not just the part above the old absolute floor (gh#391).
 #[test]
 fn verdict_is_scale_invariant_where_certifiable() {
-    for k in [-12, -10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10, 12] {
-        let status = solve(TwoEqualities::contradictory(10.0_f64.powi(k)));
-        assert_eq!(
-            status,
-            ApplicationReturnStatus::InfeasibleProblemDetected,
-            "row scale 1e{k}: same empty feasible set, different verdict"
-        );
+    for presolve in [false, true] {
+        for k in [-12, -10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10, 12] {
+            let status = solve_with(TwoEqualities::contradictory(10.0_f64.powi(k)), presolve);
+            assert_eq!(
+                status,
+                ApplicationReturnStatus::InfeasibleProblemDetected,
+                "row scale 1e{k}, presolve={presolve}: same empty feasible set, \
+                 different verdict"
+            );
+        }
     }
 }
 
@@ -204,13 +220,15 @@ fn verdict_is_scale_invariant_where_certifiable() {
 /// the sub-tolerance scales are certified like every other.
 #[test]
 fn sub_tolerance_scales_are_certified_too() {
-    let status = solve(TwoEqualities::contradictory(1e-12));
-    assert_eq!(
-        status,
-        ApplicationReturnStatus::InfeasibleProblemDetected,
-        "the crossing is 0.6 at every row scale; only the witness's absolute \
-         floor made 1e-12 different"
-    );
+    for presolve in [false, true] {
+        let status = solve_with(TwoEqualities::contradictory(1e-12), presolve);
+        assert_eq!(
+            status,
+            ApplicationReturnStatus::InfeasibleProblemDetected,
+            "presolve={presolve}: the crossing is 0.6 at every row scale; only \
+             the witness's absolute floor made 1e-12 different"
+        );
+    }
 }
 
 /// The safety net the flip above must not have cut: a genuinely feasible model
@@ -218,8 +236,16 @@ fn sub_tolerance_scales_are_certified_too() {
 /// DOF error stands. `x == 0.2` with `2x == 0.4` is consistent at `x = 0.2`.
 #[test]
 fn sub_tolerance_consistent_system_still_reports_dof_error() {
-    let status = solve(TwoEqualities::consistent(1e-12));
-    assert_eq!(status, ApplicationReturnStatus::NotEnoughDegreesOfFreedom);
+    for presolve in [false, true] {
+        let status = solve_with(TwoEqualities::consistent(1e-12), presolve);
+        assert!(
+            !matches!(status, ApplicationReturnStatus::InfeasibleProblemDetected),
+            "presolve={presolve}: `x == 0.2, 2x == 0.4` is consistent; got {status:?}"
+        );
+        if !presolve {
+            assert_eq!(status, ApplicationReturnStatus::NotEnoughDegreesOfFreedom);
+        }
+    }
 }
 
 /// A consistent over-determined system (`x == 0.2`, `2x == 0.4`) is not
