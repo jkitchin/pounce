@@ -175,14 +175,9 @@ impl TNLP for ProductAndSum {
     fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
 }
 
-/// All-default options — in particular `presolve` stays at its default "no",
-/// the configuration the issue was filed against.
-fn solve(problem: ProductAndSum) -> ApplicationReturnStatus {
-    solve_with(problem, false)
-}
-
-/// `solve`, optionally with `presolve=yes`. Every sweep below runs both legs:
-/// with presolve off nothing here reaches Phase 2's redundant-row removal,
+/// Default options, optionally with `presolve=yes`. `presolve=false` is the
+/// all-default configuration the issue was filed against. Every sweep below
+/// runs both legs: with presolve off nothing here reaches Phase 2's redundant-row removal,
 /// which under an absolute tolerance dropped the down-scaled linear sum row
 /// and reported this model solved (gh #1197).
 fn solve_with(problem: ProductAndSum, presolve: bool) -> ApplicationReturnStatus {
