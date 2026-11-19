@@ -15,7 +15,7 @@
 //!
 //! | fixture | convex | NLP | reports | decided by |
 //! |---|---|---|---|---|
-//! | `lp_tuff.nl` (NETLIB TUFF) at `tol=1e-12` | `1.4e-12`, acceptable | `3.9e-9`, succeeded | convex | accuracy |
+//! | `lp_tuff.nl` (NETLIB TUFF) at `tol=1e-12`, `relative_gap_tol=0` | `1.4e-12`, acceptable | `3.9e-9`, succeeded | convex | accuracy |
 //! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable | `1.5e-16`, succeeded | NLP | accuracy |
 //! | `lp_israel.nl` at `tol=1e-16` | `2.0e-16`, iteration limit | `5.2e-14`, acceptable | NLP | the status guard |
 //! | `lp_afiro.nl` at `tol=1e-20` | `2.4e-16`, iteration limit | `5.5e-13`, search direction too small | convex, its own failing status | accuracy |
@@ -97,7 +97,12 @@ fn status_lines(stdout: &str) -> Vec<&str> {
 #[test]
 fn a_more_accurate_convex_answer_is_kept() {
     for leg in [&[][..], &[LBFGS][..]] {
-        let mut args = vec!["tol=1e-12"];
+        // `relative_gap_tol=0`: the fallback otherwise holds the NLP arm to the
+        // convex arm's duality gap, which lifts it to 4.8e-13 here and makes it
+        // the winner — that branch is pinned in
+        // `relative_gap_tol_closes_the_nlp_gap.rs`. This test is about the
+        // comparison, so it keeps the NLP arm on Ipopt's own test.
+        let mut args = vec!["tol=1e-12", "relative_gap_tol=0"];
         args.extend_from_slice(leg);
         let r = run("lp_tuff.nl", &args);
         assert!(
@@ -293,7 +298,7 @@ fn when_both_fail_the_verdict_stays_honest() {
 /// which answer it kept — the console counterpart of `convex_fallback`.
 #[test]
 fn the_comparison_is_announced() {
-    let r = run("lp_tuff.nl", &["tol=1e-12"]);
+    let r = run("lp_tuff.nl", &["tol=1e-12", "relative_gap_tol=0"]);
     let line = r
         .stderr
         .lines()

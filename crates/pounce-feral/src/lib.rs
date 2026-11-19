@@ -946,6 +946,30 @@ pub(crate) fn pivot_counts(solver: &Solver) -> Option<(usize, usize)> {
     Some((delayed, two_by_two))
 }
 
+/// The tightest convex-IPM `tol` for which [`FeralSolverInterface::for_convex_ipm`]
+/// turns static pivoting on; see there.
+pub const STATIC_PIVOT_MIN_TOL: f64 = 1e-8;
+
+/// The largest fraction of free columns for which
+/// [`FeralSolverInterface::for_convex_ipm`] turns static pivoting on; see
+/// there.
+pub const STATIC_PIVOT_MAX_FREE_FRACTION: f64 = 0.01;
+
+/// The static-pivoting decision of [`FeralSolverInterface::for_convex_ipm`],
+/// apart from the environment: an explicit setting wins; otherwise on exactly
+/// when `tol >= STATIC_PIVOT_MIN_TOL` and at most
+/// `STATIC_PIVOT_MAX_FREE_FRACTION` of the columns are free.
+pub fn convex_ipm_static_pivoting(
+    explicit: Option<bool>,
+    tol: f64,
+    free_fraction: f64,
+) -> Option<bool> {
+    explicit.or_else(|| {
+        (tol >= STATIC_PIVOT_MIN_TOL && free_fraction <= STATIC_PIVOT_MAX_FREE_FRACTION)
+            .then_some(true)
+    })
+}
+
 /// Everything POUNCE records about one successful factorization. Shared
 /// by the monolithic backend and the Schur backend's eliminated block.
 /// Every read is `O(n)` or cheaper — negligible next to the factor.
@@ -1148,6 +1172,51 @@ impl FeralSolverInterface {
             parallel: Some(false),
             ..FeralConfig::from_env()
         })
+    }
+
+    /// Backend for the convex LP/QP interior point (`pounce-convex`).
+    ///
+    /// Identical to [`Self::new`] except that static pivoting defaults
+    /// **on** when `tol >= STATIC_PIVOT_MIN_TOL` (an explicit
+    /// `POUNCE_FERAL_STATIC_PIVOTING` still wins). The convex KKT is
+    /// quasi-definite by construction — `P + δ_w` on `(x, x)`, `-(W² + δ)` on
+    /// the cone block, `-δ_c` on `(y, y)` — so an `LDLᵀ` with 1×1 pivots
+    /// exists for every symmetric permutation and delaying a pivot buys no
+    /// stability, while near convergence the `-s/z` pivots of active bound
+    /// rows fall below `pivtol · |offdiag|` and delayed pivoting cascades them
+    /// into a dense root front that feral factors with its scalar kernel.
+    /// Measured on MIPLIB `rmatr200-p5`: one late factorization grows from
+    /// `nnz(L)` 3.0e6 / 0.02 s to 2.0e8 / 266 s (62 041 delayed columns), and
+    /// the solve goes from ~300 s to 10.5 s with static pivoting.
+    ///
+    /// Static pivoting perturbs tiny pivots, which costs accuracy at tight
+    /// tolerances, so below `STATIC_PIVOT_MIN_TOL` (`1e-8`, the default
+    /// `tol`) delayed pivoting stays. The threshold was `1e-10` first, and that
+    /// was measured too loose: `lp_israel` at `tol = 1e-16` goes from 1.9e-16
+    /// to 2.0e-13, and the gh#1000 blend LP with its objective scaled by 1e-6
+    /// (`test_blend_lp_certifies_at_every_objective_scale`) ends
+    /// `optimal_inaccurate` after 200 iterations at `tol = 1e-10`, against 68
+    /// delayed. At `1e-9` the same LP fails at scale 1e-7 (delayed: 118); at
+    /// `1e-8` static was as good as or better than delayed at every scale from
+    /// 1e-10 to 1e6.
+    ///
+    /// It also stays when more than `STATIC_PIVOT_MAX_FREE_FRACTION` of the
+    /// columns are free (`free_fraction`, from
+    /// `QpProblem::free_column_fraction`). A free column's `(x, x)` pivot has
+    /// no barrier term — on an LP it is the regularization alone — so the
+    /// quasi-definite margin there is `δ_w`, and force-accepting it in place
+    /// is exactly what static pivoting does. Measured on the DC-OPF models,
+    /// whose bus angles are ~89% of the columns: `case_ACTIVSg10k` 15 s → 57
+    /// s and `case_ACTIVSg25k` 23 s → 74 s (both handed to the NLP fallback),
+    /// `case_ACTIVSg70k` 97 s → over 300 s, and the infeasible
+    /// `case_SyntheticUSA` lost its certificate (112 s → 200 iterations, KKT
+    /// error 1.4e9). Delayed pivoting does not cascade on them (nnz(L) within
+    /// 1.09× of the first factorization through SyntheticUSA's solve, against
+    /// 11–69× on rmatr200-p5 and waihi, which have no free column).
+    pub fn for_convex_ipm(tol: f64, free_fraction: f64) -> Self {
+        let mut cfg = FeralConfig::from_env();
+        cfg.static_pivoting = convex_ipm_static_pivoting(cfg.static_pivoting, tol, free_fraction);
+        Self::with_config(cfg)
     }
 
     /// Construct with explicit configuration. Cascade-break
@@ -2805,6 +2874,28 @@ mod tests {
             assert!((rhs[0] - 1.0).abs() < 1e-10, "x0 for {strategy:?}");
             assert!((rhs[1] - 1.0).abs() < 1e-10, "x1 for {strategy:?}");
         }
+    }
+
+    /// Every branch of the convex-IPM rule: on only when the tolerance is
+    /// loose enough *and* the free columns are few; an explicit setting wins
+    /// both ways; the boundaries are inclusive.
+    #[test]
+    fn convex_ipm_static_pivoting_rule() {
+        let f = convex_ipm_static_pivoting;
+        assert_eq!(f(None, 1e-8, 0.0), Some(true));
+        assert_eq!(
+            f(None, STATIC_PIVOT_MIN_TOL, STATIC_PIVOT_MAX_FREE_FRACTION),
+            Some(true)
+        );
+        // tol tighter than the default 1e-8: delayed pivoting.
+        assert_eq!(f(None, 1e-9, 0.0), None);
+        assert_eq!(f(None, 1e-12, 0.0), None);
+        // DC-OPF-like: most columns free → delayed pivoting.
+        assert_eq!(f(None, 1e-8, 0.887), None);
+        assert_eq!(f(None, 1e-8, 0.0101), None);
+        // Explicit setting wins in both directions.
+        assert_eq!(f(Some(false), 1e-8, 0.0), Some(false));
+        assert_eq!(f(Some(true), 1e-12, 0.9), Some(true));
     }
 
     /// The pounce default leaves static pivoting unset (`None`), so the

@@ -1577,6 +1577,25 @@ fn real_main() -> ExitCode {
                         app.options_mut()
                             .set_numeric_value("bound_relax_factor", 0.0, true, true);
                 }
+                // The convex arm this solve stands in for stops on the
+                // relative duality gap. The NLP test bounds the max-norm
+                // complementarity, which leaves a gap of ≈ N·μ: MIPLIB
+                // `neos-4763324-toguru` (160k products) certified at 3.1e-6
+                // against tol = 1e-8. So hold the NLP arm to the convex arm's
+                // gap, unless the caller set `relative_gap_tol` themselves.
+                if !matches!(
+                    app.options().get_numeric_value("relative_gap_tol", ""),
+                    Ok((_, true))
+                ) {
+                    if let Ok((tol, _)) = app.options().get_numeric_value("tol", "") {
+                        let _ = app.options_mut().set_numeric_value(
+                            "relative_gap_tol",
+                            tol,
+                            true,
+                            true,
+                        );
+                    }
+                }
             }
             // Builtins never classify as convex; fall through to NLP.
         }
@@ -4018,7 +4037,22 @@ fn run_convex_qp(
     let obj_const = prob.obj_constant + obj_nl_const;
     let sign = if prob.minimize { 1.0 } else { -1.0 };
 
-    let backend = || -> Box<dyn SparseSymLinearSolverInterface> {
+    // The IPM's backend is built per problem: whether static pivoting is on
+    // depends on the solve's `tol` and on the free-column fraction of the
+    // (presolved) problem actually factored. See `for_convex_ipm`.
+    let ipm_backend = |p: &pounce_convex::QpProblem, tol: f64| {
+        let free = p.free_column_fraction();
+        move || -> Box<dyn SparseSymLinearSolverInterface> {
+            Box::new(pounce_feral::FeralSolverInterface::for_convex_ipm(
+                tol, free,
+            ))
+        }
+    };
+    // The active-set QP takes an indefinite `P` and reads inertia off the
+    // factorization, so it keeps feral's default (delayed) pivoting: the
+    // quasi-definite argument behind `for_convex_ipm` is the IPM's alone. The
+    // Farkas polish below uses it too.
+    let active_set_backend = || -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(pounce_feral::FeralSolverInterface::new())
     };
     // With presolve on, reduce the problem (logging what was removed),
@@ -4088,9 +4122,9 @@ fn run_convex_qp(
         match debug_hook.filter(|_| !use_active_set) {
             Some(hook) => {
                 let mut h = hook.borrow_mut();
-                solve_qp_ipm_debug(p, o, &mut *h, backend)
+                solve_qp_ipm_debug(p, o, &mut *h, ipm_backend(p, o.tol))
             }
-            None => solve_qp_ipm(p, o, backend),
+            None => solve_qp_ipm(p, o, ipm_backend(p, o.tol)),
         }
     };
     // What presolve did, held back until we know this solve is the one that
@@ -4201,7 +4235,7 @@ fn run_convex_qp(
                 let red = {
                     let _t = timing.solve.guard();
                     if use_active_set {
-                        let mut mk = backend;
+                        let mut mk = active_set_backend;
                         solve_qp_active_set_inertia(
                             &ps.reduced,
                             &solve_opts_offset(ps.obj_offset()),
@@ -4246,7 +4280,7 @@ fn run_convex_qp(
             }
         }
     } else if use_active_set {
-        let mut mk = backend;
+        let mut mk = active_set_backend;
         let _t = timing.solve.guard();
         solve_qp_active_set_inertia(&qp, &solve_opts(), &engine_overrides, inertia, &mut mk)
     } else {
@@ -4525,7 +4559,7 @@ fn run_convex_qp(
                         collect_iterates: false,
                         ..o
                     },
-                    backend,
+                    ipm_backend(&qp, o.tol),
                 )
             })
         })
@@ -4534,8 +4568,24 @@ fn run_convex_qp(
     // disagree about `verified` or `margin` (gh#1181 review: the console used
     // to print the certificate before `certificate_report`'s range-row
     // netting re-checked it).
+    // Project the Farkas ray's stationarity residual out through the
+    // equality rows before reporting it: the IPM's ray carries the
+    // residual its last iterate left on free columns, which the relative
+    // check accepts but which is large next to `|value|` (DC-OPF's bus
+    // angles). Kept only when the re-checked ray verifies and is tighter.
     let certificate = outcome
         .certificate
+        .map(|c| match c {
+            pounce_convex::Certificate::PrimalInfeasible(f) => {
+                pounce_convex::Certificate::PrimalInfeasible(
+                    // Default (delayed) pivoting: the polish system's
+                    // `-δI` block, `δ ≈ 1e-14`, is exactly what static
+                    // pivoting would perturb.
+                    pounce_convex::certificate::polish_farkas(&qp, &[], f, active_set_backend),
+                )
+            }
+            other => other,
+        })
         .map(|c| pounce_cli::qp_extract::certificate_report(prob, &con_map, &qp, c));
     if let Some(contrary) = outcome.contradicted_by {
         eprintln!(
@@ -4705,7 +4755,15 @@ fn run_convex_qp(
     // is why the step is missing" rather than a silently absent suffix — which
     // is the issue #196 failure mode in a new place.
     if let Some(pins) = &sens_pins {
-        match pounce_cli::convex_sens::perturbed_x(&qp, &sol, &solve_opts(), pins, backend) {
+        match pounce_cli::convex_sens::perturbed_x(
+            &qp,
+            &sol,
+            &solve_opts(),
+            pins,
+            // A sensitivity factorization, not an IPM solve: delayed pivoting,
+            // as in the Python frontend's `QpSensitivity::build`.
+            active_set_backend,
+        ) {
             Ok(x_pert) => {
                 qp_bound_suffixes.push(pounce_cli::convex_sens::sens_suffix(x_pert));
             }

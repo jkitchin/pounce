@@ -141,6 +141,12 @@ pub struct OptErrorConvCheck {
     /// relative arm's streak (see that method). `NAN` until first set, which
     /// compares as "not improving" and lets the first iterate count.
     pub prev_rel_viol: Number,
+    /// Relative duality-gap tolerance (`relative_gap_tol`); `0` disables the
+    /// gate. See [`Self::gap_gate_refuses`].
+    pub relative_gap_tol: Number,
+    /// Strict certificates the gap gate has refused so far this solve,
+    /// bounded by [`GAP_MAX_EXTRA_ITERS`].
+    pub gap_extra_iters: Index,
 }
 
 /// How many iterations the veto may spend before its bet is called off.
@@ -152,6 +158,13 @@ pub struct OptErrorConvCheck {
 /// this number: whatever happens after the budget is spent, the refused
 /// certificate is still restored if the run ends without a better one.
 const VETO_MAX_EXTRA_ITERS: Index = 60;
+
+/// How many strict certificates the `relative_gap_tol` gate may refuse before
+/// it stands aside. Closing the gap is the IPM's superlinear tail — μ jumps to
+/// the requested floor in one update and the iterate follows in a handful of
+/// steps (toguru: 4 extra iterations from 3.1e-6 to below 1e-8) — so a gate
+/// still refusing after this many is not going to be satisfied.
+const GAP_MAX_EXTRA_ITERS: Index = 30;
 
 /// How many acceptable-level terminations the gh #533 progress test may refuse
 /// before it stands aside for the rest of the solve.
@@ -298,11 +311,74 @@ impl Default for OptErrorConvCheck {
             veto_extra_iters: 0,
             rel_infeas_extra_iters: 0,
             prev_rel_viol: Number::NAN,
+            relative_gap_tol: 0.0,
+            gap_extra_iters: 0,
         }
     }
 }
 
 impl OptErrorConvCheck {
+    /// The `relative_gap_tol` gate on a strict certificate the other tests
+    /// have already granted. Returns `true` (refuse, keep iterating) when the
+    /// unscaled relative duality gap `Σ|compl| / (1 + 2|f|)` is above the
+    /// tolerance and the gate's budget is not spent; in that case it also
+    /// asks the μ update for a floor low enough to close the gap.
+    ///
+    /// Why a sum: the strict test bounds `max_i |compl_i|`, but a verifier's
+    /// gap is `Σ_i |compl_i|`, and on the central path every product sits at
+    /// ≈ μ, so the gap is ≈ `N·μ`. With `N` in the hundreds of thousands
+    /// (MIPLIB `neos-4763324-toguru`: 160 k bound and row products) a
+    /// `Solve_Succeeded` at `tol = 1e-8` reads `3.1e-6` relative.
+    ///
+    /// The requested floor is half the mean product scaled by `tol/gap`:
+    /// products track μ, so that is where the gap meets the tolerance with a
+    /// factor two to spare. It is only ever lowered, never raised.
+    fn gap_gate_refuses(
+        &mut self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        obj_scale: Number,
+    ) -> bool {
+        if !(self.relative_gap_tol > 0.0) || self.gap_extra_iters >= GAP_MAX_EXTRA_ITERS {
+            return false;
+        }
+        let (sum_scaled, n) = cq.borrow().curr_complementarity_sum();
+        if n == 0 || !sum_scaled.is_finite() {
+            return false;
+        }
+        let df = obj_scale.abs();
+        let df = if df.is_finite() && df > 0.0 { df } else { 1.0 };
+        let f = cq.borrow().unscaled_curr_f();
+        if !f.is_finite() {
+            return false;
+        }
+        let gap = (sum_scaled / df) / (1.0 + 2.0 * f.abs());
+        if gap <= self.relative_gap_tol {
+            return false;
+        }
+        self.gap_extra_iters += 1;
+        let mean_scaled = sum_scaled / n as Number;
+        let want = 0.5 * mean_scaled * (self.relative_gap_tol / gap);
+        let mut d = data.borrow_mut();
+        let floor = match d.gap_mu_floor {
+            Some(prev) => prev.min(want),
+            None => want,
+        };
+        d.gap_mu_floor = Some(floor);
+        if self.gap_extra_iters == 1 {
+            tracing::info!(
+                relative_gap = gap,
+                relative_gap_tol = self.relative_gap_tol,
+                complementarity_products = n,
+                mu_floor = floor,
+                "refusing a success certificate: the relative duality gap (sum of the \
+                 complementarity products) is above relative_gap_tol; continuing with a \
+                 lower barrier floor (bounded)"
+            );
+        }
+        true
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -1033,6 +1109,7 @@ impl ConvCheck for OptErrorConvCheck {
         let rel_veto = rel_viol > self.relative_viol_threshold()
             && self.rel_infeas_extra_iters < VETO_MAX_EXTRA_ITERS;
         let mut rel_veto_blocked = false;
+        let mut gap_blocked = false;
 
         // gh #200: refuse a certificate the objective scaling has masked, and
         // keep iterating. A constant objective scale cancels out of the Newton
@@ -1117,6 +1194,15 @@ impl ConvCheck for OptErrorConvCheck {
                          magnitude; continuing (bounded by the veto budget)"
                     );
                 }
+            } else if self.gap_gate_refuses(data, cq, obj_scale) {
+                // `relative_gap_tol`: refused on the duality gap; the gate has
+                // lowered the μ floor and the run continues. The acceptable
+                // exit below is blocked too: otherwise each refusal counts
+                // toward `acceptable_iter`, and a gap that does not close
+                // within that many iterations would end Solved_To_Acceptable
+                // on a point the strict test had already passed — not "as it
+                // would have without the gate" once the budget is spent.
+                gap_blocked = true;
             } else {
                 // The certificate is going out with a dual infeasibility above
                 // `dual_inf_tol`, which the end-of-run summary will print
@@ -1150,6 +1236,9 @@ impl ConvCheck for OptErrorConvCheck {
         if acceptable_now && rel_veto {
             acceptable_now = false;
             rel_veto_blocked = true;
+        }
+        if gap_blocked {
+            acceptable_now = false;
         }
         if rel_veto_blocked {
             self.rel_infeas_extra_iters += 1;

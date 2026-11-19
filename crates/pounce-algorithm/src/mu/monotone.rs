@@ -271,6 +271,14 @@ impl MuUpdate for MonotoneMuUpdate {
             .mu_target
             .max(self.certificate_safe_mu_min(df))
             .max(dynamic_floor);
+        // `relative_gap_tol`: the convergence check refused a certificate on
+        // the duality gap and asked for a lower floor. Both terms above are
+        // per-product (max-norm) thresholds; the gap is their sum, so it can
+        // need μ below either. Never below `mu_target`.
+        let floor = match data.borrow().gap_mu_floor {
+            Some(g) if g.is_finite() && g > 0.0 => floor.min(g.max(self.mu_target)),
+            _ => floor,
+        };
 
         // The barrier error depends on μ via the relaxed
         // complementarity. Read it once per μ value.
