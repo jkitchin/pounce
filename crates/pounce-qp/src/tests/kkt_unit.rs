@@ -124,7 +124,27 @@ fn add_h_diagonal_shift_shifts_a_duplicated_diagonal_once() {
 
 /// A 4-variable QP whose `H` stores no diagonal for columns 2 and 4 (one of
 /// them coupled off-diagonally, one structurally zero), with two rows.
+/// Runs `f` with the `H`-diagonal padding forced on: the fixture is far below
+/// `H_DIAG_PAD_MIN_DIM`.
 fn qp_with_zero_h_columns<R>(f: impl FnOnce(&crate::problem::QpProblem) -> R) -> R {
+    crate::kkt::FORCE_H_DIAG_PAD.with(|p| p.set(true));
+    let out = qp_with_zero_h_columns_inner(f);
+    crate::kkt::FORCE_H_DIAG_PAD.with(|p| p.set(false));
+    out
+}
+
+/// Below `H_DIAG_PAD_MIN_DIM` nothing is padded: the δ = 0 KKT is assembled
+/// exactly as before gh#1206 P2.
+#[test]
+fn small_kkts_are_not_padded() {
+    use crate::kkt::assemble_box_with_active;
+    qp_with_zero_h_columns_inner(|qp| {
+        let kkt = assemble_box_with_active(qp, &[]);
+        assert_eq!(kkt.irn.len(), qp.h.irows().len());
+    });
+}
+
+fn qp_with_zero_h_columns_inner<R>(f: impl FnOnce(&crate::problem::QpProblem) -> R) -> R {
     use crate::problem::{HessianInertia, QpProblem};
     use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
     let mut h = SymTMatrix::new(SymTMatrixSpace::new(4, vec![1, 3, 2], vec![1, 3, 1]));

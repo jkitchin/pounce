@@ -143,6 +143,21 @@ pub struct QpOptions {
     /// set independent again.
     pub dual_shift_probe: Number,
 
+    /// KKT dimension from which the [`Self::dual_shift_probe`] runs (gh#1206
+    /// B6). Below it the ladder climbs as it always did.
+    ///
+    /// Swept ungated over the CLI fixtures under
+    /// `solver_selection=qp-active-set`, the probe lost Maros-Meszaros
+    /// QGFRDXPN (`Optimal`/3553 → `MaxIter`/41395 on both legs): the
+    /// degenerate phase-1 sets the old ladder "factored" at a masking
+    /// `δ ≈ 1e6` are now reported, the rank repair prunes them, and pruning
+    /// at those vertices is the cycle gh#1076 describes. A climb costs
+    /// thirteen factorizations, which on a small KKT is nothing and on
+    /// gh#1206's (4.8 s each) is a minute; the corpus has no QP at the size
+    /// that matters. Default [`crate::SOFT_DROP_MIN_DIM`], the size from
+    /// which the soft-drop pattern (gh#1083) is on for the same reason.
+    pub dual_shift_probe_min_dim: usize,
+
     /// Opt in to the §4.2 sparse Schur-complement update path in
     /// `solve_general`. When `true`, the inner loop uses a cached
     /// factor of the fixed-dim K_max matrix and absorbs working-
@@ -369,6 +384,7 @@ impl Default for QpOptions {
             inertia_shift_factor: 100.0,
             inertia_max_shifts: 12,
             dual_shift_probe: 1e-8,
+            dual_shift_probe_min_dim: crate::solver::SOFT_DROP_MIN_DIM,
             use_schur_updates: false,
             schur_drop_inertia_test: true,
             elastic_seed_from_hint: false,

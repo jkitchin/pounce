@@ -54,6 +54,15 @@ fn dependent_rows_qp<R>(h_diag: [f64; 3], f: impl FnOnce(&QpProblem) -> R) -> R 
     })
 }
 
+/// The probe at every size: the fixtures are far below
+/// `dual_shift_probe_min_dim`.
+fn probe_on() -> QpOptions {
+    QpOptions {
+        dual_shift_probe_min_dim: 0,
+        ..QpOptions::default()
+    }
+}
+
 fn no_probe() -> QpOptions {
     QpOptions {
         dual_shift_probe: 0.0,
@@ -70,7 +79,7 @@ fn the_ladder_reports_a_dependent_working_set_without_climbing() {
         let mut s = solver();
         let mut rhs = vec![1.0; kkt.dim];
         let err = s
-            .factorize_with_inertia_control(kkt.clone(), &mut rhs, 2, 3, &QpOptions::default())
+            .factorize_with_inertia_control(kkt.clone(), &mut rhs, 2, 3, &probe_on())
             .unwrap_err();
         assert!(err.is_rank_deficient_working_set(), "{err}");
         assert!(err.is_recoverable_factorization_failure());
@@ -108,7 +117,7 @@ fn the_schur_reset_reports_a_dependent_working_set_without_climbing() {
         let mut s = solver();
         let mut state = SchurState::new(3, 2);
         let err = state
-            .reset(&mut s.linsol, qp, &w, 2, &QpOptions::default())
+            .reset(&mut s.linsol, qp, &w, 2, &probe_on())
             .unwrap_err();
         assert!(err.is_rank_deficient_working_set(), "{err}");
         assert_eq!(n_factor(&s), 3);
@@ -130,7 +139,7 @@ fn an_h_block_singularity_still_takes_the_shift() {
         let mut s = solver();
         let mut rhs = vec![1.0; kkt.dim];
         let delta = s
-            .factorize_with_inertia_control(kkt, &mut rhs, 1, 3, &QpOptions::default())
+            .factorize_with_inertia_control(kkt, &mut rhs, 1, 3, &probe_on())
             .unwrap();
         assert!(delta > 0.0);
         assert_eq!(n_factor(&s), 2, "unshifted, then the first rung");
@@ -146,10 +155,24 @@ fn a_dependent_working_set_over_a_singular_h_is_still_reported() {
         let mut s = solver();
         let mut rhs = vec![1.0; kkt.dim];
         let err = s
-            .factorize_with_inertia_control(kkt, &mut rhs, 2, 3, &QpOptions::default())
+            .factorize_with_inertia_control(kkt, &mut rhs, 2, 3, &probe_on())
             .unwrap_err();
         assert!(err.is_rank_deficient_working_set(), "{err}");
         assert_eq!(n_factor(&s), 3);
+    });
+}
+
+/// Below `dual_shift_probe_min_dim` (the default, on this small KKT) the
+/// ladder climbs as before.
+#[test]
+fn below_its_size_floor_the_probe_does_not_run() {
+    dependent_rows_qp([1.0; 3], |qp| {
+        let kkt = assemble_active_set_kkt(qp, &[0, 1], &[]);
+        let mut s = solver();
+        let mut rhs = vec![1.0; kkt.dim];
+        let out = s.factorize_with_inertia_control(kkt, &mut rhs, 2, 3, &QpOptions::default());
+        assert!(!matches!(&out, Err(e) if e.is_rank_deficient_working_set()));
+        assert!(n_factor(&s) >= 8, "{} factorizations", n_factor(&s));
     });
 }
 
@@ -166,7 +189,7 @@ fn a_dependent_hint_is_pruned_for_fewer_factorizations() {
             let sol = s.solve_with_working_set(qp, &w, opts).unwrap();
             (sol, n_factor(&s))
         };
-        let (on, f_on) = run(&QpOptions::default());
+        let (on, f_on) = run(&probe_on());
         let (off, f_off) = run(&no_probe());
         assert_eq!(on.status, crate::QpStatus::Optimal);
         assert_eq!(off.status, crate::QpStatus::Optimal);

@@ -179,8 +179,18 @@ impl KktTriplet {
 /// shift moves values only, and FERAL's pattern cache reuses the analysis.
 /// gh#1206's collocation NLP has ≈3 700 such columns.
 ///
-/// The appended zeros are numerically inert: they add nothing to the
-/// assembled matrix.
+/// The appended zeros add nothing to the assembled matrix, but they are
+/// stored entries, and FERAL's ordering and scaling read the stored pattern:
+/// they are **not** inert to the factorization's round-off. Swept over the
+/// CLI fixtures under `solver_selection=qp-active-set`, padding every KKT
+/// moved four convex lines and lost Maros-Meszaros QFORPLAN (`Optimal` →
+/// `MaxIter`; its outcome is known to flip on any change of pivoting,
+/// gh#1076). So, like the soft-drop pattern (gh#1083, [`SOFT_DROP_MIN_DIM`])
+/// whose saving is the same symbolic reuse, the padding applies from
+/// `n + m ≥` [`H_DIAG_PAD_MIN_DIM`]: where a second symbolic analysis is
+/// worth avoiding, and where the corpus says nothing either way.
+///
+/// [`SOFT_DROP_MIN_DIM`]: crate::solver::SOFT_DROP_MIN_DIM
 pub(crate) fn push_h_block(
     qp: &QpProblem,
     irn: &mut Vec<Index>,
@@ -202,12 +212,35 @@ pub(crate) fn push_h_block(
             has_diag[(i - 1) as usize] = true;
         }
     }
+    if !pad_h_diagonal(qp) {
+        return;
+    }
     for (i, _) in has_diag.iter().enumerate().filter(|(_, d)| !**d) {
         let i1 = (i + 1) as Index;
         irn.push(i1);
         jcn.push(i1);
         vals.push(0.0);
     }
+}
+
+/// QP size `n + m` from which [`push_h_block`] stores an explicit zero on
+/// every `H` diagonal that `H` omits (gh#1206 P2).
+pub const H_DIAG_PAD_MIN_DIM: usize = crate::solver::SOFT_DROP_MIN_DIM;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: pad below [`H_DIAG_PAD_MIN_DIM`] too, so small fixtures
+    /// reach the padded branch.
+    pub(crate) static FORCE_H_DIAG_PAD: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+fn pad_h_diagonal(qp: &QpProblem) -> bool {
+    #[cfg(test)]
+    if FORCE_H_DIAG_PAD.with(|f| f.get()) {
+        return true;
+    }
+    qp.n + qp.m >= H_DIAG_PAD_MIN_DIM
 }
 
 /// Right-hand side `[-g; b]` for the equality-only KKT.
