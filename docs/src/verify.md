@@ -82,7 +82,7 @@ A consumer (CI step, agent harness, Makefile) gates on the exit code.
 | `--feas-tol <t>` | `1e-6` | feasibility tolerance for constraints and bounds. **Relative per row**: a row passes when `|violation| <= t * max(1, |row|)`, where `|row|` is the larger of the evaluated value and its finite bounds. A violation of `1.0` on a row of size `2e6` therefore passes at `1e-6`. |
 | `--abs-feas-tol <t>` | — | judge every row by the plain absolute test `|violation| <= t`, replacing the relative test above (gh#987) |
 | `--opt-tol <t>` | `1e-6` | stationarity tolerance for the optimality check |
-| `--compl-tol <t>` | `1e-4` | the largest unscaled `|z|·gap` at which a bound still carries its multiplier `z` — the solver's own `compl_inf_tol` |
+| `--compl-tol <t>` | `1e-4` | the largest unscaled `|z|·gap` at which a bound still carries its multiplier `z` — the solver's own `compl_inf_tol`. One rule for bound activity everywhere `verify` needs it: the bound-projected residual and the misplaced-multiplier check (below) |
 | `--require-optimal` | off | also fail (exit 20) if the KKT stationarity residual exceeds `--opt-tol` — the exact one when the `.sol` carries bound multipliers, otherwise the bound-projected one — or if a bound multiplier larger than `--opt-tol` is misplaced (below) |
 | `--json-output <path>` | — | write a JSON verification receipt |
 
@@ -147,7 +147,12 @@ complementarity is reported as `not checked`, never as `0.0`.
 Without the suffixes, `z_L` and `z_U` are *inferred* from which bounds are
 active, and the reported stationarity residual is bound-**projected**: it
 projects out exactly the component a bound multiplier would carry, so it
-reads `0.0` on a point whose bound multiplier is missing or wrong.
+reads `0.0` on a point whose bound multiplier is missing or wrong. A bound
+may absorb a component `s_j` of the Lagrangian gradient when the point is on
+it to `1e-8·(1 + |bound|)`, or stands off it with `|s_j|·gap ≤ --compl-tol`
+— the same rule the misplaced-multiplier check below applies to the
+suffixes, so a point's bounds read as active or not the same way whether or
+not the `.sol` carries them (gh#1209).
 
 When the `.sol` does carry them (pounce always writes them; so does Ipopt's
 AMPL interface), `verify` additionally reports the **exact** dual

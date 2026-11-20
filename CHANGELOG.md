@@ -158,6 +158,34 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **`pounce verify`'s JSON receipt no longer reports `optimality.available:
+  false` for a verdict decided on optimality.** A model with no rows needs no
+  constraint duals, so verify computes its stationarity residual from a `.sol`
+  that has neither duals nor `ipopt_zL_out`/`ipopt_zU_out` suffixes, and
+  `--require-optimal` gates on that residual. The receipt included the
+  `optimality` block only when the `.sol` carried duals or suffixes, though,
+  so for exactly that case it said optimality was not checked. The block now
+  appears whenever optimality was computed. A model with rows and no duals
+  still reads `available: false`. Both cases are pinned in
+  `crates/pounce-cli/tests/verify_subcommand.rs`.
+- **`pounce verify --compl-tol` now governs the bound-projected stationarity
+  residual too** (gh#1209). Both bound-activity tests in `verify` share one
+  rule: on the bound to `1e-8·(1+|b|)`, or standing off it with
+  `|z|·gap ≤ tol`. The misplaced-multiplier check passed `--compl-tol`
+  (default `1e-4`), but the projected residual passed `--opt-tol` (`1e-6`).
+  So a point standing off a bound with `1e-6 < |z|·gap ≤ 1e-4` read as
+  active when the `.sol` carried `ipopt_zL_out`/`ipopt_zU_out` and as
+  inactive when it did not, and `--compl-tol` had no effect on the
+  suffix-less path. **Verdict change, looser, only on `.sol` files without
+  bound-multiplier suffixes**, where the projected residual is the
+  `--require-optimal` gate. We solved every `.nl` fixture, stripped the
+  suffixes, and verified with the old and new binaries: 2 of 169 verdicts
+  move, both REJECTED → VERIFIED, and both are interior-point stand-offs in
+  that band. `hs71_obj1e8` (solver complementarity `9.1e-6`) now gets the
+  same verdict with and without the suffixes. `dallass` (`2.0e-6`) read a
+  projected residual of `0.45` from an active bound it took for interior.
+  Pinned on both sides of the threshold by
+  `crates/pounce-cli/tests/verify_misplaced_bound_multipliers.rs`.
 - **`pounce verify --require-optimal` rejects bound multipliers that cannot
   be multipliers** (gh#1202 follow-up). With the `ipopt_zL_out` /
   `ipopt_zU_out` suffixes present it gated only on the exact residual, which

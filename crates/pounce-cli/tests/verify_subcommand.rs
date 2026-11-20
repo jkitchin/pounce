@@ -368,3 +368,62 @@ fn signed_receipt_validates_with_the_key_only() {
     let _ = std::fs::remove_file(&sol);
     let _ = std::fs::remove_file(&receipt);
 }
+
+/// Run `verify --json-output` and return the receipt's `optimality` block.
+fn receipt_optimality(tag: &str, nl: &PathBuf, sol_text: &str) -> serde_json::Value {
+    let sol = tmp(&format!("{tag}.sol"));
+    let receipt = tmp(&format!("{tag}.json"));
+    std::fs::write(&sol, sol_text).unwrap();
+    let status = Command::new(pounce_exe())
+        .arg("verify")
+        .arg(nl)
+        .arg(&sol)
+        .arg("--json-output")
+        .arg(&receipt)
+        .status()
+        .expect("spawn pounce verify --json-output");
+    assert!(matches!(status.code(), Some(0 | 20)), "{tag}: {status:?}");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&receipt).unwrap()).unwrap();
+    let _ = std::fs::remove_file(&sol);
+    let _ = std::fs::remove_file(&receipt);
+    v["optimality"].clone()
+}
+
+/// The receipt's `optimality` block appears exactly when optimality was
+/// computed. A model with no rows needs no constraint duals, so a `.sol`
+/// without duals or bound-multiplier suffixes still gets a residual, and
+/// `--require-optimal` gates on it. The receipt reported
+/// `available: false` for that case. A model *with* rows and no duals takes
+/// the other branch: nothing is computed, and the block says so.
+#[test]
+fn receipt_reports_optimality_whenever_it_was_computed() {
+    // `min (x − 3)²` on `[0, 1]`, no rows; `x = 1` is the optimum.
+    let rowless = tmp("rowless.nl");
+    std::fs::write(
+        &rowless,
+        "g3 1 1 0\n 1 0 1 0 0\n 0 1\n 0 0\n 0 1 0\n 0 0 0 1\n 0 0 0 0 0\n 0 1\n 0 0\n \
+         0 0 0 0 0\nO0 0\no5\no0\nv0\nn-3\nn2\nx1\n0 0.5\nb\n0 0 1\nk0\nG0 1\n0 0\n",
+    )
+    .unwrap();
+    let opt = receipt_optimality(
+        "rowless",
+        &rowless,
+        "claim\n\nOptions\n3\n1\n1\n0\n0\n0\n1\n1\n1.0\nobjno 0 0\n",
+    );
+    let _ = std::fs::remove_file(&rowless);
+    assert_eq!(opt["available"], true, "{opt}");
+    assert_eq!(opt["bound_multipliers_present"], false, "{opt}");
+    assert_eq!(opt["stationarity_residual"].as_f64(), Some(0.0), "{opt}");
+    assert_eq!(opt["optimal"], true, "{opt}");
+
+    // `parametric.nl` has 4 rows; a `.sol` with no duals leaves nothing to
+    // compute optimality from.
+    let mut s = String::from("claim\n\nOptions\n0\n0\n4\n5\n5\n");
+    for _ in 0..5 {
+        s.push_str("0.0\n");
+    }
+    s.push_str("objno 0 0\n");
+    let opt = receipt_optimality("rows_no_duals", &fixture_nl(), &s);
+    assert_eq!(opt["available"], false, "{opt}");
+}
