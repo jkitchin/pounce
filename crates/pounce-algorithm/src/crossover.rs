@@ -664,18 +664,15 @@ where
     };
     let mut qp_solver = ParametricActiveSetSolver::new(make_backend());
     let eqp_started = std::time::Instant::now();
-    let eqp = match qp_data.stabilized_start(&working, qp.bl, qp.bu) {
-        Some(start) => match qp_solver.solve(&qp, Some(&start), &eqp_opts) {
+    let stabilized = qp_data
+        .stabilized_start(&working, qp.bl, qp.bu)
+        .zip(qp_data.as_standard_qp(qp.bl, qp.bu));
+    let eqp = match stabilized {
+        Some((start, standard)) => match qp_solver.solve(&qp, Some(&start), &eqp_opts) {
             Ok(sol) if sol.status == QpStatus::Optimal => Ok(qp_data.unlift_solution(sol)),
             // A stabilized QP that does not solve falls back to the
             // standard one.
-            _ => qp_solver.solve_with_working_set(
-                &qp_data
-                    .as_standard_qp(qp.bl, qp.bu)
-                    .expect("a stabilized subproblem keeps its standard form"),
-                &working,
-                &eqp_opts,
-            ),
+            _ => qp_solver.solve_with_working_set(&standard, &working, &eqp_opts),
         },
         None => qp_solver.solve_with_working_set(&qp, &working, &eqp_opts),
     };

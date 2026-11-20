@@ -397,7 +397,7 @@ impl SqpQpData {
         let finite_up = |v: Number| v < NLP_UPPER_BOUND_INF;
         let mut bounds = Vec::with_capacity(n + m);
         let mut x = vec![0.0; n + m];
-        for j in 0..n {
+        for (j, xj) in x.iter_mut().enumerate().take(n) {
             let (lo, up) = (self.xl[j], self.xu[j]);
             let status = w.bounds.get(j).copied().unwrap_or(BoundStatus::Inactive);
             // An active status on an infinite bound cannot be honoured; the
@@ -409,7 +409,7 @@ impl SqpQpData {
                 BoundStatus::Fixed if !(finite_lo(lo) && finite_up(up)) => BoundStatus::Inactive,
                 s => s,
             };
-            x[j] = match status {
+            *xj = match status {
                 BoundStatus::AtLower | BoundStatus::Fixed => lo,
                 BoundStatus::AtUpper => up,
                 BoundStatus::Inactive => {
