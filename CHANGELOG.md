@@ -36,6 +36,11 @@ changes.
   `algorithm=active-set-sqp` it added 1–7 iterations to 25 solves and failed
   two. A debug line under `pounce::sqp` reports the model error every
   iteration. Default `0`, off.
+- **`QpOptions::elastic_seed_from_hint`** (off by default, gh#1206 B7): seed
+  the l1-elastic phase 1 at a pinned hint the repair declined, instead of at
+  the origin. 2 working-set changes against 62 on a hint one row from the
+  optimum, but 111 against 14 on #428's MPC sweep, hence opt-in; see
+  `dev-notes/known-limitations.md`.
 - **`ipm_sqp_handover_time_ratio` and `ipm_sqp_handover_primal_tol`**
   (gh#1206). A handover attempt was capped at the interior-point time spent so
   far with no way to change it, so a crossover that converged but needed
@@ -271,6 +276,36 @@ changes.
   feral's, bit for bit, so the same rows are dropped. The fixture sweep diffs
   empty on both legs, at the defaults, with `ipm_sqp_handover=yes` and with
   `algorithm=active-set-sqp`.
+- **Schur updates in `pounce-qp` are stored sparse** (gh#1206 P3). Each
+  working-set change kept six dense vectors of length `dim(K_max)` (about
+  21 MB per change on the reporter's KKT), and every Schur solve did dense
+  dots over them; `u = e_p` is now its index and `v` its nonzeros, so those
+  dots are `O(nnz)`. Bit-identical up to the sign of a zero.
+- **A Schur-path drop on a Hessian not known PSD no longer always
+  refactorizes** (gh#1206 P1). The updated KKT's inertia follows from the
+  base factor's and the small Schur block's by Haynsworth additivity
+  (`neg(K_W) = neg(K₀) + pos(C·S) − k`); when it is the one the new working
+  set needs the cheap update is kept, otherwise the drop refactorizes under
+  inertia control as before (`QpOptions::schur_drop_inertia_test`).
+- **A free variable no longer costs a row in the Schur K_max** (gh#1206 P7).
+  Every variable had a bound slot, so the stabilized SQP subproblem's one free
+  variable per row grew K_max from `2n + m` to `2(n + m) + m`; bound slots now
+  go only to variables with a finite bound. Only decoupled identity rows go,
+  but FERAL orders the smaller matrix differently: under
+  `solver_selection=qp-active-set` `farkas_far_feasible_no_box` reaches the
+  same verified unbounded verdict in 2 iterations instead of 0.
+- **Large QPs analyse each KKT pattern once and stop climbing the inertia
+  ladder on a dependent working set** (gh#1206 P2, B6). From `n + m ≥ 5000`
+  every assembled KKT stores a diagonal for each `H` row, so the inertia
+  retry's shift moves values and FERAL reuses the symbolic analysis; and when
+  a KKT is singular both unshifted and at the first rung, one factorization
+  with `−δ_c` on the live constraint rows (`QpOptions::dual_shift_probe`)
+  tells a rank-deficient working set — which no `H` shift repairs — from an
+  indefinite one, and reports it for the prune at once instead of after ten
+  more factorizations. The regularized factor is a diagnosis only, never a
+  step. Both are size-gated (`dual_shift_probe_min_dim`) because below that
+  they moved two Maros-Meszaros fixtures to `MaxIter` under
+  `solver_selection=qp-active-set`; see `dev-notes/known-limitations.md`.
 - **The active-set QP solver no longer stops on an inertia-ladder error at a
   working set its own rank test called independent (gh#1195).** When the
   rank probe dropped an equality row, the re-selection that keeps equalities

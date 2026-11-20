@@ -76,6 +76,81 @@ a step-4 first QP of 591 s and one of 23 s.
 
 ---
 
+## Active-set QP: the gh#1206 rank probe and H-diagonal padding are size-gated, and the hint-seeded phase 1 is opt-in (gh#1206 B6, P2, B7)
+
+*Measured on the gh#1206 pounce-qp branch against `b49e6d4`,
+`scripts/sweep-fixtures.sh <bin> <out> solver_selection=qp-active-set`, both
+legs, with a binary carrying one environment switch per item to attribute
+each line. Recorded 2026-11-20.*
+
+Three of gh#1206's QP items help the reporter's 90 k-variable step QP and
+cost something on the fixture corpus, which has no QP within two orders of
+that size. They ship gated, and the gate is what this entry records.
+
+### What is worse, ungated
+
+| item | fixture (both legs) | `b49e6d4` | ungated |
+|---|---|---|---|
+| B6 rank probe | `convex_qp_qgfrdxpn` | `SolveSucceeded`/3553 | `MaximumIterationsExceeded`/41395 |
+| P2 H-diagonal padding | `convex_qp_qforplan` | `SolveSucceeded`/12465 | `MaximumIterationsExceeded`/13769 |
+| B7 seeded phase 1 | `warm_start_pin_repair.rs`, horizon 40, step −0.2 | 14 pivots | 111 pivots |
+
+Also moved, same status: `convex_qp_share1b` 2299 → 2435 (B6 and P2 both),
+`feasible_x0_sentinel_bound` 6 → 8 (B6), `manyineq_concave_qp`
+22727 → 11508 (B6 and P2, better).
+
+Under `algorithm=active-set-sqp` the ungated build (B6 and P2 together, not
+separated) moved 17 fixture-legs: worse `mpcc_worse_local_solution` (exact,
+`SearchDirectionBecomesTooSmall`/2 → `MaximumIterationsExceeded`/0) and
+`pooling_rt2stp` (exact, `MaximumIterationsExceeded`/3 →
+`InfeasibleProblemDetected`/4 after four ladder rungs); better
+`pooling_rt2stp` (L-BFGS, `MaximumIterationsExceeded`/200 →
+`SearchDirectionBecomesTooSmall`/39), `jit1`/`jit1_boxed` (L-BFGS, 21 → 11,
+obj 265486 → 240694), `ssebnln` (exact, 3 → 2); `ssebnln` L-BFGS 95 → 133.
+Gated, that sweep is empty.
+
+### Mechanism
+
+- **B6.** A KKT singular unshifted and at the first `H` shift, which factors
+  once `−δ_c` sits on its live constraint rows, has dependent rows; the probe
+  reports it instead of climbing to `1e14`. QGFRDXPN's elastic phase 1 meets
+  such sets, and the old ladder "factored" them at `δ ≈ 1e6` with the null
+  direction masked (measured on a duplicated-row fixture: 9 factorizations to a
+  `δ = 1e6` "success"). Reported, they go to the rank repair, and pruning at
+  those vertices is the cycle gh#1076 describes. The counting prune's cap
+  already keeps the old ladder once it stands down; the failure-repair prune
+  has no such cap.
+- **P2.** The explicit zeros add nothing to the matrix but are stored
+  entries; FERAL's ordering and scaling read the stored pattern, so round-off
+  moves, and QFORPLAN's outcome flips on any change of pivoting (gh#1076: it
+  solves at counting caps 16, 20, 32, 40 and cycles at 24, 28, 48, 64).
+- **B7.** Started at the hint's full vertex, the Bland-ruled phase 1 releases
+  the hint's wrong bounds one lowest-index pivot at a time. Dropping Bland for
+  the seeded phase reached a point `8e-8` below the cold optimum, i.e. not
+  feasible to tolerance.
+
+### The gates
+
+B6 runs from KKT dimension `QpOptions::dual_shift_probe_min_dim`, P2 from
+`n + m ≥ kkt::H_DIAG_PAD_MIN_DIM`, both `SOFT_DROP_MIN_DIM` (5000), the size
+from which the soft-drop pattern (gh#1083) is on for the same symbolic-reuse
+reason. B7 is `QpOptions::elastic_seed_from_hint`, off. With the gates the
+`qp-active-set` sweep no longer shows the two losses; nothing in the corpus
+reaches the gated branches, so the sweep says nothing about them — the unit
+tests (`rank_probe_unit.rs`, `kkt_unit.rs`,
+`warm_start_failed_repair_seeds_elastic.rs`) reach them on purpose.
+
+### How to tell whether a fix works
+
+Lower the gates to 0 (and turn B7 on) and rerun the `qp-active-set` sweep:
+QGFRDXPN and QFORPLAN must stay `SolveSucceeded` and `warm_start_pin_repair.rs`
+must pass with the option on. For B6 the likely shape is a cap on
+probe-triggered prunes per pass, as `COUNT_PRUNE_CAP` caps the counting
+trigger; for B7, a phase 1 that releases a hint's wrong-signed bounds by
+multiplier rather than by index.
+
+---
+
 ## NLP: L-BFGS fixtures slower after restoration matched upstream (gh#1146)
 
 *Measured on `claude/charming-carson-cz5psg` against `main` at `358ecbb`,
