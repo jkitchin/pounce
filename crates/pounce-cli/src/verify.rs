@@ -136,7 +136,9 @@ Options:
   --opt-tol <t>          stationarity tolerance (default 1e-6)
   --compl-tol <t>        largest unscaled |z|*gap at which a bound still
                          carries its multiplier z (default 1e-4, the
-                         solver's compl_inf_tol)
+                         solver's compl_inf_tol). Governs bound activity in
+                         both the misplaced-multiplier check and the
+                         bound-projected stationarity residual
   --require-optimal      also fail if the KKT stationarity residual
                          exceeds --opt-tol (needs duals in the .sol), or if
                          a bound multiplier larger than --opt-tol sits on a
@@ -675,8 +677,14 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
         // stationary for exactly one of them; we report which.
         let s_pos = lagrangian_gradient(1.0, &grad_f, &irow, &jcol, &jval, fortran, lambda);
         let s_neg = lagrangian_gradient(-1.0, &grad_f, &irow, &jcol, &jval, fortran, lambda);
-        let resid_pos = bound_projected_residual(&s_pos, &x, &x_l, &x_u, args.opt_tol);
-        let resid_neg = bound_projected_residual(&s_neg, &x, &x_l, &x_u, args.opt_tol);
+        //
+        // Bound activity is judged by the same rule, at the same tolerance,
+        // as the misplaced-multiplier check above: `--compl-tol` (gh#1209).
+        // It used `--opt-tol` here, so a point standing off its bound with
+        // `1e-6 < |s_j|·gap ≤ 1e-4` read as active when the `.sol` carried
+        // bound multipliers and as inactive when it did not.
+        let resid_pos = bound_projected_residual(&s_pos, &x, &x_l, &x_u, args.compl_tol);
+        let resid_neg = bound_projected_residual(&s_neg, &x, &x_l, &x_u, args.compl_tol);
         let (best_resid, sign, s) = if resid_pos <= resid_neg {
             (resid_pos, 1, &s_pos)
         } else {
@@ -1934,6 +1942,20 @@ mod tests {
             bound_projected_residual(&[0.4399], &near, &x_l, &x_u, 1e-6),
             0.4399
         );
+    }
+
+    /// gh#1209: the projection's activity test is `|s_j|·gap ≤ compl_tol`,
+    /// and both sides of that threshold are reachable. Here `|s|·gap = 8e-6`
+    /// — inside `(1e-6, 1e-4]`, the band where `--opt-tol` and the default
+    /// `--compl-tol` used to disagree.
+    #[test]
+    fn the_projection_absorbs_up_to_compl_tol_and_no_further() {
+        let x_l = [0.0];
+        let x_u = [1.0];
+        let s = [-4.0];
+        let x = [1.0 - 2e-6];
+        assert_eq!(bound_projected_residual(&s, &x, &x_l, &x_u, 1e-4), 0.0);
+        assert_eq!(bound_projected_residual(&s, &x, &x_l, &x_u, 1e-6), 4.0);
     }
 
     /// gh#1202 follow-up: each branch of [`misplaced_bound_multiplier`].

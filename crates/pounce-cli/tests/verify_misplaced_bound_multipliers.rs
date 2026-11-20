@@ -14,7 +14,9 @@
 //! (`misplaced_bound_multiplier` in `verify.rs`): no bound on that side; a
 //! declared bound the point is off; a bound the point is on; the
 //! interior-point stand-off `|z|·gap ≤ --compl-tol`, accepted at the default
-//! and rejected once `--compl-tol` is tightened below it.
+//! and rejected once `--compl-tol` is tightened below it. The last test pins
+//! the suffix-less path, where `--compl-tol` governs the bound-projected
+//! residual by the same rule (gh#1209).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -47,6 +49,7 @@ fn sol(x: f64, z_l: Option<f64>, z_u: Option<f64>) -> String {
 struct Verdict {
     ok: bool,
     receipt: serde_json::Value,
+    stdout: String,
 }
 
 fn verify(tag: &str, nl_text: &str, sol_text: &str, extra: &[&str]) -> Verdict {
@@ -76,6 +79,7 @@ fn verify(tag: &str, nl_text: &str, sol_text: &str, extra: &[&str]) -> Verdict {
     Verdict {
         ok: code == Some(0),
         receipt,
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
     }
 }
 
@@ -187,4 +191,71 @@ fn a_solved_sol_is_accepted() {
     let v = verify("solved", &nl("0 0 10"), &text, &[]);
     assert!(v.ok, "{}", v.receipt);
     assert_eq!(misplaced(&v), 0.0);
+}
+
+/// A `.sol` claiming `x` with a constraint-dual block but no bound-multiplier
+/// suffixes at all: verify must infer the bound multipliers, so it gates on
+/// the bound-projected residual.
+fn sol_without_suffixes(x: f64) -> String {
+    format!("claim\n\nOptions\n3\n1\n1\n0\n0\n0\n1\n1\n{x:e}\nobjno 0 0\n")
+}
+
+/// The bound-projected residual, read from the text report: the receipt
+/// omits the optimality block for a row-less model without suffixes.
+fn projected(v: &Verdict) -> f64 {
+    let line = v
+        .stdout
+        .lines()
+        .find(|l| l.contains("KKT stationarity residual (bound-projected)"))
+        .unwrap_or_else(|| panic!("no projected residual in report:\n{}", v.stdout));
+    let value = line
+        .split(':')
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    value.parse().unwrap()
+}
+
+/// gh#1209: without suffixes, the bound-projected residual decides bound
+/// activity by `--compl-tol`, the same rule the misplaced-multiplier check
+/// applies when the suffixes are present. `x` stands `2e-6` inside the
+/// upper bound with `∇f = −4`, so `|s|·gap = 8e-6`: in the `(1e-6, 1e-4]`
+/// band that read as *inactive* (residual 4, rejected) when the projection
+/// used `--opt-tol`, while the same point with `ipopt_zU_out` was accepted.
+/// Each branch of the threshold is taken once.
+#[test]
+fn without_suffixes_a_stand_off_is_active_up_to_compl_tol() {
+    let x = 1.0 - 2e-6;
+    let model = nl("0 0 1");
+
+    let v = verify("nosuf_band", &model, &sol_without_suffixes(x), &[]);
+    assert!(
+        !v.stdout.contains("with z_L/z_U suffixes"),
+        "fixture must take the suffix-less path:\n{}",
+        v.stdout
+    );
+    assert!(v.ok, "{}", v.stdout);
+    assert_eq!(projected(&v), 0.0);
+
+    // The same point with the suffix: the two paths now agree.
+    let with = verify(
+        "suf_band",
+        &model,
+        &sol(x, None, Some(2.0 * (x - 3.0))),
+        &[],
+    );
+    assert!(with.ok, "{}", with.receipt);
+
+    // `--compl-tol` reaches the projected residual: below 8e-6 the bound no
+    // longer absorbs the gradient and the whole of it is residual.
+    let tight = verify(
+        "nosuf_band_tight",
+        &model,
+        &sol_without_suffixes(x),
+        &["--compl-tol", "1e-6"],
+    );
+    assert!(!tight.ok, "{}", tight.stdout);
+    assert!((projected(&tight) - 4.0).abs() < 1e-5, "{}", tight.stdout);
 }
