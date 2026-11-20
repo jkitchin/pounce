@@ -10467,6 +10467,12 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
     if let Ok((v, true)) = options.get_integer_value("sqp_dense_hessian_max_n", "") {
         opts.dense_hessian_max_n = usize::try_from(v).unwrap_or(0);
     }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_stabilization", "") {
+        opts.stabilization = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_proximal", "") {
+        opts.proximal = v;
+    }
 }
 
 /// Populate the active-set SQP **QP-subproblem** options

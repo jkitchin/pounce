@@ -217,6 +217,20 @@ pub struct SqpOptions {
     /// interior-point phase's own deadline, and a duration measured from
     /// `optimize` would grant it a fresh budget (gh#1054).
     pub deadline: Option<Deadline>,
+
+    /// `sqp_stabilization`: the cap `σ_max` on the dual regularization of the
+    /// stabilized step subproblem (gh#1206; see
+    /// [`crate::sqp::qp_assembly`]). Each step QP uses
+    /// `σ_k = min(σ_max, ρ_k)` with `ρ_k` the KKT residual at the iterate.
+    /// `0` (the default) poses the standard subproblem.
+    pub stabilization: Number,
+
+    /// `sqp_proximal`: the cap `ρ_max` on an adaptive proximal term
+    /// `ρ_k I` added to the step QP's Hessian (gh#1206). `ρ_k` follows the
+    /// measured error of the Hessian model along the previous step on the
+    /// free variables, so it vanishes when the model is accurate. `0` (the
+    /// default) adds nothing.
+    pub proximal: Number,
 }
 
 impl Default for SqpOptions {
@@ -240,6 +254,8 @@ impl Default for SqpOptions {
             qp_schur_indefinite_max_dim: Some(DEFAULT_QP_SCHUR_INDEFINITE_MAX_DIM),
             qp_ipm_cold_start_min_dim: Some(DEFAULT_QP_IPM_COLD_START_MIN_DIM),
             deadline: None,
+            stabilization: 0.0,
+            proximal: 0.0,
         }
     }
 }

@@ -714,6 +714,45 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         6,
         "Limited-memory BFGS keeps a circular buffer of the most-recent (s, y) curvature pairs; this option caps that buffer length. Mirrors upstream's \"limited_memory_max_history\". Only consulted when \"algorithm\" is \"active-set-sqp\" and \"sqp_hessian\" is \"lbfgs\".",
     )?;
+    r.add_lower_bounded_number_option(
+        "sqp_stabilization",
+        "Cap on the dual regularization of the stabilized SQP step subproblem; 0 = off.",
+        0.0,
+        false,
+        0.0,
+        "Active-set SQP only (also the crossover and ipm_sqp_handover QPs). When \
+         positive, each step QP is the stabilized subproblem of Wright, Hager, \
+         Fernandez-Solodov and Gill-Robinson: a free residual r on every \
+         general row, priced by lambda_k^T r + |r|^2/(2 sigma), with sigma = \
+         min(this, the KKT residual at the iterate). Its KKT matrix stays \
+         nonsingular when the active constraint gradients are linearly \
+         dependent (LICQ fails) or weakly active, which is where the standard \
+         subproblem's warm start has nothing it can factor, and it converges \
+         superlinearly under second-order sufficiency alone. Each step QP also \
+         starts from a feasible point that satisfies its working set exactly, \
+         so it never enters the elastic phase 1. Costs m extra QP variables \
+         (one per row). Not applied to the lifted limited-memory Hessian \
+         (sqp_dense_hessian_max_n). Default 0 (off); gh#1206 used 1e-4.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_proximal",
+        "Cap on an adaptive proximal term on the SQP step-QP Hessian; 0 = off.",
+        0.0,
+        false,
+        0.0,
+        "Active-set SQP only (also the crossover and ipm_sqp_handover runs). \
+         When positive, the step QP's Hessian is H + rho_k I with rho_k = \
+         min(this, max(e_k, rho_{k-1}/4)) and e_k = |P(B s - y)| / |P s| the \
+         error of the previous step's Hessian model along that step, P masking \
+         the variables at active bounds. It vanishes when the model is accurate \
+         along the steps, keeping the local rate, and shortens the step in \
+         proportion to the error when it is not -- for a Hessian that is only \
+         partly analytical (gh#1206: a quasi-Newton block on an embedded \
+         black-box model). Added after the negative-curvature checks, so it \
+         hides no indefiniteness from them; not applied to the lifted \
+         limited-memory Hessian. The model error is logged at debug level \
+         under pounce::sqp every iteration. Default 0 (off); gh#1206 used 1e2.",
+    )?;
     r.add_lower_bounded_integer_option(
         "sqp_dense_hessian_max_n",
         "Largest problem size at which the SQP hands a quasi-Newton Hessian to its QP as a dense matrix.",

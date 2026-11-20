@@ -10,6 +10,24 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`sqp_stabilization`: a stabilized SQP step subproblem** (gh#1206). At a
+  degenerate solution, where the active constraint gradients are linearly
+  dependent or many bounds are weakly active, the standard step QP's pinned
+  KKT matrix is singular. The crossover QP of gh#1206's 90 k-variable
+  collocation model never left its ℓ1-elastic phase 1. With
+  `sqp_stabilization = σ_max > 0`, each step QP (and the crossover and
+  handover QPs) is the stabilized subproblem. It adds a free residual on
+  every row, priced by `λ_kᵀr + ‖r‖²/(2σ)` with `σ = min(σ_max, KKT
+  residual)`. Its KKT matrix is nonsingular whatever the rank, and it starts
+  from a feasible point that satisfies its working set exactly, so it needs
+  no hint repair and no phase 1. Default `0`, off.
+- **`sqp_proximal`: an adaptive proximal term for inexact Hessians**
+  (gh#1206). `ρ_k I` is added to the step-QP Hessian, with `ρ_k` set by the
+  measured error of the previous step's Hessian model on the free variables.
+  It vanishes when the model is accurate and shortens the step in proportion
+  to the error when it is not. It is meant for a Lagrangian Hessian that is
+  only partly analytical. A debug line under `pounce::sqp` reports the model
+  error every iteration. Default `0`, off.
 - **`ipm_sqp_handover_time_ratio` and `ipm_sqp_handover_primal_tol`**
   (gh#1206). A handover attempt was capped at the interior-point time spent so
   far with no way to change it, so a crossover that converged but needed
@@ -186,6 +204,11 @@ changes.
 - **`KktTriplet::add_h_diagonal_shift` shifts a duplicated diagonal once**
   (gh#1206 B8). A diagonal stored as `k` triplet entries moved by `k·δ`, so
   the QP inertia ladder applied a different shift from the one it reported.
+- **The crossover's step-3 QP gets the SQP's size-scaled iteration budget**
+  (gh#1206 P6). It was the one step QP left on `pounce-qp`'s flat 200, which
+  an active-set solve over a large estimated set cannot finish in. The
+  reporter's needed 193 working-set changes, and they raised
+  `sqp_qp_max_iter` by hand. An explicit `sqp_qp_max_iter` still wins.
 - **Schur updates in `pounce-qp` skip work whose result is known** (gh#1206
   P4, P5): the back-solve of `e_p` on a slot that was inactive at the last
   refactorization (`K₀⁻¹e_p = e_p` on its sentinel row; 0.4 s each on the

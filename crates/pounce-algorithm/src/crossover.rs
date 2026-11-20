@@ -593,6 +593,19 @@ where
         hess_lag,
         hessian_inertia,
     );
+    // `sqp_stabilization` (gh#1206): on a degenerate active set — LICQ
+    // failing, or bounds weakly active — the estimate's pinned KKT is
+    // singular, and the step-3 QP otherwise went to a hint repair that gives
+    // up and a cold elastic phase 1 that crawls. Stabilized, it starts from a
+    // feasible point satisfying the estimate exactly.
+    let sigma = sqp_opts
+        .stabilization
+        .min(kkt_before.stationarity.max(kkt_before.constr_viol));
+    let qp_data = if sqp_opts.stabilization > 0.0 && sigma > 0.0 {
+        qp_data.stabilize(sigma, &seed.lambda_g)
+    } else {
+        qp_data
+    };
     let qp = qp_data.as_qp();
     // The step-3 QP gets whatever the solve has left (gh#1054); a QP that
     // stops on it comes back `TimeLimit`, which is a decline like any other.
@@ -617,11 +630,22 @@ where
         use_schur_updates: sqp_opts
             .step_qp_schur_updates(n + m, Some(hessian_inertia))
             .unwrap_or(qp_opts.use_schur_updates),
+        // The SQP driver's size-scaled iteration budget too (gh#1206 P6).
+        // This QP was the one step QP left on `pounce-qp`'s flat 200, which
+        // an active-set solve over a large estimated set cannot finish in —
+        // the reporter's needed 193 working-set changes and had to raise
+        // `sqp_qp_max_iter` by hand. An explicit `sqp_qp_max_iter` still wins.
+        max_iter: crate::sqp::sqp_alg::step_qp_iter_budget(qp_opts.max_iter, n, m),
         ..qp_opts.clone()
     };
     let mut qp_solver = ParametricActiveSetSolver::new(make_backend());
     let eqp_started = std::time::Instant::now();
-    let eqp = qp_solver.solve_with_working_set(&qp, &working, &eqp_opts);
+    let eqp = match qp_data.stabilized_start(&working, qp.bl, qp.bu) {
+        Some(start) => qp_solver
+            .solve(&qp, Some(&start), &eqp_opts)
+            .map(|sol| qp_data.unlift_solution(sol)),
+        None => qp_solver.solve_with_working_set(&qp, &working, &eqp_opts),
+    };
     n_qp_solves += 1;
     let eqp_report = EqpReport {
         outcome: eqp.as_ref().map(|sol| sol.status).map_err(Clone::clone),
