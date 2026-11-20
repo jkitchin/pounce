@@ -69,7 +69,16 @@ measures `dᵀ(W+Σ)d = −1.85e-19`, escapes, finds nothing, and restores it.
 ### How to tell whether a fix works
 
 Rerun the `ipm_sqp_handover=yes` sweep: both lines back to `SolveSucceeded`
-with the improvements above kept. A fix belongs in `pounce-qp`'s handling of a
+with the improvements above kept.
+
+**Re-checked after B6/B7 landed (same branch, 2026-11-20): not fixed.** The
+handover sweep of the final branch shows both lines unchanged
+(`SolvedToAcceptableLevel`, it=21 and it=64). That is expected rather than
+informative: B6's rank probe is size-gated to KKT dimension ≥ 5000 and B7's
+seeded phase 1 is opt-in (see the entry below), and these models are far
+below the gate, so neither runs on them. An ungated B6/B7 run flipped
+`cc:design_cent_3` back to `SolveSucceeded`, but it ran concurrently with
+builds, which moves the wall-clock attempt budget, so it is not evidence. A fix belongs in `pounce-qp`'s handling of a
 warm start whose working set is rank-deficient (gh#1206 B6/B7), not in
 reverting B1, which on the model that reported it is the difference between
 a step-4 first QP of 591 s and one of 23 s.
