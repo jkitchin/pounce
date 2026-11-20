@@ -4542,8 +4542,11 @@ impl IpoptApplication {
                 .map_or((Number::INFINITY, Number::INFINITY), |d| {
                     (d.remaining_wall(), d.remaining_cpu())
                 });
-            let spent_wall = time_ratio * (pounce_common::utils::wallclock_time() - wall0).max(1.0);
-            let spent_cpu = time_ratio * (pounce_common::utils::cpu_time() - cpu0).max(1.0);
+            // The 1 s floor applies to the budget, after the ratio, as the
+            // option documents: a ratio below 1 must not take it under 1 s.
+            let spent_wall =
+                (time_ratio * (pounce_common::utils::wallclock_time() - wall0)).max(1.0);
+            let spent_cpu = (time_ratio * (pounce_common::utils::cpu_time() - cpu0)).max(1.0);
             let sqp_opts = crate::sqp::SqpOptions {
                 deadline: Some(pounce_common::timing::Deadline::new(
                     spent_wall.min(wall_left),
