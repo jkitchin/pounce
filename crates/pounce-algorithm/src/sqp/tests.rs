@@ -2117,6 +2117,30 @@ fn stabilized_crossover_step3_needs_no_rank_test() {
     assert!(plain_eqp.rank_guard_calls >= 1, "{plain_eqp:?}");
 }
 
+/// gh#1206 P6 and the PR #1208 re-review: the step-3 QP gets the size-scaled
+/// iteration budget, but a pass that stops improving ends after 200, the old
+/// flat budget, so step 4 keeps the attempt's time. Explicit settings win.
+#[test]
+fn step3_qp_is_size_scaled_but_stops_when_it_stalls() {
+    use crate::crossover::step3_iteration_limits;
+    let d = QpOptions::default();
+    assert_eq!(d.max_iter, 200, "the default this rule is written against");
+    assert_eq!(
+        step3_iteration_limits(&d, 90_797, 88_800),
+        (200_000, Some(200))
+    );
+    assert_eq!(step3_iteration_limits(&d, 5, 4), (200, Some(200)));
+    let explicit = QpOptions {
+        max_iter: 2000,
+        max_stall_iters: Some(50),
+        ..QpOptions::default()
+    };
+    assert_eq!(
+        step3_iteration_limits(&explicit, 90_797, 88_800),
+        (2000, Some(50))
+    );
+}
+
 /// `σ = min(σ_max, ρ)` for the stabilized step-3 QP, and none when it is
 /// off or the residual is zero or non-finite; the proximal term's local
 /// phase is `ρ ≤ sqp_local_phase_tol`.

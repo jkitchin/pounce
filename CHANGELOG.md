@@ -322,18 +322,22 @@ changes.
   but FERAL orders the smaller matrix differently: under
   `solver_selection=qp-active-set` `farkas_far_feasible_no_box` reaches the
   same verified unbounded verdict in 2 iterations instead of 0.
-- **Large QPs analyse each KKT pattern once and stop climbing the inertia
-  ladder on a dependent working set** (gh#1206 P2, B6). From `n + m ≥ 5000`
-  every assembled KKT stores a diagonal for each `H` row, so the inertia
-  retry's shift moves values and FERAL reuses the symbolic analysis; and when
-  a KKT is singular both unshifted and at the first rung, one factorization
-  with `−δ_c` on the live constraint rows (`QpOptions::dual_shift_probe`)
-  tells a rank-deficient working set — which no `H` shift repairs — from an
-  indefinite one, and reports it for the prune at once instead of after ten
-  more factorizations. The regularized factor is a diagnosis only, never a
-  step. Both are size-gated (`dual_shift_probe_min_dim`) because below that
-  they moved two Maros-Meszaros fixtures to `MaxIter` under
-  `solver_selection=qp-active-set`; see `dev-notes/known-limitations.md`.
+- **Large QPs analyse each KKT pattern once** (gh#1206 P2). From
+  `n + m ≥ 5000` every assembled KKT stores a diagonal for each `H` row, so
+  the inertia retry's shift moves values and FERAL reuses the symbolic
+  analysis. Size-gated because below that it moved a Maros-Meszaros fixture
+  to `MaxIter` under `solver_selection=qp-active-set`; see
+  `dev-notes/known-limitations.md`.
+- **An opt-in dual-shift rank probe** (gh#1206 B6, `QpOptions::
+  dual_shift_probe_min_dim`, Rust only, **off by default**). When a KKT is
+  singular both unshifted and at the first rung, one factorization with
+  `−δ_c` on the live constraint rows tells a rank-deficient working set from
+  an indefinite one and reports it for the prune, instead of climbing ten more
+  rungs. The regularized factor is a diagnosis only, never a step. Off by
+  default: ungated it moved Maros-Meszaros QGFRDXPN to `MaxIter`, and gated at
+  KKT dimension 5000 its factorization aborted the process on BOYD2 by asking
+  FERAL for a 55.7 GB dense front (the `−δ_c` entries are new pattern
+  entries, so the probe re-analyses and the fill is unbounded).
 - **The active-set QP solver no longer stops on an inertia-ladder error at a
   working set its own rank test called independent (gh#1195).** When the
   rank probe dropped an equality row, the re-selection that keeps equalities

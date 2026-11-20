@@ -162,8 +162,16 @@ fn a_dependent_working_set_over_a_singular_h_is_still_reported() {
     });
 }
 
-/// Below `dual_shift_probe_min_dim` (the default, on this small KKT) the
-/// ladder climbs as before.
+/// With the default options the probe is off (`dual_shift_probe_min_dim =
+/// usize::MAX`, after it aborted Maros-Meszaros BOYD2 on a 55.7 GB front),
+/// and the ladder climbs as before.
+#[test]
+fn the_probe_is_off_by_default() {
+    assert_eq!(QpOptions::default().dual_shift_probe_min_dim, usize::MAX);
+}
+
+/// Below `dual_shift_probe_min_dim` (here the default) the ladder climbs as
+/// before.
 #[test]
 fn below_its_size_floor_the_probe_does_not_run() {
     dependent_rows_qp([1.0; 3], |qp| {

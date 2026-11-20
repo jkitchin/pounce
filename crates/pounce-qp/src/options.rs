@@ -143,8 +143,23 @@ pub struct QpOptions {
     /// set independent again.
     pub dual_shift_probe: Number,
 
-    /// KKT dimension from which the [`Self::dual_shift_probe`] runs (gh#1206
-    /// B6). Below it the ladder climbs as it always did.
+    /// KKT dimension (`kkt.dim`, not `n + m`) from which the
+    /// [`Self::dual_shift_probe`] runs (gh#1206 B6). Below it the ladder
+    /// climbs as it always did. **Default `usize::MAX`: the probe is off
+    /// unless a caller lowers this.**
+    ///
+    /// It was on by default from 5000 and that was wrong. On Maros-Meszaros
+    /// BOYD2 (93 263 variables) under `solver_selection=qp-active-set`, the
+    /// probe's factorization aborted the process: the `−δ_c` entries it adds
+    /// on the constraint rows are new pattern entries, FERAL re-analysed and
+    /// asked for a 55.7 GB dense front (`memory allocation of 55729914368
+    /// bytes failed`; on a machine with more memory, minutes inside one
+    /// uninterruptible factorization, past `max_wall_time`). Bisected by
+    /// switching items off one at a time: only B6 off restores `main`'s
+    /// clean `MaximumWallTimeExceeded` at 150 s. A probe that can change the
+    /// pattern can change the fill without bound, and nothing before the
+    /// numeric factorization bounds it, so it stays opt-in until it can
+    /// reuse the existing pattern or check the predicted fill first.
     ///
     /// Swept ungated over the CLI fixtures under
     /// `solver_selection=qp-active-set`, the probe lost Maros-Meszaros
@@ -154,8 +169,7 @@ pub struct QpOptions {
     /// at those vertices is the cycle gh#1076 describes. A climb costs
     /// thirteen factorizations, which on a small KKT is nothing and on
     /// gh#1206's (4.8 s each) is a minute; the corpus has no QP at the size
-    /// that matters. Default [`crate::SOFT_DROP_MIN_DIM`], the size from
-    /// which the soft-drop pattern (gh#1083) is on for the same reason.
+    /// that matters.
     pub dual_shift_probe_min_dim: usize,
 
     /// Opt in to the §4.2 sparse Schur-complement update path in
@@ -384,7 +398,7 @@ impl Default for QpOptions {
             inertia_shift_factor: 100.0,
             inertia_max_shifts: 12,
             dual_shift_probe: 1e-8,
-            dual_shift_probe_min_dim: crate::solver::SOFT_DROP_MIN_DIM,
+            dual_shift_probe_min_dim: usize::MAX,
             use_schur_updates: false,
             schur_drop_inertia_test: true,
             elastic_seed_from_hint: false,

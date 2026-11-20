@@ -137,6 +137,38 @@ use crate::sqp::warm_start::classify_working_set;
 /// the standoff it replaces.
 const IDENTIFIED_PRIMAL_TOL: Number = 1e-9;
 
+/// The step-3 QP's `(max_iter, max_stall_iters)` (gh#1206 P6).
+///
+/// `max_iter` is the SQP driver's size-scaled budget: this was the one step QP
+/// left on `pounce-qp`'s flat 200, which an active-set solve over a large
+/// estimated set cannot finish in (the reporter's needed 193 working-set
+/// changes and had to raise `sqp_qp_max_iter` by hand).
+///
+/// `max_stall_iters` ends a pass that stops improving after
+/// [`STEP3_STALL_ITERS`], so a stuck step 3 leaves the attempt's time to step
+/// 4. Without it the larger budget let a QP making no progress run to the
+/// attempt's time limit and decline it: `ssebnln` under
+/// `ipm_sqp_handover=yes` ground through 1361 refactorizations with no
+/// working-set change for 1.0 s and ended `Solved_To_Acceptable_Level`,
+/// where `main`'s step 3 stopped at 200 in 0.16 s, step 4 ran and the attempt
+/// was accepted (PR #1208 re-review, macOS). Explicit `sqp_qp_max_iter` /
+/// `max_stall_iters` still win.
+pub(crate) fn step3_iteration_limits(
+    qp_opts: &QpOptions,
+    n: usize,
+    m: usize,
+) -> (u32, Option<u32>) {
+    (
+        crate::sqp::sqp_alg::step_qp_iter_budget(qp_opts.max_iter, n, m),
+        qp_opts.max_stall_iters.or(Some(STEP3_STALL_ITERS)),
+    )
+}
+
+/// Non-improving iterations after which the step-3 QP ends (`MaxIter`) and
+/// step 4 takes over: `pounce-qp`'s default iteration budget, which was the
+/// step-3 QP's whole budget before it was size-scaled (gh#1206 P6).
+const STEP3_STALL_ITERS: u32 = 200;
+
 /// Slack on the never-regress comparisons, so a crossed-over point is not
 /// rejected for a change at the last bit of a residual that is otherwise
 /// identical.
@@ -659,7 +691,9 @@ where
         // an active-set solve over a large estimated set cannot finish in —
         // the reporter's needed 193 working-set changes and had to raise
         // `sqp_qp_max_iter` by hand. An explicit `sqp_qp_max_iter` still wins.
-        max_iter: crate::sqp::sqp_alg::step_qp_iter_budget(qp_opts.max_iter, n, m),
+        // gh#1206 P6: see `step3_iteration_limits`.
+        max_iter: step3_iteration_limits(qp_opts, n, m).0,
+        max_stall_iters: step3_iteration_limits(qp_opts, n, m).1,
         ..qp_opts.clone()
     };
     let mut qp_solver = ParametricActiveSetSolver::new(make_backend());

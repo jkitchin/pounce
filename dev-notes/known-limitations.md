@@ -74,7 +74,8 @@ with the improvements above kept.
 **Re-checked after B6/B7 landed (same branch, 2026-11-20): not fixed.** The
 handover sweep of the final branch shows both lines unchanged
 (`SolvedToAcceptableLevel`, it=21 and it=64). That is expected rather than
-informative: B6's rank probe is size-gated to KKT dimension ≥ 5000 and B7's
+informative: B6's rank probe is off by default (it was size-gated to KKT
+dimension ≥ 5000 when this was checked) and B7's
 seeded phase 1 is opt-in (see the entry below), and these models are far
 below the gate, so neither runs on them. An ungated B6/B7 run flipped
 `cc:design_cent_3` back to `SolveSucceeded`, but it ran concurrently with
@@ -85,7 +86,7 @@ a step-4 first QP of 591 s and one of 23 s.
 
 ---
 
-## Active-set QP: the gh#1206 rank probe and H-diagonal padding are size-gated, and the hint-seeded phase 1 is opt-in (gh#1206 B6, P2, B7)
+## Active-set QP: the gh#1206 H-diagonal padding is size-gated, and the rank probe and hint-seeded phase 1 are opt-in (gh#1206 B6, P2, B7)
 
 *Measured on the gh#1206 pounce-qp branch against `b49e6d4`,
 `scripts/sweep-fixtures.sh <bin> <out> solver_selection=qp-active-set`, both
@@ -138,12 +139,38 @@ Gated, that sweep is empty.
   the seeded phase reached a point `8e-8` below the cold optimum, i.e. not
   feasible to tolerance.
 
+### B6 gated at 5000 aborted BOYD2; it is now off by default
+
+B6 first shipped gated at KKT dimension 5000. The PR #1208 re-review ran
+Maros-Meszaros under `solver_selection=qp-active-set`, `max_wall_time=150`.
+BOYD2 (93 263 variables) then ran past the wall-time limit: still inside one
+FERAL dense factorization (`packed_schur_tiles_nofma`) at 500 s on the
+reviewer's machine, against `main`'s clean `MaximumWallTimeExceeded` at
+150.7 s. On a 15 GB Linux container the same run aborted after about 100 s
+with `memory allocation of 55729914368 bytes failed`, inside
+`factorize_with_inertia_control`, in FERAL's `grow_pooled_front`. Bisected
+with one environment switch per item: switching off P1, P2 or P7 alone still
+aborts; switching off B6 alone, or all four, restores `main`'s behaviour.
+
+The mechanism: the probe's `−δ_c` entries sit on constraint-row diagonals
+that the KKT does not store, so the probe matrix has a new pattern. FERAL
+re-analyses it, and on BOYD2 the new ordering produces a 55.7 GB front.
+Nothing before the numeric factorization bounds the fill, and an allocation
+failure aborts the process rather than returning an error. So B6 is now
+opt-in: `QpOptions::dual_shift_probe_min_dim` defaults to `usize::MAX`.
+Making it safe would mean either reusing the existing pattern (store explicit
+zero diagonals on the constraint rows too, as P2 does for `H`) or checking
+FERAL's predicted fill before the probe's numeric factorization.
+
 ### The gates
 
-B6 runs from KKT dimension `QpOptions::dual_shift_probe_min_dim`, P2 from
-`n + m ≥ kkt::H_DIAG_PAD_MIN_DIM`, both `SOFT_DROP_MIN_DIM` (5000), the size
-from which the soft-drop pattern (gh#1083) is on for the same symbolic-reuse
-reason. B7 is `QpOptions::elastic_seed_from_hint`, off. With the gates the
+B6: `QpOptions::dual_shift_probe_min_dim`, compared against the **KKT
+dimension** (`kkt.dim`), default `usize::MAX` (off). P2: `n + m ≥
+kkt::H_DIAG_PAD_MIN_DIM` (5000, `SOFT_DROP_MIN_DIM`, the size from which the
+soft-drop pattern of gh#1083 is on for the same symbolic-reuse reason). The
+two measure different things: a K_max on the Schur path has dimension about
+`2n + m`, so a probe gate of 5000 would engage there at `n + m ≈ 2500`. B7:
+`QpOptions::elastic_seed_from_hint`, off. With the gates the
 `qp-active-set` sweep no longer shows the two losses; nothing in the corpus
 reaches the gated branches, so the sweep says nothing about them — the unit
 tests (`rank_probe_unit.rs`, `kkt_unit.rs`,
@@ -153,7 +180,11 @@ tests (`rank_probe_unit.rs`, `kkt_unit.rs`,
 
 Lower the gates to 0 (and turn B7 on) and rerun the `qp-active-set` sweep:
 QGFRDXPN and QFORPLAN must stay `SolveSucceeded` and `warm_start_pin_repair.rs`
-must pass with the option on. For B6 the likely shape is a cap on
+must pass with the option on. For B6, also run Maros-Meszaros BOYD2 under
+`solver_selection=qp-active-set max_wall_time=150`
+(`benchmarks/qp/generate_nl.py BOYD2`; the `.mat` is fetchable from
+`raw.githubusercontent.com/qpsolvers/maros_meszaros_qpbenchmark/main/data/`):
+it must stop at the wall-time limit. For B6 the likely shape is a cap on
 probe-triggered prunes per pass, as `COUNT_PRUNE_CAP` caps the counting
 trigger; for B7, a phase 1 that releases a hint's wrong-signed bounds by
 multiplier rather than by index.
