@@ -79,7 +79,26 @@ pub enum QpError {
     DeadlineExpired,
 }
 
+/// Message of the failure an inertia-control ladder reports when the
+/// gh#1206 B6 probe has identified a rank-deficient constraint block. It
+/// carries "singular", so it is recoverable like every other singular
+/// factor, and the callers answer it the same way: prune the working set.
+const RANK_DEFICIENT_MSG: &str = "KKT constraint block is singular (rank-deficient working set: \
+     a -delta_c dual shift factors where the H-block shift could not)";
+
 impl QpError {
+    /// The failure an inertia-control ladder reports, without climbing its
+    /// remaining rungs, when the B6 probe finds a rank-deficient constraint
+    /// block ([`crate::QpOptions::dual_shift_probe`]).
+    pub(crate) fn rank_deficient_working_set() -> Self {
+        QpError::LinearSolverFailure(RANK_DEFICIENT_MSG.into())
+    }
+
+    /// Whether this is [`Self::rank_deficient_working_set`].
+    pub fn is_rank_deficient_working_set(&self) -> bool {
+        matches!(self, QpError::LinearSolverFailure(m) if m == RANK_DEFICIENT_MSG)
+    }
+
     /// True when this is a linear-solver failure that the §4.5
     /// inertia-control loop may recover from by shifting the Hessian
     /// diagonal — i.e. a singular factor or a wrong-inertia report.

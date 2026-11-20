@@ -83,6 +83,46 @@ impl KktTriplet {
 }
 
 impl KktTriplet {
+    /// Add `−delta_c` to the diagonal of every row below the `H` block whose
+    /// assembled diagonal is zero — the live constraint rows — and return
+    /// how many it shifted (gh#1206 B6). A row carrying the `(p, p) = 1`
+    /// sentinel of a dropped or inactive slot ([`crate::schur`]'s K_max,
+    /// [`assemble_soft_active_set_kkt`]) is decoupled already and is left
+    /// alone. An existing diagonal entry is shifted in place; a missing one
+    /// is appended.
+    pub(crate) fn add_dual_shift(&mut self, n_h_rows: usize, delta_c: Number) -> usize {
+        let n_rows = self.dim.saturating_sub(n_h_rows);
+        let mut diag = vec![0.0; n_rows];
+        let mut first = vec![None; n_rows];
+        for k in 0..self.irn.len() {
+            let (i, j) = (self.irn[k], self.jcn[k]);
+            if i == j && i as usize > n_h_rows {
+                let r = i as usize - n_h_rows - 1;
+                diag[r] += self.vals[k];
+                first[r].get_or_insert(k);
+            }
+        }
+        let mut shifted = 0;
+        for r in 0..n_rows {
+            if diag[r] != 0.0 {
+                continue;
+            }
+            shifted += 1;
+            match first[r] {
+                Some(k) => self.vals[k] -= delta_c,
+                None => {
+                    let i1 = (n_h_rows + r + 1) as Index;
+                    self.irn.push(i1);
+                    self.jcn.push(i1);
+                    self.vals.push(-delta_c);
+                }
+            }
+        }
+        shifted
+    }
+}
+
+impl KktTriplet {
     /// Assemble the equality-only KKT matrix `[H Aᵀ; A 0]` for the
     /// QP. Caller must have validated the QP (see
     /// [`QpProblem::validate`]) and verified

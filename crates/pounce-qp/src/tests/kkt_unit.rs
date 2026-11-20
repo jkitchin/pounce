@@ -197,7 +197,10 @@ fn an_inertia_shift_keeps_every_assembled_kkt_pattern() {
                         .sum()
                 };
                 let moved = d(&shifted) - d(&kkt);
-                assert!((moved - 1e-4).abs() < 1e-15, "{what}: diagonal {i} moved {moved}");
+                assert!(
+                    (moved - 1e-4).abs() < 1e-15,
+                    "{what}: diagonal {i} moved {moved}"
+                );
             }
         }
     });

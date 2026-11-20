@@ -120,6 +120,29 @@ pub struct QpOptions {
     pub inertia_shift_factor: Number,
     pub inertia_max_shifts: u32,
 
+    /// The `−δ_c·I` dual shift of the rank-deficiency probe (gh#1206 B6); 0
+    /// turns the probe off.
+    ///
+    /// A shift `δ·I` on the `H` block cannot remove a singularity that comes
+    /// from dependent *constraint* rows — `[H + δI, Aᵀ; A, 0]` is singular
+    /// for every `δ` when `A` is rank-deficient — so on an LICQ failure the
+    /// ladder used to climb all `inertia_max_shifts` rungs (to `1e14`, one
+    /// numeric factorization each) before reporting the failure its callers
+    /// answer by pruning the working set to an independent subset. Now, when
+    /// the unshifted KKT and the first rung both fail `Singular`, one more
+    /// factorization tries the first rung with `−δ_c` on the diagonal of
+    /// every live constraint row, as the interior point regularizes its
+    /// Jacobian block. If that factors with the right inertia the
+    /// singularity is a rank deficiency, and the ladder reports it at once.
+    ///
+    /// The regularized factor is a **diagnosis only**, never a step: its
+    /// solution has `A_W p = δ_c λ` rather than `A_W p = 0`, so stepping on
+    /// it would move the iterate off its own active rows, and its multipliers
+    /// are one arbitrary split among dependent rows — not something to drop
+    /// or certify optimality on. The callers' prune is what makes the working
+    /// set independent again.
+    pub dual_shift_probe: Number,
+
     /// Opt in to the §4.2 sparse Schur-complement update path in
     /// `solve_general`. When `true`, the inner loop uses a cached
     /// factor of the fixed-dim K_max matrix and absorbs working-
@@ -326,6 +349,7 @@ impl Default for QpOptions {
             inertia_shift_initial: 1e-8,
             inertia_shift_factor: 100.0,
             inertia_max_shifts: 12,
+            dual_shift_probe: 1e-8,
             use_schur_updates: false,
             schur_drop_inertia_test: true,
             use_homotopy: false,

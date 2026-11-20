@@ -450,8 +450,22 @@ impl SchurState {
             Err(e) => return Err(e),
         }
 
+        let singular_unshifted = linsol.last_factor_singular();
         let mut next = opts.inertia_shift_initial;
-        for _ in 0..opts.inertia_max_shifts {
+        for rung in 0..opts.inertia_max_shifts {
+            // gh#1206 B6, as in `factorize_with_inertia_control`: singular
+            // unshifted and at the first rung, and a dual shift on the active
+            // slot rows (never the `(p, p) = 1` sentinels) factors — a
+            // rank-deficient working set, which no rung of this ladder
+            // repairs. The caller (`schur_reset_rank_repaired`) prunes it.
+            if rung == 1
+                && singular_unshifted
+                && linsol.last_factor_singular()
+                && !crate::deadline::expired()
+                && linsol.probe_rank_deficiency(&kkt, self.n, expected_neg, opts)?
+            {
+                return Err(QpError::rank_deficient_working_set());
+            }
             kkt.add_h_diagonal_shift(self.n, next - current);
             current = next;
             let mut rhs_local = vec![0.0; self.dim];

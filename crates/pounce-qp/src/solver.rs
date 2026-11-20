@@ -260,10 +260,28 @@ impl ParametricActiveSetSolver {
             Err(ref e) if e.is_recoverable_factorization_failure() => {}
             Err(e) => return Err(e),
         }
+        let singular_unshifted = self.linsol.last_factor_singular();
 
         let mut current = 0.0;
         let mut next = opts.inertia_shift_initial;
-        for _ in 0..opts.inertia_max_shifts {
+        for rung in 0..opts.inertia_max_shifts {
+            // gh#1206 B6. Singular unshifted *and* at the first rung: a zero
+            // pivot an `H`-block shift does not remove. If a dual shift on
+            // the constraint rows does, the rows are dependent, no rung of
+            // this ladder can help (`[H + δI, Aᵀ; A, 0]` is singular for
+            // every δ), and climbing to `1e14` would only cost ten more
+            // factorizations — or, past `δ ≈ 1e8`, return a factor that
+            // masks the null direction. Report it for the caller's prune.
+            if rung == 1
+                && singular_unshifted
+                && self.linsol.last_factor_singular()
+                && !crate::deadline::expired()
+                && self
+                    .linsol
+                    .probe_rank_deficiency(&kkt, n_h_rows, expected_neg, opts)?
+            {
+                return Err(QpError::rank_deficient_working_set());
+            }
             if crate::deadline::expired() {
                 // Cancellation is an *error*, not a value. `Ok(current)` here
                 // would hand the caller an `rhs` that was never solved — it
@@ -1022,8 +1040,25 @@ impl ParametricActiveSetSolver {
             }
             // rhs[n..n+m] and rhs[n+m..n+m+k] stay zero.
 
-            let delta =
-                self.factorize_with_inertia_control(kkt, &mut rhs, (m + k) as i32, qp.n, opts)?;
+            // A bound pinning a variable the equalities already fix makes the
+            // block rank-deficient. The ladder used to climb to `1e14` on it
+            // and return either that failure or, past `δ ≈ 1e8`, a factor
+            // masking the null direction; it now reports the deficiency at
+            // once (gh#1206 B6), and the rank-aware general path takes the
+            // problem, as `solve_equality_only` does for the same cause.
+            let delta = match self.factorize_with_inertia_control(
+                kkt,
+                &mut rhs,
+                (m + k) as i32,
+                qp.n,
+                opts,
+            ) {
+                Ok(d) => d,
+                Err(e) if e.is_rank_deficient_working_set() => {
+                    return self.solve_general(qp, None, opts);
+                }
+                Err(e) => return Err(e),
+            };
             n_refactor += 1;
             if crate::deadline::expired() {
                 return Ok(cut_off_solution(
@@ -3748,7 +3783,24 @@ impl ParametricActiveSetSolver {
                     self.count_prune.prunes += 1;
                 }
             }
-            match schur.reset(&mut self.linsol, qp, working, ac as i32, opts) {
+            let mut reset = schur.reset(&mut self.linsol, qp, working, ac as i32, opts);
+            // Past `COUNT_PRUNE_CAP` the counting trigger stands down and the
+            // over-full set is deliberately left to the factorization, which
+            // climbed its ladder to whatever δ factored (see above: pruning
+            // there is what cycled QFORPLAN). The B6 probe (gh#1206) would
+            // turn that into a failure the repair below prunes after all, so
+            // a stood-down pass keeps the old ladder.
+            if ac > qp.n
+                && self.count_prune.prunes >= COUNT_PRUNE_CAP
+                && matches!(&reset, Err(e) if e.is_rank_deficient_working_set())
+            {
+                let no_probe = QpOptions {
+                    dual_shift_probe: 0.0,
+                    ..opts.clone()
+                };
+                reset = schur.reset(&mut self.linsol, qp, working, ac as i32, &no_probe);
+            }
+            match reset {
                 Ok(()) => return Ok(()),
                 Err(e) if e.is_recoverable_factorization_failure() => {
                     if *budget == 0 {
