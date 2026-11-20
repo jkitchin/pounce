@@ -83,6 +83,11 @@
     border: 1px solid var(--accent); padding: .5rem 1rem; font-size: 14px;
   }
 
+  #plot { display: block; width: 100%; height: 12rem; }
+  #plot .axis { stroke: var(--line); stroke-width: 1; }
+  #plot .trace { fill: none; stroke: var(--accent); stroke-width: 2;
+                 stroke-linejoin: round; }
+
   pre#log {
     margin: 0; padding: .9rem 1rem; max-height: 22rem; overflow: auto;
     background: #14130f; color: #e6ded0; border-radius: 10px;
@@ -139,11 +144,24 @@
       </label>
       <textarea id="options" spellcheck="false">print_level 5
 max_iter 3000
-tol 1e-8</textarea>
+tol 1e-8
+wasm_iterate_callback yes</textarea>
       <div class="row" style="margin-top:.75rem">
         <button id="solve">Solve</button>
         <span id="solve-status" class="note"></span>
       </div>
+    </div>
+  </section>
+
+  <section id="plot-section" hidden>
+    <h2>Objective by iteration</h2>
+    <div class="panel">
+      <svg id="plot" viewBox="0 0 600 200" preserveAspectRatio="none" role="img"
+           aria-label="Objective value at each iteration">
+        <line class="axis" x1="0" y1="200" x2="600" y2="200" vector-effect="non-scaling-stroke"/>
+        <polyline id="trace" class="trace" vector-effect="non-scaling-stroke"/>
+      </svg>
+      <p class="note" id="plot-note"></p>
     </div>
   </section>
 

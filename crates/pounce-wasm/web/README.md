@@ -26,7 +26,7 @@ from `.github/workflows/docs.yml`.
 | `index.html` | markup + styles |
 | `app.js` | file intake and rendering, main thread |
 | `worker.js` | owns the wasm instance; runs load/solve off the UI thread |
-| `wasi.js` | ~60-line `wasi_snapshot_preview1` host |
+| `wasi.js` | ~60-line `wasi_snapshot_preview1` host, plus the module's own `pounce.iterate` import |
 | `pounce.wasm` | build artifact, staged by `build.sh` (not in git) |
 
 ## Why WASI and not `wasm-bindgen`
@@ -65,6 +65,13 @@ const csv     = fromWasm(wasm.pounce_solution_csv());   // every row, named
 Options are `ipopt.opt`-format text, exactly as the CLI and the Python API
 take them. Every entry point catches panics and reports `{"error": …}`, so a
 malformed model does not trap the instance.
+
+With `wasm_iterate_callback yes` in the options, the solve also calls the
+module's one non-WASI import, `pounce.iterate`, once per iteration. The
+worker passes `createWasi` an `onIterate` hook that forwards the objective
+to the page, which plots it while the solve runs. The default options turn
+it on, and deleting that line turns the plot off. The import's signature
+and arguments are in `docs/src/wasm.md`, "Following a solve as it runs".
 
 Each returned payload is a little-endian `u32` byte count followed by that
 many UTF-8 bytes — no terminator to scan for, so a bad pointer or length is

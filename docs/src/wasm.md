@@ -336,3 +336,55 @@ Both entry points catch panics and return `{"error": …}`, so a malformed
 model cannot trap the instance. See `crates/pounce-wasm/web/README.md` for
 the full walkthrough and `crates/pounce-wasm/tests/smoke.mjs` for a
 headless (Node) driver of the same ABI.
+
+## Following a solve as it runs
+
+With `wasm_iterate_callback yes` in the options, `pounce_solve` calls a host
+function once per iteration, iteration 0 included. The module imports it as
+`iterate` from module `pounce`:
+
+```text
+(import "pounce" "iterate"
+  (func (param $iter i32) (param $restoration i32)
+        (param $objective f64) (param $inf_pr f64) (param $inf_du f64)
+        (param $mu f64) (param $alpha_pr f64) (param $alpha_du f64)
+        (param $x_ptr i32) (param $x_len i32)
+        (result i32)))
+```
+
+The objective is in the model's own units and sense, the value the result
+reports. `inf_pr`, `inf_du`, `mu`, `alpha_pr` and `alpha_du` are the columns
+of the iteration log. `x_ptr` points at `x_len` doubles in the module's
+memory. They are the current x in the `.nl` file's variable order and units,
+the coordinates of the `.sol` primal block, with presolve and scaling mapped
+back as the `.sol` writer maps them. The module overwrites them at the next
+call, so a host that keeps x copies it. An iteration of the restoration phase
+has no point in those coordinates, so its call passes `restoration = 1`, a
+NaN objective and an empty x (`x_ptr = 0`, `x_len = 0`). A nonzero return
+stops the solve, which ends with status `UserRequestedStop` at the point it
+had reached.
+
+`wasm_iterate_callback_every k` makes the call only at iterations that are a
+multiple of `k`. With `wasm_iterate_callback no`, the default, the module
+makes no call and the solve is unchanged. A solve the second-opinion ladder
+re-solves calls the host again for each re-solve, with the iteration numbers
+starting over.
+
+Every module imports the function whether or not a solve calls it, so every
+host has to provide it. `wasi.js` does, as a function that returns 0 unless
+`createWasi` is given an `onIterate` hook. The hook receives the statistics
+and a copy of x, and returning `true` stops the solve:
+
+```js
+const wasi = createWasi(onStdout, {
+  onIterate: ({ iter, restoration, objective, inf_pr, x }) => {
+    plot(iter, objective);
+    return false;
+  },
+});
+```
+
+The `.nl` page plots the objective this way, and
+`crates/pounce-wasm/tests/iterate_callback.mjs` tests the call in Node. The
+CLI and the native Python and C interfaces refuse both options, since they
+make no such call. Python and C have their own intermediate callbacks.

@@ -30,7 +30,13 @@ function restartWorker() {
 function resetUi() {
   summary = null;
   result = null;
-  for (const id of ['summary-section', 'solve-section', 'result-section', 'log-section']) {
+  for (const id of [
+    'summary-section',
+    'solve-section',
+    'plot-section',
+    'result-section',
+    'log-section',
+  ]) {
     $(id).hidden = true;
   }
   log.textContent = '';
@@ -96,6 +102,8 @@ function onWorkerMessage({ data }) {
     }
     summary = data.summary;
     renderSummary(summary);
+  } else if (data.type === 'iterate') {
+    addPoint(data);
   } else if (data.type === 'log') {
     log.textContent += data.text;
     log.scrollTop = log.scrollHeight;
@@ -128,8 +136,59 @@ solveButton.addEventListener('click', () => {
   $('log-section').hidden = false;
   $('result-section').hidden = true;
   result = null;
+  resetPlot();
   worker.postMessage({ type: 'solve', options: $('options').value });
 });
+
+// --- live objective plot ---------------------------------------------------
+
+// The worker forwards one message per `pounce.iterate` call, which arrive
+// while the solve is still running. The section stays hidden until the
+// first one, so a solve without `wasm_iterate_callback yes` shows no plot.
+// Restoration iterations carry no objective (NaN) and leave a gap.
+let points = [];
+let frame = 0;
+
+function resetPlot() {
+  points = [];
+  $('plot-section').hidden = true;
+  $('trace').setAttribute('points', '');
+  $('plot-note').textContent = '';
+}
+
+function addPoint({ iter, objective }) {
+  points.push([iter, objective]);
+  $('plot-section').hidden = false;
+  // Redraw at most once per frame however fast the iterations come.
+  if (!frame) {
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      drawPlot();
+    });
+  }
+}
+
+function drawPlot() {
+  const finitePoints = points.filter(([, f]) => Number.isFinite(f));
+  if (!finitePoints.length) return;
+  const lastIter = points.at(-1)[0];
+  const values = finitePoints.map(([, f]) => f);
+  let lo = Math.min(...values);
+  let hi = Math.max(...values);
+  if (hi === lo) {
+    lo -= 1;
+    hi += 1;
+  }
+  const px = (k) => (lastIter ? (k / lastIter) * 600 : 300);
+  const py = (f) => 196 - ((f - lo) / (hi - lo)) * 192;
+  $('trace').setAttribute(
+    'points',
+    finitePoints.map(([k, f]) => `${px(k).toFixed(1)},${py(f).toFixed(1)}`).join(' '),
+  );
+  const [k, f] = finitePoints.at(-1);
+  $('plot-note').textContent =
+    `Iteration ${num(k)}: objective ${sci(f)}. The axis runs from ${sci(lo)} to ${sci(hi)}.`;
+}
 
 // --- downloads -------------------------------------------------------------
 

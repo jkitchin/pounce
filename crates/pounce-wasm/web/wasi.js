@@ -9,6 +9,11 @@
 //
 // Keeping the shim here (~60 lines) is what lets the demo run from a plain
 // static server with no build step, no npm install, and no `wasm-bindgen`.
+//
+// The module imports one function of its own, `iterate` from module
+// `pounce`, which it calls once per iteration when a solve sets
+// `wasm_iterate_callback yes` (docs/src/wasm.md). The shim provides it for
+// every host, and it does nothing unless the host passes `onIterate`.
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
@@ -17,8 +22,15 @@ const ERRNO_NOSYS = 52;
 /**
  * @param {(text: string) => void} onStdout called with each chunk the module
  *   writes to fd 1 / fd 2.
+ * @param {{ onIterate?: (it: {
+ *   iter: number, restoration: boolean, objective: number, inf_pr: number,
+ *   inf_du: number, mu: number, alpha_pr: number, alpha_du: number,
+ *   x: Float64Array }) => boolean | void }} [hooks] `onIterate` is called
+ *   at each `pounce.iterate` call with the iteration's statistics and a copy
+ *   of x in the .nl variable order (empty during restoration). Returning
+ *   `true` stops the solve with status UserRequestedStop.
  */
-export function createWasi(onStdout) {
+export function createWasi(onStdout, { onIterate } = {}) {
   let memory = null;
   const decoder = new TextDecoder();
   const dv = () => new DataView(memory.buffer);
@@ -93,8 +105,31 @@ export function createWasi(onStdout) {
     path_open: () => ERRNO_NOSYS,
   };
 
+  // The module's per-iteration call. x is copied out of linear memory
+  // because the module reuses that buffer at the next call.
+  const pounce = {
+    iterate(iter, restoration, objective, infPr, infDu, mu, alphaPr, alphaDu, xPtr, xLen) {
+      if (!onIterate) return 0;
+      const x = xLen
+        ? new Float64Array(memory.buffer, xPtr >>> 0, xLen >>> 0).slice()
+        : new Float64Array(0);
+      const stop = onIterate({
+        iter,
+        restoration: restoration !== 0,
+        objective,
+        inf_pr: infPr,
+        inf_du: infDu,
+        mu,
+        alpha_pr: alphaPr,
+        alpha_du: alphaDu,
+        x,
+      });
+      return stop === true ? 1 : 0;
+    },
+  };
+
   return {
-    imports: { wasi_snapshot_preview1 },
+    imports: { wasi_snapshot_preview1, pounce },
     /** Must be called with the instance's memory before any other export. */
     bind(instance) {
       memory = instance.exports.memory;

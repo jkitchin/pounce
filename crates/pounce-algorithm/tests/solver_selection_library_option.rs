@@ -314,3 +314,41 @@ fn declaring_convex_routing_silences_the_guard() {
         "a caller that can reach the convex engines honours the knob"
     );
 }
+
+/// `wasm_iterate_callback` asks for the WebAssembly module's per-iteration
+/// host call. A library solve makes no such call, so a non-default value
+/// would configure nothing, and it is refused like a convex knob.
+#[test]
+fn the_wasm_iterate_callback_is_refused_on_a_library_solve() {
+    for opts in [
+        "print_level 0\nwasm_iterate_callback yes\n",
+        "print_level 0\nwasm_iterate_callback_every 5\n",
+    ] {
+        let (_app, status, _out) = solve_hs35_with(opts);
+        assert_eq!(status, ApplicationReturnStatus::InvalidOption, "{opts}");
+    }
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    app.initialize_with_options_str("wasm_iterate_callback yes\n")
+        .unwrap();
+    let msg = app
+        .unhonored_wasm_option()
+        .expect("a non-default wasm option must be refused");
+    assert!(msg.contains("wasm_iterate_callback"), "{msg}");
+}
+
+/// Its defaults ask for nothing and keep solving, and the module, which
+/// does make the call, declares so and is not refused.
+#[test]
+fn the_wasm_iterate_callback_defaults_and_the_module_are_not_refused() {
+    let (_app, status, _out) =
+        solve_hs35_with("print_level 0\nwasm_iterate_callback no\nwasm_iterate_callback_every 1\n");
+    assert!(converged(status), "{status:?}");
+
+    let mut app = IpoptApplication::new();
+    app.initialize().unwrap();
+    app.initialize_with_options_str("wasm_iterate_callback yes\n")
+        .unwrap();
+    app.set_wasm_iterate_callback_available(true);
+    assert_eq!(app.unhonored_wasm_option(), None);
+}

@@ -42,6 +42,48 @@
 //! The solver's own console output (banner, iteration table, exit line) is
 //! written to stdout as usual; under WASI the host shim receives it through
 //! `fd_write`, which is how the demo page streams the live iteration log.
+//!
+//! # Per-iteration host call
+//!
+//! The module imports one function besides WASI's, from module `pounce`:
+//!
+//! ```text
+//! (import "pounce" "iterate"
+//!   (func (param $iter i32) (param $restoration i32)
+//!         (param $objective f64) (param $inf_pr f64) (param $inf_du f64)
+//!         (param $mu f64) (param $alpha_pr f64) (param $alpha_du f64)
+//!         (param $x_ptr i32) (param $x_len i32)
+//!         (result i32)))
+//! ```
+//!
+//! With the option `wasm_iterate_callback yes`, [`pounce_solve`] calls it
+//! from inside the solve once per iteration, iteration 0 included, or at
+//! every iteration that is a multiple of `wasm_iterate_callback_every`. With
+//! the option off, the default, it is never called and the solve is the one
+//! the module ran before the import existed. Every host has to provide the
+//! import for the module to instantiate, so a host that does not use it
+//! passes a function that returns 0.
+//!
+//! * `iter` is the iteration number, and `restoration` is 1 for an
+//!   iteration of the restoration phase and 0 otherwise.
+//! * `objective` is the model's objective in its own units and sense, as
+//!   the solve result and the `.sol` file report it. `inf_pr`, `inf_du`,
+//!   `mu`, `alpha_pr` and `alpha_du` are the columns of the iteration log.
+//! * `x_ptr` and `x_len` describe `x_len` `f64` values in the module's
+//!   memory: the current x, in the `.nl` file's variable order and units,
+//!   the coordinates of the primal block [`pounce_solution_sol`] writes.
+//!   Variables presolve removed or scaling transformed are mapped back as
+//!   the `.sol` writer maps them. The values are valid only until the call
+//!   returns, so a host that keeps them copies them.
+//! * During restoration the iterate belongs to the feasibility problem, not
+//!   the model, so those calls pass `x_ptr = 0`, `x_len = 0` and a NaN
+//!   `objective`.
+//! * A nonzero return stops the solve, which ends with the status a
+//!   user-requested stop gets (`UserRequestedStop`), as Ipopt's
+//!   `intermediate_callback` returning `false` does.
+//!
+//! A solve that fails and is re-solved by the second-opinion ladder calls
+//! it again for each re-solve, with the iteration numbers starting over.
 
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -50,12 +92,19 @@ use std::rc::Rc;
 use pounce_algorithm::application::{
     IpoptApplication, default_backend_factory, feral_config_from_options, ma57_config_from_options,
 };
+use pounce_common::types::{Index, Number};
 use pounce_nl::nl_reader::{NlProblem, NlTnlp, parse_nl_text};
 use pounce_nl::sol_writer::{
     SolSuffix, SolSuffixTarget, SolSuffixValues, SolutionFile, format_sol,
 };
+use pounce_nlp::constant_derivatives::DerivativeProofs;
 use pounce_nlp::expression_provider::ExpressionProvider;
-use pounce_nlp::tnlp::{Linearity, TNLP};
+use pounce_nlp::live_iterate::with_current_user_iterate;
+use pounce_nlp::return_codes::AlgorithmMode;
+use pounce_nlp::tnlp::{
+    BoundsInfo, InfeasibilityProof, IpoptCq, IpoptData, IterStats, Linearity, MetaData, NlpInfo,
+    ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
+};
 use pounce_restoration::resto_alg_builder::RestoAlgorithmBuilder;
 use pounce_restoration::resto_inner_solver::{
     InnerBackendFactoryFactory, make_default_restoration_factory_provider,
@@ -448,6 +497,278 @@ fn summarize(tnlp: &mut NlTnlp) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
+// Per-iteration host call
+// ---------------------------------------------------------------------------
+
+/// What one per-iteration call passes the host besides x. See the crate
+/// docs, "Per-iteration host call".
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct IterateCall {
+    iter: Index,
+    restoration: bool,
+    objective: Number,
+    inf_pr: Number,
+    inf_du: Number,
+    mu: Number,
+    alpha_pr: Number,
+    alpha_du: Number,
+}
+
+/// The call into the host's `pounce.iterate` import. Returns `true` when
+/// the host asks the solve to stop.
+#[cfg(target_family = "wasm")]
+mod host {
+    #[link(wasm_import_module = "pounce")]
+    unsafe extern "C" {
+        #[link_name = "iterate"]
+        fn pounce_iterate(
+            iter: i32,
+            restoration: i32,
+            objective: f64,
+            inf_pr: f64,
+            inf_du: f64,
+            mu: f64,
+            alpha_pr: f64,
+            alpha_du: f64,
+            x_ptr: *const f64,
+            x_len: usize,
+        ) -> i32;
+    }
+
+    pub(super) fn call(c: &super::IterateCall, x: &[f64]) -> bool {
+        let x_ptr = if x.is_empty() {
+            std::ptr::null()
+        } else {
+            x.as_ptr()
+        };
+        // SAFETY: `x_ptr` and `x.len()` describe a live slice for the whole
+        // call, and the import's contract is to read it before returning.
+        let stop = unsafe {
+            pounce_iterate(
+                c.iter,
+                i32::from(c.restoration),
+                c.objective,
+                c.inf_pr,
+                c.inf_du,
+                c.mu,
+                c.alpha_pr,
+                c.alpha_du,
+                x_ptr,
+                x.len(),
+            )
+        };
+        stop != 0
+    }
+}
+
+/// Off wasm there is no host to import from. The host-side unit tests
+/// install a closure here in its place, and without one every call returns
+/// "continue".
+#[cfg(not(target_family = "wasm"))]
+mod host {
+    use std::cell::RefCell;
+
+    type Host = Box<dyn FnMut(&super::IterateCall, &[f64]) -> bool>;
+
+    thread_local! {
+        pub(super) static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn call(c: &super::IterateCall, x: &[f64]) -> bool {
+        HOST.with(|h| h.borrow_mut().as_mut().is_some_and(|f| f(c, x)))
+    }
+}
+
+/// `wasm_iterate_callback_every` when `wasm_iterate_callback` is on, else
+/// `None`.
+fn iterate_callback_every(app: &IpoptApplication) -> Option<Index> {
+    let on = app
+        .options()
+        .get_bool_value("wasm_iterate_callback", "")
+        .is_ok_and(|(v, _)| v);
+    let every = app
+        .options()
+        .get_integer_value("wasm_iterate_callback_every", "")
+        .map_or(1, |(v, _)| v)
+        .max(1);
+    on.then_some(every)
+}
+
+/// The loaded model with a per-iteration callback that calls the host.
+/// Installed only with `wasm_iterate_callback yes`; every other method is
+/// the model's own.
+///
+/// It sits at the bottom of the TNLP stack, under presolve, so the iterate
+/// it reads ([`with_current_user_iterate`]) has been lifted by every layer
+/// above it into the model's own variables and units, by the rules each
+/// layer's `finalize_solution` applies to the point the `.sol` reports.
+struct IterateCallbackTnlp {
+    inner: Rc<RefCell<NlTnlp>>,
+    every: Index,
+    /// `1` for a minimize model and `-1` for a maximize one: `NlTnlp`
+    /// negates a maximize objective, and the host gets the model's own.
+    sense: Number,
+    /// x for the host, reused across calls.
+    x: Vec<f64>,
+}
+
+impl IterateCallbackTnlp {
+    fn new(inner: Rc<RefCell<NlTnlp>>, every: Index) -> Self {
+        let sense = if inner.borrow().problem().minimize {
+            1.0
+        } else {
+            -1.0
+        };
+        Self {
+            inner,
+            every,
+            sense,
+            x: Vec::new(),
+        }
+    }
+}
+
+impl TNLP for IterateCallbackTnlp {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        self.inner.borrow_mut().get_nlp_info()
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        self.inner.borrow_mut().get_bounds_info(b)
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        self.inner.borrow_mut().get_starting_point(sp)
+    }
+    fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+        self.inner.borrow_mut().eval_f(x, new_x)
+    }
+    fn eval_grad_f(&mut self, x: &[Number], new_x: bool, grad_f: &mut [Number]) -> bool {
+        self.inner.borrow_mut().eval_grad_f(x, new_x, grad_f)
+    }
+    fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+        self.inner.borrow_mut().eval_g(x, new_x, g)
+    }
+    fn eval_jac_g(&mut self, x: Option<&[Number]>, new_x: bool, mode: SparsityRequest<'_>) -> bool {
+        self.inner.borrow_mut().eval_jac_g(x, new_x, mode)
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        new_x: bool,
+        obj_factor: Number,
+        lambda: Option<&[Number]>,
+        new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        self.inner
+            .borrow_mut()
+            .eval_h(x, new_x, obj_factor, lambda, new_lambda, mode)
+    }
+    fn finalize_solution(&mut self, sol: Solution<'_>, ip_data: &IpoptData, ip_cq: &IpoptCq) {
+        self.inner
+            .borrow_mut()
+            .finalize_solution(sol, ip_data, ip_cq);
+    }
+    fn get_var_con_metadata(&mut self, var: &mut MetaData, con: &mut MetaData) -> bool {
+        self.inner.borrow_mut().get_var_con_metadata(var, con)
+    }
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        self.inner.borrow_mut().get_scaling_parameters(req)
+    }
+    fn get_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner.borrow_mut().get_variables_linearity(types)
+    }
+    fn get_objective_variables_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner
+            .borrow_mut()
+            .get_objective_variables_linearity(types)
+    }
+    fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+        self.inner.borrow_mut().get_constraints_linearity(types)
+    }
+    fn get_number_of_nonlinear_variables(&mut self) -> Index {
+        self.inner.borrow_mut().get_number_of_nonlinear_variables()
+    }
+    fn get_list_of_nonlinear_variables(&mut self, pos_nonlin_vars: &mut [Index]) -> bool {
+        self.inner
+            .borrow_mut()
+            .get_list_of_nonlinear_variables(pos_nonlin_vars)
+    }
+    fn derivative_proofs(&mut self) -> DerivativeProofs {
+        self.inner.borrow_mut().derivative_proofs()
+    }
+    fn update_with_barrier(&mut self, mu: Number) -> bool {
+        self.inner.borrow_mut().update_with_barrier(mu)
+    }
+    fn finalize_metadata(&mut self, var: &MetaData, con: &MetaData) {
+        self.inner.borrow_mut().finalize_metadata(var, con);
+    }
+    fn is_presolve_wrapper(&self) -> bool {
+        self.inner.borrow().is_presolve_wrapper()
+    }
+    fn scaling_factors(&self) -> Option<Vec<Number>> {
+        self.inner.borrow().scaling_factors()
+    }
+    fn presolve_infeasibility_proof(&self) -> Option<InfeasibilityProof> {
+        self.inner.borrow().presolve_infeasibility_proof()
+    }
+
+    fn wants_intermediate_callback(&self) -> bool {
+        true
+    }
+
+    fn wants_current_iterate(&self) -> bool {
+        true
+    }
+
+    fn intermediate_callback(
+        &mut self,
+        stats: IterStats,
+        ip_data: &IpoptData,
+        ip_cq: &IpoptCq,
+    ) -> bool {
+        let model_continues = self
+            .inner
+            .borrow_mut()
+            .intermediate_callback(stats, ip_data, ip_cq);
+        if stats.iter % self.every != 0 {
+            return model_continues;
+        }
+        let restoration = matches!(stats.mode, AlgorithmMode::RestorationPhaseMode);
+        // `stats.obj_value` is the objective the algorithm minimizes:
+        // scaled, and negated for a maximize model. The iterate carries the
+        // scale, so the host gets the model's own objective at no extra
+        // evaluation. No iterate is installed during restoration, where the
+        // iterate is the feasibility problem's, and then x and the
+        // objective are unavailable.
+        self.x.clear();
+        let mut objective = Number::NAN;
+        if !restoration {
+            let sense = self.sense;
+            let x = &mut self.x;
+            with_current_user_iterate(|it| {
+                x.extend_from_slice(&it.x);
+                let scale = it.scaling.as_ref().map_or(1.0, |s| s.obj);
+                if scale != 0.0 {
+                    objective = sense * stats.obj_value / scale;
+                }
+            });
+        }
+        let call = IterateCall {
+            iter: stats.iter,
+            restoration,
+            objective,
+            inf_pr: stats.inf_pr,
+            inf_du: stats.inf_du,
+            mu: stats.mu,
+            alpha_pr: stats.alpha_pr,
+            alpha_du: stats.alpha_du,
+        };
+        let stop = host::call(&call, &self.x);
+        model_continues && !stop
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Solve
 // ---------------------------------------------------------------------------
 
@@ -492,6 +813,16 @@ fn solve_loaded_with(
         return serde_json::json!({ "error": format!("bad options: {}", e.message) });
     }
     configure(&mut app);
+    // This module makes the per-iteration host call, so the options that
+    // configure it are honoured here and refused everywhere else.
+    app.set_wasm_iterate_callback_available(true);
+    let model: Rc<RefCell<dyn TNLP>> = match iterate_callback_every(&app) {
+        Some(every) => Rc::new(RefCell::new(IterateCallbackTnlp::new(
+            Rc::clone(&tnlp),
+            every,
+        ))),
+        None => Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>,
+    };
     // Per-iteration rows for the solve report (the CLI does the same for
     // `--json` at full detail): the studio's convergence plots and
     // diagnostics read them. The rows come from the solver's tracing events,
@@ -513,7 +844,7 @@ fn solve_loaded_with(
         app.set_presolve_already_applied(true);
         Rc::new(RefCell::new(
             pounce_presolve::PresolveTnlp::with_expression_provider(
-                Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>,
+                Rc::clone(&model),
                 Rc::clone(&tnlp) as Rc<RefCell<dyn ExpressionProvider>>,
                 presolve_opts,
             ),
@@ -536,7 +867,7 @@ fn solve_loaded_with(
     let target: Rc<RefCell<dyn TNLP>> = match (&elim, &presolve) {
         (Some(e), _) => Rc::clone(e) as Rc<RefCell<dyn TNLP>>,
         (None, Some(p)) => Rc::clone(p) as Rc<RefCell<dyn TNLP>>,
-        (None, None) => Rc::clone(&tnlp) as Rc<RefCell<dyn TNLP>>,
+        (None, None) => Rc::clone(&model),
     };
 
     // Wire the restoration phase exactly as the CLI and the C interface do.
@@ -1542,6 +1873,114 @@ mod tests {
         assert!(
             opts.iter()
                 .all(|o| o["short"].is_string() && o["long"].is_string())
+        );
+    }
+
+    /// One recorded per-iteration call: what the host was passed, x copied.
+    type Recorded = Vec<(IterateCall, Vec<f64>)>;
+
+    /// Solve the loaded model with `opts`, recording every per-iteration
+    /// call. `stop_at` is the iteration at which the host asks to stop.
+    fn solve_recording(opts: &str, stop_at: Option<Index>) -> (serde_json::Value, Recorded) {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&calls);
+        host::HOST.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |c: &IterateCall, x: &[f64]| {
+                sink.borrow_mut().push((*c, x.to_vec()));
+                stop_at == Some(c.iter)
+            }));
+        });
+        let r = call_solve(opts);
+        host::HOST.with(|h| *h.borrow_mut() = None);
+        let calls = calls.borrow().clone();
+        (r, calls)
+    }
+
+    /// The solve result without its wall time, which no two solves share.
+    fn without_wall_time(mut r: serde_json::Value) -> serde_json::Value {
+        r.as_object_mut().unwrap().remove("wall_time_secs");
+        r
+    }
+
+    #[test]
+    fn the_host_is_called_at_every_iteration_with_the_sol_point_last() {
+        call_load(SIMPLE_NL, "", "");
+        let (r, calls) = solve_recording("print_level 0\nwasm_iterate_callback yes\n", None);
+        assert_eq!(r["success"], true, "{r}");
+        let iters: Vec<Index> = calls.iter().map(|(c, _)| c.iter).collect();
+        let n = r["iterations"].as_i64().unwrap() as Index;
+        assert_eq!(
+            iters,
+            (0..=n).collect::<Vec<_>>(),
+            "one call per iteration from 0"
+        );
+        assert!(calls.iter().all(|(c, x)| !c.restoration && x.len() == 2));
+        let (last, x) = calls.last().unwrap();
+        let sol_x = LAST_SOLVE.with(|s| s.borrow().as_ref().unwrap().x.clone());
+        assert_eq!(x, &sol_x, "the last call's x is the .sol primal block");
+        let objective = r["objective"].as_f64().unwrap();
+        assert!(
+            (last.objective - objective).abs() < 1e-12,
+            "{last:?} against {objective}"
+        );
+    }
+
+    #[test]
+    fn with_the_option_off_the_host_is_never_called_and_the_result_is_unchanged() {
+        call_load(SIMPLE_NL, "", "");
+        let (plain, calls) = solve_recording("print_level 0\n", None);
+        assert!(calls.is_empty());
+        let (off, calls) = solve_recording("print_level 0\nwasm_iterate_callback no\n", None);
+        assert!(calls.is_empty());
+        assert_eq!(without_wall_time(off), without_wall_time(plain.clone()));
+        let (on, _) = solve_recording("print_level 0\nwasm_iterate_callback yes\n", None);
+        assert_eq!(
+            without_wall_time(on),
+            without_wall_time(plain),
+            "turning the call on does not change the solve"
+        );
+    }
+
+    #[test]
+    fn every_k_calls_at_the_multiples_of_k() {
+        call_load(SIMPLE_NL, "", "");
+        let (r, calls) = solve_recording(
+            "print_level 0\nwasm_iterate_callback yes\nwasm_iterate_callback_every 3\n",
+            None,
+        );
+        let n = r["iterations"].as_i64().unwrap() as Index;
+        let iters: Vec<Index> = calls.iter().map(|(c, _)| c.iter).collect();
+        assert_eq!(iters, (0..=n).step_by(3).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_host_can_stop_the_solve() {
+        call_load(SIMPLE_NL, "", "");
+        let (r, calls) = solve_recording("print_level 0\nwasm_iterate_callback yes\n", Some(2));
+        assert_eq!(r["status"], "UserRequestedStop", "{r}");
+        assert_eq!(calls.last().map(|(c, _)| c.iter), Some(2));
+        assert_eq!(r["iterations"], 2);
+    }
+
+    #[test]
+    fn a_maximize_model_reports_its_own_objective() {
+        // `max -x0` over the same rows is the same problem, solved as
+        // `min x0`, so its objective is the negative of the plain one.
+        let max_nl = SIMPLE_NL
+            .replacen("O0 0", "O0 1", 1)
+            .replacen("G0 1\n0 1", "G0 1\n0 -1", 1);
+        call_load(&max_nl, "", "");
+        let (r, calls) = solve_recording("print_level 0\nwasm_iterate_callback yes\n", None);
+        assert_eq!(r["success"], true, "{r}");
+        let objective = r["objective"].as_f64().unwrap();
+        let last = calls.last().unwrap().0;
+        assert!(
+            (last.objective - objective).abs() < 1e-12,
+            "{last:?} against {objective}"
+        );
+        assert!(
+            objective > 0.0,
+            "max -x0 at x0 = -1/sqrt(2) is positive: {objective}"
         );
     }
 }
