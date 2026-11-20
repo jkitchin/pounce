@@ -434,3 +434,197 @@ fn schur_row_add_then_base_active_drop_match_fresh_factor() {
     state.solve(&mut ls, &mut got).unwrap();
     close(&got, &fresh(&w2, 1, &rhs0), "after bound drop");
 }
+
+/// A deterministic xorshift for the randomized Schur tests below.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    /// Uniform in `[-1, 1)`.
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+    }
+    fn below(&mut self, k: usize) -> usize {
+        (self.next() % k as u64) as usize
+    }
+}
+
+/// A random dense QP: `H` symmetric with entries in `[-1, 1)` (indefinite
+/// in general) plus `diag_shift·I`, and a dense `m × n` `A`.
+struct RandomQp {
+    n: usize,
+    m: usize,
+    h: SymTMatrix,
+    a: GenTMatrix,
+    g: Vec<f64>,
+    bl: Vec<f64>,
+    bu: Vec<f64>,
+    xl: Vec<f64>,
+    xu: Vec<f64>,
+}
+
+impl RandomQp {
+    fn new(rng: &mut Rng, n: usize, m: usize, diag_shift: f64) -> Self {
+        let (mut hi, mut hj, mut hv) = (vec![], vec![], vec![]);
+        for i in 0..n {
+            for j in 0..=i {
+                hi.push((i + 1) as i32);
+                hj.push((j + 1) as i32);
+                hv.push(rng.unit() + if i == j { diag_shift } else { 0.0 });
+            }
+        }
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as i32, hi, hj));
+        h.set_values(&hv);
+        let (mut ai, mut aj, mut av) = (vec![], vec![], vec![]);
+        for i in 0..m {
+            for j in 0..n {
+                ai.push((i + 1) as i32);
+                aj.push((j + 1) as i32);
+                av.push(rng.unit());
+            }
+        }
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as i32, n as i32, ai, aj));
+        a.set_values(&av);
+        Self {
+            n,
+            m,
+            h,
+            a,
+            g: vec![0.0; n],
+            bl: vec![-1.0; m],
+            bu: vec![1.0; m],
+            xl: vec![-1.0; n],
+            xu: vec![1.0; n],
+        }
+    }
+
+    fn qp(&self, inertia: HessianInertia) -> QpProblem<'_> {
+        QpProblem {
+            n: self.n,
+            m: self.m,
+            h: &self.h,
+            g: &self.g,
+            a: &self.a,
+            bl: &self.bl,
+            bu: &self.bu,
+            xl: &self.xl,
+            xu: &self.xu,
+            hessian_inertia: inertia,
+        }
+    }
+}
+
+fn set_slot(w: &mut WorkingSet, m: usize, slot: usize, on: bool) {
+    if slot < m {
+        w.constraints[slot] = if on {
+            ConsStatus::AtLower
+        } else {
+            ConsStatus::Inactive
+        };
+    } else {
+        w.bounds[slot - m] = if on {
+            BoundStatus::AtLower
+        } else {
+            BoundStatus::Inactive
+        };
+    }
+}
+
+fn active_count(w: &WorkingSet, m_total: usize) -> usize {
+    (0..m_total)
+        .filter(|&s| SchurState::slot_active(w, s))
+        .count()
+}
+
+/// Factor K_max for `w` afresh, unshifted and with no inertia check, and
+/// return the solution of `K rhs` together with the factor's negative
+/// eigenvalue count (`None` when the backend calls it singular).
+fn fresh_k_max(qp: &QpProblem, w: &WorkingSet, rhs: &[f64]) -> Option<(Vec<f64>, i32)> {
+    let s = SchurState::new(qp.n, qp.m);
+    let active: Vec<bool> = (0..qp.m + qp.n)
+        .map(|slot| SchurState::slot_active(w, slot))
+        .collect();
+    let kkt = s.build_k_max_triplet(qp, &active);
+    let mut l = linsol();
+    let mut x = rhs.to_vec();
+    l.factorize_and_solve(&kkt, &mut x, None).ok()?;
+    Some((x, l.number_of_neg_evals().unwrap()))
+}
+
+/// gh#1206 P3: the Schur layer stores `u = e_p` by index and `v` by its
+/// nonzeros. Over random add/drop sequences on random indefinite QPs, every
+/// SMW solve must still match a fresh factor of the K_max it represents.
+#[test]
+fn sparse_schur_updates_match_fresh_factors_over_random_sequences() {
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let opts = QpOptions::default();
+    let mut checked = 0;
+    for trial in 0..20 {
+        let (n, m) = (5 + trial % 4, 2 + trial % 3);
+        let rq = RandomQp::new(&mut rng, n, m, 2.0);
+        let qp = rq.qp(HessianInertia::Indefinite);
+        let m_total = m + n;
+        let mut w = WorkingSet::cold(n, m);
+        for _ in 0..rng.below(3) {
+            set_slot(&mut w, m, rng.below(m_total), true);
+        }
+        let mut state = SchurState::new(n, m);
+        let mut ls = linsol();
+        let ac = active_count(&w, m_total);
+        if state.reset(&mut ls, &qp, &w, ac as i32, &opts).is_err() || state.shift() != 0.0 {
+            continue;
+        }
+        for _ in 0..8 {
+            let slot = rng.below(m_total);
+            let on = !SchurState::slot_active(&w, slot);
+            if on && active_count(&w, m_total) + 1 >= n {
+                continue;
+            }
+            state.apply_change(&mut ls, &qp, slot, on).unwrap();
+            set_slot(&mut w, m, slot, on);
+            let rhs: Vec<f64> = (0..n + m_total).map(|_| rng.unit()).collect();
+            let Some((want, _)) = fresh_k_max(&qp, &w, &rhs) else {
+                continue;
+            };
+            let mut got = rhs.clone();
+            if state.solve(&mut ls, &mut got).is_err() {
+                continue;
+            }
+            let scale = want.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+            for (i, (&a, &b)) in got.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() <= 1e-8 * scale,
+                    "trial {trial} rhs[{i}]: schur={a}, fresh={b}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 40, "only {checked} solves compared");
+}
+
+/// gh#1206 P3: what one change stores is the update's nonzeros, not two
+/// dense columns of length `dim` (plus copies): two entries for a bound,
+/// the row's nonzeros plus the diagonal correction for a general row.
+#[test]
+fn a_schur_update_stores_only_its_nonzeros() {
+    let mut rng = Rng(7);
+    let (n, m) = (6, 3);
+    let rq = RandomQp::new(&mut rng, n, m, 4.0);
+    let qp = rq.qp(HessianInertia::Psd);
+    let w = WorkingSet::cold(n, m);
+    let mut state = SchurState::new(n, m);
+    let mut ls = linsol();
+    state
+        .reset(&mut ls, &qp, &w, 0, &QpOptions::default())
+        .unwrap();
+    state.apply_change(&mut ls, &qp, m + 2, true).unwrap();
+    assert_eq!(state.stored_update_entries(), (1, 2));
+    state.apply_change(&mut ls, &qp, 1, true).unwrap();
+    assert_eq!(state.stored_update_entries(), (2, 2 + n + 1));
+}

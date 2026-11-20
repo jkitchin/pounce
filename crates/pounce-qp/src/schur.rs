@@ -79,15 +79,21 @@ pub struct SchurState {
     /// what the cached factor in `LinearSolver` represents.
     base_active: Vec<bool>,
 
-    /// U columns accumulated since the last reset. Each column is
-    /// length `dim`. Per working-set change, two columns appended:
-    /// first `u = e_p`, then `v` (the row-difference vector).
-    u_cols: Vec<Vec<Number>>,
-    v_cols: Vec<Vec<Number>>,
+    /// The rank-2 updates accumulated since the last reset, one per
+    /// working-set change, stored **sparse** (gh#1206 P3). Change `k`
+    /// contributes columns `2k` and `2k + 1` of `U = [u, v, …]` and of
+    /// `V = [v, u, …]`, with `u = e_p` held as its index alone and `v` as
+    /// its nonzeros: one row of `A` plus the `(p, ±½)` diagonal correction,
+    /// or two entries for a bound. They used to be four dense length-`dim`
+    /// vectors per change (`V` held a second copy of `u` and `v`), and every
+    /// Schur solve took `O(s_dim · dim)` dense dots over them.
+    changes: Vec<SparseChange>,
 
     /// `K_0⁻¹ U_j` for each column of `U`, cached at apply-time so
-    /// the per-iteration solve doesn't re-do them.
-    kinv_u_cols: Vec<Vec<Number>>,
+    /// the per-iteration solve doesn't re-do them. Genuinely dense, except
+    /// `K_0⁻¹ e_p = e_p` for a slot inactive at the last reset (P4), which
+    /// is kept as the unit vector it is.
+    kinv_u_cols: Vec<KinvCol>,
 
     /// `S = I + Vᵀ K_0⁻¹ U`, row-major, size `s_dim × s_dim`.
     s_matrix: Vec<Number>,
@@ -118,10 +124,98 @@ pub struct SchurState {
     a_rows: Option<(Vec<usize>, Vec<usize>)>,
 }
 
-/// One half of a rank-2 update vector pair.
-struct UpdateVectors {
-    u: Vec<Number>,
-    v: Vec<Number>,
+/// One rank-2 update `e_p vᵀ + v e_pᵀ`, stored sparse: `u = e_p` by its
+/// index and `v` by its nonzeros in ascending index order (gh#1206 P3).
+///
+/// Ascending order is what keeps the sparse dots below bit-identical to the
+/// dense ones they replace: a dense dot sums `aᵢbᵢ` in index order, and the
+/// terms a sparse one skips are exact zeros.
+struct SparseChange {
+    p: usize,
+    v: Vec<(usize, Number)>,
+}
+
+impl SparseChange {
+    /// Column `j ∈ {0, 1}` of this change's block of `U` (`[u, v]`).
+    fn u_col(&self, j: usize) -> SparseCol<'_> {
+        if j == 0 {
+            SparseCol::Unit(self.p)
+        } else {
+            SparseCol::Entries(&self.v)
+        }
+    }
+
+    /// Column `j ∈ {0, 1}` of this change's block of `V` (`[v, u]`).
+    fn v_col(&self, j: usize) -> SparseCol<'_> {
+        self.u_col(1 - j)
+    }
+}
+
+/// A cached `K_0⁻¹ U_j`.
+enum KinvCol {
+    /// `e_p` itself: `u = e_p` on a slot inactive at the last reset (P4).
+    Unit(usize),
+    Dense(Vec<Number>),
+}
+
+impl KinvCol {
+    /// `x ← x − y · self`.
+    fn sub_scaled_from(&self, y: Number, x: &mut [Number]) {
+        match self {
+            KinvCol::Unit(p) => x[*p] -= y * 1.0,
+            KinvCol::Dense(c) => {
+                for (xi, &ci) in x.iter_mut().zip(c.iter()) {
+                    *xi -= y * ci;
+                }
+            }
+        }
+    }
+}
+
+/// A column of `U` or `V`: `e_p`, or a sparse `v`.
+#[derive(Clone, Copy)]
+enum SparseCol<'a> {
+    Unit(usize),
+    Entries(&'a [(usize, Number)]),
+}
+
+impl SparseCol<'_> {
+    /// `selfᵀ x` for a dense `x`.
+    fn dot_dense(self, x: &[Number]) -> Number {
+        match self {
+            SparseCol::Unit(p) => x[p],
+            SparseCol::Entries(e) => e.iter().map(|&(i, v)| v * x[i]).sum(),
+        }
+    }
+
+    /// `selfᵀ k` for a cached `K_0⁻¹ U_j`.
+    fn dot_kinv(self, k: &KinvCol) -> Number {
+        match k {
+            KinvCol::Dense(d) => self.dot_dense(d),
+            KinvCol::Unit(q) => match self {
+                SparseCol::Unit(p) => {
+                    if p == *q {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                SparseCol::Entries(e) => e.iter().find(|&&(i, _)| i == *q).map_or(0.0, |&(_, v)| v),
+            },
+        }
+    }
+
+    /// `y ← y + c · self`.
+    fn add_scaled_to(self, c: Number, y: &mut [Number]) {
+        match self {
+            SparseCol::Unit(p) => y[p] += c * 1.0,
+            SparseCol::Entries(e) => {
+                for &(i, v) in e {
+                    y[i] += c * v;
+                }
+            }
+        }
+    }
 }
 
 impl SchurState {
@@ -134,8 +228,7 @@ impl SchurState {
             m_total,
             dim,
             base_active: vec![false; m_total],
-            u_cols: Vec::new(),
-            v_cols: Vec::new(),
+            changes: Vec::new(),
             kinv_u_cols: Vec::new(),
             s_matrix: Vec::new(),
             s_dim: 0,
@@ -256,14 +349,11 @@ impl SchurState {
         qp: &QpProblem,
         slot: usize,
         going_active: bool,
-    ) -> UpdateVectors {
+    ) -> SparseChange {
         let p = self.n + slot; // 0-based row in K_max
-        let mut u = vec![0.0; self.dim];
-        u[p] = 1.0;
-
-        let mut v = vec![0.0; self.dim];
+        let sign = if going_active { 1.0 } else { -1.0 };
+        let mut v: Vec<(usize, Number)> = Vec::new();
         if self.slot_is_general(slot) {
-            let sign = if going_active { 1.0 } else { -1.0 };
             let (a_jcols, a_vals) = (qp.a.jcols(), qp.a.values());
             // The row index cached at the last reset, when it still describes
             // this `A`; a full scan otherwise. Both visit the row's triplets
@@ -272,8 +362,7 @@ impl SchurState {
             match &self.a_rows {
                 Some((ptr, entries)) if entries.len() == a_jcols.len() && ptr.len() == qp.m + 1 => {
                     for &k in &entries[ptr[slot]..ptr[slot + 1]] {
-                        let col_0 = (a_jcols[k] - 1) as usize;
-                        v[col_0] += sign * a_vals[k];
+                        v.push(((a_jcols[k] - 1) as usize, sign * a_vals[k]));
                     }
                 }
                 _ => {
@@ -281,21 +370,48 @@ impl SchurState {
                     let a_irows = qp.a.irows();
                     for k in 0..a_irows.len() {
                         if a_irows[k] == row_1based {
-                            let col_0 = (a_jcols[k] - 1) as usize;
-                            v[col_0] += sign * a_vals[k];
+                            v.push(((a_jcols[k] - 1) as usize, sign * a_vals[k]));
                         }
                     }
                 }
             }
-            v[p] = if going_active { -0.5 } else { 0.5 };
+            // Ascending column, duplicates summed in triplet order — the
+            // stable sort keeps that order — exactly as the dense
+            // `v[col] += …` accumulation they replace.
+            v.sort_by_key(|&(i, _)| i);
+            let mut merged: Vec<(usize, Number)> = Vec::with_capacity(v.len() + 1);
+            for (i, x) in v {
+                match merged.last_mut() {
+                    Some((j, acc)) if *j == i => *acc += x,
+                    _ => merged.push((i, 0.0 + x)),
+                }
+            }
+            v = merged;
         } else {
-            let var = slot - self.m;
-            let sign = if going_active { 1.0 } else { -1.0 };
-            v[var] = sign;
-            v[p] = if going_active { -0.5 } else { 0.5 };
+            v.push((slot - self.m, sign));
         }
+        // `p ≥ n` exceeds every column index above, so this stays sorted.
+        v.push((p, if going_active { -0.5 } else { 0.5 }));
 
-        UpdateVectors { u, v }
+        SparseChange { p, v }
+    }
+
+    /// Discard the update layer (U, V, `K_0⁻¹U`, S).
+    fn clear_updates(&mut self) {
+        self.changes.clear();
+        self.kinv_u_cols.clear();
+        self.s_matrix.clear();
+        self.s_dim = 0;
+    }
+
+    /// Column `j` of `U`.
+    fn u_col(&self, j: usize) -> SparseCol<'_> {
+        self.changes[j / 2].u_col(j % 2)
+    }
+
+    /// Column `j` of `V`.
+    fn v_col(&self, j: usize) -> SparseCol<'_> {
+        self.changes[j / 2].v_col(j % 2)
     }
 
     /// Reset: discard any cached SMW state, build the K_max for
@@ -324,11 +440,7 @@ impl SchurState {
         let mut last_err: Option<QpError>;
         match linsol.factorize_and_solve(&kkt, &mut rhs, Some(expected_neg)) {
             Ok(()) => {
-                self.u_cols.clear();
-                self.v_cols.clear();
-                self.kinv_u_cols.clear();
-                self.s_matrix.clear();
-                self.s_dim = 0;
+                self.clear_updates();
                 self.base_kkt = Some(kkt.clone());
                 self.shift = 0.0;
                 return Ok(());
@@ -346,11 +458,7 @@ impl SchurState {
             let mut rhs_local = vec![0.0; self.dim];
             match linsol.factorize_and_solve(&kkt, &mut rhs_local, Some(expected_neg)) {
                 Ok(()) => {
-                    self.u_cols.clear();
-                    self.v_cols.clear();
-                    self.kinv_u_cols.clear();
-                    self.s_matrix.clear();
-                    self.s_dim = 0;
+                    self.clear_updates();
                     self.base_kkt = Some(kkt.clone());
                     self.shift = current;
                     return Ok(());
@@ -381,7 +489,8 @@ impl SchurState {
         slot: usize,
         going_active: bool,
     ) -> Result<(), QpError> {
-        let UpdateVectors { u, v } = self.build_update_vectors(qp, slot, going_active);
+        let change = self.build_update_vectors(qp, slot, going_active);
+        let p = change.p;
         // `u = e_p`. A slot inactive at the last reset has the sentinel row
         // `(p, p) = 1` and nothing else in row or column `p` of `K_0` (the
         // inertia shift touches the H block only), so `K_0 e_p = e_p` and
@@ -389,14 +498,19 @@ impl SchurState {
         // each at `dim = 448 117`). The base factor is what `resolve` uses,
         // so flips since the reset do not change this.
         let kinv_u = if self.base_active[slot] {
-            let mut kinv_u = u.clone();
+            let mut kinv_u = vec![0.0; self.dim];
+            kinv_u[p] = 1.0;
             linsol.resolve(&mut kinv_u)?;
-            kinv_u
+            KinvCol::Dense(kinv_u)
         } else {
-            u.clone()
+            KinvCol::Unit(p)
         };
-        let mut kinv_v = v.clone();
+        let mut kinv_v = vec![0.0; self.dim];
+        for &(i, x) in &change.v {
+            kinv_v[i] = x;
+        }
         linsol.resolve(&mut kinv_v)?;
+        let kinv_v = KinvCol::Dense(kinv_v);
 
         let old_dim = self.s_dim;
         let new_dim = old_dim + 2;
@@ -415,33 +529,33 @@ impl SchurState {
         //                                  `old_dim + 1` → v
         // For V: new row `old_dim`     → vᵀ
         //                `old_dim + 1` → uᵀ
-        let v_new_rows: [&[Number]; 2] = [&v, &u];
-        let u_new_cols: [&[Number]; 2] = [&kinv_u, &kinv_v];
+        // Every product below is a sparse `V` column against a cached
+        // `K_0⁻¹ U` column: O(nnz(v)), not O(dim) (P3).
+        let v_new_rows = [change.v_col(0), change.v_col(1)];
+        let u_new_cols = [&kinv_u, &kinv_v];
 
         // Top-right block: old V rows × new K_0⁻¹ U cols.
         for i in 0..old_dim {
-            new_s[i * new_dim + old_dim] = dot(&self.v_cols[i], &kinv_u);
-            new_s[i * new_dim + old_dim + 1] = dot(&self.v_cols[i], &kinv_v);
+            let vi = self.v_col(i);
+            new_s[i * new_dim + old_dim] = vi.dot_kinv(&kinv_u);
+            new_s[i * new_dim + old_dim + 1] = vi.dot_kinv(&kinv_v);
         }
         // Bottom-left block: new V rows × old K_0⁻¹ U cols.
         for ii in 0..2 {
             for j in 0..old_dim {
-                new_s[(old_dim + ii) * new_dim + j] = dot(v_new_rows[ii], &self.kinv_u_cols[j]);
+                new_s[(old_dim + ii) * new_dim + j] = v_new_rows[ii].dot_kinv(&self.kinv_u_cols[j]);
             }
         }
         // Bottom-right block: 2×2 from new V rows × new K_0⁻¹ U cols.
         for ii in 0..2 {
             for jj in 0..2 {
-                let entry = dot(v_new_rows[ii], u_new_cols[jj]);
+                let entry = v_new_rows[ii].dot_kinv(u_new_cols[jj]);
                 let identity = if ii == jj { 1.0 } else { 0.0 };
                 new_s[(old_dim + ii) * new_dim + old_dim + jj] = entry + identity;
             }
         }
 
-        self.u_cols.push(u);
-        self.u_cols.push(v.clone());
-        self.v_cols.push(v);
-        self.v_cols.push(self.u_cols[self.u_cols.len() - 2].clone()); // = the just-pushed `u`
+        self.changes.push(change);
         self.kinv_u_cols.push(kinv_u);
         self.kinv_u_cols.push(kinv_v);
         self.s_matrix = new_s;
@@ -475,12 +589,9 @@ impl SchurState {
         }
         // + U (Vᵀ x)
         for j in 0..self.s_dim {
-            let c = dot(&self.v_cols[j], x);
+            let c = self.v_col(j).dot_dense(x);
             if c != 0.0 {
-                let uj = &self.u_cols[j];
-                for (yi, &uij) in y.iter_mut().zip(uj.iter()) {
-                    *yi += c * uij;
-                }
+                self.u_col(j).add_scaled_to(c, &mut y);
             }
         }
         Some(y)
@@ -638,20 +749,15 @@ impl SchurState {
             return Ok(());
         }
         // w = Vᵀ z
-        let z = rhs.to_vec();
         let mut w = vec![0.0; self.s_dim];
-        for j in 0..self.s_dim {
-            w[j] = dot(&self.v_cols[j], &z);
+        for (j, wj) in w.iter_mut().enumerate() {
+            *wj = self.v_col(j).dot_dense(rhs);
         }
         // y = S⁻¹ w
         let y = small_dense_lu_solve(&self.s_matrix, self.s_dim, &w)?;
         // x = z − K_0⁻¹ U y = z − Σ y_j · kinv_u_cols[j]
-        for j in 0..self.s_dim {
-            let y_j = y[j];
-            let kinv_uj = &self.kinv_u_cols[j];
-            for i in 0..self.dim {
-                rhs[i] -= y_j * kinv_uj[i];
-            }
+        for (kinv_uj, &y_j) in self.kinv_u_cols.iter().zip(y.iter()) {
+            kinv_uj.sub_scaled_from(y_j, rhs);
         }
         Ok(())
     }
@@ -664,6 +770,16 @@ impl SchurState {
 
     pub fn n_schur_updates(&self) -> u32 {
         (self.s_dim / 2) as u32
+    }
+
+    /// `(changes, stored v entries)` of the update layer — test-only, for
+    /// the P3 storage check.
+    #[cfg(test)]
+    pub(crate) fn stored_update_entries(&self) -> (usize, usize) {
+        (
+            self.changes.len(),
+            self.changes.iter().map(|c| c.v.len()).sum(),
+        )
     }
 }
 
@@ -697,10 +813,6 @@ fn a_row_index(qp: &QpProblem) -> (Vec<usize>, Vec<usize>) {
         next[i] += 1;
     }
     (ptr, entries)
-}
-
-fn dot(a: &[Number], b: &[Number]) -> Number {
-    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
 }
 
 /// Relative pivot below which the Schur block is treated as singular.
