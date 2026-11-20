@@ -714,6 +714,39 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         6,
         "Limited-memory BFGS keeps a circular buffer of the most-recent (s, y) curvature pairs; this option caps that buffer length. Mirrors upstream's \"limited_memory_max_history\". Only consulted when \"algorithm\" is \"active-set-sqp\" and \"sqp_hessian\" is \"lbfgs\".",
     )?;
+    r.add_lower_bounded_number_option(
+        "sqp_proximal",
+        "Cap on an adaptive proximal term on the SQP step-QP Hessian; 0 = off.",
+        0.0,
+        false,
+        0.0,
+        "Active-set SQP only (also the crossover and ipm_sqp_handover runs). \
+         When positive, the step QP's Hessian is H + rho_k I with rho_k = \
+         min(this, max(e_k, rho_{k-1}/4)) and e_k = |P(B s - y)| / |P s| the \
+         error of the previous step's Hessian model along that step, P masking \
+         the variables at active bounds. It vanishes when the model is accurate \
+         along the steps, keeping the local rate, and shortens the step in \
+         proportion to the error when it is not -- for a Hessian that is only \
+         partly analytical (gh#1206: a quasi-Newton block on an embedded \
+         black-box model). Added after the negative-curvature checks, so it \
+         hides no indefiniteness from them; not applied to the lifted \
+         limited-memory Hessian. The model error is logged at debug level \
+         under pounce::sqp every iteration. Applied only within \
+         \"sqp_local_phase_tol\". Default 0 (off); gh#1206 used 1e2.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_local_phase_tol",
+        "KKT residual at or below which sqp_proximal applies.",
+        0.0,
+        false,
+        1e-2,
+        "The proximal term applies only at iterates whose KKT residual \
+         max(stationarity, constraint violation) is at or below this. Far from \
+         a solution even an exact Hessian has a large model error along a long \
+         step, so the term would shrink every step; measured on the fixture \
+         corpus, applying it from the first iterate turned solved models into \
+         failures. Only consulted when \"sqp_proximal\" is positive.",
+    )?;
     r.add_lower_bounded_integer_option(
         "sqp_dense_hessian_max_n",
         "Largest problem size at which the SQP hands a quasi-Newton Hessian to its QP as a dense matrix.",
@@ -774,6 +807,29 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          Raising it makes the initial estimate more conservative (fewer rows \
          guessed active), which the active-set phase can still correct by \
          pivoting. Only consulted when \"crossover\" is \"yes\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "crossover_stabilization",
+        "Cap on the dual regularization of a stabilized crossover QP; 0 = off.",
+        0.0,
+        false,
+        0.0,
+        "When positive, the crossover's one-step QP (KNITRO section 7 step 3, \
+         also under ipm_sqp_handover) is the stabilized SQP subproblem of \
+         Wright, Hager, Fernandez-Solodov and Gill-Robinson: a free residual r \
+         on every general row priced by lambda^T r + |r|^2/(2 sigma), with \
+         sigma = min(this, the KKT residual at the interior iterate). Its KKT \
+         matrix stays nonsingular when the estimated active constraint \
+         gradients are linearly dependent (LICQ fails) or weakly active -- \
+         where the standard QP's pinned start is singular, gives up its hint \
+         repair and crawls in the elastic phase 1 (gh#1206) -- and it starts \
+         from a feasible point satisfying the estimate exactly. A stabilized QP \
+         that does not solve falls back to the standard one, and its point is \
+         put through the same never-regress test as any crossover point. Costs \
+         m extra QP variables. The full active-set SQP of step 4 is not \
+         stabilized: its line search and stopping tests judge the primal step \
+         alone, and a stabilized method's progress near a solution is largely \
+         in the multipliers. Default 0 (off); gh#1206 used 1e-4.",
     )?;
     r.add_lower_bounded_number_option(
         "crossover_primal_tol",
@@ -846,6 +902,36 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          a declined one changes nothing, so this caps what a model whose active \
          set never settles can spend on them. Only consulted when \
          \"ipm_sqp_handover\" is yes.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "ipm_sqp_handover_time_ratio",
+        "Time budget of one handover attempt, relative to the interior-point time spent so far.",
+        0.0,
+        true,
+        1.0,
+        "An attempt may spend this multiple of the wall-clock and CPU time the \
+         interior method has spent before it (floor 1 s), and never more than \
+         the solve's own max_wall_time / max_cpu_time leave. The default 1 \
+         bounds a declined attempt at a doubling of the solve. Raise it for a \
+         model whose crossover converges but needs longer than the interior \
+         point took to reach it -- an attempt that runs out of budget is \
+         declined as a time limit and its work is lost (gh#1206). Only \
+         consulted when \"ipm_sqp_handover\" is yes.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "ipm_sqp_handover_primal_tol",
+        "Primal tolerance for identifying the active set at a handover; 0 = automatic.",
+        0.0,
+        false,
+        0.0,
+        "The distance to a bound below which a row is taken binding when the \
+         handover classifies the interior iterate. 0 (the default) uses \
+         max(\"crossover_primal_tol\", sqrt(mu)): at an interior iterate an \
+         active bound sits about mu/z inside it and an inactive one far from \
+         it, and sqrt(mu) separates the two. A positive value is used as is, \
+         below that floor too -- for a model whose weakly active bounds sit \
+         inside sqrt(mu) and should be left out of the estimate (gh#1206). \
+         Only consulted when \"ipm_sqp_handover\" is yes.",
     )?;
     // ----- Inner QP-subproblem knobs (`sqp_qp_*`) -----
     //

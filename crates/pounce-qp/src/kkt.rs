@@ -49,6 +49,14 @@ impl KktTriplet {
     /// `1..=n_h_rows`). Existing diagonal entries are incremented in
     /// place; missing ones are appended. Used by the §4.5 inertia-
     /// control retry loop.
+    ///
+    /// A triplet matrix may legally store one diagonal as several
+    /// entries (summed on assembly) — the SQP's convexification
+    /// appends its shift as extra `(i, i)` entries, for one. Only the
+    /// *first* `(i, i)` entry of each row is shifted, so the assembled
+    /// diagonal moves by exactly `delta` however many times it is
+    /// stored (gh#1206 B8: it used to move by `k·delta`, and the
+    /// inertia ladder then reported a shift it had not applied).
     pub fn add_h_diagonal_shift(&mut self, n_h_rows: usize, delta: Number) {
         if delta == 0.0 {
             return;
@@ -58,7 +66,7 @@ impl KktTriplet {
         for k in 0..self.irn.len() {
             let i = self.irn[k];
             let j = self.jcn[k];
-            if i == j && i >= 1 && i <= n_h {
+            if i == j && i >= 1 && i <= n_h && !have_diag[(i - 1) as usize] {
                 self.vals[k] += delta;
                 have_diag[(i - 1) as usize] = true;
             }
@@ -71,6 +79,46 @@ impl KktTriplet {
                 self.vals.push(delta);
             }
         }
+    }
+}
+
+impl KktTriplet {
+    /// Add `−delta_c` to the diagonal of every row below the `H` block whose
+    /// assembled diagonal is zero — the live constraint rows — and return
+    /// how many it shifted (gh#1206 B6). A row carrying the `(p, p) = 1`
+    /// sentinel of a dropped or inactive slot ([`crate::schur`]'s K_max,
+    /// [`assemble_soft_active_set_kkt`]) is decoupled already and is left
+    /// alone. An existing diagonal entry is shifted in place; a missing one
+    /// is appended.
+    pub(crate) fn add_dual_shift(&mut self, n_h_rows: usize, delta_c: Number) -> usize {
+        let n_rows = self.dim.saturating_sub(n_h_rows);
+        let mut diag = vec![0.0; n_rows];
+        let mut first = vec![None; n_rows];
+        for k in 0..self.irn.len() {
+            let (i, j) = (self.irn[k], self.jcn[k]);
+            if i == j && i as usize > n_h_rows {
+                let r = i as usize - n_h_rows - 1;
+                diag[r] += self.vals[k];
+                first[r].get_or_insert(k);
+            }
+        }
+        let mut shifted = 0;
+        for r in 0..n_rows {
+            if diag[r] != 0.0 {
+                continue;
+            }
+            shifted += 1;
+            match first[r] {
+                Some(k) => self.vals[k] -= delta_c,
+                None => {
+                    let i1 = (n_h_rows + r + 1) as Index;
+                    self.irn.push(i1);
+                    self.jcn.push(i1);
+                    self.vals.push(-delta_c);
+                }
+            }
+        }
+        shifted
     }
 }
 
@@ -93,17 +141,7 @@ impl KktTriplet {
         let mut vals = Vec::with_capacity(cap);
 
         // ---- H block (top-left), lower-triangle normalized ----
-        let h_irows = qp.h.irows();
-        let h_jcols = qp.h.jcols();
-        let h_vals = qp.h.values();
-        for k in 0..nh {
-            let i = h_irows[k];
-            let j = h_jcols[k];
-            let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
-            irn.push(hi);
-            jcn.push(lo);
-            vals.push(h_vals[k]);
-        }
+        push_h_block(qp, &mut irn, &mut jcn, &mut vals);
 
         // ---- A block (bottom-left), rows shifted by n ----
         let a_irows = qp.a.irows();
@@ -125,6 +163,84 @@ impl KktTriplet {
             vals,
         }
     }
+}
+
+/// Append `H`'s entries, normalized to the lower triangle (1-based), and
+/// then an explicit `(i, i, 0.0)` for every row `i` of `H` that stores no
+/// diagonal (gh#1206 P2).
+///
+/// Every KKT this crate factors starts with this block, and the §4.5
+/// inertia-control retry adds `δ` to each `H` diagonal through
+/// [`KktTriplet::add_h_diagonal_shift`]. On an `H` with structurally zero
+/// columns that call used to *append* the missing diagonals, so the `δ > 0`
+/// matrix had a different sparsity pattern from the `δ = 0` one and the
+/// backend re-ran its symbolic analysis for it — on every new working set
+/// whose first attempt needed a shift. With the zeros stored up front the
+/// shift moves values only, and FERAL's pattern cache reuses the analysis.
+/// gh#1206's collocation NLP has ≈3 700 such columns.
+///
+/// The appended zeros add nothing to the assembled matrix, but they are
+/// stored entries, and FERAL's ordering and scaling read the stored pattern:
+/// they are **not** inert to the factorization's round-off. Swept over the
+/// CLI fixtures under `solver_selection=qp-active-set`, padding every KKT
+/// moved four convex lines and lost Maros-Meszaros QFORPLAN (`Optimal` →
+/// `MaxIter`; its outcome is known to flip on any change of pivoting,
+/// gh#1076). So, like the soft-drop pattern (gh#1083, [`SOFT_DROP_MIN_DIM`])
+/// whose saving is the same symbolic reuse, the padding applies from
+/// `n + m ≥` [`H_DIAG_PAD_MIN_DIM`]: where a second symbolic analysis is
+/// worth avoiding, and where the corpus says nothing either way.
+///
+/// [`SOFT_DROP_MIN_DIM`]: crate::solver::SOFT_DROP_MIN_DIM
+pub(crate) fn push_h_block(
+    qp: &QpProblem,
+    irn: &mut Vec<Index>,
+    jcn: &mut Vec<Index>,
+    vals: &mut Vec<Number>,
+) {
+    let h_irows = qp.h.irows();
+    let h_jcols = qp.h.jcols();
+    let h_vals = qp.h.values();
+    let mut has_diag = vec![false; qp.n];
+    for k in 0..h_irows.len() {
+        let i = h_irows[k];
+        let j = h_jcols[k];
+        let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
+        irn.push(hi);
+        jcn.push(lo);
+        vals.push(h_vals[k]);
+        if i == j && i >= 1 && (i as usize) <= qp.n {
+            has_diag[(i - 1) as usize] = true;
+        }
+    }
+    if !pad_h_diagonal(qp) {
+        return;
+    }
+    for (i, _) in has_diag.iter().enumerate().filter(|(_, d)| !**d) {
+        let i1 = (i + 1) as Index;
+        irn.push(i1);
+        jcn.push(i1);
+        vals.push(0.0);
+    }
+}
+
+/// QP size `n + m` from which [`push_h_block`] stores an explicit zero on
+/// every `H` diagonal that `H` omits (gh#1206 P2).
+pub const H_DIAG_PAD_MIN_DIM: usize = crate::solver::SOFT_DROP_MIN_DIM;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: pad below [`H_DIAG_PAD_MIN_DIM`] too, so small fixtures
+    /// reach the padded branch.
+    pub(crate) static FORCE_H_DIAG_PAD: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+fn pad_h_diagonal(qp: &QpProblem) -> bool {
+    #[cfg(test)]
+    if FORCE_H_DIAG_PAD.with(|f| f.get()) {
+        return true;
+    }
+    qp.n + qp.m >= H_DIAG_PAD_MIN_DIM
 }
 
 /// Right-hand side `[-g; b]` for the equality-only KKT.
@@ -193,17 +309,7 @@ pub fn assemble_box_with_active(qp: &QpProblem, active_bounds: &[usize]) -> KktT
     let mut vals = Vec::with_capacity(nh + k);
 
     // ---- H block ----
-    let h_irows = qp.h.irows();
-    let h_jcols = qp.h.jcols();
-    let h_vals = qp.h.values();
-    for k_h in 0..nh {
-        let i = h_irows[k_h];
-        let j = h_jcols[k_h];
-        let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
-        irn.push(hi);
-        jcn.push(lo);
-        vals.push(h_vals[k_h]);
-    }
+    push_h_block(qp, &mut irn, &mut jcn, &mut vals);
 
     // ---- E_W block: row (n+j+1), col (var+1), value 1 ----
     let n_i = n as Index;
@@ -289,17 +395,7 @@ pub fn assemble_active_set_kkt(
     let mut vals = Vec::with_capacity(cap);
 
     // ---- H block ----
-    let h_irows = qp.h.irows();
-    let h_jcols = qp.h.jcols();
-    let h_vals = qp.h.values();
-    for kk in 0..nh {
-        let i = h_irows[kk];
-        let j = h_jcols[kk];
-        let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
-        irn.push(hi);
-        jcn.push(lo);
-        vals.push(h_vals[kk]);
-    }
+    push_h_block(qp, &mut irn, &mut jcn, &mut vals);
 
     // ---- A_W block: only rows whose 0-based index appears in active_cons ----
     // Build a row-map: for each problem-row, what's its saddle-row offset?
@@ -380,9 +476,11 @@ pub(crate) fn assemble_soft_active_set_kkt(
 
     // `assemble_active_set_kkt` emits the A_W entries in triplet order and
     // the E_W entries after them, one per bound, so the entries to zero are
-    // found the same way it placed them.
-    let nh = qp.h.nonzeros() as usize;
+    // found the same way it placed them. The H block — `H`'s entries and the
+    // explicit zero diagonals `push_h_block` adds — is every entry before
+    // the first row below it.
     let first_row = (n + 1) as Index;
+    let nh = kkt.irn.iter().take_while(|&&r| r < first_row).count();
     for k in nh..kkt.irn.len() - k_b {
         let j = (kkt.irn[k] - first_row) as usize;
         if !cons_live[j] {
@@ -433,17 +531,7 @@ pub fn assemble_equality_plus_bounds(qp: &QpProblem, active_bounds: &[usize]) ->
     let mut vals = Vec::with_capacity(cap);
 
     // ---- H block ----
-    let h_irows = qp.h.irows();
-    let h_jcols = qp.h.jcols();
-    let h_vals = qp.h.values();
-    for kk in 0..nh {
-        let i = h_irows[kk];
-        let j = h_jcols[kk];
-        let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
-        irn.push(hi);
-        jcn.push(lo);
-        vals.push(h_vals[kk]);
-    }
+    push_h_block(qp, &mut irn, &mut jcn, &mut vals);
 
     // ---- A_eq block at rows (n+1)..(n+m) ----
     let n_i = n as Index;

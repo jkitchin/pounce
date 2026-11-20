@@ -48,7 +48,10 @@
 //!    crossover costs about one iteration.
 //! 4. Otherwise run the full active-set algorithm from the interior iterate,
 //!    seeded with `A` and with `ν₀` a little above the largest `|multiplier|`
-//!    at the interior solution.
+//!    at the interior solution. When step 3's QP solved, the seed is that
+//!    QP's optimal working set rather than `A`: step 4's first step QP is
+//!    step 3's QP again, and starting it from `A` would redo every pivot
+//!    (gh#1206 B1).
 //!
 //! # Where this departs from the paper
 //!
@@ -134,6 +137,38 @@ use crate::sqp::warm_start::classify_working_set;
 /// the standoff it replaces.
 const IDENTIFIED_PRIMAL_TOL: Number = 1e-9;
 
+/// The step-3 QP's `(max_iter, max_stall_iters)` (gh#1206 P6).
+///
+/// `max_iter` is the SQP driver's size-scaled budget: this was the one step QP
+/// left on `pounce-qp`'s flat 200, which an active-set solve over a large
+/// estimated set cannot finish in (the reporter's needed 193 working-set
+/// changes and had to raise `sqp_qp_max_iter` by hand).
+///
+/// `max_stall_iters` ends a pass that stops improving after
+/// [`STEP3_STALL_ITERS`], so a stuck step 3 leaves the attempt's time to step
+/// 4. Without it the larger budget let a QP making no progress run to the
+/// attempt's time limit and decline it: `ssebnln` under
+/// `ipm_sqp_handover=yes` ground through 1361 refactorizations with no
+/// working-set change for 1.0 s and ended `Solved_To_Acceptable_Level`,
+/// where `main`'s step 3 stopped at 200 in 0.16 s, step 4 ran and the attempt
+/// was accepted (PR #1208 re-review, macOS). Explicit `sqp_qp_max_iter` /
+/// `max_stall_iters` still win.
+pub(crate) fn step3_iteration_limits(
+    qp_opts: &QpOptions,
+    n: usize,
+    m: usize,
+) -> (u32, Option<u32>) {
+    (
+        crate::sqp::sqp_alg::step_qp_iter_budget(qp_opts.max_iter, n, m),
+        qp_opts.max_stall_iters.or(Some(STEP3_STALL_ITERS)),
+    )
+}
+
+/// Non-improving iterations after which the step-3 QP ends (`MaxIter`) and
+/// step 4 takes over: `pounce-qp`'s default iteration budget, which was the
+/// step-3 QP's whole budget before it was size-scaled (gh#1206 P6).
+const STEP3_STALL_ITERS: u32 = 200;
+
 /// Slack on the never-regress comparisons, so a crossed-over point is not
 /// rejected for a change at the last bit of a residual that is otherwise
 /// identical.
@@ -162,6 +197,10 @@ pub struct CrossoverOptions {
     /// (`crossover_max_iter`). `0` disables step 4 entirely, leaving
     /// crossover as the one-step refinement of step 3.
     pub max_iter: u32,
+    /// `crossover_stabilization`: cap `σ_max` on the dual regularization of
+    /// a stabilized step-3 QP; `0` (the default) poses the standard one
+    /// (gh#1206; see [`crate::sqp::qp_assembly`]).
+    pub stabilization: Number,
 }
 
 impl Default for CrossoverOptions {
@@ -171,6 +210,7 @@ impl Default for CrossoverOptions {
             mult_tol: 1e-8,
             primal_tol: 1e-6,
             max_iter: 30,
+            stabilization: 0.0,
         }
     }
 }
@@ -446,6 +486,26 @@ fn complementarity_at(
     worst
 }
 
+/// `σ = min(σ_max, residual)` for a stabilized step-3 QP at an interior
+/// iterate with KKT residual `residual`, or `None` for the standard QP (off,
+/// or a zero or non-finite residual).
+///
+/// Only the step-3 QP is stabilized, not the step-4 SQP. Measured on the
+/// fixture corpus under `algorithm=active-set-sqp` with the stabilized
+/// subproblem in every SQP step QP (`σ_max = 1e-4`, applied only once the
+/// KKT residual was below `1e-2`), 15 solves that succeeded failed
+/// instead. Most ended `Search_Direction_Becomes_Too_Small` at the right
+/// objective: a stabilized method's progress near a solution is largely in
+/// the multipliers, and the SQP's merit line search and step-size exit read
+/// the primal step alone. Two (`issue981_wachter_biegler`,
+/// `issue1176_wb_redundant_row`, L-BFGS) were declared infeasible. Getting
+/// that right needs a primal-dual merit function (Gill & Robinson 2013),
+/// which is a redesign of the SQP's globalization, not an option. One QP
+/// whose point must pass [`accepts`] cannot give a false verdict.
+pub(crate) fn stabilization_sigma(sigma_max: Number, residual: Number) -> Option<Number> {
+    (sigma_max > 0.0 && residual.is_finite() && residual > 0.0).then(|| sigma_max.min(residual))
+}
+
 /// Count the active entries of a working set, split bounds / rows.
 /// The inertia hint for a QP built on the exact Lagrangian Hessian `h`.
 ///
@@ -590,6 +650,19 @@ where
         hess_lag,
         hessian_inertia,
     );
+    // `crossover_stabilization` (gh#1206): on a degenerate active set — LICQ
+    // failing, or bounds weakly active — the estimate's pinned KKT is
+    // singular, and the step-3 QP otherwise went to a hint repair that gives
+    // up and a cold elastic phase 1 that crawls. Stabilized, it starts from a
+    // feasible point satisfying the estimate exactly.
+    let qp_data = match stabilization_sigma(
+        opts.stabilization,
+        kkt_before.stationarity.max(kkt_before.constr_viol),
+    ) {
+        Some(sigma) => qp_data.stabilize(sigma, &seed.lambda_g),
+        None => qp_data,
+    };
+    let step3_stabilized = qp_data.stabilization().is_some();
     let qp = qp_data.as_qp();
     // The step-3 QP gets whatever the solve has left (gh#1054); a QP that
     // stops on it comes back `TimeLimit`, which is a decline like any other.
@@ -614,11 +687,30 @@ where
         use_schur_updates: sqp_opts
             .step_qp_schur_updates(n + m, Some(hessian_inertia))
             .unwrap_or(qp_opts.use_schur_updates),
+        // The SQP driver's size-scaled iteration budget too (gh#1206 P6).
+        // This QP was the one step QP left on `pounce-qp`'s flat 200, which
+        // an active-set solve over a large estimated set cannot finish in —
+        // the reporter's needed 193 working-set changes and had to raise
+        // `sqp_qp_max_iter` by hand. An explicit `sqp_qp_max_iter` still wins.
+        // gh#1206 P6: see `step3_iteration_limits`.
+        max_iter: step3_iteration_limits(qp_opts, n, m).0,
+        max_stall_iters: step3_iteration_limits(qp_opts, n, m).1,
         ..qp_opts.clone()
     };
     let mut qp_solver = ParametricActiveSetSolver::new(make_backend());
     let eqp_started = std::time::Instant::now();
-    let eqp = qp_solver.solve_with_working_set(&qp, &working, &eqp_opts);
+    let stabilized = qp_data
+        .stabilized_start(&working, qp.bl, qp.bu)
+        .zip(qp_data.as_standard_qp(qp.bl, qp.bu));
+    let eqp = match stabilized {
+        Some((start, standard)) => match qp_solver.solve(&qp, Some(&start), &eqp_opts) {
+            Ok(sol) if sol.status == QpStatus::Optimal => Ok(qp_data.unlift_solution(sol)),
+            // A stabilized QP that does not solve falls back to the
+            // standard one.
+            _ => qp_solver.solve_with_working_set(&standard, &working, &eqp_opts),
+        },
+        None => qp_solver.solve_with_working_set(&qp, &working, &eqp_opts),
+    };
     n_qp_solves += 1;
     let eqp_report = EqpReport {
         outcome: eqp.as_ref().map(|sol| sol.status).map_err(Clone::clone),
@@ -634,6 +726,17 @@ where
     let mut step3_failure = match &eqp {
         Ok(sol) if sol.status == QpStatus::TimeLimit => CrossoverDecline::TimeLimit,
         _ => CrossoverDecline::QpFailed,
+    };
+    // Step 3's optimal working set, kept for step 4 (gh#1206 B1). Step 4's
+    // first step QP is built at the same point with the same multipliers as
+    // step 3's, so it *is* step 3's QP; warm-starting it from the step-2
+    // estimate re-solves that QP from scratch and throws away every pivot
+    // step 3 paid for (591 s and 167 working-set changes on the reporter's
+    // 90 k-variable collocation model). The QP's own optimal set is the
+    // better hint whenever it exists.
+    let step3_working = match &eqp {
+        Ok(sol) if sol.status == QpStatus::Optimal => Some(sol.working.clone()),
+        _ => None,
     };
     if let Ok(sol) = eqp
         && sol.status == QpStatus::Optimal
@@ -755,6 +858,16 @@ where
     let step4_opts = SqpOptions {
         max_iter: opts.max_iter,
         l1_penalty: nu0,
+        // Step 4 is stabilized exactly when step 3 was: it starts from step
+        // 3's working set, which only a stabilized QP can pin (gh#1206; see
+        // `SqpOptions::stabilization`).
+        stabilization: if step3_stabilized {
+            opts.stabilization
+        } else {
+            0.0
+        },
+        // A stuck step QP ends instead of taking the attempt's time.
+        step_qp_max_stall_iters: sqp_opts.step_qp_max_stall_iters.or(Some(STEP3_STALL_ITERS)),
         ..sqp_opts.clone()
     };
     let Some(mut sqp) = make_sqp(step4_opts) else {
@@ -763,7 +876,7 @@ where
             None,
         );
     };
-    iter.working = Some(working);
+    iter.working = Some(step3_working.unwrap_or(working));
     let res = match sqp.optimize_with_warm_start(nlp, Some(iter)) {
         Ok(r) => r,
         Err(e) => {

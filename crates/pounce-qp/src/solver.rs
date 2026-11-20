@@ -260,10 +260,28 @@ impl ParametricActiveSetSolver {
             Err(ref e) if e.is_recoverable_factorization_failure() => {}
             Err(e) => return Err(e),
         }
+        let singular_unshifted = self.linsol.last_factor_singular();
 
         let mut current = 0.0;
         let mut next = opts.inertia_shift_initial;
-        for _ in 0..opts.inertia_max_shifts {
+        for rung in 0..opts.inertia_max_shifts {
+            // gh#1206 B6. Singular unshifted *and* at the first rung: a zero
+            // pivot an `H`-block shift does not remove. If a dual shift on
+            // the constraint rows does, the rows are dependent, no rung of
+            // this ladder can help (`[H + δI, Aᵀ; A, 0]` is singular for
+            // every δ), and climbing to `1e14` would only cost ten more
+            // factorizations — or, past `δ ≈ 1e8`, return a factor that
+            // masks the null direction. Report it for the caller's prune.
+            if rung == 1
+                && singular_unshifted
+                && self.linsol.last_factor_singular()
+                && !crate::deadline::expired()
+                && self
+                    .linsol
+                    .probe_rank_deficiency(&kkt, n_h_rows, expected_neg, opts)?
+            {
+                return Err(QpError::rank_deficient_working_set());
+            }
             if crate::deadline::expired() {
                 // Cancellation is an *error*, not a value. `Ok(current)` here
                 // would hand the caller an `rhs` that was never solved — it
@@ -1022,8 +1040,25 @@ impl ParametricActiveSetSolver {
             }
             // rhs[n..n+m] and rhs[n+m..n+m+k] stay zero.
 
-            let delta =
-                self.factorize_with_inertia_control(kkt, &mut rhs, (m + k) as i32, qp.n, opts)?;
+            // A bound pinning a variable the equalities already fix makes the
+            // block rank-deficient. The ladder used to climb to `1e14` on it
+            // and return either that failure or, past `δ ≈ 1e8`, a factor
+            // masking the null direction; it now reports the deficiency at
+            // once (gh#1206 B6), and the rank-aware general path takes the
+            // problem, as `solve_equality_only` does for the same cause.
+            let delta = match self.factorize_with_inertia_control(
+                kkt,
+                &mut rhs,
+                (m + k) as i32,
+                qp.n,
+                opts,
+            ) {
+                Ok(d) => d,
+                Err(e) if e.is_rank_deficient_working_set() => {
+                    return self.solve_general(qp, None, opts);
+                }
+                Err(e) => return Err(e),
+            };
             n_refactor += 1;
             if crate::deadline::expired() {
                 return Ok(cut_off_solution(
@@ -2646,11 +2681,28 @@ impl ParametricActiveSetSolver {
     /// polish was reached by none of the issue generator's 200 seeds, so it is
     /// gone rather than kept as an untested branch.
     fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
+        self.solve_elastic_seeded(qp, opts, None)
+    }
+
+    /// [`Self::solve_elastic`], with the phase-1 seeded at `seed` (projected
+    /// into the variable box) instead of at the origin; see
+    /// [`Self::solve_elastic_rows`].
+    fn solve_elastic_seeded(
+        &mut self,
+        qp: &QpProblem,
+        opts: &QpOptions,
+        seed: Option<&[Number]>,
+    ) -> Result<QpSolution, QpError> {
         let mut spent = QpStats::default();
-        if let Some(sol) = self.solve_pruned(qp, opts, Self::solve_elastic_rows, &mut spent)? {
+        if let Some(sol) = self.solve_pruned(
+            qp,
+            opts,
+            |s, q, o| s.solve_elastic_rows(q, o, seed),
+            &mut spent,
+        )? {
             return Ok(sol);
         }
-        let mut sol = self.solve_elastic_rows(qp, opts)?;
+        let mut sol = self.solve_elastic_rows(qp, opts, seed)?;
         sol.stats.add_work(&spent);
         Ok(sol)
     }
@@ -2708,10 +2760,20 @@ impl ParametricActiveSetSolver {
     /// Unpacks the augmented solution into the original variable
     /// space and reports `QpStatus::Infeasible` when residual
     /// slacks exceed `feas_tol`.
+    ///
+    /// `seed` replaces the origin as the point the elastic slacks are
+    /// measured from (gh#1206 B7): a warm start whose pinned point is
+    /// infeasible — the hint repair having given up — is still near a
+    /// feasible point, and every row it pins is at its boundary there, so
+    /// [`ElasticReformulation::initial_seed`] puts those rows back in the
+    /// working set and the slacks only have to absorb the violated rows. The
+    /// origin is kept as a recovery seed below, so nothing the cold seed
+    /// could reach is lost.
     fn solve_elastic_rows(
         &mut self,
         qp: &QpProblem,
         opts: &QpOptions,
+        seed: Option<&[Number]>,
     ) -> Result<QpSolution, QpError> {
         let started = Instant::now();
         let n = qp.n;
@@ -2720,18 +2782,30 @@ impl ParametricActiveSetSolver {
         let reform = crate::elastic::ElasticReformulation::build(qp, opts.elastic_gamma);
         let qp_aug = reform.as_qp();
 
-        // Initial `x_orig` for the augmented seed: project 0 into
-        // the original variable box. Slacks then absorb any
-        // remaining infeasibility.
-        let mut x_orig = vec![0.0; n];
-        for (xi, (&l, &u)) in x_orig.iter_mut().zip(qp.xl.iter().zip(qp.xu.iter())) {
-            if l > NLP_LOWER_BOUND_INF && *xi < l {
-                *xi = l;
+        // Initial `x_orig` for the augmented seed: project 0 (or the
+        // caller's seed) into the original variable box. Slacks then absorb
+        // any remaining infeasibility.
+        let project = |x: &mut [Number]| {
+            for (xi, (&l, &u)) in x.iter_mut().zip(qp.xl.iter().zip(qp.xu.iter())) {
+                if l > NLP_LOWER_BOUND_INF && *xi < l {
+                    *xi = l;
+                }
+                if u < NLP_UPPER_BOUND_INF && *xi > u {
+                    *xi = u;
+                }
             }
-            if u < NLP_UPPER_BOUND_INF && *xi > u {
-                *xi = u;
+        };
+        let mut x_zero = vec![0.0; n];
+        project(&mut x_zero);
+        let x_orig = match seed {
+            Some(s) if s.len() == n && s.iter().all(|v| v.is_finite()) => {
+                let mut x = s.to_vec();
+                project(&mut x);
+                x
             }
-        }
+            _ => x_zero.clone(),
+        };
+        let seeded = x_orig != x_zero;
         let (x_aug, working_aug) = reform.initial_seed(qp, &x_orig, opts.feas_tol);
 
         let ws = QpWarmStart {
@@ -2916,6 +2990,9 @@ impl ParametricActiveSetSolver {
         // with points feasible to slack 1.66, and the SQP reported
         // `Infeasible_Problem_Detected` at iteration 0 (gh#484 follow-up).
         let mut candidates = vec![x.clone(), x_orig.clone()];
+        if seeded {
+            candidates.push(x_zero);
+        }
         // The convex phase-1's point earns a place in the seed list
         // whether or not it cleared `feas_tol`: it is the closest thing
         // to a feasible point anyone here has, and phase-2 warm-started
@@ -3748,7 +3825,24 @@ impl ParametricActiveSetSolver {
                     self.count_prune.prunes += 1;
                 }
             }
-            match schur.reset(&mut self.linsol, qp, working, ac as i32, opts) {
+            let mut reset = schur.reset(&mut self.linsol, qp, working, ac as i32, opts);
+            // Past `COUNT_PRUNE_CAP` the counting trigger stands down and the
+            // over-full set is deliberately left to the factorization, which
+            // climbed its ladder to whatever δ factored (see above: pruning
+            // there is what cycled QFORPLAN). The B6 probe (gh#1206) would
+            // turn that into a failure the repair below prunes after all, so
+            // a stood-down pass keeps the old ladder.
+            if ac > qp.n
+                && self.count_prune.prunes >= COUNT_PRUNE_CAP
+                && matches!(&reset, Err(e) if e.is_rank_deficient_working_set())
+            {
+                let no_probe = QpOptions {
+                    dual_shift_probe: 0.0,
+                    ..opts.clone()
+                };
+                reset = schur.reset(&mut self.linsol, qp, working, ac as i32, &no_probe);
+            }
+            match reset {
                 Ok(()) => return Ok(()),
                 Err(e) if e.is_recoverable_factorization_failure() => {
                     if *budget == 0 {
@@ -3907,7 +4001,7 @@ impl ParametricActiveSetSolver {
         }
 
         // Initialize Schur and factor the base K_max.
-        let mut schur = crate::schur::SchurState::new(n, m);
+        let mut schur = crate::schur::SchurState::for_problem(qp);
         self.schur_reset_rank_repaired(
             &mut schur,
             qp,
@@ -4308,7 +4402,50 @@ impl ParametricActiveSetSolver {
                     // Schur path opt-in on the SQP arm, whose exact Hessian is
                     // `Indefinite`). Adds only shrink the null space and keep
                     // the cheap update; on a PSD Hessian, drops do too.
+                    //
+                    // Unless the update's inertia can be read without the
+                    // refactorization (gh#1206 P1): by Haynsworth additivity
+                    // `In(K_W)` follows from the base factor's count and the
+                    // small Schur block (`SchurState::updated_neg_evals`).
+                    // When it is the `|W|` negatives the new working set
+                    // needs, the update *is* what inertia control would
+                    // accept at δ = 0, so it is kept; otherwise — wrong
+                    // count, a block too near singular to count, or a base
+                    // factor carrying a shift that a fresh δ = 0 attempt
+                    // might no longer need — the drop refactors as before.
+                    // On the gh#1206 handover QP every drop refactorized
+                    // (4.8 s each at `dim = 448 117`).
                     if qp.hessian_inertia != HessianInertia::Psd {
+                        let mut kept = false;
+                        if opts.schur_drop_inertia_test
+                            && schur.shift() == 0.0
+                            && schur.has_room_for_update(opts)
+                        {
+                            match schur.apply_change(&mut self.linsol, qp, slot, false) {
+                                Ok(()) => {
+                                    let want = active_slot_count(&working) as i32;
+                                    let got = schur.updated_neg_evals();
+                                    kept = got == Some(want);
+                                    if trace {
+                                        eprintln!(
+                                            "[qp] it={_iter} DROP inertia via Schur block: \
+                                             {got:?} negative, want {want} → {}",
+                                            if kept { "update kept" } else { "refactor" }
+                                        );
+                                    }
+                                }
+                                Err(e) if e.is_recoverable_factorization_failure() => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        if kept {
+                            n_changes += 1;
+                            crate::deadline::charge_working_set_change();
+                            n_schur_updates += 1;
+                            prev_was_null_step = false;
+                            floor_refactored = false;
+                            continue;
+                        }
                         reset_or_stop!('iters);
                         n_refactor += 1;
                         n_changes += 1;
@@ -5397,6 +5534,13 @@ fn independent_active_subset_any(
     // Past it no rank test runs, and the caller is told so: "nothing
     // dropped" is "cannot help" to a pruning caller but "full rank" to the
     // masked-deficiency guards, which must not accept on it.
+    //
+    // A probe stopped by the solve's deadline (gh#1206 B5) gets no dense
+    // fallback either: the time is already spent, and the caller is told no
+    // rank test ran.
+    if crate::deadline::time_passed() {
+        return None;
+    }
     let k = (active_cons.len() + active_bounds.len()) as Number;
     if k * k * qp.n as Number > DENSE_GUARD_FLOP_BUDGET {
         return None;
@@ -6304,6 +6448,45 @@ impl ParametricActiveSetSolver {
             Ok(ws) => ws,
             Err(timed_out) => return Ok(timed_out),
         };
+        // gh#1206 B7. A pinned point still infeasible after the repair (it
+        // gave up: too many violated rows, or `|W| + violated > n`) fails
+        // `solve`'s admission pre-check, which sends it to the l1-elastic
+        // phase 1 seeded at the *origin* — discarding the hint entirely and
+        // paying about one working-set change per row to rebuild it. Seed
+        // that phase at the pinned point instead: the hint's rows are active
+        // there, and only the violated ones need slacks. Everything else
+        // about the route — the phase, its recovery seeds, the second-order
+        // pass `solve` would run — is unchanged.
+        //
+        // Only a point the pin actually determined qualifies: one solved
+        // from an *unshifted* pinned KKT (`pinned_factor` is kept only then)
+        // over a non-empty working set. A shifted pin leaves the free
+        // directions at `−g/δ` — on an LP with an empty hint, a point ~1e8
+        // out — and seeding there cost `h_zero_general_inequalities` its
+        // 1e-8 answer; such a hint keeps the origin.
+        //
+        // And only a hint that is *nearly* right. The repair declines for two
+        // reasons, and only one is B7's: `|W| + violated > n` (the hint pins
+        // a full vertex, so it cannot add rows without a drop). The other —
+        // more violated rows than `max(|W|/4, PIN_REPAIR_MIN_ROWS)` — is the
+        // badly-wrong hint the pre-check was written for, and seeded there
+        // it cost #428's MPC sweep 111 pivots where the origin needs 14.
+        let active = ws.working.active_count();
+        let nearly_right = || {
+            violated_inactive(qp, &ws.x, &ws.working, opts.feas_tol)
+                .is_some_and(|(c, b)| c.len() + b.len() <= (active / 4).max(PIN_REPAIR_MIN_ROWS))
+        };
+        let pin_determined = self.pinned_factor.is_some() && active > 0;
+        if opts.elastic_seed_from_hint
+            && pin_determined
+            && nearly_right()
+            && !point_is_feasible_scaled(qp, &ws.x, opts.feas_tol)
+        {
+            let _deadline = crate::deadline::enter(opts);
+            return self
+                .solve_elastic_seeded(qp, opts, Some(&ws.x))
+                .and_then(|sol| self.escape_negative_curvature(qp, sol, opts));
+        }
         self.solve(qp, Some(&ws), opts)
     }
 
@@ -7711,6 +7894,88 @@ mod issue1061_unchecked_rank_tests {
             "accepted an unchecked shifted factor: {:?}",
             r.as_ref().map(|x| &x[..4])
         );
+    }
+}
+
+#[cfg(test)]
+mod issue1206_rank_probe_deadline_tests {
+    //! gh#1206 B5: the rank guard's sparse probe ran unbounded inside a QP
+    //! with a `time_limit` — one call on the IPM→SQP handover's step QP of a
+    //! 90 797-variable collocation NLP ran for more than 2 400 s of CPU and
+    //! 11.6 GB. The probe now stops at the solve's wall-clock deadline, and the
+    //! guard reports that no rank test ran instead of grinding on.
+    use std::time::Duration;
+
+    use pounce_common::types::{Index, Number};
+    use pounce_feral::{FeralSolverInterface, ProbeBailout};
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+
+    use super::{ParametricActiveSetSolver, checked_independent_active_subset};
+    use crate::{HessianInertia, QpOptions, QpProblem};
+
+    /// `x_i − x_{i+p} = 0` for `i < p`, each row repeated once scaled by 2
+    /// (`2p` equality rows of rank `p`), the rank test run over all of them
+    /// on a FERAL-backed solver, inside a solve scope with `time_limit`.
+    fn rank_test_in_scope(p: usize, time_limit: Option<Duration>) -> Option<usize> {
+        let (n, m) = (2 * p, 2 * p);
+        let diag: Vec<Index> = (1..=n as Index).collect();
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as Index, diag.clone(), diag));
+        h.set_values(&vec![1.0; n]);
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..p {
+            for (row, scale) in [(i, 1.0), (p + i, 2.0)] {
+                irn.extend([row as Index + 1, row as Index + 1]);
+                jcn.extend([i as Index + 1, (i + p) as Index + 1]);
+                vals.extend([scale, -scale]);
+            }
+        }
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as Index, n as Index, irn, jcn));
+        a.set_values(&vals);
+        let g: Vec<Number> = vec![1.0; n];
+        let (bl, bu) = (vec![0.0; m], vec![0.0; m]);
+        let (xl, xu) = (vec![-1e20; n], vec![1e20; n]);
+        let qp = QpProblem {
+            n,
+            m,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::new()));
+        let opts = QpOptions {
+            time_limit,
+            ..QpOptions::default()
+        };
+        let _scope = crate::deadline::enter(&opts);
+        let rows: Vec<usize> = (0..m).collect();
+        checked_independent_active_subset(&mut solver.linsol, &qp, &rows, &[])
+            .map(|(kc, _)| kc.len())
+    }
+
+    #[test]
+    fn the_rank_test_stops_at_the_solve_deadline() {
+        // Control: with time left, the probe finds the `p` independent rows.
+        assert_eq!(
+            rank_test_in_scope(40, Some(Duration::from_secs(3600))),
+            Some(40)
+        );
+        assert_eq!(pounce_feral::last_probe_bailout(), None);
+        // Out of time: the probe stops, and the dense fallback (well inside
+        // its flop budget here) is not run in its place. Before gh#1206 the
+        // probe ignored the deadline and this read `Some(40)`.
+        assert_eq!(rank_test_in_scope(40, Some(Duration::ZERO)), None);
+        assert_eq!(
+            pounce_feral::last_probe_bailout(),
+            Some(ProbeBailout::Deadline)
+        );
+        // The deadline is the solve's: outside a scope nothing is imposed.
+        let _ = rank_test_in_scope(40, None);
+        assert_eq!(pounce_feral::last_probe_bailout(), None);
     }
 }
 

@@ -272,7 +272,10 @@ fn a_failing_sentinel_pattern_falls_back_once_per_pass() {
     let runs = soft.windows(2).filter(|w| !w[0] && w[1]).count();
     assert!(attempts >= 1, "the first drop tried a sentinel pattern");
     assert_eq!(runs, 1, "and no later drop did: {soft:?}");
-    let ladder = 1 + QpOptions::default().inertia_max_shifts as usize;
+    // One ladder: the unshifted attempt, every rung, and the gh#1206 B6
+    // rank-deficiency probe, which this backend fails too (its pattern
+    // carries diagonals past the H rows), so the climb goes on.
+    let ladder = 2 + QpOptions::default().inertia_max_shifts as usize;
     assert!(
         attempts <= ladder,
         "{attempts} attempts, one ladder is {ladder}"

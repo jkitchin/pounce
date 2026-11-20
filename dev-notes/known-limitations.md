@@ -12,6 +12,185 @@ merges.
 
 ---
 
+## Handover: two declared-pair fixtures end acceptable after crossover step 4 seeds from step 3 (gh#1206 B1)
+
+*Measured on `claude/optimistic-lamport-8vweis` against `main` at `e0b4442`,
+`scripts/sweep-fixtures.sh <bin> <out> ipm_sqp_handover=yes`, both legs, with a
+third binary that reverts B1 alone to attribute every line. Recorded
+2026-11-20.*
+
+**The change.** When crossover's step-3 QP solves but its point misses the
+stopping tolerances, step 4 (the full active-set SQP) now starts from that
+QP's optimal working set instead of the step-2 estimate. Step 4's first step
+QP is step 3's QP again, so the estimate made it redo every pivot step 3 had
+paid for — 591 s and 167 working-set changes on gh#1206's 90 k-variable
+collocation model. Off the handover path nothing moves: the default sweep and
+the `crossover=yes` sweep are empty (one `tot=` count on `cc:qpec_small`
+under `crossover=yes`, 240 → 224).
+
+### What is worse
+
+Under `ipm_sqp_handover=yes`, B1 alone moves 12 of 300 lines. Two are worse in
+status, both exact leg, both declared-pair (`cc:`) fixtures, and both reach a
+slightly *lower* objective:
+
+| fixture | `main` | branch |
+|---|---|---|
+| `cc:design_cent_3` | `SolveSucceeded`, it=12, tot=614, obj 3.723369071 | `SolvedToAcceptableLevel`, it=21, tot=134, obj 3.723366071 |
+| `cc:opf_vv_lower_knee` | `SolveSucceeded`, it=3, tot=247, obj −0.3954687711 | `SolvedToAcceptableLevel`, it=64, tot=281, obj −0.3954730625 |
+
+The rest are better or neutral: `cc:qpec_small` 13 → 1 iterations (tot 153 →
+85) exact and tot 329 → 208 L-BFGS; L-BFGS `cc:mixed_pair` 39 → 19;
+L-BFGS `cc:opf_vv_lower_knee` 61 → 39; L-BFGS `mpcc_worse_local_solution`
+31 → 28; `csfi2` 30 → 37 (below).
+
+### Mechanism
+
+`cc:design_cent_3`, third lowered solve, handover at interior iteration 12:
+step 3's QP is `Optimal` with one pivot; step 4 from the estimate repeats that
+pivot and converges in 5 SQP iterations. From step 3's set the iterates agree
+with `main`'s to the printed digits through SQP iteration 4, where `main`'s
+step QP refactors with a rank test and returns `‖p‖ = 2.4e-8` while the
+branch's takes its warm factorization with no refactor and no rank test and
+returns `‖p‖ = 1.14`. The model is the lifted MPCC with multipliers near
+`1e26` in its step QPs — exactly the LICQ-failing, degenerate active set
+gh#1206 §1 describes — and the next QP hits its iteration cap in phase 1, so
+the attempt is declined `ActiveSetNotConverged` and the complementarity
+driver takes a different path. So the defect is the QP accepting an
+unchecked factorization on a near-singular working set; B1 changes which
+working set reaches it. `cc:opf_vv_lower_knee` moves earlier: a different
+accepted handover point in an early lowered solve sends the driver down
+another sequence.
+
+`csfi2` (30 → 37, same point) is the gh#797 negative-curvature probe reading
+roundoff: the point step 4 returns differs at `1e-15`, and the probe then
+measures `dᵀ(W+Σ)d = −1.85e-19`, escapes, finds nothing, and restores it.
+
+### How to tell whether a fix works
+
+Rerun the `ipm_sqp_handover=yes` sweep: both lines back to `SolveSucceeded`
+with the improvements above kept.
+
+**Re-checked after B6/B7 landed (same branch, 2026-11-20): not fixed.** The
+handover sweep of the final branch shows both lines unchanged
+(`SolvedToAcceptableLevel`, it=21 and it=64). That is expected rather than
+informative: B6's rank probe is off by default (it was size-gated to KKT
+dimension ≥ 5000 when this was checked) and B7's
+seeded phase 1 is opt-in (see the entry below), and these models are far
+below the gate, so neither runs on them. An ungated B6/B7 run flipped
+`cc:design_cent_3` back to `SolveSucceeded`, but it ran concurrently with
+builds, which moves the wall-clock attempt budget, so it is not evidence. A fix belongs in `pounce-qp`'s handling of a
+warm start whose working set is rank-deficient (gh#1206 B6/B7), not in
+reverting B1, which on the model that reported it is the difference between
+a step-4 first QP of 591 s and one of 23 s.
+
+---
+
+## Active-set QP: the gh#1206 H-diagonal padding is size-gated, and the rank probe and hint-seeded phase 1 are opt-in (gh#1206 B6, P2, B7)
+
+*Measured on the gh#1206 pounce-qp branch against `b49e6d4`,
+`scripts/sweep-fixtures.sh <bin> <out> solver_selection=qp-active-set`, both
+legs, with a binary carrying one environment switch per item to attribute
+each line. Recorded 2026-11-20.*
+
+Three of gh#1206's QP items help the reporter's 90 k-variable step QP and
+cost something on the fixture corpus, which has no QP within two orders of
+that size. They ship gated, and the gate is what this entry records.
+
+### What is worse, ungated
+
+| item | fixture (both legs) | `b49e6d4` | ungated |
+|---|---|---|---|
+| B6 rank probe | `convex_qp_qgfrdxpn` | `SolveSucceeded`/3553 | `MaximumIterationsExceeded`/41395 |
+| P2 H-diagonal padding | `convex_qp_qforplan` | `SolveSucceeded`/12465 | `MaximumIterationsExceeded`/13769 |
+| B7 seeded phase 1 | `warm_start_pin_repair.rs`, horizon 40, step −0.2 | 14 pivots | 111 pivots |
+
+Also moved, same status: `convex_qp_share1b` 2299 → 2435 (B6 and P2 both),
+`feasible_x0_sentinel_bound` 6 → 8 (B6), `manyineq_concave_qp`
+22727 → 11508 (B6 and P2, better).
+
+Under `algorithm=active-set-sqp` the ungated build (B6 and P2 together, not
+separated) moved 17 fixture-legs: worse `mpcc_worse_local_solution` (exact,
+`SearchDirectionBecomesTooSmall`/2 → `MaximumIterationsExceeded`/0) and
+`pooling_rt2stp` (exact, `MaximumIterationsExceeded`/3 →
+`InfeasibleProblemDetected`/4 after four ladder rungs); better
+`pooling_rt2stp` (L-BFGS, `MaximumIterationsExceeded`/200 →
+`SearchDirectionBecomesTooSmall`/39), `jit1`/`jit1_boxed` (L-BFGS, 21 → 11,
+obj 265486 → 240694), `ssebnln` (exact, 3 → 2); `ssebnln` L-BFGS 95 → 133.
+Gated, that sweep is empty.
+
+### Mechanism
+
+- **B6.** A KKT singular unshifted and at the first `H` shift, which factors
+  once `−δ_c` sits on its live constraint rows, has dependent rows; the probe
+  reports it instead of climbing to `1e14`. QGFRDXPN's elastic phase 1 meets
+  such sets, and the old ladder "factored" them at `δ ≈ 1e6` with the null
+  direction masked (measured on a duplicated-row fixture: 9 factorizations to a
+  `δ = 1e6` "success"). Reported, they go to the rank repair, and pruning at
+  those vertices is the cycle gh#1076 describes. The counting prune's cap
+  already keeps the old ladder once it stands down; the failure-repair prune
+  has no such cap.
+- **P2.** The explicit zeros add nothing to the matrix but are stored
+  entries; FERAL's ordering and scaling read the stored pattern, so round-off
+  moves, and QFORPLAN's outcome flips on any change of pivoting (gh#1076: it
+  solves at counting caps 16, 20, 32, 40 and cycles at 24, 28, 48, 64).
+- **B7.** Started at the hint's full vertex, the Bland-ruled phase 1 releases
+  the hint's wrong bounds one lowest-index pivot at a time. Dropping Bland for
+  the seeded phase reached a point `8e-8` below the cold optimum, i.e. not
+  feasible to tolerance.
+
+### B6 gated at 5000 aborted BOYD2; it is now off by default
+
+B6 first shipped gated at KKT dimension 5000. The PR #1208 re-review ran
+Maros-Meszaros under `solver_selection=qp-active-set`, `max_wall_time=150`.
+BOYD2 (93 263 variables) then ran past the wall-time limit: still inside one
+FERAL dense factorization (`packed_schur_tiles_nofma`) at 500 s on the
+reviewer's machine, against `main`'s clean `MaximumWallTimeExceeded` at
+150.7 s. On a 15 GB Linux container the same run aborted after about 100 s
+with `memory allocation of 55729914368 bytes failed`, inside
+`factorize_with_inertia_control`, in FERAL's `grow_pooled_front`. Bisected
+with one environment switch per item: switching off P1, P2 or P7 alone still
+aborts; switching off B6 alone, or all four, restores `main`'s behaviour.
+
+The mechanism: the probe's `−δ_c` entries sit on constraint-row diagonals
+that the KKT does not store, so the probe matrix has a new pattern. FERAL
+re-analyses it, and on BOYD2 the new ordering produces a 55.7 GB front.
+Nothing before the numeric factorization bounds the fill, and an allocation
+failure aborts the process rather than returning an error. So B6 is now
+opt-in: `QpOptions::dual_shift_probe_min_dim` defaults to `usize::MAX`.
+Making it safe would mean either reusing the existing pattern (store explicit
+zero diagonals on the constraint rows too, as P2 does for `H`) or checking
+FERAL's predicted fill before the probe's numeric factorization.
+
+### The gates
+
+B6: `QpOptions::dual_shift_probe_min_dim`, compared against the **KKT
+dimension** (`kkt.dim`), default `usize::MAX` (off). P2: `n + m ≥
+kkt::H_DIAG_PAD_MIN_DIM` (5000, `SOFT_DROP_MIN_DIM`, the size from which the
+soft-drop pattern of gh#1083 is on for the same symbolic-reuse reason). The
+two measure different things: a K_max on the Schur path has dimension about
+`2n + m`, so a probe gate of 5000 would engage there at `n + m ≈ 2500`. B7:
+`QpOptions::elastic_seed_from_hint`, off. With the gates the
+`qp-active-set` sweep no longer shows the two losses; nothing in the corpus
+reaches the gated branches, so the sweep says nothing about them — the unit
+tests (`rank_probe_unit.rs`, `kkt_unit.rs`,
+`warm_start_failed_repair_seeds_elastic.rs`) reach them on purpose.
+
+### How to tell whether a fix works
+
+Lower the gates to 0 (and turn B7 on) and rerun the `qp-active-set` sweep:
+QGFRDXPN and QFORPLAN must stay `SolveSucceeded` and `warm_start_pin_repair.rs`
+must pass with the option on. For B6, also run Maros-Meszaros BOYD2 under
+`solver_selection=qp-active-set max_wall_time=150`
+(`benchmarks/qp/generate_nl.py BOYD2`; the `.mat` is fetchable from
+`raw.githubusercontent.com/qpsolvers/maros_meszaros_qpbenchmark/main/data/`):
+it must stop at the wall-time limit. For B6 the likely shape is a cap on
+probe-triggered prunes per pass, as `COUNT_PRUNE_CAP` caps the counting
+trigger; for B7, a phase 1 that releases a hint's wrong-signed bounds by
+multiplier rather than by index.
+
+---
+
 ## NLP: L-BFGS fixtures slower after restoration matched upstream (gh#1146)
 
 *Measured on `claude/charming-carson-cz5psg` against `main` at `358ecbb`,

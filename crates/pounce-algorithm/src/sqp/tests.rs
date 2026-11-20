@@ -1751,6 +1751,619 @@ fn issue_1061_an_accepted_crossover_reports_its_step3_qp() {
     assert_eq!(eqp.outcome, Ok(QpStatus::Optimal));
 }
 
+/// `min Σ ½(xᵢ − 1)² + ¼xᵢ⁴  s.t.  xᵢ ≥ 0` — quartic, with every bound
+/// inactive at the solution (`x³ + x − 1 = 0`, `x ≈ 0.6823`). Seeded at the
+/// bound with a positive multiplier, the step-2 estimate takes all three
+/// bounds active, step 3's QP drops them, and its point (`x = 1`) misses the
+/// stopping tolerances because the quadratic model is wrong there.
+struct QuarticLowerBoundNlp;
+
+impl SqpProblemSpec for QuarticLowerBoundNlp {
+    fn n(&self) -> usize {
+        3
+    }
+    fn m(&self) -> usize {
+        0
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.0; 3]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![0.0; 3], vec![NLP_UPPER_BOUND_INF; 3])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![], vec![])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        x.iter()
+            .map(|&v| 0.5 * (v - 1.0).powi(2) + 0.25 * v.powi(4))
+            .sum()
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        x.iter().map(|&v| v - 1.0 + v.powi(3)).collect()
+    }
+    fn eval_c(&mut self, _x: &[f64]) -> Vec<f64> {
+        vec![]
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 0,
+            n_cols: 3,
+            irow: vec![],
+            jcol: vec![],
+            vals: vec![],
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 3,
+            n_cols: 3,
+            irow: vec![1, 2, 3],
+            jcol: vec![1, 2, 3],
+            vals: x.iter().map(|&v| 1.0 + 3.0 * v * v).collect(),
+        }
+    }
+}
+
+/// gh#1206 B1: when step 3's QP solves but its point misses the stopping
+/// tolerances, step 4 starts from step 3's optimal working set, not the
+/// step-2 estimate. Step 4's first step QP is step 3's QP again (same point,
+/// same multipliers), so seeding it with the estimate redid every pivot.
+///
+/// Here the estimate has all three bounds active and step 3's QP drops all
+/// three. Seeded with the estimate, step 4's first QP drops them again;
+/// seeded with step 3's set, it pivots nothing.
+#[test]
+fn issue_1206_step4_starts_from_the_step3_working_set() {
+    use crate::crossover::{CrossoverOptions, CrossoverPhase, CrossoverSeed};
+    let seed = CrossoverSeed {
+        x: vec![0.0; 3],
+        lambda_g: vec![],
+        lambda_x: vec![1.0; 3],
+    };
+    let mut nlp = QuarticLowerBoundNlp;
+    let (report, accepted) = crate::crossover::run(
+        &mut nlp,
+        &seed,
+        &CrossoverOptions {
+            enabled: true,
+            ..CrossoverOptions::default()
+        },
+        &SqpOptions::default(),
+        &QpOptions::sqp_subproblem(),
+        || Box::new(pounce_feral::FeralSolverInterface::new()),
+        |o| {
+            Some(SqpAlgorithm::new(
+                ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new())),
+                o,
+            ))
+        },
+    );
+    assert_eq!(report.estimated_active, 3, "{report:?}");
+    let eqp = report.eqp.as_ref().expect("step 3 ran");
+    assert_eq!(eqp.outcome, Ok(QpStatus::Optimal));
+    assert_eq!(eqp.working_set_changes, 3, "{eqp:?}");
+    assert_eq!(report.phase, Some(CrossoverPhase::ActiveSet), "{report:?}");
+    let res = accepted.expect("step 4 converges");
+    let x_star = 0.682_327_803_828_019_3;
+    assert!(
+        res.x.iter().all(|&v| (v - x_star).abs() < 1e-6),
+        "{:?}",
+        res.x
+    );
+    assert_eq!(
+        res.n_qp_working_set_changes, 0,
+        "step 4 repeated step 3's pivots: it did not start from step 3's working set ({res:?})"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// gh#1206: stabilized SQP subproblem and adaptive proximal term.
+// ─────────────────────────────────────────────────────────────────
+
+/// `min Σ ½(xᵢ − 1)²  s.t.  x₀ + x₁ + x₂ + x₀² ≤ 0,  x ≤ 0` (and, with
+/// `dup`, the same row twice). At the solution `x = 0` all three upper
+/// bounds and the row are active: four (or five) constraint gradients in
+/// three variables, so LICQ fails and the multipliers are not unique — the
+/// degenerate active set of gh#1206 §1 in miniature.
+struct LinkedBoundsNlp {
+    dup: bool,
+}
+
+impl SqpProblemSpec for LinkedBoundsNlp {
+    fn n(&self) -> usize {
+        3
+    }
+    fn m(&self) -> usize {
+        if self.dup { 2 } else { 1 }
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![-1.0, -0.5, -2.0]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![NLP_LOWER_BOUND_INF; 3], vec![0.0; 3])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        let m = self.m();
+        (vec![NLP_LOWER_BOUND_INF; m], vec![0.0; m])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        x.iter().map(|&v| 0.5 * (v - 1.0).powi(2)).sum()
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        x.iter().map(|&v| v - 1.0).collect()
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        let c = x[0] + x[1] + x[2] + x[0] * x[0];
+        vec![c; self.m()]
+    }
+    fn eval_jac_c(&mut self, x: &[f64]) -> Triplet {
+        let m = self.m();
+        let mut t = Triplet {
+            n_rows: m,
+            n_cols: 3,
+            irow: vec![],
+            jcol: vec![],
+            vals: vec![],
+        };
+        for i in 0..m {
+            for (j, v) in [1.0 + 2.0 * x[0], 1.0, 1.0].into_iter().enumerate() {
+                t.irow.push(i as Index + 1);
+                t.jcol.push(j as Index + 1);
+                t.vals.push(v);
+            }
+        }
+        t
+    }
+    fn eval_hess_lag(&mut self, _x: &[f64], lambda_g: &[f64]) -> Triplet {
+        let l: f64 = lambda_g.iter().sum();
+        Triplet {
+            n_rows: 3,
+            n_cols: 3,
+            irow: vec![1, 2, 3],
+            jcol: vec![1, 2, 3],
+            vals: vec![1.0 + 2.0 * l, 1.0, 1.0],
+        }
+    }
+}
+
+fn proximal_sqp(proximal: Number) -> SqpAlgorithm {
+    SqpAlgorithm::new(
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new())),
+        SqpOptions {
+            proximal,
+            ..SqpOptions::default()
+        },
+    )
+}
+
+/// The stabilized start satisfies every row and bound, and every active one
+/// with equality, for an arbitrary working set — including one whose
+/// active rows the linearization cannot meet together.
+#[test]
+fn stabilized_start_is_feasible_and_satisfies_the_working_set() {
+    use pounce_qp::{BoundStatus, ConsStatus, WorkingSet};
+    let mut nlp = LinkedBoundsNlp { dup: true };
+    let x = vec![-0.3, -0.2, -0.1];
+    let lam = vec![0.4, 0.6];
+    let (xl, xu) = nlp.variable_bounds();
+    let (bl, bu) = nlp.constraint_bounds();
+    let data = SqpQpData::build(
+        &x,
+        &nlp.eval_grad_f(&x),
+        &nlp.eval_c(&x),
+        &bl,
+        &bu,
+        &xl,
+        &xu,
+        nlp.eval_jac_c(&x),
+        nlp.eval_hess_lag(&x, &lam),
+        HessianInertia::Psd,
+    )
+    .stabilize(1e-3, &lam);
+    assert_eq!(data.stabilization(), Some(1e-3));
+    let qp = data.as_qp();
+    assert_eq!((qp.n, qp.m), (5, 2));
+    let w = WorkingSet {
+        bounds: vec![
+            BoundStatus::AtUpper,
+            BoundStatus::Inactive,
+            BoundStatus::AtUpper,
+        ],
+        constraints: vec![ConsStatus::AtUpper, ConsStatus::Inactive],
+    };
+    let start = data.stabilized_start(&w, qp.bl, qp.bu).unwrap();
+    let p = &start.x;
+    assert_eq!(p.len(), 5);
+    // Bounds on p, active ones exactly.
+    for j in 0..3 {
+        assert!(p[j] <= qp.xu[j] + 1e-15, "bound {j}: {p:?}");
+    }
+    assert_eq!(p[0], qp.xu[0]);
+    assert_eq!(p[2], qp.xu[2]);
+    // Rows `Jp − r`, the active one at its bound.
+    let ax = |i: usize| -> Number {
+        let (ai, aj, av) = (qp.a.irows(), qp.a.jcols(), qp.a.values());
+        (0..av.len())
+            .filter(|&k| (ai[k] - 1) as usize == i)
+            .map(|k| av[k] * p[(aj[k] - 1) as usize])
+            .sum()
+    };
+    assert!((ax(0) - qp.bu[0]).abs() < 1e-14, "{}", ax(0));
+    assert!(ax(1) <= qp.bu[1] + 1e-14);
+    assert_eq!(start.working.bounds.len(), 5);
+    assert_eq!(start.working.constraints, w.constraints);
+    // The QP accepts it and solves without a phase 1.
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let sol = solver
+        .solve(&qp, Some(&start), &QpOptions::sqp_subproblem())
+        .unwrap();
+    assert_eq!(sol.status, QpStatus::Optimal);
+    assert!(!sol.stats.used_phase1);
+    // An unstabilized subproblem has no such start.
+    let plain = SqpQpData::build(
+        &x,
+        &nlp.eval_grad_f(&x),
+        &nlp.eval_c(&x),
+        &bl,
+        &bu,
+        &xl,
+        &xu,
+        nlp.eval_jac_c(&x),
+        nlp.eval_hess_lag(&x, &lam),
+        HessianInertia::Psd,
+    );
+    assert!(plain.stabilized_start(&w, &bl, &bu).is_none());
+}
+
+/// Stabilized, the solution's multipliers satisfy `r = σ(λ − λ_k)`: the
+/// QP's own residual columns carry exactly that, so the unlifted solution's
+/// rows hold to `σ|λ − λ_k|`.
+#[test]
+fn stabilized_qp_residual_is_sigma_times_the_multiplier_change() {
+    let mut nlp = LinkedBoundsNlp { dup: false };
+    let x = vec![-0.3, -0.2, -0.1];
+    let lam = vec![0.25];
+    let (xl, xu) = nlp.variable_bounds();
+    let (bl, bu) = nlp.constraint_bounds();
+    let sigma = 1e-2;
+    let data = SqpQpData::build(
+        &x,
+        &nlp.eval_grad_f(&x),
+        &nlp.eval_c(&x),
+        &bl,
+        &bu,
+        &xl,
+        &xu,
+        nlp.eval_jac_c(&x),
+        nlp.eval_hess_lag(&x, &lam),
+        HessianInertia::Psd,
+    )
+    .stabilize(sigma, &lam);
+    let qp = data.as_qp();
+    let start = data
+        .stabilized_start(&pounce_qp::WorkingSet::cold(3, 1), qp.bl, qp.bu)
+        .unwrap();
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let sol = solver
+        .solve(&qp, Some(&start), &QpOptions::sqp_subproblem())
+        .unwrap();
+    assert_eq!(sol.status, QpStatus::Optimal);
+    let r = sol.x[3];
+    assert!(
+        (r - sigma * (sol.lambda_g[0] - lam[0])).abs() < 1e-10,
+        "r = {r}, σ(λ − λ_k) = {}",
+        sigma * (sol.lambda_g[0] - lam[0])
+    );
+    // And the unlifted view drops `r`.
+    let un = data.unlift_solution(sol);
+    assert_eq!(un.x.len(), 3);
+    assert_eq!(un.working.bounds.len(), 3);
+}
+
+/// Crossover step 3 on the LICQ-failing solution: stabilized, the QP solves
+/// from the estimate with no rank test, and the point is accepted.
+#[test]
+fn stabilized_crossover_step3_needs_no_rank_test() {
+    use crate::crossover::{CrossoverOptions, CrossoverSeed};
+    // An interior-like point near the solution, with multipliers that
+    // identify all four active constraints.
+    let seed = CrossoverSeed {
+        x: vec![-1e-7, -1e-7, -1e-7],
+        lambda_g: vec![0.5],
+        lambda_x: vec![-0.5, -0.5, -0.5],
+    };
+    let run = |sigma: Number| {
+        let mut nlp = LinkedBoundsNlp { dup: true };
+        crate::crossover::run(
+            &mut nlp,
+            &CrossoverSeed {
+                lambda_g: vec![0.25, 0.25],
+                ..seed.clone()
+            },
+            &CrossoverOptions {
+                enabled: true,
+                primal_tol: 1e-6,
+                stabilization: sigma,
+                ..CrossoverOptions::default()
+            },
+            &SqpOptions::default(),
+            &QpOptions::sqp_subproblem(),
+            || Box::new(pounce_feral::FeralSolverInterface::new()),
+            |o| {
+                Some(SqpAlgorithm::new(
+                    ParametricActiveSetSolver::new(Box::new(
+                        pounce_feral::FeralSolverInterface::new(),
+                    )),
+                    o,
+                ))
+            },
+        )
+    };
+    let (report, accepted) = run(1e-4);
+    assert_eq!(report.estimated_active, 5, "{report:?}");
+    let eqp = report.eqp.as_ref().expect("step 3 ran");
+    assert_eq!(eqp.outcome, Ok(QpStatus::Optimal), "{eqp:?}");
+    assert_eq!(eqp.rank_guard_calls, 0, "{eqp:?}");
+    let res = accepted.expect("accepted");
+    assert!(res.x.iter().all(|v| v.abs() < 1e-8), "{:?}", res.x);
+    // Unstabilized, the same QP has to rank-test the pinned set: five
+    // constraint gradients in three variables are singular to pin. That rank
+    // test is the call that ran past 2 400 s on gh#1206's model (B5).
+    let (plain, _) = run(0.0);
+    let plain_eqp = plain.eqp.as_ref().expect("step 3 ran");
+    assert!(plain_eqp.rank_guard_calls >= 1, "{plain_eqp:?}");
+}
+
+/// `QuarticLowerBoundNlp` plus one inactive row `Σ xᵢ ≤ 10`, so a crossover
+/// over it has a row to stabilize.
+struct QuarticWithRowNlp;
+
+impl SqpProblemSpec for QuarticWithRowNlp {
+    fn n(&self) -> usize {
+        3
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.0; 3]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        QuarticLowerBoundNlp.variable_bounds()
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![NLP_LOWER_BOUND_INF], vec![10.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        QuarticLowerBoundNlp.eval_f(x)
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        QuarticLowerBoundNlp.eval_grad_f(x)
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x.iter().sum()]
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 3,
+            irow: vec![1, 1, 1],
+            jcol: vec![1, 2, 3],
+            vals: vec![1.0; 3],
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        QuarticLowerBoundNlp.eval_hess_lag(x, &[])
+    }
+}
+
+/// gh#1206, the reporter's run of PR #1208: step 4 starts from step 3's
+/// working set (B1), which after a stabilized step 3 only a stabilized QP
+/// can pin, so step 4 is stabilized exactly when step 3 was, and its step
+/// QPs carry the stall cap. Here step 3 is stabilized and misses the
+/// tolerances (the quartic model is wrong at its point), step 4 runs with
+/// both, and the attempt converges to `x³ + x − 1 = 0`.
+#[test]
+fn crossover_step4_is_stabilized_when_step3_was() {
+    use crate::crossover::{CrossoverOptions, CrossoverPhase, CrossoverSeed};
+    let run = |sigma: Number| {
+        let seen = std::cell::Cell::new(None);
+        let mut nlp = QuarticWithRowNlp;
+        let (report, accepted) = crate::crossover::run(
+            &mut nlp,
+            &CrossoverSeed {
+                x: vec![0.0; 3],
+                lambda_g: vec![0.0],
+                lambda_x: vec![1.0; 3],
+            },
+            &CrossoverOptions {
+                enabled: true,
+                stabilization: sigma,
+                ..CrossoverOptions::default()
+            },
+            &SqpOptions::default(),
+            &QpOptions::sqp_subproblem(),
+            || Box::new(pounce_feral::FeralSolverInterface::new()),
+            |o| {
+                seen.set(Some((o.stabilization, o.step_qp_max_stall_iters)));
+                Some(SqpAlgorithm::new(
+                    ParametricActiveSetSolver::new(Box::new(
+                        pounce_feral::FeralSolverInterface::new(),
+                    )),
+                    o,
+                ))
+            },
+        );
+        (report, accepted, seen.get())
+    };
+    let x_star = 0.682_327_803_828_019_3;
+    let (report, accepted, seen) = run(1e-4);
+    assert_eq!(report.phase, Some(CrossoverPhase::ActiveSet), "{report:?}");
+    assert_eq!(seen, Some((1e-4, Some(200))), "step 4 must inherit both");
+    let res = accepted.expect("step 4 converges stabilized");
+    assert!(
+        res.x.iter().all(|&v| (v - x_star).abs() < 1e-6),
+        "{:?}",
+        res.x
+    );
+    // Step 3 not stabilized: neither is step 4, but the stall cap still is.
+    let (_, accepted, seen) = run(0.0);
+    assert_eq!(seen, Some((0.0, Some(200))));
+    assert!(accepted.is_some());
+}
+
+/// The step-4 stabilization reaches a standalone SQP only through the
+/// internal option: on the LICQ-failing NLP the stabilized SQP solves it,
+/// with the row single and duplicated.
+#[test]
+fn stabilized_sqp_solves_a_problem_without_licq() {
+    for dup in [false, true] {
+        let mut nlp = LinkedBoundsNlp { dup };
+        let mut sqp = SqpAlgorithm::new(
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new())),
+            SqpOptions {
+                stabilization: 1e-1,
+                ..SqpOptions::default()
+            },
+        );
+        let res = sqp.optimize(&mut nlp).unwrap();
+        assert_eq!(res.status, SqpStatus::Optimal, "dup={dup}: {res:?}");
+        assert!(
+            res.x.iter().all(|v| v.abs() < 1e-8),
+            "dup={dup}: {:?}",
+            res.x
+        );
+    }
+}
+
+/// gh#1206 P6 and the PR #1208 re-review: the step-3 QP gets the size-scaled
+/// iteration budget, but a pass that stops improving ends after 200, the old
+/// flat budget, so step 4 keeps the attempt's time. Explicit settings win.
+#[test]
+fn step3_qp_is_size_scaled_but_stops_when_it_stalls() {
+    use crate::crossover::step3_iteration_limits;
+    let d = QpOptions::default();
+    assert_eq!(d.max_iter, 200, "the default this rule is written against");
+    assert_eq!(
+        step3_iteration_limits(&d, 90_797, 88_800),
+        (200_000, Some(200))
+    );
+    assert_eq!(step3_iteration_limits(&d, 5, 4), (200, Some(200)));
+    let explicit = QpOptions {
+        max_iter: 2000,
+        max_stall_iters: Some(50),
+        ..QpOptions::default()
+    };
+    assert_eq!(
+        step3_iteration_limits(&explicit, 90_797, 88_800),
+        (2000, Some(50))
+    );
+}
+
+/// `σ = min(σ_max, ρ)` for the stabilized step-3 QP, and none when it is
+/// off or the residual is zero or non-finite; the proximal term's local
+/// phase is `ρ ≤ sqp_local_phase_tol`.
+#[test]
+fn stabilization_sigma_and_the_proximal_local_phase() {
+    use crate::crossover::stabilization_sigma;
+    use crate::sqp::sqp_alg::in_local_phase;
+    assert_eq!(stabilization_sigma(1e-4, 1e-6), Some(1e-6));
+    assert_eq!(stabilization_sigma(1e-4, 5e-3), Some(1e-4));
+    assert_eq!(stabilization_sigma(1e-4, 0.0), None);
+    assert_eq!(stabilization_sigma(1e-4, f64::NAN), None);
+    assert_eq!(stabilization_sigma(0.0, 1e-6), None);
+    let tol = SqpOptions::default().local_phase_tol;
+    assert_eq!(tol, 1e-2);
+    assert!(in_local_phase(tol, 1e-3));
+    assert!(in_local_phase(tol, 1e-2));
+    assert!(!in_local_phase(tol, 2e-2));
+    assert!(!in_local_phase(tol, f64::INFINITY));
+}
+
+#[test]
+fn proximal_model_error_is_zero_for_an_exact_model_and_masks_bound_variables() {
+    use crate::sqp::sqp_alg::{free_variable_mask, model_error};
+    // B = [[2, 1], [1, 3]] stored lower-triangle; y = B s exactly.
+    let b = Triplet {
+        n_rows: 2,
+        n_cols: 2,
+        irow: vec![1, 2, 2],
+        jcol: vec![1, 1, 2],
+        vals: vec![2.0, 1.0, 3.0],
+    };
+    let s = [1.0, -2.0];
+    let y = [0.0, -5.0];
+    let me = model_error(&b, &s, &y, &[true, true]);
+    assert_eq!(me.rel_all, 0.0);
+    assert_eq!(me.e, 0.0);
+    assert!((me.sbs_over_sy - 1.0).abs() < 1e-15);
+    // Wrong on variable 0 only: Bs = (0, -5), y' = (4, -5).
+    let y_bad = [4.0, -5.0];
+    let me = model_error(&b, &s, &y_bad, &[true, true]);
+    assert!((me.e - 4.0 / 5.0_f64.sqrt()).abs() < 1e-14, "{me:?}");
+    // Variable 0 at a bound: masked out, the model is exact on the rest.
+    let w = pounce_qp::WorkingSet {
+        bounds: vec![
+            pounce_qp::BoundStatus::AtLower,
+            pounce_qp::BoundStatus::Inactive,
+        ],
+        constraints: vec![],
+    };
+    let free = free_variable_mask(Some(&w), 2);
+    assert_eq!(free, vec![false, true]);
+    let me = model_error(&b, &s, &y_bad, &free);
+    assert_eq!(me.e, 0.0);
+    assert!(me.rel_all > 0.0);
+}
+
+#[test]
+fn proximal_term_follows_the_error_and_decays_by_four() {
+    use crate::sqp::sqp_alg::next_proximal;
+    assert_eq!(next_proximal(100.0, 0.5, 0.0), 0.5);
+    // Capped.
+    assert_eq!(next_proximal(1.0, 50.0, 0.0), 1.0);
+    // Accurate model: decays by 4 per iteration, never jumps to 0.
+    assert_eq!(next_proximal(100.0, 0.0, 8.0), 2.0);
+    assert_eq!(next_proximal(100.0, 0.0, 2.0), 0.5);
+    // A non-finite error keeps the term.
+    assert_eq!(next_proximal(100.0, f64::NAN, 3.0), 3.0);
+}
+
+#[test]
+fn proximal_add_diagonal_shifts_every_row_once() {
+    use crate::sqp::sqp_alg::{add_diagonal, model_error};
+    let b = Triplet {
+        n_rows: 2,
+        n_cols: 2,
+        irow: vec![2],
+        jcol: vec![1],
+        vals: vec![1.0],
+    };
+    let shifted = add_diagonal(b.clone(), 0.5);
+    // (B + ½I) s for s = e₀ is (0.5, 1).
+    let me = model_error(&shifted, &[1.0, 0.0], &[0.5, 1.0], &[true, true]);
+    assert_eq!(me.rel_all, 0.0);
+    assert_eq!(add_diagonal(b.clone(), 0.0).vals, b.vals);
+}
+
+/// With an inexact Hessian the proximal term shortens the steps and still
+/// converges; with an exact one it stays out of the way (same answer).
+#[test]
+fn proximal_sqp_converges_and_matches_the_plain_answer() {
+    let mut plain = NonlinearEqNlp;
+    let a = proximal_sqp(0.0).optimize(&mut plain).unwrap();
+    let mut prox = NonlinearEqNlp;
+    let b = proximal_sqp(1e2).optimize(&mut prox).unwrap();
+    assert_eq!(a.status, SqpStatus::Optimal);
+    assert_eq!(b.status, SqpStatus::Optimal);
+    for (u, v) in a.x.iter().zip(b.x.iter()) {
+        assert!((u - v).abs() < 1e-6, "{:?} vs {:?}", a.x, b.x);
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────
 // gh#1054: L-BFGS in lifted low-rank form.
 // ─────────────────────────────────────────────────────────────────
