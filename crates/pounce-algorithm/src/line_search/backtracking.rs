@@ -232,6 +232,13 @@ pub struct BacktrackingLineSearch {
     /// gradient-block variant. Both correspond to upstream's
     /// `soc_method` option.
     pub soc_method: i32,
+    /// `tail_soc` (gh#1211), off by default. In the last barrier problem
+    /// of a monotone-μ solve, replace a full step that the acceptor took on
+    /// its first trial by its second-order correction, when the corrected
+    /// point is a full step, has a smaller constraint violation than the
+    /// accepted trial, and passes the same acceptance test at the same
+    /// reference iterate. See [`Self::try_tail_soc`].
+    pub tail_soc: bool,
     /// Number of consecutive shortened iterations before the watchdog
     /// procedure activates. Disabled when `<= 0`. Mirrors upstream's
     /// `watchdog_shortened_iter_trigger` (default 10).
@@ -406,6 +413,7 @@ impl BacktrackingLineSearch {
             max_soc: 4,
             kappa_soc: 0.99,
             soc_method: 0,
+            tail_soc: false,
             watchdog_shortened_iter_trigger: 10,
             watchdog_trial_iter_max: 3,
             alpha_min: 1e-12,
@@ -1420,6 +1428,7 @@ impl BacktrackingLineSearch {
                 self.acceptor
                     .check_trial_point(alpha, theta, phi, d_phi, theta_trial, phi_trial)
             };
+            let judged_by_acceptor = !force_accept && decision == AcceptDecision::Accept;
             if decision == AcceptDecision::Reject
                 && self.passes_noise_limited_wolfe(
                     cq,
@@ -1457,9 +1466,48 @@ impl BacktrackingLineSearch {
                 };
             }
             if decision == AcceptDecision::Accept {
-                let mode = self
-                    .acceptor
-                    .update_for_next_iteration(alpha, theta, phi, d_phi, phi_trial);
+                // gh#1211: in the last barrier problem, a full step accepted
+                // on its first trial may be replaced by its second-order
+                // correction. Only a step the acceptor itself judged (not a
+                // forced or slope-test acceptance), never under watchdog,
+                // and only while the trial still leaves a constraint
+                // residual to remove.
+                let mut phi_accepted = phi_trial;
+                let mut alpha_dual_accepted = alpha_dual;
+                let mut corrected = false;
+                if self.tail_soc
+                    && judged_by_acceptor
+                    && trial == 0
+                    && !skip_first
+                    && !self.in_watchdog
+                    && alpha == 1.0
+                    && theta_trial > 0.0
+                    && data.borrow().mu_at_floor()
+                    && let (Some(sd), Some(nlp_ref)) = (soc_search_dir.as_deref_mut(), nlp)
+                    && let Some((phi_soc, alpha_dual_soc)) = self.try_tail_soc(
+                        data,
+                        cq,
+                        nlp_ref,
+                        sd,
+                        &curr,
+                        theta,
+                        phi,
+                        d_phi,
+                        theta_trial,
+                    )
+                {
+                    phi_accepted = phi_soc;
+                    alpha_dual_accepted = alpha_dual_soc;
+                    corrected = true;
+                }
+                let mode =
+                    self.acceptor
+                        .update_for_next_iteration(alpha, theta, phi, d_phi, phi_accepted);
+                let mode = if corrected {
+                    mode.to_ascii_uppercase()
+                } else {
+                    mode
+                };
                 if std::env::var_os("POUNCE_DBG_LS").is_some() {
                     let d = data.borrow();
                     tracing::debug!(target: "pounce::linesearch",
@@ -1469,7 +1517,7 @@ impl BacktrackingLineSearch {
                 }
                 let mut d = data.borrow_mut();
                 d.info_alpha_primal = alpha;
-                d.info_alpha_dual = alpha_dual;
+                d.info_alpha_dual = alpha_dual_accepted;
                 d.info_ls_count = trial + 1;
                 d.info_alpha_primal_char = mode;
                 return AlphaResult::Accepted { n_steps: trial };
@@ -1613,6 +1661,101 @@ impl BacktrackingLineSearch {
             n_steps,
             last_alpha,
             evaluation_error,
+        }
+    }
+
+    /// The tail second-order correction (gh#1211). Called with the full
+    /// step `x + d` already accepted and staged in `data.trial`.
+    ///
+    /// A full Newton step leaves a constraint residual
+    /// `c(x + d) = O(‖d‖²)` from the constraints' curvature. Near a
+    /// solution, with every step a full first-trial acceptance, the
+    /// existing SOC (`max_soc`) never runs — it is tried only after a
+    /// *rejected* first trial — so the residual is removed only by the next
+    /// iteration's step, which leaves a new one of the same order, and
+    /// `inf_pr` hovers above `constr_viol_tol` until `‖d‖` itself shrinks.
+    /// The correction `p` solves the current primal-dual system (the
+    /// factorization in hand, no new one) with the constraint rows set to
+    /// `c(x) + c(x + d)` — the right-hand side `max_soc` uses at `α = 1` —
+    /// so `c(x + d + p) = O(‖d‖³)` (Nocedal & Wright §15.6; Wächter &
+    /// Biegler 2006 §3.4).
+    ///
+    /// The corrected point replaces the accepted one only if
+    ///
+    /// * the correction is taken in full — the `O(‖d‖³)` argument is about
+    ///   `x + d + p` itself, so a fraction-to-the-boundary cut voids it;
+    /// * its constraint violation is strictly below the accepted trial's;
+    /// * the acceptor's side-effect-free [`BacktrackingLsAcceptor::is_acceptable`]
+    ///   accepts it at the same reference iterate and step size — the test
+    ///   an accepted `max_soc` point passes.
+    ///
+    /// On success returns `(phi_soc, alpha_dual_soc)` with the corrected
+    /// point staged as the trial; otherwise restores the original trial and
+    /// returns `None`. Costs one back-solve plus one constraint and one
+    /// objective evaluation.
+    #[allow(clippy::too_many_arguments)]
+    fn try_tail_soc(
+        &self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        search_dir: &mut PdSearchDirCalc,
+        curr: &IteratesVector,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        theta_trial: Number,
+    ) -> Option<(Number, Number)> {
+        let accepted_trial = data.borrow().trial.clone()?;
+        let restore = |data: &IpoptDataHandle| data.borrow_mut().set_trial(accepted_trial.clone());
+
+        let (c_soc, dms_soc) = {
+            let cq_ref = cq.borrow();
+            let mut c_soc = cq_ref.curr_c().make_new();
+            c_soc.copy(&*cq_ref.curr_c());
+            c_soc.axpy(1.0, &*cq_ref.trial_c());
+            let mut dms_soc = cq_ref.curr_d_minus_s().make_new();
+            dms_soc.copy(&*cq_ref.curr_d_minus_s());
+            dms_soc.axpy(1.0, &*cq_ref.trial_d_minus_s());
+            (c_soc, dms_soc)
+        };
+        let Some(delta_soc) =
+            search_dir.compute_soc_step(data, cq, nlp, &*c_soc, &*dms_soc, 1.0, self.soc_method)
+        else {
+            return None;
+        };
+        let tau = data.borrow().curr_tau;
+        let alpha_primal_soc = cq.borrow().aff_step_alpha_primal_max(&delta_soc, tau);
+        if !(alpha_primal_soc >= 1.0) {
+            return None;
+        }
+        let alpha_dual_soc = cq.borrow().aff_step_alpha_dual_max(&delta_soc, tau);
+        let mut trial_iv = curr.deep_copy();
+        trial_iv.x.axpy(1.0, &*delta_soc.x);
+        trial_iv.s.axpy(1.0, &*delta_soc.s);
+        trial_iv.y_c.axpy(1.0, &*delta_soc.y_c);
+        trial_iv.y_d.axpy(1.0, &*delta_soc.y_d);
+        trial_iv.z_l.axpy(alpha_dual_soc, &*delta_soc.z_l);
+        trial_iv.z_u.axpy(alpha_dual_soc, &*delta_soc.z_u);
+        trial_iv.v_l.axpy(alpha_dual_soc, &*delta_soc.v_l);
+        trial_iv.v_u.axpy(alpha_dual_soc, &*delta_soc.v_u);
+        data.borrow_mut().set_trial(trial_iv.freeze());
+
+        let theta_soc = cq.borrow().trial_constraint_violation();
+        let phi_soc = cq.borrow().trial_barrier_obj();
+        let keep = theta_soc.is_finite()
+            && phi_soc.is_finite()
+            && theta_soc < theta_trial
+            && self
+                .acceptor
+                .is_acceptable(1.0, theta, phi, d_phi, theta_soc, phi_soc);
+        if keep {
+            tracing::debug!(target: "pounce::linesearch",
+                theta_trial, theta_soc, "tail second-order correction accepted (gh#1211)");
+            Some((phi_soc, alpha_dual_soc))
+        } else {
+            restore(data);
+            None
         }
     }
 

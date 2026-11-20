@@ -43,6 +43,20 @@ pub enum AcceptDecision {
     Reject,
 }
 
+/// Why [`FilterLsAcceptor::judge_trial`] decided as it did. The reason
+/// matters only to the bookkeeping in
+/// [`FilterLsAcceptor::check_acceptability`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrialVerdict {
+    /// `theta_trial > theta_max`.
+    ThetaMaxGate,
+    /// Fails Armijo / sufficient progress against the current iterate.
+    NotAcceptableToIterate,
+    /// Acceptable to the iterate but dominated by a filter entry.
+    DominatedByFilter,
+    Accept,
+}
+
 pub struct FilterLsAcceptor {
     pub filter: Filter,
     pub eta_phi: Number,
@@ -382,6 +396,85 @@ impl FilterLsAcceptor {
         theta_trial: Number,
         phi_trial: Number,
     ) -> AcceptDecision {
+        // Adaptive-ceiling bookkeeping (pounce#546). Counted here, at
+        // the top, so that `trials_this_ls` is the number of trials the
+        // gate had the opportunity to refuse — the denominator the
+        // "every trial was refused at the gate" predicate needs.
+        self.trials_this_ls = self.trials_this_ls.saturating_add(1);
+
+        match self.judge_trial(alpha_primal, theta, phi, d_phi, theta_trial, phi_trial) {
+            TrialVerdict::ThetaMaxGate => {
+                self.theta_max_gate_rejections_this_ls =
+                    self.theta_max_gate_rejections_this_ls.saturating_add(1);
+                self.last_rejection_due_to_filter = false;
+                AcceptDecision::Reject
+            }
+            TrialVerdict::NotAcceptableToIterate => {
+                // Iterate-acceptability rejection (the LS-test branch in
+                // upstream's `CheckAcceptabilityOfTrialPoint`, lines 363-381).
+                // Upstream sets `last_rejection_due_to_filter_ = false` on
+                // both the unfortunate-Armijo-failure and the
+                // sufficient-progress-failure paths.
+                self.last_rejection_due_to_filter = false;
+                AcceptDecision::Reject
+            }
+            TrialVerdict::DominatedByFilter => {
+                // Iterate test passed but filter dominates → mark this
+                // rejection as filter-due (line 397).
+                self.last_rejection_due_to_filter = true;
+                AcceptDecision::Reject
+            }
+            TrialVerdict::Accept => {
+                // Trial accepted. Run the filter-reset heuristic
+                // (`IpFilterLSAcceptor.cpp:407-433`).
+                if self.max_filter_resets > 0 && self.n_filter_resets < self.max_filter_resets {
+                    if self.last_rejection_due_to_filter {
+                        self.count_successive_filter_rejections += 1;
+                        if self.count_successive_filter_rejections >= self.filter_reset_trigger {
+                            self.filter.clear();
+                            self.n_filter_resets += 1;
+                            self.count_successive_filter_rejections = 0;
+                        }
+                    } else {
+                        self.count_successive_filter_rejections = 0;
+                    }
+                }
+                // Clear for the next outer iteration's α-loop (line 434).
+                self.last_rejection_due_to_filter = false;
+                AcceptDecision::Accept
+            }
+        }
+    }
+
+    /// The acceptance judgement of [`Self::check_acceptability`] with none
+    /// of its bookkeeping: no trial counters, no rejection-reason flag, no
+    /// filter reset. Used by the tail second-order correction (gh#1211) to
+    /// ask whether a *replacement* for an already-accepted trial passes the
+    /// same test at the same reference iterate, without that question
+    /// counting as another trial of the line search.
+    pub fn is_acceptable(
+        &self,
+        alpha_primal: Number,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        theta_trial: Number,
+        phi_trial: Number,
+    ) -> bool {
+        self.judge_trial(alpha_primal, theta, phi, d_phi, theta_trial, phi_trial)
+            == TrialVerdict::Accept
+    }
+
+    /// Pure core of [`Self::check_acceptability`].
+    fn judge_trial(
+        &self,
+        alpha_primal: Number,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        theta_trial: Number,
+        phi_trial: Number,
+    ) -> TrialVerdict {
         // theta_min / theta_max may not yet have been initialised if
         // the caller skipped `calc_alpha_min` for some reason; fall
         // back to the same lazy formula upstream uses on first
@@ -398,17 +491,8 @@ impl FilterLsAcceptor {
         // line search may accept a step that inflates constraint
         // violation by many orders of magnitude (POLAK6, ROSENMMX,
         // ACOPR14: theta jumps from 8 to 1e12 on iter 1).
-        // Adaptive-ceiling bookkeeping (pounce#546). Counted here, at
-        // the top, so that `trials_this_ls` is the number of trials the
-        // gate had the opportunity to refuse — the denominator the
-        // "every trial was refused at the gate" predicate needs.
-        self.trials_this_ls = self.trials_this_ls.saturating_add(1);
-
         if theta_trial > theta_max {
-            self.theta_max_gate_rejections_this_ls =
-                self.theta_max_gate_rejections_this_ls.saturating_add(1);
-            self.last_rejection_due_to_filter = false;
-            return AcceptDecision::Reject;
+            return TrialVerdict::ThetaMaxGate;
         }
 
         let f_type = alpha_primal > 0.0 && self.is_switching_condition(alpha_primal, d_phi, theta);
@@ -458,40 +542,12 @@ impl FilterLsAcceptor {
         };
 
         if !iterate_ok {
-            // Iterate-acceptability rejection (the LS-test branch in
-            // upstream's `CheckAcceptabilityOfTrialPoint`, lines 363-381).
-            // Upstream sets `last_rejection_due_to_filter_ = false` on
-            // both the unfortunate-Armijo-failure and the
-            // sufficient-progress-failure paths.
-            self.last_rejection_due_to_filter = false;
-            return AcceptDecision::Reject;
+            return TrialVerdict::NotAcceptableToIterate;
         }
-
         if self.filter.dominated_by_any(theta_trial, phi_trial) {
-            // Iterate test passed but filter dominates → mark this
-            // rejection as filter-due (line 397).
-            self.last_rejection_due_to_filter = true;
-            return AcceptDecision::Reject;
+            return TrialVerdict::DominatedByFilter;
         }
-
-        // Trial accepted. Run the filter-reset heuristic
-        // (`IpFilterLSAcceptor.cpp:407-433`).
-        if self.max_filter_resets > 0 && self.n_filter_resets < self.max_filter_resets {
-            if self.last_rejection_due_to_filter {
-                self.count_successive_filter_rejections += 1;
-                if self.count_successive_filter_rejections >= self.filter_reset_trigger {
-                    self.filter.clear();
-                    self.n_filter_resets += 1;
-                    self.count_successive_filter_rejections = 0;
-                }
-            } else {
-                self.count_successive_filter_rejections = 0;
-            }
-        }
-        // Clear for the next outer iteration's α-loop (line 434).
-        self.last_rejection_due_to_filter = false;
-
-        AcceptDecision::Accept
+        TrialVerdict::Accept
     }
 }
 
@@ -655,6 +711,26 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
         self.check_acceptability(alpha_primal, theta, phi, d_phi, theta_trial, phi_trial)
     }
 
+    fn is_acceptable(
+        &self,
+        alpha_primal: Number,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        theta_trial: Number,
+        phi_trial: Number,
+    ) -> bool {
+        FilterLsAcceptor::is_acceptable(
+            self,
+            alpha_primal,
+            theta,
+            phi,
+            d_phi,
+            theta_trial,
+            phi_trial,
+        )
+    }
+
     /// Port of `IpFilterLSAcceptor::UpdateForNextIteration` (lines
     /// 881-895). Returns `'f'` when both the switching condition fires
     /// AND Armijo holds (in which case the filter is **not** augmented);
@@ -760,6 +836,56 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bookkeeping(a: &FilterLsAcceptor) -> (u32, u32, bool, i32, i32, usize) {
+        (
+            a.trials_this_ls,
+            a.theta_max_gate_rejections_this_ls,
+            a.last_rejection_due_to_filter,
+            a.count_successive_filter_rejections,
+            a.n_filter_resets,
+            a.filter.entries().len(),
+        )
+    }
+
+    /// gh#1211: `is_acceptable` is `check_acceptability`'s judgement with
+    /// none of its bookkeeping. Every branch of the judgement is reached —
+    /// the `theta_max` gate, the iterate test, the filter, and acceptance —
+    /// because a pure query that agrees on one branch says nothing about
+    /// the others.
+    #[test]
+    fn is_acceptable_agrees_with_check_acceptability_and_records_nothing() {
+        let mut a = FilterLsAcceptor::new();
+        let (theta, phi, d_phi) = (1e-2, 10.0, -1e-3);
+        let _ = a.calc_alpha_min(d_phi, theta);
+        // A filter entry that dominates the region theta >= 5e-3, phi >= 9.
+        a.filter.add(5e-3, 9.0, 0);
+        let cases = [
+            (1e3, 10.0),  // theta_max gate (theta_max = 1e4 * max(1, theta))
+            (1e-2, 11.0), // fails sufficient progress against the iterate
+            (6e-3, 9.5),  // passes the iterate test, dominated by the filter
+            (1e-3, 9.5),  // accepted
+            (1e-2, 8.0),  // accepted on the objective axis
+        ];
+        let mut saw = [false; 2];
+        for (theta_trial, phi_trial) in cases {
+            let before = bookkeeping(&a);
+            let pure = a.is_acceptable(1.0, theta, phi, d_phi, theta_trial, phi_trial);
+            assert_eq!(bookkeeping(&a), before, "is_acceptable must record nothing");
+            let live = a.check_acceptability(1.0, theta, phi, d_phi, theta_trial, phi_trial);
+            assert_eq!(
+                pure,
+                live == AcceptDecision::Accept,
+                "disagreement at ({theta_trial:e}, {phi_trial})"
+            );
+            saw[usize::from(pure)] = true;
+        }
+        assert!(saw[0] && saw[1], "the cases must reach both verdicts");
+        // The trait method forwards to the inherent one.
+        let dyn_a: &dyn BacktrackingLsAcceptor = &a;
+        assert!(dyn_a.is_acceptable(1.0, theta, phi, d_phi, 1e-3, 9.5));
+        assert!(!dyn_a.is_acceptable(1.0, theta, phi, d_phi, 1e3, 10.0));
+    }
 
     /// gh#476: **the row floor is opt-in.** Its default is `0`, so a
     /// stock POUNCE reproduces upstream's `theta_max` exactly on every

@@ -331,6 +331,11 @@ impl MuUpdate for MonotoneMuUpdate {
         let mut d = data.borrow_mut();
         d.curr_mu = mu;
         d.curr_tau = tau;
+        // Record the floor so `IpoptData::mu_at_floor` can tell when the
+        // solve has entered its last barrier problem (gh#1211). Recorded,
+        // not decided here: the loop above leaves `mu == floor` exactly
+        // when it reaches it.
+        d.monotone_mu_floor = Some(floor);
         // Upstream `IpMonotoneMuUpdate.cpp:165` resets the line search
         // once the reduction loop has moved μ, and not otherwise.
         if mu < mu_at_entry {
@@ -360,6 +365,37 @@ mod tests {
         let mu = m.update_barrier_parameter(&data, &cq, None, None);
         assert!(mu < 0.1, "fixture must reduce μ for this test");
         assert!(data.borrow().request_ls_reset);
+    }
+
+    /// gh#1211: `mu_at_floor` turns on exactly when the update lands μ on
+    /// the floor it computes, and not before.
+    #[test]
+    fn mu_at_floor_is_set_once_the_floor_is_reached() {
+        let (data, cq) = test_fixture::fixture(0.1);
+        assert!(
+            !data.borrow().mu_at_floor(),
+            "no monotone update has run yet"
+        );
+
+        // One reduction (0.1 -> 0.02) that stays above the floor.
+        let mut m = MonotoneMuUpdate::new();
+        m.barrier_tol_factor = 1e6;
+        m.mu_target = 5e-3;
+        m.mu_allow_fast_monotone_decrease = false;
+        let mu = m.update_barrier_parameter(&data, &cq, None, None);
+        assert!((mu - 0.02).abs() < 1e-15);
+        assert!(!data.borrow().mu_at_floor());
+
+        // The next reduction (0.02 -> 0.004) would undershoot mu_target, so
+        // it lands on it.
+        let mu = m.update_barrier_parameter(&data, &cq, None, None);
+        assert_eq!(mu, 5e-3);
+        assert!(data.borrow().mu_at_floor());
+
+        // Another writer of curr_mu raising it clears the state: the gate
+        // compares live μ, it does not cache a flag.
+        data.borrow_mut().curr_mu = 1e-2;
+        assert!(!data.borrow().mu_at_floor());
     }
 
     #[test]
