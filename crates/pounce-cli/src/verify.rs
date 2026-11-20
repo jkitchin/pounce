@@ -95,7 +95,8 @@ pub struct VerifyArgs {
     /// `--json-output PATH` — write the machine-readable receipt to PATH.
     pub json_output: Option<PathBuf>,
     /// `--require-optimal` — also gate the exit code on the stationarity
-    /// residual (needs duals in the `.sol`).
+    /// residual (needs constraint duals in the `.sol` when the model has
+    /// constraint rows).
     pub require_optimal: bool,
 }
 
@@ -140,7 +141,8 @@ Options:
                          both the misplaced-multiplier check and the
                          bound-projected stationarity residual
   --require-optimal      also fail if the KKT stationarity residual
-                         exceeds --opt-tol (needs duals in the .sol), or if
+                         exceeds --opt-tol (needs constraint duals in the
+                         .sol when the model has constraint rows), or if
                          a bound multiplier larger than --opt-tol sits on a
                          side the model does not declare or the point is
                          not on (within 1e-8 relative, or --compl-tol)
