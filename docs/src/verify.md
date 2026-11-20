@@ -70,7 +70,7 @@ pounce verify — independent solution check
 | Exit code | Meaning |
 |---|---|
 | `0` | `VERIFIED` — every violation within tolerance |
-| `20` | `REJECTED` — a constraint or bound violation exceeds tolerance, a declared integer column is fractional (`not integer-feasible`), or, with `--require-optimal`, the stationarity residual exceeds `--opt-tol` |
+| `20` | `REJECTED` — a constraint or bound violation exceeds tolerance, a declared integer column is fractional (`not integer-feasible`), or, with `--require-optimal`, the stationarity residual exceeds `--opt-tol` or a bound multiplier sits where it cannot (below) |
 | `2` | usage / I/O error (missing file, malformed `.sol`, dimension mismatch) |
 
 A consumer (CI step, agent harness, Makefile) gates on the exit code.
@@ -82,7 +82,8 @@ A consumer (CI step, agent harness, Makefile) gates on the exit code.
 | `--feas-tol <t>` | `1e-6` | feasibility tolerance for constraints and bounds. **Relative per row**: a row passes when `|violation| <= t * max(1, |row|)`, where `|row|` is the larger of the evaluated value and its finite bounds. A violation of `1.0` on a row of size `2e6` therefore passes at `1e-6`. |
 | `--abs-feas-tol <t>` | — | judge every row by the plain absolute test `|violation| <= t`, replacing the relative test above (gh#987) |
 | `--opt-tol <t>` | `1e-6` | stationarity tolerance for the optimality check |
-| `--require-optimal` | off | also fail (exit 20) if the KKT stationarity residual exceeds `--opt-tol` — the exact one when the `.sol` carries bound multipliers, otherwise the bound-projected one |
+| `--compl-tol <t>` | `1e-4` | the largest unscaled `|z|·gap` at which a bound still carries its multiplier `z` — the solver's own `compl_inf_tol` |
+| `--require-optimal` | off | also fail (exit 20) if the KKT stationarity residual exceeds `--opt-tol` — the exact one when the `.sol` carries bound multipliers, otherwise the bound-projected one — or if a bound multiplier larger than `--opt-tol` is misplaced (below) |
 | `--json-output <path>` | — | write a JSON verification receipt |
 
 ### Integer variables
@@ -153,7 +154,20 @@ AMPL interface), `verify` additionally reports the **exact** dual
 infeasibility `‖∇f + Jᵀλ − (zL_out + zU_out)‖∞`, using the multipliers the
 file actually claims. That number is directly comparable to the solver's
 `Dual infeasibility`, and it is what `--require-optimal` gates on whenever
-it is available — the projected residual can only understate it.
+it is available.
+
+The exact residual has the opposite blind spot. It counts every suffix
+entry, so a multiplier on a bound the point is **not on**, or on a side the
+model **does not declare**, balances it exactly as a real one would: given
+`ipopt_zU_out = −2`, `x = 2` reads as stationary for `min (x − 3)²` on
+`[0, 10]`. So `verify` also reports the **misplaced bound multiplier**: the
+largest `|z|` on a side that cannot carry one, and where it is. A side carries
+its multiplier when the point is on the bound to `1e-8·(1 + |bound|)`, or
+stands off it by no more than an interior-point solution does,
+`|z|·gap ≤ --compl-tol`. `--require-optimal` rejects a misplaced multiplier
+larger than `--opt-tol`, since dropping it would leave that much residual.
+(gh#1202: the rolled-back `presolve=yes` duals of Vanderbei `qpnstair`
+carried `z_U = 2.8e4` on a variable with no upper bound, and passed.)
 
 ## The JSON receipt
 
@@ -167,7 +181,7 @@ both inputs by SHA-256** — so a downstream consumer can confirm exactly
   "solver": "pounce 0.4.0",
   "problem":  { "path": "…", "sha256": "4bb435a3…", "n_vars": 1694, "n_cons": 1682 },
   "solution": { "path": "…", "sha256": "b77d9e7b…", "duals_present": true },
-  "tolerances": { "feasibility": 1e-6, "optimality": 1e-6 },
+  "tolerances": { "feasibility": 1e-6, "optimality": 1e-6, "complementarity": 1e-4 },
   "feasibility": {
     "max_constraint_violation": 1.4e-12,
     "worst_constraint": { "index": 114, "name": "c[114]", "value": 1.4e-12,
@@ -182,6 +196,8 @@ both inputs by SHA-256** — so a downstream consumer can confirm exactly
     "stationarity_residual_with_bound_multipliers": 6.2e-14,
     "constraint_complementarity_residual": 0.0,
     "bound_complementarity_residual": 9.1e-10,
+    "misplaced_bound_multiplier": 0.0,
+    "worst_misplaced_bound_multiplier": null,
     "bound_multipliers_present": true,
     "complementarity_residual": 0.0,
     "optimal": true, "note": "…"
@@ -191,7 +207,11 @@ both inputs by SHA-256** — so a downstream consumer can confirm exactly
 }
 ```
 
-`bound_complementarity_residual` and
+`worst_misplaced_bound_multiplier` names the variable, `side`, suffix value
+`z`, `x` and `bound` (`null` for a side the model does not declare) when
+`misplaced_bound_multiplier` is nonzero, and is `null` otherwise.
+
+`bound_complementarity_residual`, `misplaced_bound_multiplier` and
 `stationarity_residual_with_bound_multipliers` are `null` when the `.sol`
 carries no `ipopt_zL_out` / `ipopt_zU_out` suffixes — `null` means *not
 checked*, not zero. `complementarity_residual` is a **deprecated alias** of

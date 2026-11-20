@@ -87,6 +87,11 @@ pub struct VerifyArgs {
     pub abs_feas_tol: Option<Number>,
     /// Max stationarity residual still called first-order optimal.
     pub opt_tol: Number,
+    /// `--compl-tol T` — the unscaled `|z|·gap` a bound may stand off with
+    /// and still carry its multiplier `z` (gh#1202). Default `1e-4`, the
+    /// solver's own `compl_inf_tol`: the bar a reported `Optimal` already
+    /// clears.
+    pub compl_tol: Number,
     /// `--json-output PATH` — write the machine-readable receipt to PATH.
     pub json_output: Option<PathBuf>,
     /// `--require-optimal` — also gate the exit code on the stationarity
@@ -102,6 +107,7 @@ impl Default for VerifyArgs {
             feas_tol: 1e-6,
             abs_feas_tol: None,
             opt_tol: 1e-6,
+            compl_tol: 1e-4,
             json_output: None,
             require_optimal: false,
         }
@@ -128,8 +134,14 @@ Options:
   --abs-feas-tol <t>     judge every row by the absolute test |violation| <= t
                          (replaces the relative --feas-tol test)
   --opt-tol <t>          stationarity tolerance (default 1e-6)
+  --compl-tol <t>        largest unscaled |z|*gap at which a bound still
+                         carries its multiplier z (default 1e-4, the
+                         solver's compl_inf_tol)
   --require-optimal      also fail if the KKT stationarity residual
-                         exceeds --opt-tol (needs duals in the .sol)
+                         exceeds --opt-tol (needs duals in the .sol), or if
+                         a bound multiplier larger than --opt-tol sits on a
+                         side the model does not declare or the point is
+                         not on (within 1e-8 relative, or --compl-tol)
   --json-output <path>   write a JSON verification receipt to <path>
   -h, --help             print this message
 
@@ -183,6 +195,10 @@ fn parse_verify_argv(rest: &[String]) -> Result<Option<VerifyArgs>, String> {
                 let v = it.next().ok_or("--opt-tol requires a value")?;
                 a.opt_tol = v.parse().map_err(|e| format!("--opt-tol: {e}"))?;
             }
+            "--compl-tol" => {
+                let v = it.next().ok_or("--compl-tol requires a value")?;
+                a.compl_tol = v.parse().map_err(|e| format!("--compl-tol: {e}"))?;
+            }
             "--require-optimal" => a.require_optimal = true,
             "--json-output" => {
                 let v = it.next().ok_or("--json-output requires a value")?;
@@ -216,6 +232,7 @@ pub struct VerifyOutcome {
     pub solve_result_num: Option<i32>,
     pub feas_tol: Number,
     pub opt_tol: Number,
+    pub compl_tol: Number,
     // feasibility
     pub max_con_violation: Number,
     pub worst_con: Option<RowReport>,
@@ -242,6 +259,12 @@ pub struct VerifyOutcome {
     /// `‖∇f + sign·Jᵀλ − (z_L^suffix + z_U^suffix)‖∞`, available only when
     /// both duals and bound multipliers are present.
     pub stationarity_with_bound_multipliers: Option<Number>,
+    /// The largest `|z|` the `.sol` puts on a bound side that cannot carry
+    /// a multiplier — one the model does not declare, or a declared bound
+    /// the point is not on — and where (gh#1202). `None` when the `.sol`
+    /// carried no bound multipliers. See [`misplaced_bound_multiplier`].
+    pub misplaced_bound_multiplier: Option<Number>,
+    pub worst_misplaced: Option<MisplacedMultiplier>,
     pub optimal: Option<bool>,
     /// The `.nl` header's declared binary / integer census (gh#987).
     pub discrete: Option<DiscreteCensus>,
@@ -264,6 +287,20 @@ pub struct RowReport {
     pub lo: Number,
     pub hi: Number,
     pub violation: Number,
+}
+
+/// Where [`misplaced_bound_multiplier`] found its largest entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MisplacedMultiplier {
+    pub index: usize,
+    pub name: String,
+    /// `"lower"` or `"upper"`.
+    pub side: &'static str,
+    /// The suffix value as the `.sol` carries it.
+    pub z: Number,
+    pub x: Number,
+    /// The declared bound on that side; infinite when there is none.
+    pub bound: Number,
 }
 
 // `is_finite_bound(b) = b > NLP_LOWER_BOUND_INF && b < NLP_UPPER_BOUND_INF`
@@ -579,6 +616,24 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     } else {
         None
     };
+    // A suffix multiplier on a side the point is not on balances the exact
+    // residual without being a KKT multiplier at all (gh#1202): the exact
+    // residual alone cannot see it, so it is checked on its own.
+    let (misplaced_bound_multiplier, worst_misplaced) = if bound_multipliers_present {
+        let (v, at) =
+            misplaced_bound_multiplier(&x, &x_l, &x_u, &z_l_suf, &z_u_suf, args.compl_tol);
+        let worst = at.map(|(j, lower)| MisplacedMultiplier {
+            index: j,
+            name: name_at(&var_names, j, 'x'),
+            side: if lower { "lower" } else { "upper" },
+            z: if lower { z_l_suf[j] } else { z_u_suf[j] },
+            x: x[j],
+            bound: if lower { x_l[j] } else { x_u[j] },
+        });
+        (Some(v), worst)
+    } else {
+        (None, None)
+    };
 
     // --- first-order / KKT stationarity (only when duals are supplied) ---
     let mut stationarity = None;
@@ -633,14 +688,20 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
 
         // With the bound multipliers in hand the residual no longer has to
         // be projected: the exact dual infeasibility is available, and it
-        // is what a solver reports. It is also the strictly sharper check —
-        // the projection can only *remove* residual — so `--require-optimal`
-        // gates on it whenever it exists.
+        // is what a solver reports. It sees a bound multiplier that is
+        // missing or wrong, which the projection assumes away (gh #495).
+        // It does not see one that is *misplaced* — mass on a bound the
+        // point is not on, or the model does not declare, balancing the
+        // residual all the same — which the projection does (gh#1202). So
+        // `--require-optimal` gates on the exact residual *and* on the
+        // misplaced multipliers whenever the suffixes are present.
         if bound_multipliers_present {
             stationarity_with_bound_multipliers =
                 Some(exact_dual_infeasibility(s, &z_l_suf, &z_u_suf, obj_sigma));
         }
-        let gate = stationarity_with_bound_multipliers.unwrap_or(best_resid);
+        let gate = stationarity_with_bound_multipliers
+            .unwrap_or(best_resid)
+            .max(misplaced_bound_multiplier.unwrap_or(0.0));
         optimal = Some(gate <= args.opt_tol);
     }
 
@@ -656,6 +717,7 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
         solve_result_num: parsed.solve_result_num,
         feas_tol: args.feas_tol,
         opt_tol: args.opt_tol,
+        compl_tol: args.compl_tol,
         max_con_violation,
         worst_con,
         max_bound_violation,
@@ -669,6 +731,8 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
         bound_multipliers_present,
         bound_complementarity,
         stationarity_with_bound_multipliers,
+        misplaced_bound_multiplier,
+        worst_misplaced,
         optimal,
         discrete,
         integrality,
@@ -739,7 +803,7 @@ fn bound_projected_residual(
             continue;
         }
         let absorbable = |present: bool, bound: Number, gap: Number, z: Number| {
-            present && (gap.abs() <= 1e-8 * (1.0 + bound.abs()) || z * gap.max(0.0) <= compl_tol)
+            carries_multiplier(present, bound, gap, z, compl_tol)
         };
         let r = if s[j] > 0.0 {
             if absorbable(lower_bound_present(x_l[j]), x_l[j], x[j] - x_l[j], s[j]) {
@@ -811,6 +875,74 @@ fn bound_complementarity(
         }
     }
     comp
+}
+
+/// Is the point on the bound `b` closely enough for that side to carry the
+/// multiplier `z`? On it to `1e-8·(1+|b|)`, or standing off it by no more
+/// than complementarity `|z|·gap ≤ compl_tol` allows — the interior-point
+/// stand-off [`bound_projected_residual`] also accepts (PGLib
+/// case6468_rte: gap 1.9e-8, `z` 0.44).
+fn carries_multiplier(
+    present: bool,
+    bound: Number,
+    gap: Number,
+    z: Number,
+    compl_tol: Number,
+) -> bool {
+    present && (gap.abs() <= 1e-8 * (1.0 + bound.abs()) || z.abs() * gap.max(0.0) <= compl_tol)
+}
+
+/// The largest `|z|` the `.sol`'s suffixes put on a bound side that cannot
+/// carry a multiplier, and where (`(j, is_lower)`): a side the model does
+/// not declare, or a declared bound the point is not on by
+/// [`carries_multiplier`]. `0.0` and `None` when every multiplier is
+/// placed.
+///
+/// [`exact_dual_infeasibility`] counts every suffix entry, so such a
+/// multiplier balances it as well as a real one would (gh#1202:
+/// `presolve=yes` on Vanderbei `qpnstair` once reported `z = 2.8e4` on a
+/// bound `7e-6` away, exact residual `2.5e-11`). Its size is the residual
+/// the exact check would have read without it, so it is gated against the
+/// same `opt_tol`. Magnitudes throughout: no sign convention is assumed.
+fn misplaced_bound_multiplier(
+    x: &[Number],
+    x_l: &[Number],
+    x_u: &[Number],
+    z_l_suf: &[Number],
+    z_u_suf: &[Number],
+    compl_tol: Number,
+) -> (Number, Option<(usize, bool)>) {
+    let mut worst = (0.0_f64, None);
+    for j in 0..x.len() {
+        let zl = z_l_suf.get(j).copied().unwrap_or(0.0);
+        let zu = z_u_suf.get(j).copied().unwrap_or(0.0);
+        let sides = [
+            (zl, true, lower_bound_present(x_l[j]), x_l[j], x[j] - x_l[j]),
+            (
+                zu,
+                false,
+                upper_bound_present(x_u[j]),
+                x_u[j],
+                x_u[j] - x[j],
+            ),
+        ];
+        for (z, lower, present, bound, gap) in sides {
+            // A NaN multiplier is misplaced wherever it is: every other
+            // check here, and `f64::max` in the exact residual, passes it.
+            if !z.is_nan() && (z == 0.0 || carries_multiplier(present, bound, gap, z, compl_tol)) {
+                continue;
+            }
+            let m = if z.is_nan() {
+                Number::INFINITY
+            } else {
+                z.abs()
+            };
+            if m > worst.0 {
+                worst = (m, Some((j, lower)));
+            }
+        }
+    }
+    worst
 }
 
 /// `max_i |λ_i| · dist(g_i, active side)` over constraints with a finite
@@ -1099,6 +1231,24 @@ fn print_report(args: &VerifyArgs, o: &VerifyOutcome) {
         if let Some(s) = o.stationarity_with_bound_multipliers {
             println!("    dual infeasibility (with z_L/z_U suffixes)   : {s:.3e}");
         }
+        if let Some(m) = o.misplaced_bound_multiplier {
+            match &o.worst_misplaced {
+                Some(w) if m > 0.0 => println!(
+                    "    misplaced bound multiplier (max |z|)         : {m:.3e}  \
+                     ({} {} side: z = {:.3e}, x = {:.6e}, bound = {})",
+                    w.name,
+                    w.side,
+                    w.z,
+                    w.x,
+                    if w.bound.abs() < 1e19 {
+                        format!("{:.6e}", w.bound)
+                    } else {
+                        "none".to_string()
+                    }
+                ),
+                _ => println!("    misplaced bound multiplier (max |z|)         : {m:.3e}"),
+            }
+        }
         // Two different residuals answer to "complementarity", and the row
         // one is NOT what a solver prints as `Complementarity` — label both
         // by what they range over so the numbers cannot be crossed (gh #516).
@@ -1238,6 +1388,15 @@ fn receipt_json(args: &VerifyArgs, o: &VerifyOutcome) -> String {
                 o.stationarity_with_bound_multipliers,
             "constraint_complementarity_residual": o.constraint_complementarity,
             "bound_complementarity_residual": o.bound_complementarity,
+            "misplaced_bound_multiplier": o.misplaced_bound_multiplier,
+            "worst_misplaced_bound_multiplier": o.worst_misplaced.as_ref().map(|w| json!({
+                "index": w.index,
+                "name": w.name,
+                "side": w.side,
+                "z": w.z,
+                "x": w.x,
+                "bound": if w.bound.is_finite() && w.bound.abs() < 1e19 { Some(w.bound) } else { None },
+            })),
             "bound_multipliers_present": o.bound_multipliers_present,
             // Deprecated alias, kept so a v1 consumer does not break. Its bare
             // name is the trap gh #516 is about: read
@@ -1254,7 +1413,9 @@ fn receipt_json(args: &VerifyArgs, o: &VerifyOutcome) -> String {
                      when the .sol carries the ipopt_zL_out/ipopt_zU_out suffixes (null \
                      otherwise, meaning not checked — not zero). When those suffixes are \
                      present, `stationarity_residual_with_bound_multipliers` is the exact, \
-                     unprojected residual and is what `--require-optimal` gates on. \
+                     unprojected residual, and `misplaced_bound_multiplier` is the largest \
+                     |z| on a bound side that cannot carry one (not declared, or not active \
+                     at x); `--require-optimal` gates on both. \
                      `complementarity_residual` is a deprecated alias of \
                      `constraint_complementarity_residual`. Feasibility is the rigorous \
                      gate, and `optimal` is reported false for an infeasible point \
@@ -1283,6 +1444,7 @@ fn receipt_json(args: &VerifyArgs, o: &VerifyOutcome) -> String {
             "absolute_feasibility": o.abs_feas_tol,
             "feasibility_mode": if o.abs_feas_tol.is_some() { "absolute" } else { "relative_per_row" },
             "optimality": o.opt_tol,
+            "complementarity": o.compl_tol,
         },
         "integrality": match (o.discrete, o.integrality) {
             (Some(d), Some((v, j))) if d.total() > 0 => json!({
@@ -1772,6 +1934,53 @@ mod tests {
             bound_projected_residual(&[0.4399], &near, &x_l, &x_u, 1e-6),
             0.4399
         );
+    }
+
+    /// gh#1202 follow-up: each branch of [`misplaced_bound_multiplier`].
+    #[test]
+    fn misplaced_bound_multipliers_by_branch() {
+        let inf_l = NLP_LOWER_BOUND_INF;
+        let inf_u = NLP_UPPER_BOUND_INF;
+        // On the bound: placed, however large.
+        assert_eq!(
+            misplaced_bound_multiplier(&[1.0], &[1.0], &[inf_u], &[1e9], &[0.0], 1e-4),
+            (0.0, None)
+        );
+        // Off a declared bound by 8 with |z|·gap = 16: misplaced.
+        assert_eq!(
+            misplaced_bound_multiplier(&[2.0], &[0.0], &[10.0], &[0.0], &[-2.0], 1e-4),
+            (2.0, Some((0, false)))
+        );
+        // The same multiplier with no bound on that side at all.
+        assert_eq!(
+            misplaced_bound_multiplier(&[2.0], &[inf_l], &[inf_u], &[0.0], &[-2.0], 1e-4),
+            (2.0, Some((0, false)))
+        );
+        // A barrier stand-off: gap 2e-7 (off the bound by the 1e-8 test),
+        // |z|·gap = 8e-7, within compl_tol 1e-4 but not 1e-7.
+        let x = [1.0 - 2e-7];
+        assert_eq!(
+            misplaced_bound_multiplier(&x, &[0.0], &[1.0], &[0.0], &[-4.0], 1e-4),
+            (0.0, None)
+        );
+        assert_eq!(
+            misplaced_bound_multiplier(&x, &[0.0], &[1.0], &[0.0], &[-4.0], 1e-7),
+            (4.0, Some((0, false)))
+        );
+        // A zero entry is never misplaced, and the largest of several wins.
+        let (v, at) = misplaced_bound_multiplier(
+            &[2.0, 5.0, 0.0],
+            &[0.0, inf_l, 0.0],
+            &[10.0, inf_u, 1.0],
+            &[0.5, 3.0, 7.0],
+            &[0.0, 0.0, 0.0],
+            1e-4,
+        );
+        assert_eq!((v, at), (3.0, Some((1, true))));
+        // NaN is misplaced wherever it sits.
+        let (v, at) =
+            misplaced_bound_multiplier(&[1.0], &[1.0], &[inf_u], &[Number::NAN], &[0.0], 1e-4);
+        assert!(v.is_infinite() && at == Some((0, true)));
     }
 
     /// **gh #516.** Constraint complementarity (rows) and bound
