@@ -158,6 +158,34 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **`pounce verify --require-optimal` rejects bound multipliers that cannot
+  be multipliers** (gh#1202 follow-up). With the `ipopt_zL_out` /
+  `ipopt_zU_out` suffixes present it gated only on the exact residual, which
+  counts every suffix entry. A multiplier on a bound the point is not on, or
+  on a side the model does not declare, balanced it like a real one:
+  `x = 2` was certified optimal for `min (x − 3)²` on `[0, 10]` given
+  `ipopt_zU_out = −2`, and so were the rolled-back `presolve=yes` duals of
+  `qpnstair`, with `z_U = 2.8e4` on a variable with no upper bound. `verify`
+  now reports `misplaced_bound_multiplier`, the largest such `|z|`, and where
+  it is, and `--require-optimal` rejects one above `--opt-tol`. A bound
+  carries its multiplier when the point is on it to `1e-8` relative, or
+  stands off it by `|z|·gap ≤ --compl-tol`. That flag is new, and defaults to
+  `1e-4`, the solver's `compl_inf_tol`. A NaN multiplier is now rejected, not
+  skipped. No `.sol` the solver writes for the fixture corpus changes
+  verdict (default, `presolve=yes` and L-BFGS). The largest legitimate
+  stand-off there is `9.1e-6` (`hs71_obj1e8`).
+- **`presolve=yes` on Vanderbei `qpnstair` and `deb7` is pinned to report
+  the original problem's duals** (gh#1202). Both used to roll back the
+  derived-bound dual recovery and write the reduced problem's multipliers.
+  qpnstair ran out of the recovery's work budget, and deb7's 684-multiplier
+  component was past the dense cap. The sparse recovery (gh#1176) now
+  recovers both, and a test holds it there: neither may roll back, and the
+  written duals must have no misplaced bound multiplier and bound
+  complementarity at `presolve=no`'s level (qpnstair 2.2e-3, deb7 3.3e-6).
+  Before, the rolled-back duals measured a misplaced `z` of `2.8e4`
+  (qpnstair) and `125` (deb7), and bound complementarity `0.21` and `452`.
+  qpnstair joins the fixture corpus, converted from Vanderbei's AMPL
+  source; its provenance is in `crates/pounce-cli/tests/fixtures/README-qpnstair.md`.
 - **The active-set QP solver no longer stops on an inertia-ladder error at a
   working set its own rank test called independent (gh#1195).** When the
   rank probe dropped an equality row, the re-selection that keeps equalities
