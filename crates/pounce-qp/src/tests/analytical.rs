@@ -3239,3 +3239,66 @@ fn issue_971_elastic_prune_on_an_infeasible_warm_start() {
         );
     }
 }
+
+/// gh#1206 P2 on the Schur path, end to end (PR #1208 re-review: no test
+/// combined the H-diagonal padding with a full Schur-path solve). A QP whose
+/// Hessian has structurally zero columns — the case the padding exists for —
+/// solved with Schur updates, once with the padding forced on (it is
+/// size-gated, so a small fixture needs the test switch) and once off: the
+/// same optimum, and the Schur path really ran updates.
+#[test]
+fn schur_path_solves_the_same_with_and_without_h_diagonal_padding() {
+    // min ½x₀² − x₁ − 2x₂  s.t.  x₁ + x₂ ≤ 1,  x₀ − x₂ ≥ −0.25,  0 ≤ x ≤ 1.
+    // Only x₀ has curvature; x₁, x₂ enter linearly.
+    let n = 3;
+    let m = 2;
+    let h_space = SymTMatrixSpace::new(n as i32, vec![1], vec![1]);
+    let mut h = SymTMatrix::new(h_space);
+    h.set_values(&[1.0]);
+    let a_space = GenTMatrixSpace::new(m as i32, n as i32, vec![1, 1, 2, 2], vec![2, 3, 1, 3]);
+    let mut a = GenTMatrix::new(a_space);
+    a.set_values(&[1.0, 1.0, 1.0, -1.0]);
+    let g = [0.0, -1.0, -2.0];
+    let bl = [NLP_LOWER_BOUND_INF, -0.25];
+    let bu = [1.0, NLP_UPPER_BOUND_INF];
+    let xl = [0.0; 3];
+    let xu = [1.0; 3];
+    let qp = QpProblem {
+        n,
+        m,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    };
+    let opts = QpOptions {
+        use_schur_updates: true,
+        ..QpOptions::default()
+    };
+    let solve = |pad: bool| {
+        crate::kkt::FORCE_H_DIAG_PAD.with(|p| p.set(pad));
+        let sol = new_solver().solve(&qp, None, &opts);
+        crate::kkt::FORCE_H_DIAG_PAD.with(|p| p.set(false));
+        sol.unwrap()
+    };
+    let plain = solve(false);
+    let padded = solve(true);
+    assert_eq!(plain.status, crate::QpStatus::Optimal);
+    assert_eq!(padded.status, crate::QpStatus::Optimal);
+    assert!(
+        padded.stats.n_schur_updates > 0,
+        "the Schur path must take updates: {:?}",
+        padded.stats
+    );
+    for (p, q) in plain.x.iter().zip(padded.x.iter()) {
+        assert!((p - q).abs() < 1e-9, "{:?} vs {:?}", plain.x, padded.x);
+    }
+    // x₂ = 1 (its bound), x₁ = 0, and x₀ ≥ 0.75 from the second row with
+    // ½x₀² minimized there: x₀ = 0.75.
+    assert!((padded.x[0] - 0.75).abs() < 1e-9, "{:?}", padded.x);
+    assert!((padded.x[2] - 1.0).abs() < 1e-9, "{:?}", padded.x);
+}

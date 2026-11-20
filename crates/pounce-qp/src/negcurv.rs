@@ -319,12 +319,24 @@ impl ParametricActiveSetSolver {
             opts.inertia_shift_initial
         };
 
+        let singular_unshifted = self.linsol.last_factor_singular();
         let mut current = 0.0;
         let mut hi = None;
         let mut next = shift_floor;
-        for _ in 0..opts.inertia_max_shifts {
+        for rung in 0..opts.inertia_max_shifts {
             if crate::deadline::expired() {
                 return Err(QpError::DeadlineExpired);
+            }
+            // gh#1206 B6: a zero pivot that survives the first rung and that
+            // a dual shift on the working set's rows removes is a dependent
+            // set of rows — "not this module's business" (see `k >= n`
+            // above), and no rung of the ladder would bracket anything.
+            if rung == 1
+                && singular_unshifted
+                && self.linsol.last_factor_singular()
+                && self.linsol.probe_rank_deficiency(&kkt, n, expected, opts)?
+            {
+                return Ok(SecondOrder::NotChecked);
             }
             match self.try_shift(&mut kkt, &mut current, next, n, &seed, expected, dim) {
                 Ok(true) => {

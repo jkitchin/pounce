@@ -10,6 +10,53 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`crossover_stabilization`: a stabilized crossover QP** (gh#1206). At a
+  degenerate solution, where the active constraint gradients are linearly
+  dependent or many bounds are weakly active, the crossover's step-3 QP
+  pins a singular KKT matrix, gives up its hint repair and crawls in the
+  ℓ1-elastic phase 1. On gh#1206's 90 k-variable collocation model it never
+  left that phase. With `crossover_stabilization = σ_max > 0` that QP (also
+  under `ipm_sqp_handover`) is the stabilized subproblem. It adds a free
+  residual on every row, priced by `λᵀr + ‖r‖²/(2σ)` with
+  `σ = min(σ_max, KKT residual)`. Its KKT matrix is nonsingular whatever the
+  rank, and it starts from a feasible point that satisfies the estimate
+  exactly. A stabilized QP that does not solve falls back to the standard
+  one, and the crossover's never-regress test still judges the point. When
+  step 3 was stabilized, the step-4 SQP's step QPs are stabilized too: step 4
+  starts from step 3's working set, which only a stabilized QP can pin. On
+  the reporter's model the unstabilized step 4 pinned it infeasible and
+  rank-deficient and stalled 2 139 s in phase 1; stabilized, it converged in
+  three SQP iterations and the attempt was accepted. Standalone
+  `algorithm=active-set-sqp` is never stabilized: there it failed 15 corpus
+  solves that had succeeded, two of them as false infeasibility verdicts,
+  whereas inside the crossover a failed step 4 only declines the attempt.
+  Step 4's step QPs also stop after 200 non-improving iterations. Default
+  `0`, off.
+- **`sqp_proximal`: an adaptive proximal term for inexact Hessians**
+  (gh#1206). `ρ_k I` is added to the step-QP Hessian, with `ρ_k` set by the
+  measured error of the previous step's Hessian model on the free variables.
+  It vanishes when the model is accurate and shortens the step in proportion
+  to the error when it is not. It is meant for a Lagrangian Hessian that is
+  only partly analytical, and applies only within the new
+  `sqp_local_phase_tol` (KKT residual ≤ `1e-2` by default). On an exact
+  Hessian it costs iterations: across the fixture corpus under
+  `algorithm=active-set-sqp` it added 1–7 iterations to 25 solves and failed
+  two. A debug line under `pounce::sqp` reports the model error every
+  iteration. Default `0`, off.
+- **`QpOptions::elastic_seed_from_hint`** (off by default, gh#1206 B7): seed
+  the l1-elastic phase 1 at a pinned hint the repair declined, instead of at
+  the origin. 2 working-set changes against 62 on a hint one row from the
+  optimum, but 111 against 14 on #428's MPC sweep, hence opt-in; see
+  `dev-notes/known-limitations.md`.
+- **`ipm_sqp_handover_time_ratio` and `ipm_sqp_handover_primal_tol`**
+  (gh#1206). A handover attempt was capped at the interior-point time spent so
+  far with no way to change it, so a crossover that converged but needed
+  longer — the reporter's 90 k-variable collocation model spent 697 s in its
+  step-3 QP after 270 s of interior point — was declined as a time limit and
+  its work lost. The ratio (default `1`, the old rule) scales that cap. And the
+  identification tolerance was `max(crossover_primal_tol, √μ)`, so no option
+  could tighten it below `√μ`; a positive `ipm_sqp_handover_primal_tol` is now
+  used as is. Both default to the previous behaviour.
 - **`tail_soc`**, an NLP-arm option, default `no` (off) (gh#1211). Once the
   monotone barrier parameter is at its floor, a full step accepted on its
   first trial is replaced by its second-order correction: one back-solve with
@@ -207,6 +254,35 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **Crossover step 4 no longer re-solves step 3's QP from scratch** (gh#1206
+  B1). When the step-3 point missed the stopping tolerances, the active-set
+  SQP started from the interior iterate with the step-2 *estimate* — but its
+  first step QP is step 3's QP again, so every pivot step 3 had paid for was
+  repeated (591 s and 167 working-set changes on the reporter's model). It now
+  starts from step 3's optimal working set when that QP solved. Off the
+  handover path the fixture sweep is empty; under `ipm_sqp_handover=yes` it
+  moves 12 of 300 lines, mostly fewer iterations, but `cc:design_cent_3` and
+  `cc:opf_vv_lower_knee` (exact leg) go from `Solve_Succeeded` to
+  `Solved_To_Acceptable_Level` at a slightly lower objective — recorded with
+  the mechanism in `dev-notes/known-limitations.md`.
+- **`classify_working_set` honours `mult_tol` as documented** (gh#1206 B3).
+  Two fallback arms took any at-bound row whose multiplier had the right sign
+  as active however small it was, so `crossover_mult_tol` changed nothing
+  within `primal_tol`. A row with `|λ| < mult_tol` is now `Inactive`, bounds
+  and constraint rows alike; `mult_tol = 0` keeps the old reading.
+- **`KktTriplet::add_h_diagonal_shift` shifts a duplicated diagonal once**
+  (gh#1206 B8). A diagonal stored as `k` triplet entries moved by `k·δ`, so
+  the QP inertia ladder applied a different shift from the one it reported.
+- **The crossover's step-3 QP gets the SQP's size-scaled iteration budget**
+  (gh#1206 P6). It was the one step QP left on `pounce-qp`'s flat 200, which
+  an active-set solve over a large estimated set cannot finish in. The
+  reporter's needed 193 working-set changes, and they raised
+  `sqp_qp_max_iter` by hand. An explicit `sqp_qp_max_iter` still wins.
+- **Schur updates in `pounce-qp` skip work whose result is known** (gh#1206
+  P4, P5): the back-solve of `e_p` on a slot that was inactive at the last
+  refactorization (`K₀⁻¹e_p = e_p` on its sentinel row; 0.4 s each on the
+  reporter's KKT), and a scan of all of `A` for every general-row change (the
+  row index built at the refactorization is now kept).
 - **`pounce verify`'s JSON receipt no longer reports `optimality.available:
   false` for a verdict decided on optimality.** A model with no rows needs no
   constraint duals, so verify computes its stationarity residual from a `.sol`
@@ -263,6 +339,61 @@ changes.
   (qpnstair) and `125` (deb7), and bound complementarity `0.21` and `452`.
   qpnstair joins the fixture corpus, converted from Vanderbei's AMPL
   source; its provenance is in `crates/pounce-cli/tests/fixtures/README-qpnstair.md`.
+- **The active-set QP's rank test stops at the solve's deadline, and is no
+  longer quadratic in the number of dependent rows (gh#1206).** The
+  dependent-row probe (`pounce_feral::determine_dependent_rows`) factors the
+  augmented system `[s·I Jᵀ; J 0]` with a threshold-Markowitz LU that could not
+  be stopped. On the IPM→SQP handover of a 90 797-variable, 88 800-row
+  collocation NLP one call ran for more than 2 400 s of CPU and grew past
+  11.6 GB, past the handover's deadline. The elimination now runs in pounce,
+  under the QP's `time_limit` and caps on fill (64× the input's storage, within
+  256 MiB to 2 GiB) and work. Past any of them it stops at once, and the QP is
+  told that no rank test ran, which it already handles. It no longer stores the
+  `L` and `U` factors, which the probe never read. Two costs are gone: every
+  numerically empty column (one per dependent row) was popped, scanned and
+  pushed back at every pivot step, and every entry in a long column was found
+  by scanning it. On a 188 870-dimension recurrence system with 8 854
+  dependent rows the probe went from 37 s to 0.6 s, and at twice that size from
+  144 s to 1.5 s. It is still an unsymmetric LU: FERAL's symmetric LDLᵀ does not
+  reveal rank, and it reports only how many pivots were zero, not which rows
+  they belong to. On every input that finishes inside the budget the pivots are
+  feral's, bit for bit, so the same rows are dropped. The fixture sweep diffs
+  empty on both legs, at the defaults, with `ipm_sqp_handover=yes` and with
+  `algorithm=active-set-sqp`.
+- **Schur updates in `pounce-qp` are stored sparse** (gh#1206 P3). Each
+  working-set change kept six dense vectors of length `dim(K_max)` (about
+  21 MB per change on the reporter's KKT), and every Schur solve did dense
+  dots over them; `u = e_p` is now its index and `v` its nonzeros, so those
+  dots are `O(nnz)`. Bit-identical up to the sign of a zero.
+- **A Schur-path drop on a Hessian not known PSD no longer always
+  refactorizes** (gh#1206 P1). The updated KKT's inertia follows from the
+  base factor's and the small Schur block's by Haynsworth additivity
+  (`neg(K_W) = neg(K₀) + pos(C·S) − k`); when it is the one the new working
+  set needs the cheap update is kept, otherwise the drop refactorizes under
+  inertia control as before (`QpOptions::schur_drop_inertia_test`).
+- **A free variable no longer costs a row in the Schur K_max** (gh#1206 P7).
+  Every variable had a bound slot, so the stabilized SQP subproblem's one free
+  variable per row grew K_max from `2n + m` to `2(n + m) + m`; bound slots now
+  go only to variables with a finite bound. Only decoupled identity rows go,
+  but FERAL orders the smaller matrix differently: under
+  `solver_selection=qp-active-set` `farkas_far_feasible_no_box` reaches the
+  same verified unbounded verdict in 2 iterations instead of 0.
+- **Large QPs analyse each KKT pattern once** (gh#1206 P2). From
+  `n + m ≥ 5000` every assembled KKT stores a diagonal for each `H` row, so
+  the inertia retry's shift moves values and FERAL reuses the symbolic
+  analysis. Size-gated because below that it moved a Maros-Meszaros fixture
+  to `MaxIter` under `solver_selection=qp-active-set`; see
+  `dev-notes/known-limitations.md`.
+- **An opt-in dual-shift rank probe** (gh#1206 B6, `QpOptions::
+  dual_shift_probe_min_dim`, Rust only, **off by default**). When a KKT is
+  singular both unshifted and at the first rung, one factorization with
+  `−δ_c` on the live constraint rows tells a rank-deficient working set from
+  an indefinite one and reports it for the prune, instead of climbing ten more
+  rungs. The regularized factor is a diagnosis only, never a step. Off by
+  default: ungated it moved Maros-Meszaros QGFRDXPN to `MaxIter`, and gated at
+  KKT dimension 5000 its factorization aborted the process on BOYD2 by asking
+  FERAL for a 55.7 GB dense front (the `−δ_c` entries are new pattern
+  entries, so the probe re-analyses and the fill is unbounded).
 - **The active-set QP solver no longer stops on an inertia-ladder error at a
   working set its own rank test called independent (gh#1195).** When the
   rank probe dropped an equality row, the re-selection that keeps equalities

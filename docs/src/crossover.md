@@ -17,6 +17,7 @@ crossover                yes | no     (default: no)
 crossover_max_iter       integer      (default: 30)
 crossover_mult_tol       number       (default: 1e-8)
 crossover_primal_tol     number       (default: 1e-6)
+crossover_stabilization  number       (default: 0, off)
 ```
 
 > This is the NLP feature. The convex LP path has its own, separate
@@ -359,6 +360,63 @@ declines with `TimeLimit` and the interior solution stands. Before gh#1054 it
 had no budget at all, and a large model could sit in crossover's first QP for
 as long as it took.
 
+## Degenerate active sets: `crossover_stabilization` (gh#1206)
+
+Step 3 pins the estimated active set and factors it. When the estimate's
+constraint gradients are linearly dependent — LICQ fails, as when a
+variable is bounded twice or bounded and pinned by an equality — or many
+bounds are weakly active, that pinned KKT is singular for every inertia
+shift. The QP then gives up its hint repair and restarts cold in the
+ℓ1-elastic phase 1. On gh#1206's 90 k-variable collocation model it never
+left that phase.
+
+`crossover_stabilization = σ_max > 0` makes the step-3 QP the *stabilized*
+subproblem (Wright 1998; Hager 1999; Fernández & Solodov 2010; Gill &
+Robinson 2013). At the interior iterate `(x, λ)`,
+
+```text
+min  ∇fᵀp + ½ pᵀHp + λᵀr + ‖r‖²/(2σ)
+s.t. bl ≤ c + Jp − r ≤ bu,   xl ≤ x + p ≤ xu,   r free
+```
+
+with `σ = min(σ_max, KKT residual)`. Optimality gives `r = σ(λ_new − λ)`, so
+the KKT matrix on the active rows is `[H Jᵀ; J −σI]`: nonsingular however
+dependent the active gradients are. Because `r` is free, every working set
+has a feasible point that satisfies it exactly. The QP starts there, from
+the estimate, so it needs no pinned solve, no hint repair and no phase 1.
+The cost is `m` extra QP variables. A stabilized QP that does not end
+`Optimal` falls back to the standard one. Either way the point goes through
+the never-regress test below, so the option cannot make a crossover accept a
+worse point.
+
+The reporter of gh#1206, using their own implementation with
+`σ_max = 1e-4`, measured the step-3 QP ending `Optimal` after 193
+working-set changes and no rank tests. The model is not public, and this
+implementation has not been measured on it.
+
+**Step 4 is stabilized only after a stabilized step 3.** Step 4 starts from
+step 3's working set (B1), and a stabilized step 3's working set is consistent
+only because `r` absorbs the dependence among its rows. The standard step QP
+cannot pin it. On gh#1206's model (the reporter's run) it pinned infeasible
+and rank-deficient, and the cold re-solve sat 2 139 s in phase 1 until the
+attempt's time limit. With step 4 stabilized as well, it converged in three
+SQP iterations and the attempt was accepted. Step 4's step QPs also stop after
+200 non-improving iterations, so a crawl like that one ends early. Inside the
+crossover a failed step 4 only declines the attempt; the interior point
+carries on.
+
+**Standalone `algorithm=active-set-sqp` is never stabilized.** Stabilizing
+every SQP step QP there was tried and measured. Under `algorithm=active-set-sqp`
+(`σ_max = 1e-4`, applied only once the KKT residual was below `1e-2`), 15
+fixture solves that succeeded failed. Most ended
+`Search_Direction_Becomes_Too_Small` at the right objective. Near a solution
+a stabilized method makes much of its progress in the multipliers, while the
+SQP's merit line search and step-size exit judge the primal step alone. Two
+feasible models (`issue981_wachter_biegler` and its redundant-row variant,
+L-BFGS) were declared infeasible. Getting this right takes a primal-dual
+merit function (Gill & Robinson 2013), which is a redesign of the SQP's
+globalization.
+
 ## Handing over before convergence (`ipm_sqp_handover`)
 
 ```
@@ -368,6 +426,8 @@ ipm_sqp_handover               yes | no   (default: no; yes under
 ipm_sqp_handover_tol           number     (default: 1e-4)
 ipm_sqp_handover_stall_iter    integer    (default: 0, off)
 ipm_sqp_handover_max_attempts  integer    (default: 3)
+ipm_sqp_handover_time_ratio    number     (default: 1)
+ipm_sqp_handover_primal_tol    number     (default: 0, automatic)
 ```
 
 Crossover runs after the interior method has converged, so it cannot shorten
@@ -382,8 +442,9 @@ offers the *unconverged* iterate to the same bridge:
   the best error has not halved in `k` iterations, whatever its value.
 - **What**: the active set is read off the multipliers against the slacks.
   At an interior iterate `s·z ≈ μ`, so `√μ` separates active from inactive and
-  the primal tolerance is `max(crossover_primal_tol, √μ)`; the equality rows
-  are always in. One QP step is taken over that set, and if it does not meet
+  the primal tolerance is `max(crossover_primal_tol, √μ)` — or
+  `ipm_sqp_handover_primal_tol` as is, when that is positive, which is the
+  only way to go *below* `√μ` (gh#1206); the equality rows are always in. One QP step is taken over that set, and if it does not meet
   the stopping tolerances the active-set SQP runs from that working set for
   up to `crossover_max_iter` iterations — the same two phases as above.
 - **Accepting**: only a point that meets the stopping tolerances, in the
@@ -417,9 +478,14 @@ negative-curvature escape before it is certified, exactly as its convergence
 exit does: the SQP's one-step path has no curvature test, and without the
 escape the handover ended at the stationary point the interior method leaves
 on `nonconvex_qp`, `nonconvex_qp_ineq` and `nonconvex_two_escapes`. And each
-attempt may spend at most the interior-point time used so far (at least one
-second), within the solve's own budget — on `deb7` an unbounded attempt ran the
-full-SQP fallback for minutes against a 114-iteration interior solve.
+attempt may spend at most `ipm_sqp_handover_time_ratio` times the interior-point
+time used so far (at least one second), within the solve's own budget — on
+`deb7` an unbounded attempt ran the full-SQP fallback for minutes against a
+114-iteration interior solve. The default ratio of 1 bounds a declined attempt
+at a doubling; raise it when the crossover converges but needs longer than the
+interior method took to get there (gh#1206: a 90 k-variable collocation model
+whose step-3 QP alone took 697 s against 270 s of interior point), since an
+attempt that runs out is declined as a time limit and its work is lost.
 
 What it does not change is the cost of the QP itself. An attempt is one
 active-set QP over the whole model warm-started from the identified set, so it

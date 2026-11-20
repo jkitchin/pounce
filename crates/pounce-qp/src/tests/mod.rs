@@ -17,6 +17,7 @@ mod hint_signal;
 mod homotopy_unit;
 mod kkt_unit;
 mod qps_unit;
+mod rank_probe_unit;
 mod refinement_unit;
 mod scaling_unit;
 mod schur_unit;

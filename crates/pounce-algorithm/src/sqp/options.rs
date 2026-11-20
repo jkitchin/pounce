@@ -217,6 +217,50 @@ pub struct SqpOptions {
     /// interior-point phase's own deadline, and a duration measured from
     /// `optimize` would grant it a fresh budget (gh#1054).
     pub deadline: Option<Deadline>,
+
+    /// `sqp_proximal`: the cap `ρ_max` on an adaptive proximal term
+    /// `ρ_k I` added to the step QP's Hessian (gh#1206). `ρ_k` follows the
+    /// measured error of the Hessian model along the previous step on the
+    /// free variables, so it vanishes when the model is accurate. `0` (the
+    /// default) adds nothing.
+    pub proximal: Number,
+
+    /// `sqp_local_phase_tol`: `sqp_proximal` applies only at iterates whose
+    /// KKT residual `max(stationarity, constraint violation)` is at or below
+    /// this (gh#1206): far from a solution even an exact Hessian has a large
+    /// model error along a long step, and the term would shrink every step.
+    pub local_phase_tol: Number,
+
+    /// Cap `σ_max` on a stabilized step subproblem in **every** step QP of
+    /// this run (gh#1206). Not a user option: set only by the crossover, for
+    /// its step-4 SQP, when its step-3 QP was stabilized
+    /// (`crossover_stabilization`). `0` (the default) poses the standard
+    /// subproblem.
+    ///
+    /// Step 4 starts from step 3's working set (B1). A stabilized step 3's
+    /// working set is consistent only because the free residual `r` absorbs
+    /// the dependence among its rows, so the unstabilized step QP cannot pin
+    /// it: on gh#1206's model (reporter's run of PR #1208) it pinned
+    /// infeasible and rank-deficient, the cold re-solve sat 2 139 s in
+    /// phase 1, and the attempt was declined on its time limit. With step 4
+    /// stabilized as well it converged in three SQP iterations (32 s of QP
+    /// time) and was accepted.
+    ///
+    /// Stabilizing a standalone `algorithm=active-set-sqp` solve failed 15
+    /// corpus solves that had succeeded, two as false infeasibility verdicts
+    /// (see `crate::crossover::stabilization_sigma`). Inside the crossover
+    /// the verdict is never final: a step-4 result that is not `Optimal`, or
+    /// fails `accepts` or the user tolerances, declines the attempt and the
+    /// interior point continues. So here it can cost an attempt's time but
+    /// not a wrong answer.
+    pub stabilization: Number,
+
+    /// `max_stall_iters` for every step QP of this run that does not set its
+    /// own (gh#1206). Not a user option: the crossover sets it for step 4, so
+    /// a phase-1 crawl ends instead of consuming the attempt (the reporter's
+    /// cold re-solve made 1 311 adds at step lengths ~1e-25 with the
+    /// infeasibility flat, for 2 139 s). `None` (the default): no cap.
+    pub step_qp_max_stall_iters: Option<u32>,
 }
 
 impl Default for SqpOptions {
@@ -240,6 +284,10 @@ impl Default for SqpOptions {
             qp_schur_indefinite_max_dim: Some(DEFAULT_QP_SCHUR_INDEFINITE_MAX_DIM),
             qp_ipm_cold_start_min_dim: Some(DEFAULT_QP_IPM_COLD_START_MIN_DIM),
             deadline: None,
+            proximal: 0.0,
+            local_phase_tol: 1e-2,
+            stabilization: 0.0,
+            step_qp_max_stall_iters: None,
         }
     }
 }

@@ -43,7 +43,8 @@ use pounce_qp::{BoundStatus, ConsStatus, WorkingSet};
 ///   Used identically for constraint rows.
 /// - `mult_tol`: multiplier-magnitude threshold; a row whose
 ///   `|λ|` falls below this is classified as `Inactive`
-///   regardless of primal distance.
+///   regardless of primal distance. `0` takes every at-bound row
+///   with a multiplier of the right sign (zero included) as active.
 /// - `primal_tol`: distance threshold between `x[i]` and `x_l[i]`
 ///   / `x_u[i]` (resp. `g[i]` vs `g_l[i]` / `g_u[i]`) below which
 ///   a row is treated as "at the bound".
@@ -92,13 +93,16 @@ pub fn classify_working_set(
         let mu = lambda_x[i];
         let at_lo = lo_fin && (x[i] - x_l[i]).abs() < primal_tol;
         let at_up = up_fin && (x_u[i] - x[i]).abs() < primal_tol;
-        let status = if mu > mult_tol && at_lo {
+        // Both halves of the test must hold: at the bound *and* a multiplier
+        // of the right sign at least `mult_tol` in magnitude. Two fallback
+        // arms used to take any at-bound row with a multiplier of the right
+        // sign, however small, which left `mult_tol` with no effect on
+        // anything within `primal_tol` — the opposite of what it documents
+        // (gh#1206 B3). `mult_tol = 0` keeps that old reading: a zero
+        // multiplier at the bound is then still active.
+        let status = if at_lo && mu >= mult_tol.max(0.0) {
             BoundStatus::AtLower
-        } else if mu < -mult_tol && at_up {
-            BoundStatus::AtUpper
-        } else if at_lo && mu >= 0.0 {
-            BoundStatus::AtLower
-        } else if at_up && mu <= 0.0 {
+        } else if at_up && mu <= -mult_tol.max(0.0) {
             BoundStatus::AtUpper
         } else {
             BoundStatus::Inactive
@@ -137,13 +141,10 @@ pub fn classify_working_set(
         let mu = lambda_g[i];
         let at_lo = lo_fin && (g[i] - g_l[i]).abs() < primal_tol;
         let at_up = up_fin && (g_u[i] - g[i]).abs() < primal_tol;
-        let status = if mu < -mult_tol && at_lo {
+        // Same two-sided test as the bounds, with the row signs (gh#1206 B3).
+        let status = if at_lo && mu <= -mult_tol.max(0.0) {
             ConsStatus::AtLower
-        } else if mu > mult_tol && at_up {
-            ConsStatus::AtUpper
-        } else if at_lo && mu <= 0.0 {
-            ConsStatus::AtLower
-        } else if at_up && mu >= 0.0 {
+        } else if at_up && mu >= mult_tol.max(0.0) {
             ConsStatus::AtUpper
         } else {
             ConsStatus::Inactive
@@ -386,6 +387,78 @@ mod tests {
             sol.lambda_g
         );
         assert_eq!(ws.bounds, sol.working.bounds);
+    }
+
+    /// gh#1206 B3: a row at its bound whose multiplier is below `mult_tol`
+    /// is `Inactive`, as documented — bounds and constraint rows alike. Two
+    /// fallback arms used to activate it anyway, so raising
+    /// `crossover_mult_tol` changed nothing within `primal_tol`.
+    #[test]
+    fn classify_respects_mult_tol_at_the_bound() {
+        // Lower bound, upper bound, and a row at each side; all primal-tight,
+        // all with multipliers of the right sign but below `mult_tol`.
+        let ws = classify_working_set(
+            &[1e-4, -1e-4],
+            &[-1e-4, 1e-4],
+            0,
+            &[0.0, 1.0],
+            &[0.0, 0.0],
+            &[1.0, 1.0],
+            &[1.0, 10.0],
+            &[1.0, 0.0],
+            &[10.0, 10.0],
+            1e-3,
+            1e-6,
+        );
+        assert_eq!(ws.bounds, vec![BoundStatus::Inactive; 2]);
+        assert_eq!(ws.constraints, vec![ConsStatus::Inactive; 2]);
+
+        // The same point with `mult_tol` below the multipliers: all active.
+        let ws = classify_working_set(
+            &[1e-4, -1e-4],
+            &[-1e-4, 1e-4],
+            0,
+            &[0.0, 1.0],
+            &[0.0, 0.0],
+            &[1.0, 1.0],
+            &[1.0, 10.0],
+            &[1.0, 0.0],
+            &[10.0, 10.0],
+            1e-5,
+            1e-6,
+        );
+        assert_eq!(ws.bounds, vec![BoundStatus::AtLower, BoundStatus::AtUpper]);
+        assert_eq!(
+            ws.constraints,
+            vec![ConsStatus::AtLower, ConsStatus::AtUpper]
+        );
+    }
+
+    /// `mult_tol = 0` keeps the old reading: a zero multiplier at the bound
+    /// is active, a wrong-signed one is not.
+    #[test]
+    fn classify_zero_mult_tol_takes_zero_multiplier_at_bound_as_active() {
+        let ws = classify_working_set(
+            &[0.0, 0.0, -1.0],
+            &[],
+            0,
+            &[0.0, 1.0, 0.0],
+            &[0.0, 0.0, 0.0],
+            &[1.0, 1.0, 1.0],
+            &[],
+            &[],
+            &[],
+            0.0,
+            1e-6,
+        );
+        assert_eq!(
+            ws.bounds,
+            vec![
+                BoundStatus::AtLower,
+                BoundStatus::AtUpper,
+                BoundStatus::Inactive
+            ]
+        );
     }
 
     #[test]

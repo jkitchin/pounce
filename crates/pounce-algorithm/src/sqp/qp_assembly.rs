@@ -40,6 +40,32 @@
 //! [`HessianInertia::Indefinite`]. The SQP never sees the lift:
 //! [`SqpQpData::lift_working_set`] and [`SqpQpData::unlift_solution`] map
 //! working sets and solutions across it at every QP call.
+//!
+//! # Stabilized subproblems (gh#1206)
+//!
+//! At a degenerate solution — linearly dependent active constraints (LICQ
+//! fails) or weakly active ones (strict complementarity fails) — the KKT
+//! matrix of the standard subproblem over the active set is singular, and an
+//! active-set QP warm-started there has nothing it can factor. Stabilized SQP
+//! (Wright 1998; Hager 1999; Fernández & Solodov 2010; Gill & Robinson 2013)
+//! poses instead, at `(x_k, λ_k)` with a dual regularization `σ > 0`,
+//!
+//! ```text
+//!     min  ∇fᵀp + ½ pᵀHp + λ_kᵀr + ‖r‖²/(2σ)
+//!     s.t.   bl ≤ c + Jp − r ≤ bu,   xl ≤ x + p ≤ xu,   r free
+//! ```
+//!
+//! Stationarity in `r` gives `r = σ(λ − λ_k)`, and eliminating `r` leaves the
+//! KKT matrix `[H Jᵀ; J −σI]` on the active rows, nonsingular whatever the
+//! rank of the active Jacobian. With `σ` of the order of the KKT residual it
+//! converges superlinearly under second-order sufficiency alone.
+//! [`SqpQpData::stabilize`] poses `r` as `m` extra free columns — `−I` in the
+//! constraint matrix, `1/σ` on the Hessian diagonal, `λ_k` in the gradient —
+//! through the same lift the low-rank form uses, so the rest of the SQP sees
+//! the NLP's dimensions. And because `r` is free, the subproblem has a
+//! trivially feasible point satisfying *any* working set exactly
+//! ([`SqpQpData::stabilized_start`]), so the QP starts in its primal phase
+//! with no pinned solve, no hint repair and no elastic phase 1.
 
 use pounce_common::types::{Index, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
@@ -71,13 +97,21 @@ pub struct SqpQpData {
     /// tolerances do not depend on whether the QP was lifted.
     pub hess_inf: Number,
     lift: Option<Lift>,
+    /// `σ` of a stabilized subproblem ([`Self::stabilize`]), `None` otherwise.
+    stabilization: Option<Number>,
+    /// The unstabilized Hessian, kept by [`Self::stabilize`] so the standard
+    /// subproblem can still be posed ([`Self::as_standard_qp`]).
+    standard_h: Option<SymTMatrix>,
 }
 
-/// The lifted constraint matrix of a low-rank subproblem.
+/// The lifted constraint matrix of a low-rank or stabilized subproblem.
 struct Lift {
-    /// Number of lifted variables / rows.
-    r: usize,
-    /// `[A 0; −Vᵀ I]`, `(m + r) × (n + r)`.
+    /// Number of lifted variables.
+    extra_n: usize,
+    /// Number of lifted rows (always equalities).
+    extra_m: usize,
+    /// Low rank: `[A 0; −Vᵀ I]`, `(m + r) × (n + r)`. Stabilized:
+    /// `[A −I]`, `m × (n + m)`.
     a: GenTMatrix,
 }
 
@@ -166,6 +200,8 @@ impl SqpQpData {
             hessian_inertia,
             hess_inf,
             lift: None,
+            stabilization: None,
+            standard_h: None,
         }
     }
 
@@ -249,8 +285,200 @@ impl SqpQpData {
         out.xl.resize(n + r, NLP_LOWER_BOUND_INF);
         out.xu.resize(n + r, NLP_UPPER_BOUND_INF);
         out.hessian_inertia = HessianInertia::Indefinite;
-        out.lift = Some(Lift { r, a });
+        out.lift = Some(Lift {
+            extra_n: r,
+            extra_m: r,
+            a,
+        });
         out
+    }
+
+    /// Turn an unlifted subproblem into the stabilized one at multipliers
+    /// `lambda_g` with dual regularization `sigma` — see the module docs.
+    /// Returns `self` unchanged when it is already lifted (the low-rank form
+    /// is not stabilized), when `m = 0`, or when `sigma` is not a positive
+    /// finite number.
+    pub fn stabilize(mut self, sigma: Number, lambda_g: &[Number]) -> Self {
+        let (n, m) = (self.n, self.m);
+        if self.lift.is_some() || m == 0 || !(sigma.is_finite() && sigma > 0.0) {
+            return self;
+        }
+        debug_assert_eq!(lambda_g.len(), m);
+        let nq = (n + m) as Index;
+        // H = diag(H, I/σ): the original pattern plus one diagonal per `r_i`.
+        let mut irow = self.h.irows().to_vec();
+        let mut jcol = self.h.jcols().to_vec();
+        let mut vals = self.h.values().to_vec();
+        for i in 0..m {
+            let k = (n + i + 1) as Index;
+            irow.push(k);
+            jcol.push(k);
+            vals.push(1.0 / sigma);
+        }
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(nq, irow, jcol));
+        h.set_values(&vals);
+        // A = [J −I].
+        let mut irow = self.a.irows().to_vec();
+        let mut jcol = self.a.jcols().to_vec();
+        let mut vals = self.a.values().to_vec();
+        for i in 0..m {
+            irow.push((i + 1) as Index);
+            jcol.push((n + i + 1) as Index);
+            vals.push(-1.0);
+        }
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as Index, nq, irow, jcol));
+        a.set_values(&vals);
+
+        self.standard_h = Some(std::mem::replace(&mut self.h, h));
+        self.g.extend_from_slice(lambda_g);
+        self.xl.resize(n + m, NLP_LOWER_BOUND_INF);
+        self.xu.resize(n + m, NLP_UPPER_BOUND_INF);
+        self.lift = Some(Lift {
+            extra_n: m,
+            extra_m: 0,
+            a,
+        });
+        self.stabilization = Some(sigma);
+        self
+    }
+
+    /// The standard (unstabilized) subproblem of a stabilized one, with the
+    /// given general-row bounds; `None` when this subproblem is not
+    /// stabilized. The fallback when a stabilized QP does not solve, and the
+    /// only form that can report an infeasible linearization: the stabilized
+    /// one is feasible by construction.
+    pub fn as_standard_qp<'a>(
+        &'a self,
+        bl: &'a [Number],
+        bu: &'a [Number],
+    ) -> Option<QpProblem<'a>> {
+        let h = self.standard_h.as_ref()?;
+        Some(QpProblem {
+            n: self.n,
+            m: self.m,
+            h,
+            g: &self.g[..self.n],
+            a: &self.a,
+            bl,
+            bu,
+            xl: &self.xl[..self.n],
+            xu: &self.xu[..self.n],
+            hessian_inertia: self.hessian_inertia,
+        })
+    }
+
+    /// `σ` when this subproblem is stabilized ([`Self::stabilize`]).
+    pub fn stabilization(&self) -> Option<Number> {
+        self.stabilization
+    }
+
+    /// A feasible point of the stabilized subproblem that satisfies the
+    /// working set `w` (in the NLP's dimensions) exactly, as a warm start for
+    /// [`pounce_qp::QpSolver::solve`]. `bl` / `bu` are the general-row bounds
+    /// of the QP actually being solved — [`Self::bl`] / [`Self::bu`], or the
+    /// second-order correction's re-centred ones. `None` when the subproblem
+    /// is not stabilized.
+    ///
+    /// `p` sits on each active bound and at the projection of `0` onto its
+    /// box elsewhere; then `r = Jp − t`, with `t` the active row bound, or
+    /// `Jp` projected onto `[bl, bu]` for an inactive row. Every row and
+    /// bound holds and every active one holds with equality, whatever `w`
+    /// is — the free `r` absorbs what the linearization cannot meet — and it
+    /// costs one product with `J`, no factorization.
+    pub fn stabilized_start(
+        &self,
+        w: &WorkingSet,
+        bl: &[Number],
+        bu: &[Number],
+    ) -> Option<pounce_qp::QpWarmStart> {
+        self.stabilization?;
+        let (n, m) = (self.n, self.m);
+        let finite_lo = |v: Number| v > NLP_LOWER_BOUND_INF;
+        let finite_up = |v: Number| v < NLP_UPPER_BOUND_INF;
+        let mut bounds = Vec::with_capacity(n + m);
+        let mut x = vec![0.0; n + m];
+        for (j, xj) in x.iter_mut().enumerate().take(n) {
+            let (lo, up) = (self.xl[j], self.xu[j]);
+            let status = w.bounds.get(j).copied().unwrap_or(BoundStatus::Inactive);
+            // An active status on an infinite bound cannot be honoured; the
+            // variable is left free instead.
+            let status = match status {
+                _ if finite_lo(lo) && finite_up(up) && lo == up => BoundStatus::Fixed,
+                BoundStatus::AtLower if !finite_lo(lo) => BoundStatus::Inactive,
+                BoundStatus::AtUpper if !finite_up(up) => BoundStatus::Inactive,
+                BoundStatus::Fixed if !(finite_lo(lo) && finite_up(up)) => BoundStatus::Inactive,
+                s => s,
+            };
+            *xj = match status {
+                BoundStatus::AtLower | BoundStatus::Fixed => lo,
+                BoundStatus::AtUpper => up,
+                BoundStatus::Inactive => {
+                    let mut v = 0.0;
+                    if finite_lo(lo) && v < lo {
+                        v = lo;
+                    }
+                    if finite_up(up) && v > up {
+                        v = up;
+                    }
+                    v
+                }
+            };
+            bounds.push(status);
+        }
+        bounds.resize(n + m, BoundStatus::Inactive);
+        // J p over the NLP's own columns.
+        let mut jp = vec![0.0; m];
+        let (ai, aj, av) = (self.a.irows(), self.a.jcols(), self.a.values());
+        for k in 0..av.len() {
+            jp[(ai[k] - 1) as usize] += av[k] * x[(aj[k] - 1) as usize];
+        }
+        let mut constraints = Vec::with_capacity(m);
+        for i in 0..m {
+            let (lo, up) = (bl[i], bu[i]);
+            let equality = finite_lo(lo) && finite_up(up) && lo == up;
+            let status = if equality {
+                ConsStatus::Equality
+            } else {
+                match w
+                    .constraints
+                    .get(i)
+                    .copied()
+                    .unwrap_or(ConsStatus::Inactive)
+                {
+                    ConsStatus::AtLower if finite_lo(lo) => ConsStatus::AtLower,
+                    ConsStatus::AtUpper if finite_up(up) => ConsStatus::AtUpper,
+                    // An `Equality` hint on a row that is not one, or an
+                    // active status on an infinite side, is not honoured.
+                    _ => ConsStatus::Inactive,
+                }
+            };
+            let target = match status {
+                ConsStatus::Equality | ConsStatus::AtLower => lo,
+                ConsStatus::AtUpper => up,
+                ConsStatus::Inactive => {
+                    let mut t = jp[i];
+                    if finite_lo(lo) && t < lo {
+                        t = lo;
+                    }
+                    if finite_up(up) && t > up {
+                        t = up;
+                    }
+                    t
+                }
+            };
+            x[n + i] = jp[i] - target;
+            constraints.push(status);
+        }
+        Some(pounce_qp::QpWarmStart {
+            x,
+            // `λ_k`, which `stabilize` stored as the residuals' gradient.
+            lambda_g: self.g[n..n + m].to_vec(),
+            lambda_x: vec![0.0; n + m],
+            working: WorkingSet {
+                bounds,
+                constraints,
+            },
+        })
     }
 
     /// Borrowed `QpProblem` view ready for
@@ -267,10 +495,13 @@ impl SqpQpData {
         bl: &'a [Number],
         bu: &'a [Number],
     ) -> QpProblem<'a> {
-        let r = self.lift.as_ref().map_or(0, |l| l.r);
+        let (en, em) = self
+            .lift
+            .as_ref()
+            .map_or((0, 0), |l| (l.extra_n, l.extra_m));
         QpProblem {
-            n: self.n + r,
-            m: self.m + r,
+            n: self.n + en,
+            m: self.m + em,
             h: &self.h,
             g: &self.g,
             a: self.lift.as_ref().map_or(&self.a, |l| &l.a),
@@ -294,8 +525,9 @@ impl SqpQpData {
         if let Some(l) = &self.lift {
             w.bounds.truncate(self.n);
             w.constraints.truncate(self.m);
-            w.bounds.resize(self.n + l.r, BoundStatus::Inactive);
-            w.constraints.resize(self.m + l.r, ConsStatus::Equality);
+            w.bounds.resize(self.n + l.extra_n, BoundStatus::Inactive);
+            w.constraints
+                .resize(self.m + l.extra_m, ConsStatus::Equality);
         }
         w
     }

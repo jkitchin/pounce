@@ -37,6 +37,11 @@ pub use feral::symbolic::OrderingPreprocess;
 
 pub mod block;
 pub use block::FeralBlockSolver;
+pub mod dependent_rows;
+pub use dependent_rows::{
+    DEFAULT_PROBE_MAX_WORK, DependentRowsBudget, ProbeBailout, RankProbeDeadline,
+    default_max_active_bytes, last_probe_bailout, rank_probe_deadline,
+};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::summary::{FactorRecord, LinearSolverSummary};
 use pounce_linsol::{
@@ -1766,6 +1771,16 @@ fn relative_residual(
 /// active-set QP calls it directly when its KKT backend (MA57) has no sparse
 /// rank-reveal, instead of falling back to `O(k²·n)` dense Gram-Schmidt
 /// (gh#1061).
+///
+/// **Budgeted (gh#1206 B5).** The elimination runs under
+/// [`DependentRowsBudget::from_scope`]: this thread's
+/// [`rank_probe_deadline`] (the active-set QP sets it from its
+/// `time_limit`), a cap on the active submatrix's storage, and a work cap.
+/// Past any of them it returns `FatalError` at once, with the reason in
+/// [`last_probe_bailout`], and the caller is told the rank test could not run.
+/// One unbudgeted call on a 1.8·10⁵-dimension augmented system ran for more
+/// than 2 400 s of CPU and 11.6 GB. Why it is still an unsymmetric LU and not
+/// FERAL's symmetric LDLᵀ: see the [`dependent_rows`] module doc.
 pub fn determine_dependent_rows(
     n_rows: Index,
     n_cols: Index,
@@ -1774,64 +1789,71 @@ pub fn determine_dependent_rows(
     vals: &[Number],
     c_deps: &mut Vec<Index>,
 ) -> ESymSolverStatus {
-    use feral::{LuParams, LuPivoting, LuScaling, LuSingularAction, SparseColMatrix, SparseLu};
+    determine_dependent_rows_budgeted(
+        n_rows,
+        n_cols,
+        irn,
+        jcn,
+        vals,
+        c_deps,
+        &DependentRowsBudget::from_scope(),
+    )
+}
 
+/// [`determine_dependent_rows`] under an explicit `budget`. On an input it
+/// finishes it flags exactly the rows the unbudgeted probe flags: the
+/// elimination is the same, step for step (see [`dependent_rows`]).
+pub fn determine_dependent_rows_budgeted(
+    n_rows: Index,
+    n_cols: Index,
+    irn: &[Index],
+    jcn: &[Index],
+    vals: &[Number],
+    c_deps: &mut Vec<Index>,
+    budget: &DependentRowsBudget,
+) -> ESymSolverStatus {
+    use dependent_rows::ProbeError;
+
+    dependent_rows::note_bailout(None);
     c_deps.clear();
-    let n_rows = n_rows as usize;
-    let n_cols = n_cols as usize;
-    if n_rows == 0 {
-        return ESymSolverStatus::Success;
-    }
-    let nnz = vals.len();
-    if irn.len() != nnz || jcn.len() != nnz {
+    let n_cols_u = n_cols as usize;
+    let Some((m, s)) = dependent_rows_augmented_system(n_rows, n_cols, irn, jcn, vals) else {
         return ESymSolverStatus::FatalError;
-    }
-
-    // Identity-block scale: dominate every J entry so the x-columns
-    // pivot on their own diagonal (see method doc).
-    let a_max = vals.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
-    let s = a_max.max(1.0);
-
-    // Build M column-by-column: cols[col] = list of (row, value).
-    let d = n_cols + n_rows;
-    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); d];
-    for c in 0..n_cols {
-        cols[c].push((c, s)); // s·I_n on the leading x-columns
-    }
-    for t in 0..nnz {
-        let i = (irn[t] - 1) as usize; // 0-based J row
-        let c = (jcn[t] - 1) as usize; // 0-based J col
-        if i >= n_rows || c >= n_cols {
-            return ESymSolverStatus::FatalError; // malformed triplet
-        }
-        let v = vals[t];
-        cols[c].push((n_cols + i, v)); // J in the bottom-left block
-        cols[n_cols + i].push((c, v)); // Jᵀ in the top-right block
-    }
-
-    let m = match SparseColMatrix::from_sparse_columns(d, &cols) {
-        Ok(m) => m,
-        Err(_) => return ESymSolverStatus::FatalError,
     };
+    if m.m == n_cols_u {
+        return ESymSolverStatus::Success; // n_rows == 0
+    }
     // feral computes its singularity floor as ztol = zero_pivot_tol·max|M|
     // (= zero_pivot_tol·s, since the identity scale dominates J) and
     // perturbs singular pivots up to `abs_floor`; setting abs_floor = ztol
     // keeps a perturbed pivot at the floor so it is detectable below.
     let zero_pivot_tol = 1e-13;
     let ztol = zero_pivot_tol * s;
-    let params = LuParams {
-        on_singular: LuSingularAction::PerturbToEps { abs_floor: ztol },
-        scaling: LuScaling::None,
+    // Threshold-Markowitz at feral's default `markowitz_threshold` (0.1) and
+    // search cutoff: see the function doc for what this replaced and why the
+    // threshold is not lower.
+    let lu_defaults = feral::LuParams::default();
+    let piv = match dependent_rows::markowitz_pivots(
+        &m,
+        lu_defaults.markowitz_threshold,
+        lu_defaults.markowitz_max_search,
         zero_pivot_tol,
-        // Threshold-Markowitz at feral's default `markowitz_threshold`
-        // (0.1): see the function doc for what this replaced and why the
-        // threshold is not lower.
-        pivoting: LuPivoting::Markowitz,
-        ..LuParams::default()
-    };
-    let lu = match SparseLu::factor_markowitz(&m, params) {
-        Ok(lu) => lu,
-        Err(_) => return ESymSolverStatus::FatalError,
+        ztol,
+        budget,
+    ) {
+        Ok(p) => p,
+        Err(ProbeError::Failed) => return ESymSolverStatus::FatalError,
+        Err(ProbeError::OverBudget(why)) => {
+            tracing::debug!(
+                target: "pounce::feral",
+                ?why,
+                dim = m.m,
+                nnz = m.nnz(),
+                "dependent-row probe stopped on its budget"
+            );
+            dependent_rows::note_bailout(Some(why));
+            return ESymSolverStatus::FatalError;
+        }
     };
 
     // A pivot position is singular when its U diagonal sits at/below the
@@ -1843,13 +1865,109 @@ pub fn determine_dependent_rows(
     // callers re-prune, but `factor_pinned_primal`'s masked-deficiency
     // guard reads "nothing dropped" as full rank, so it is not free.
     let dep_tol = 1e-9 * s;
-    let perm = lu.perm();
-    for k in 0..d {
-        if lu.u_dense(k, k).abs() <= dep_tol {
-            let r = perm[k];
-            if r >= n_cols {
-                c_deps.push((r - n_cols) as Index);
-            }
+    for (&r, &pv) in piv.perm.iter().zip(&piv.value) {
+        if pv.abs() <= dep_tol && r >= n_cols_u {
+            c_deps.push((r - n_cols_u) as Index);
+        }
+    }
+    c_deps.sort_unstable();
+    ESymSolverStatus::Success
+}
+
+/// The scaled augmented system `M = [s·I Jᵀ; J 0]` of
+/// [`determine_dependent_rows`] and its scale `s`, or `None` on a malformed
+/// triplet or a matrix feral rejects.
+fn dependent_rows_augmented_system(
+    n_rows: Index,
+    n_cols: Index,
+    irn: &[Index],
+    jcn: &[Index],
+    vals: &[Number],
+) -> Option<(feral::SparseColMatrix, f64)> {
+    let n_rows = n_rows as usize;
+    let n_cols = n_cols as usize;
+    if n_rows == 0 {
+        // Nothing to factor; the caller reports "no dependent rows".
+        let empty = feral::SparseColMatrix {
+            m: n_cols,
+            col_ptr: vec![0; n_cols + 1],
+            row_idx: Vec::new(),
+            values: Vec::new(),
+        };
+        return Some((empty, 1.0));
+    }
+    let nnz = vals.len();
+    if irn.len() != nnz || jcn.len() != nnz {
+        return None;
+    }
+
+    // Identity-block scale: dominate every J entry so the x-columns
+    // pivot on their own diagonal (see method doc).
+    let a_max = vals.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    let s = a_max.max(1.0);
+
+    // Build M column-by-column: cols[col] = list of (row, value).
+    let d = n_cols + n_rows;
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); d];
+    for (c, col) in cols.iter_mut().enumerate().take(n_cols) {
+        col.push((c, s)); // s·I_n on the leading x-columns
+    }
+    for t in 0..nnz {
+        if irn[t] < 1 || jcn[t] < 1 {
+            return None;
+        }
+        let i = (irn[t] - 1) as usize; // 0-based J row
+        let c = (jcn[t] - 1) as usize; // 0-based J col
+        if i >= n_rows || c >= n_cols {
+            return None; // malformed triplet
+        }
+        let v = vals[t];
+        cols[c].push((n_cols + i, v)); // J in the bottom-left block
+        cols[n_cols + i].push((c, v)); // Jᵀ in the top-right block
+    }
+    let m = feral::SparseColMatrix::from_sparse_columns(d, &cols).ok()?;
+    Some((m, s))
+}
+
+/// The probe as it was before gh#1206: the same system through
+/// `feral::SparseLu::factor_markowitz`, unbudgeted. The oracle the budgeted
+/// elimination is held to.
+#[cfg(test)]
+pub(crate) fn determine_dependent_rows_reference(
+    n_rows: Index,
+    n_cols: Index,
+    irn: &[Index],
+    jcn: &[Index],
+    vals: &[Number],
+    c_deps: &mut Vec<Index>,
+) -> ESymSolverStatus {
+    use feral::{LuParams, LuPivoting, LuScaling, LuSingularAction, SparseLu};
+
+    c_deps.clear();
+    let n_cols_u = n_cols as usize;
+    let Some((m, s)) = dependent_rows_augmented_system(n_rows, n_cols, irn, jcn, vals) else {
+        return ESymSolverStatus::FatalError;
+    };
+    if m.m == n_cols_u {
+        return ESymSolverStatus::Success;
+    }
+    let zero_pivot_tol = 1e-13;
+    let ztol = zero_pivot_tol * s;
+    let params = LuParams {
+        on_singular: LuSingularAction::PerturbToEps { abs_floor: ztol },
+        scaling: LuScaling::None,
+        zero_pivot_tol,
+        pivoting: LuPivoting::Markowitz,
+        ..LuParams::default()
+    };
+    let lu = match SparseLu::factor_markowitz(&m, params) {
+        Ok(lu) => lu,
+        Err(_) => return ESymSolverStatus::FatalError,
+    };
+    let dep_tol = 1e-9 * s;
+    for (k, &r) in lu.perm().iter().enumerate() {
+        if lu.u_dense(k, k).abs() <= dep_tol && r >= n_cols_u {
+            c_deps.push((r - n_cols_u) as Index);
         }
     }
     c_deps.sort_unstable();
@@ -3318,6 +3436,388 @@ mod tests {
             }
         }
         basis.len()
+    }
+
+    // ---------------------------------------------------------------
+    // gh#1206 B5: the dependent-row probe is budgeted.
+
+    /// 1-based triplet of `rows`.
+    fn triplet(rows: &[Vec<(usize, f64)>]) -> (Vec<Index>, Vec<Index>, Vec<Number>) {
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, row) in rows.iter().enumerate() {
+            for &(c, v) in row {
+                irn.push(i as Index + 1);
+                jcn.push(c as Index + 1);
+                vals.push(v);
+            }
+        }
+        (irn, jcn, vals)
+    }
+
+    /// `n_rows` rows of `per_row` random columns of `n_cols`, the last
+    /// `n_dep` of them random combinations of three earlier rows, and a few
+    /// entries far below the rest, so both the regular and the perturbed
+    /// singular pivots are reached.
+    fn random_jacobian(
+        seed: u64,
+        n_cols: usize,
+        n_rows: usize,
+        per_row: usize,
+        n_dep: usize,
+    ) -> Vec<Vec<(usize, f64)>> {
+        let mut state = seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+        for _ in 0..n_rows - n_dep {
+            let mut row: Vec<(usize, f64)> = (0..per_row)
+                .map(|_| {
+                    let c = (next() % n_cols as u64) as usize;
+                    let mut v = (next() % 2000) as f64 / 1000.0 - 1.0;
+                    if next() % 50 == 0 {
+                        v *= 1e-12;
+                    }
+                    (c, v)
+                })
+                .collect();
+            row.sort_by_key(|e| e.0);
+            rows.push(row);
+        }
+        let base = rows.len();
+        for _ in 0..n_dep {
+            let mut acc = std::collections::BTreeMap::<usize, f64>::new();
+            for _ in 0..3 {
+                let r = (next() % base as u64) as usize;
+                let w = (next() % 1000) as f64 / 500.0 + 0.1;
+                for &(c, v) in &rows[r] {
+                    *acc.entry(c).or_default() += w * v;
+                }
+            }
+            rows.push(acc.into_iter().collect());
+        }
+        rows
+    }
+
+    /// The budgeted elimination is feral's threshold-Markowitz LU, step for
+    /// step: same pivot rows, the same `U` diagonal to the bit, and so the
+    /// same dependent rows, on the gh#1061 recurrence corpus and on random
+    /// Jacobians with built-in dependencies (which reach the perturbed
+    /// singular-pivot branch). This is what makes the budget a non-event on
+    /// every probe that finishes inside it.
+    #[test]
+    fn budgeted_elimination_matches_feral_markowitz() {
+        use feral::{LuParams, LuPivoting, LuScaling, LuSingularAction, SparseLu};
+
+        type Rows = Vec<Vec<(usize, f64)>>;
+        let mut cases: Vec<(usize, Rows)> = Vec::new();
+        for seed in 1..=60u64 {
+            let (_, n_cols, rows) = recurrence_jacobian(seed, 4, 25);
+            cases.push((n_cols, rows));
+        }
+        for seed in 1..=10u64 {
+            let (_, n_cols, rows) = recurrence_jacobian(seed, 6, 120);
+            cases.push((n_cols, rows));
+        }
+        for seed in 1..=40u64 {
+            let n_cols = 30 + (seed as usize * 7) % 90;
+            let n_rows = n_cols * 3 / 4;
+            let rows = random_jacobian(seed, n_cols, n_rows, 2 + seed as usize % 5, n_rows / 6);
+            cases.push((n_cols, rows));
+        }
+        // A variable in every row (a free final time, a design parameter):
+        // a long column, which the elimination indexes by row.
+        for seed in 1..=20u64 {
+            let n_cols = 150 + seed as usize * 11;
+            let mut rows = random_jacobian(seed, n_cols, n_cols * 4 / 5, 3, 25);
+            for (i, row) in rows.iter_mut().enumerate() {
+                if !(i as u64 + seed).is_multiple_of(3) {
+                    row.push((n_cols, 0.5 + (i % 7) as f64 / 7.0));
+                }
+            }
+            cases.push((n_cols + 1, rows));
+        }
+        // Small-integer entries, a variable in most rows, and dependent rows
+        // that are exact sums: exact cancellations inside long (indexed)
+        // columns, and exact ties in the pivot search, which is where the
+        // order the removals leave a column in decides the pivot.
+        for seed in 1..=40u64 {
+            let n_cols = 40 + seed as usize * 3;
+            let mut state = seed.wrapping_mul(0xD6E8_FEB8_6659_FD93) | 1;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+            for i in 0..n_cols * 2 / 3 {
+                let mut row = std::collections::BTreeMap::<usize, f64>::new();
+                for _ in 0..3 {
+                    let v = [1.0, -1.0, 2.0][(next() % 3) as usize];
+                    row.insert((next() % n_cols as u64) as usize, v);
+                }
+                if i % 4 != 0 {
+                    row.insert(n_cols, 1.0);
+                }
+                rows.push(row.into_iter().collect());
+            }
+            let base = rows.len();
+            for _ in 0..base / 5 {
+                let (a, b) = (
+                    (next() % base as u64) as usize,
+                    (next() % base as u64) as usize,
+                );
+                let mut acc = std::collections::BTreeMap::<usize, f64>::new();
+                for &(c, v) in rows[a].iter().chain(&rows[b]) {
+                    *acc.entry(c).or_default() += v;
+                }
+                rows.push(acc.into_iter().filter(|e| e.1 != 0.0).collect());
+            }
+            cases.push((n_cols + 1, rows));
+        }
+        // Rows numerically zero against the rest (entries ~1e-15 of the
+        // largest): their columns of `M` are numerically empty from the start
+        // but long, so they sit among the live candidates by count, and the
+        // search can stop on one of them while parked.
+        for seed in 1..=30u64 {
+            let n_cols = 60 + seed as usize * 5;
+            let mut rows = random_jacobian(seed, n_cols, n_cols * 3 / 4, 3 + seed as usize % 4, 8);
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            for _ in 0..(4 + seed as usize % 6) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let len = 3 + (state % 8) as usize;
+                let row = (0..len)
+                    .map(|t| {
+                        (
+                            (state as usize >> 8).wrapping_add(t * 13) % n_cols,
+                            1e-15 * (1.0 + t as f64),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect();
+                rows.insert((state % rows.len() as u64) as usize, row);
+            }
+            cases.push((n_cols, rows));
+        }
+        let mut saw_dependent = 0;
+        let mut saw_perturbed = 0;
+        dependent_rows::INDEXED_UPDATES.with(|c| c.set(0));
+        dependent_rows::PARKED.with(|c| c.set(0));
+        dependent_rows::PARKED_STOPS.with(|c| c.set(0));
+        for (case, (n_cols, rows)) in cases.iter().enumerate() {
+            let (irn, jcn, vals) = triplet(rows);
+            let n_rows = rows.len() as Index;
+            let n_cols_i = *n_cols as Index;
+            let (mut got, mut want) = (Vec::new(), Vec::new());
+            let st = determine_dependent_rows(n_rows, n_cols_i, &irn, &jcn, &vals, &mut got);
+            let st_ref =
+                determine_dependent_rows_reference(n_rows, n_cols_i, &irn, &jcn, &vals, &mut want);
+            assert_eq!(st, ESymSolverStatus::Success, "case {case}");
+            assert_eq!(st_ref, ESymSolverStatus::Success, "case {case}");
+            assert_eq!(got, want, "case {case}: dependent rows differ");
+            saw_dependent += usize::from(!got.is_empty());
+
+            // Pivot for pivot.
+            let Some((m, s)) = dependent_rows_augmented_system(n_rows, n_cols_i, &irn, &jcn, &vals)
+            else {
+                panic!("case {case}: augmented system");
+            };
+            let ztol = 1e-13 * s;
+            let d = LuParams::default();
+            let piv = dependent_rows::markowitz_pivots(
+                &m,
+                d.markowitz_threshold,
+                d.markowitz_max_search,
+                1e-13,
+                ztol,
+                &DependentRowsBudget::unlimited(),
+            )
+            .unwrap_or_else(|e| panic!("case {case}: {e:?}"));
+            let lu = match SparseLu::factor_markowitz(
+                &m,
+                LuParams {
+                    on_singular: LuSingularAction::PerturbToEps { abs_floor: ztol },
+                    scaling: LuScaling::None,
+                    zero_pivot_tol: 1e-13,
+                    pivoting: LuPivoting::Markowitz,
+                    ..LuParams::default()
+                },
+            ) {
+                Ok(lu) => lu,
+                Err(e) => panic!("case {case}: {e:?}"),
+            };
+            assert_eq!(piv.perm, lu.perm(), "case {case}: pivot rows");
+            for k in 0..m.m {
+                assert_eq!(
+                    piv.value[k].to_bits(),
+                    lu.u_dense(k, k).to_bits(),
+                    "case {case}: pivot {k}"
+                );
+            }
+            saw_perturbed += usize::from(piv.value.iter().any(|v| v.abs() == ztol));
+        }
+        assert!(
+            saw_dependent > 60,
+            "corpus reaches dependent rows: {saw_dependent}"
+        );
+        assert!(saw_perturbed > 0, "corpus reaches perturbed pivots");
+        let indexed = dependent_rows::INDEXED_UPDATES.with(std::cell::Cell::get);
+        assert!(indexed > 1000, "corpus reaches indexed updates: {indexed}");
+        let parked = dependent_rows::PARKED.with(std::cell::Cell::get);
+        let stops = dependent_rows::PARKED_STOPS.with(std::cell::Cell::get);
+        assert!(parked > 100, "corpus parks empty columns: {parked}");
+        assert!(
+            stops > 0,
+            "corpus stops a search on a parked entry: {stops}"
+        );
+    }
+
+    /// A probe whose deadline has passed returns at once, with "could not
+    /// determine" (`FatalError`) and the reason, through the free function,
+    /// through `FeralSolverInterface`'s trait method under a
+    /// [`rank_probe_deadline`] scope, and through an explicit budget. Before
+    /// gh#1206 the probe had no deadline: the same calls ran the whole LU.
+    #[test]
+    fn a_probe_past_its_deadline_returns_could_not_determine() {
+        let (_, n_cols, rows) = recurrence_jacobian(7, 8, 400);
+        let (irn, jcn, vals) = triplet(&rows);
+        let (n_rows, n_cols) = (rows.len() as Index, n_cols as Index);
+        let mut deps = Vec::new();
+
+        // Control: no deadline, the probe answers.
+        let st = determine_dependent_rows(n_rows, n_cols, &irn, &jcn, &vals, &mut deps);
+        assert_eq!(st, ESymSolverStatus::Success);
+        assert_eq!(last_probe_bailout(), None);
+
+        let past = std::time::Instant::now();
+        {
+            let _g = rank_probe_deadline(Some(past));
+            let st = determine_dependent_rows(n_rows, n_cols, &irn, &jcn, &vals, &mut deps);
+            assert_eq!(st, ESymSolverStatus::FatalError);
+            assert_eq!(last_probe_bailout(), Some(ProbeBailout::Deadline));
+            assert!(deps.is_empty());
+
+            let mut s = FeralSolverInterface::new();
+            let st = s.determine_dependent_rows(n_rows, n_cols, &irn, &jcn, &vals, &mut deps);
+            assert_eq!(st, ESymSolverStatus::FatalError);
+            assert_eq!(last_probe_bailout(), Some(ProbeBailout::Deadline));
+
+            // A nested scope cannot loosen the deadline.
+            let _later = rank_probe_deadline(Some(past + std::time::Duration::from_secs(3600)));
+            let st = determine_dependent_rows(n_rows, n_cols, &irn, &jcn, &vals, &mut deps);
+            assert_eq!(st, ESymSolverStatus::FatalError);
+        }
+        // The scope is lifted on drop.
+        let st = determine_dependent_rows(n_rows, n_cols, &irn, &jcn, &vals, &mut deps);
+        assert_eq!(st, ESymSolverStatus::Success);
+
+        let budget = DependentRowsBudget {
+            deadline: Some(past),
+            ..DependentRowsBudget::from_scope()
+        };
+        let st = determine_dependent_rows_budgeted(
+            n_rows, n_cols, &irn, &jcn, &vals, &mut deps, &budget,
+        );
+        assert_eq!(st, ESymSolverStatus::FatalError);
+        assert_eq!(last_probe_bailout(), Some(ProbeBailout::Deadline));
+    }
+
+    /// The deadline is checked *during* the elimination, not only before it:
+    /// a deadline that falls part-way through stops a long probe early.
+    #[test]
+    fn a_long_probe_stops_at_a_deadline_inside_the_elimination() {
+        let rows = random_jacobian(11, 3000, 2600, 4, 200);
+        let (irn, jcn, vals) = triplet(&rows);
+        let n_rows = rows.len() as Index;
+        let mut deps = Vec::new();
+
+        let started = std::time::Instant::now();
+        let st = determine_dependent_rows_budgeted(
+            n_rows,
+            3000,
+            &irn,
+            &jcn,
+            &vals,
+            &mut deps,
+            &DependentRowsBudget::unlimited(),
+        );
+        let unbudgeted = started.elapsed();
+        assert_eq!(st, ESymSolverStatus::Success);
+
+        let limit = unbudgeted / 10;
+        let budget = DependentRowsBudget {
+            deadline: Some(std::time::Instant::now() + limit),
+            ..DependentRowsBudget::unlimited()
+        };
+        let started = std::time::Instant::now();
+        let st =
+            determine_dependent_rows_budgeted(n_rows, 3000, &irn, &jcn, &vals, &mut deps, &budget);
+        let took = started.elapsed();
+        assert_eq!(
+            st,
+            ESymSolverStatus::FatalError,
+            "unbudgeted {unbudgeted:?}"
+        );
+        assert_eq!(last_probe_bailout(), Some(ProbeBailout::Deadline));
+        assert!(
+            took < unbudgeted / 2,
+            "stopped after {took:?}, deadline {limit:?}, whole probe {unbudgeted:?}"
+        );
+    }
+
+    /// An elimination that fills past its storage cap, or that does more work
+    /// than its work cap, stops with "could not determine" rather than
+    /// growing; with the caps lifted the same input is answered, as the
+    /// reference LU answers it.
+    #[test]
+    fn a_probe_stops_at_its_fill_and_work_caps() {
+        let rows = random_jacobian(5, 1500, 1300, 4, 100);
+        let (irn, jcn, vals) = triplet(&rows);
+        let (n_rows, n_cols) = (rows.len() as Index, 1500 as Index);
+        let mut deps = Vec::new();
+        // The active submatrix's storage at the start: 2·nnz(J) + n entries.
+        let input_bytes = (irn.len() * 2 + 1500) * 24;
+
+        let fill = DependentRowsBudget {
+            max_active_bytes: Some(3 * input_bytes),
+            ..DependentRowsBudget::unlimited()
+        };
+        let st =
+            determine_dependent_rows_budgeted(n_rows, n_cols, &irn, &jcn, &vals, &mut deps, &fill);
+        assert_eq!(st, ESymSolverStatus::FatalError);
+        assert_eq!(last_probe_bailout(), Some(ProbeBailout::Fill));
+
+        let work = DependentRowsBudget {
+            max_work: 10 * irn.len() as u64,
+            ..DependentRowsBudget::unlimited()
+        };
+        let st =
+            determine_dependent_rows_budgeted(n_rows, n_cols, &irn, &jcn, &vals, &mut deps, &work);
+        assert_eq!(st, ESymSolverStatus::FatalError);
+        assert_eq!(last_probe_bailout(), Some(ProbeBailout::Work));
+
+        let st = determine_dependent_rows_budgeted(
+            n_rows,
+            n_cols,
+            &irn,
+            &jcn,
+            &vals,
+            &mut deps,
+            &DependentRowsBudget::unlimited(),
+        );
+        assert_eq!(st, ESymSolverStatus::Success);
+        assert_eq!(last_probe_bailout(), None);
+        let mut want = Vec::new();
+        determine_dependent_rows_reference(n_rows, n_cols, &irn, &jcn, &vals, &mut want);
+        assert_eq!(deps, want);
+        assert!(deps.len() >= 100, "{} dependent rows", deps.len());
     }
 
     // ---------------------------------------------------------------

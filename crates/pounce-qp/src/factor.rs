@@ -54,6 +54,10 @@ pub struct LinearSolver {
     rank_guard_calls: u32,
     /// Where this solver's time went; see [`Self::time_split`].
     times: LinsolTimes,
+    /// Whether the most recent factorization failed as `Singular` (a zero
+    /// pivot), as opposed to a wrong inertia count or anything else; see
+    /// [`Self::last_factor_singular`].
+    last_singular: bool,
 }
 
 /// Cumulative wall time a [`LinearSolver`] spent in each kind of linear
@@ -110,6 +114,7 @@ impl LinearSolver {
             factored: false,
             rank_guard_calls: 0,
             times: LinsolTimes::default(),
+            last_singular: false,
         }
     }
 
@@ -145,6 +150,7 @@ impl LinearSolver {
         // backend operation, so a partial failure leaves us in a
         // consistent "no cache" state.
         self.factored = false;
+        self.last_singular = false;
         let started = Instant::now();
         let res = self.factorize_and_solve_inner(kkt, rhs, expected_neg_evals);
         self.times.factor += started.elapsed();
@@ -199,9 +205,12 @@ impl LinearSolver {
                 self.factored = true;
                 Ok(())
             }
-            ESymSolverStatus::Singular => Err(QpError::LinearSolverFailure(
-                "KKT matrix is singular (LICQ violation or rank-deficient Jacobian)".into(),
-            )),
+            ESymSolverStatus::Singular => {
+                self.last_singular = true;
+                Err(QpError::LinearSolverFailure(
+                    "KKT matrix is singular (LICQ violation or rank-deficient Jacobian)".into(),
+                ))
+            }
             ESymSolverStatus::WrongInertia => Err(QpError::LinearSolverFailure(format!(
                 "KKT inertia mismatch: expected {} negative eigenvalues, got {}",
                 expected,
@@ -265,9 +274,56 @@ impl LinearSolver {
         }
     }
 
+    /// Whether the most recent [`Self::factorize_and_solve`] failed because
+    /// the backend found a zero pivot (`Singular`), rather than a wrong
+    /// inertia count. The §4.5 ladders read it to tell a singularity no
+    /// `H`-block shift removes — a rank-deficient constraint block — from
+    /// an indefinite reduced Hessian (gh#1206 B6).
+    pub fn last_factor_singular(&self) -> bool {
+        self.last_singular
+    }
+
     /// Whether a cached factor is currently available.
     pub fn has_cached_factor(&self) -> bool {
         self.factored
+    }
+
+    /// The gh#1206 B6 rank-deficiency probe: does `kkt`, which has just
+    /// failed `Singular` both unshifted and at the first `H`-block shift,
+    /// factor once its live constraint rows carry `−opts.dual_shift_probe`
+    /// on the diagonal ([`KktTriplet::add_dual_shift`])? `true` means the
+    /// singularity is a dependent set of constraint rows, which no `H`-block
+    /// shift repairs — see [`crate::QpOptions::dual_shift_probe`].
+    ///
+    /// Costs one factorization. The regularized factor is discarded, never
+    /// handed out: afterwards there is no cached factor, exactly as after
+    /// the failed attempts that led here, so nothing can back-solve against
+    /// a matrix other than the one its caller assembled.
+    pub(crate) fn probe_rank_deficiency(
+        &mut self,
+        kkt: &KktTriplet,
+        n_h_rows: usize,
+        expected_neg: i32,
+        opts: &crate::options::QpOptions,
+    ) -> Result<bool, QpError> {
+        if opts.dual_shift_probe.is_nan()
+            || opts.dual_shift_probe <= 0.0
+            || kkt.dim < opts.dual_shift_probe_min_dim
+        {
+            return Ok(false);
+        }
+        let mut probe = kkt.clone();
+        if probe.add_dual_shift(n_h_rows, opts.dual_shift_probe) == 0 {
+            return Ok(false);
+        }
+        let mut rhs = vec![0.0; probe.dim];
+        let out = match self.factorize_and_solve(&probe, &mut rhs, Some(expected_neg)) {
+            Ok(()) => Ok(true),
+            Err(QpError::DeadlineExpired) => Err(QpError::DeadlineExpired),
+            Err(_) => Ok(false),
+        };
+        self.factored = false;
+        out
     }
 
     /// How many rank tests the linear-independence guard has run against
@@ -317,6 +373,13 @@ impl LinearSolver {
     /// `n ≈ 15 000` and `≈ 10 800` equalities, gigabytes and `~10¹²` flops
     /// per pass. The probe factors a throwaway matrix, so which backend owns
     /// the KKT factor is irrelevant to it.
+    ///
+    /// Either way the FERAL probe runs under the solve's wall-clock deadline
+    /// ([`pounce_feral::rank_probe_deadline`]) and its own fill and work caps,
+    /// and past any of them reports "could not determine" (gh#1206 B5).
+    /// Unbudgeted, one call on a 1.8·10⁵-dimension augmented system ran for
+    /// more than 2 400 s of CPU and 11.6 GB, past the IPM→SQP handover's
+    /// deadline, which this solver otherwise checks only between its steps.
     pub fn determine_dependent_rows(
         &mut self,
         n_rows: Index,
@@ -326,6 +389,7 @@ impl LinearSolver {
         vals: &[Number],
         c_deps: &mut Vec<Index>,
     ) -> ESymSolverStatus {
+        let _deadline = pounce_feral::rank_probe_deadline(crate::deadline::wall_deadline());
         if self.backend.provides_degeneracy_detection() {
             self.backend
                 .determine_dependent_rows(n_rows, n_cols, irn, jcn, vals, c_deps)

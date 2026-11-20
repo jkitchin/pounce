@@ -50,6 +50,18 @@
 //! default (`1e-6`) is sized for a converged iterate, and at a loosened
 //! tolerance it would call every active bound inactive. A misclassified row
 //! costs pivots in the QP, not correctness.
+//!
+//! That floor also means `crossover_primal_tol` cannot *tighten* the test
+//! during a handover. `ipm_sqp_handover_primal_tol`, when positive, replaces
+//! the rule outright (gh#1206 B4): on a model with many weakly active bounds
+//! between `μ` and `√μ` from their bound, leaving them out of the estimate
+//! can be the better start.
+//!
+//! # Budget
+//!
+//! An attempt may spend `ipm_sqp_handover_time_ratio` times the time the
+//! interior method has spent so far (floor 1 s), capped by the solve's own
+//! budget. The default `1` bounds a declined attempt at a doubling.
 
 use pounce_common::types::{Index, Number};
 
@@ -65,6 +77,13 @@ pub struct HandoverOptions {
     pub stall_iter: Index,
     /// `ipm_sqp_handover_max_attempts`.
     pub max_attempts: u32,
+    /// `ipm_sqp_handover_time_ratio`: an attempt may spend this multiple of
+    /// the time the interior method has spent so far (gh#1206 B2).
+    pub time_ratio: Number,
+    /// `ipm_sqp_handover_primal_tol`: when positive, the identification
+    /// primal tolerance, used as is; `0` means
+    /// [`identification_primal_tol`]'s automatic rule (gh#1206 B4).
+    pub primal_tol: Number,
 }
 
 impl Default for HandoverOptions {
@@ -74,6 +93,8 @@ impl Default for HandoverOptions {
             tol: 1e-4,
             stall_iter: 0,
             max_attempts: 3,
+            time_ratio: 1.0,
+            primal_tol: 0.0,
         }
     }
 }
@@ -172,6 +193,7 @@ mod tests {
             tol,
             stall_iter: stall,
             max_attempts: max,
+            ..HandoverOptions::default()
         })
     }
 

@@ -368,3 +368,401 @@ fn k_max_assembly_matches_the_per_row_scan() {
     assert_eq!(got.jcn, jcn);
     assert_eq!(got.vals, vals);
 }
+
+/// gh#1206 P4 + P5: activating a general row that was inactive at the reset
+/// (the sentinel shortcut `K_0⁻¹ e_p = e_p`, and the row read through the
+/// cached `A` row index), then dropping a slot that was active at the reset
+/// (the back-solve path), must each match a fresh factor of the resulting
+/// K_max.
+#[test]
+fn schur_row_add_then_base_active_drop_match_fresh_factor() {
+    let (h, a, g, bl, bu, xl, xu) = tiny_qp();
+    let qp = QpProblem {
+        n: 2,
+        m: 1,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    // Base: the x₀ bound active, the general row inactive.
+    let mut working = WorkingSet::cold(2, 1);
+    working.bounds[0] = BoundStatus::AtLower;
+    let mut state = SchurState::new(2, 1);
+    let mut ls = linsol();
+    state
+        .reset(&mut ls, &qp, &working, 1, &QpOptions::default())
+        .unwrap();
+
+    let fresh = |w: &WorkingSet, neg: i32, rhs: &[f64]| -> Vec<f64> {
+        let mut st = SchurState::new(2, 1);
+        let mut l = linsol();
+        st.reset(&mut l, &qp, w, neg, &QpOptions::default())
+            .unwrap();
+        let mut r = rhs.to_vec();
+        st.solve(&mut l, &mut r).unwrap();
+        r
+    };
+    let close = |got: &[f64], want: &[f64], what: &str| {
+        for (i, (&a, &b)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "{what} rhs[{i}]: schur={a}, fresh={b}"
+            );
+        }
+    };
+    let rhs0 = [0.3, -0.7, 1.0, 0.25, 0.0];
+
+    // Add the general row (slot 0, inactive at the reset).
+    state.apply_change(&mut ls, &qp, 0, true).unwrap();
+    let mut w1 = working.clone();
+    w1.constraints[0] = ConsStatus::AtLower;
+    let mut got = rhs0.to_vec();
+    state.solve(&mut ls, &mut got).unwrap();
+    close(&got, &fresh(&w1, 2, &rhs0), "after row add");
+
+    // Drop the x₀ bound (slot 1, active at the reset).
+    state.apply_change(&mut ls, &qp, 1, false).unwrap();
+    let mut w2 = w1.clone();
+    w2.bounds[0] = BoundStatus::Inactive;
+    let mut got = rhs0.to_vec();
+    state.solve(&mut ls, &mut got).unwrap();
+    close(&got, &fresh(&w2, 1, &rhs0), "after bound drop");
+}
+
+/// A deterministic xorshift for the randomized Schur tests below.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    /// Uniform in `[-1, 1)`.
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+    }
+    fn below(&mut self, k: usize) -> usize {
+        (self.next() % k as u64) as usize
+    }
+}
+
+/// A random dense QP: `H` symmetric with entries in `[-1, 1)` (indefinite
+/// in general) plus `diag_shift·I`, and a dense `m × n` `A`.
+struct RandomQp {
+    n: usize,
+    m: usize,
+    h: SymTMatrix,
+    a: GenTMatrix,
+    g: Vec<f64>,
+    bl: Vec<f64>,
+    bu: Vec<f64>,
+    xl: Vec<f64>,
+    xu: Vec<f64>,
+}
+
+impl RandomQp {
+    fn new(rng: &mut Rng, n: usize, m: usize, diag_shift: f64) -> Self {
+        let (mut hi, mut hj, mut hv) = (vec![], vec![], vec![]);
+        for i in 0..n {
+            for j in 0..=i {
+                hi.push((i + 1) as i32);
+                hj.push((j + 1) as i32);
+                hv.push(rng.unit() + if i == j { diag_shift } else { 0.0 });
+            }
+        }
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as i32, hi, hj));
+        h.set_values(&hv);
+        let (mut ai, mut aj, mut av) = (vec![], vec![], vec![]);
+        for i in 0..m {
+            for j in 0..n {
+                ai.push((i + 1) as i32);
+                aj.push((j + 1) as i32);
+                av.push(rng.unit());
+            }
+        }
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as i32, n as i32, ai, aj));
+        a.set_values(&av);
+        Self {
+            n,
+            m,
+            h,
+            a,
+            g: vec![0.0; n],
+            bl: vec![-1.0; m],
+            bu: vec![1.0; m],
+            xl: vec![-1.0; n],
+            xu: vec![1.0; n],
+        }
+    }
+
+    fn qp(&self, inertia: HessianInertia) -> QpProblem<'_> {
+        QpProblem {
+            n: self.n,
+            m: self.m,
+            h: &self.h,
+            g: &self.g,
+            a: &self.a,
+            bl: &self.bl,
+            bu: &self.bu,
+            xl: &self.xl,
+            xu: &self.xu,
+            hessian_inertia: inertia,
+        }
+    }
+}
+
+fn set_slot(w: &mut WorkingSet, m: usize, slot: usize, on: bool) {
+    if slot < m {
+        w.constraints[slot] = if on {
+            ConsStatus::AtLower
+        } else {
+            ConsStatus::Inactive
+        };
+    } else {
+        w.bounds[slot - m] = if on {
+            BoundStatus::AtLower
+        } else {
+            BoundStatus::Inactive
+        };
+    }
+}
+
+fn active_count(w: &WorkingSet, m_total: usize) -> usize {
+    (0..m_total)
+        .filter(|&s| SchurState::slot_active(w, s))
+        .count()
+}
+
+/// Factor K_max for `w` afresh, unshifted and with no inertia check, and
+/// return the solution of `K rhs` together with the factor's negative
+/// eigenvalue count (`None` when the backend calls it singular).
+fn fresh_k_max(qp: &QpProblem, w: &WorkingSet, rhs: &[f64]) -> Option<(Vec<f64>, i32)> {
+    let s = SchurState::new(qp.n, qp.m);
+    let active: Vec<bool> = (0..qp.m + qp.n)
+        .map(|slot| SchurState::slot_active(w, slot))
+        .collect();
+    let kkt = s.build_k_max_triplet(qp, &active);
+    let mut l = linsol();
+    let mut x = rhs.to_vec();
+    l.factorize_and_solve(&kkt, &mut x, None).ok()?;
+    Some((x, l.number_of_neg_evals().unwrap()))
+}
+
+/// gh#1206 P3: the Schur layer stores `u = e_p` by index and `v` by its
+/// nonzeros. Over random add/drop sequences on random indefinite QPs, every
+/// SMW solve must still match a fresh factor of the K_max it represents.
+#[test]
+fn sparse_schur_updates_match_fresh_factors_over_random_sequences() {
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let opts = QpOptions::default();
+    let mut checked = 0;
+    for trial in 0..20 {
+        let (n, m) = (5 + trial % 4, 2 + trial % 3);
+        let rq = RandomQp::new(&mut rng, n, m, 2.0);
+        let qp = rq.qp(HessianInertia::Indefinite);
+        let m_total = m + n;
+        let mut w = WorkingSet::cold(n, m);
+        for _ in 0..rng.below(3) {
+            set_slot(&mut w, m, rng.below(m_total), true);
+        }
+        let mut state = SchurState::new(n, m);
+        let mut ls = linsol();
+        let ac = active_count(&w, m_total);
+        if state.reset(&mut ls, &qp, &w, ac as i32, &opts).is_err() || state.shift() != 0.0 {
+            continue;
+        }
+        for _ in 0..8 {
+            let slot = rng.below(m_total);
+            let on = !SchurState::slot_active(&w, slot);
+            if on && active_count(&w, m_total) + 1 >= n {
+                continue;
+            }
+            state.apply_change(&mut ls, &qp, slot, on).unwrap();
+            set_slot(&mut w, m, slot, on);
+            let rhs: Vec<f64> = (0..n + m_total).map(|_| rng.unit()).collect();
+            let Some((want, _)) = fresh_k_max(&qp, &w, &rhs) else {
+                continue;
+            };
+            let mut got = rhs.clone();
+            if state.solve(&mut ls, &mut got).is_err() {
+                continue;
+            }
+            let scale = want.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+            for (i, (&a, &b)) in got.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() <= 1e-8 * scale,
+                    "trial {trial} rhs[{i}]: schur={a}, fresh={b}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 40, "only {checked} solves compared");
+}
+
+/// gh#1206 P3: what one change stores is the update's nonzeros, not two
+/// dense columns of length `dim` (plus copies): two entries for a bound,
+/// the row's nonzeros plus the diagonal correction for a general row.
+#[test]
+fn a_schur_update_stores_only_its_nonzeros() {
+    let mut rng = Rng(7);
+    let (n, m) = (6, 3);
+    let rq = RandomQp::new(&mut rng, n, m, 4.0);
+    let qp = rq.qp(HessianInertia::Psd);
+    let w = WorkingSet::cold(n, m);
+    let mut state = SchurState::new(n, m);
+    let mut ls = linsol();
+    state
+        .reset(&mut ls, &qp, &w, 0, &QpOptions::default())
+        .unwrap();
+    state.apply_change(&mut ls, &qp, m + 2, true).unwrap();
+    assert_eq!(state.stored_update_entries(), (1, 2));
+    state.apply_change(&mut ls, &qp, 1, true).unwrap();
+    assert_eq!(state.stored_update_entries(), (2, 2 + n + 1));
+}
+
+/// gh#1206 P1: the inertia of `K_W = K_0 + UVᵀ` read off the base factor
+/// and the Schur block (`neg(K_W) = neg(K_0) + pos(C·S) − k`) must equal
+/// the inertia of a fresh factorization of the same K_max, over random
+/// indefinite QPs and random add/drop sequences — including the sequences
+/// whose `K_W` has the *wrong* inertia for its working set, which are the
+/// ones the drop test exists to catch.
+#[test]
+fn haynsworth_inertia_matches_fresh_factor_inertia() {
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let opts = QpOptions::default();
+    let (mut compared, mut declined, mut wrong_for_w, mut right_for_w) = (0, 0, 0, 0);
+    for trial in 0..60 {
+        let (n, m) = (4 + trial % 5, 1 + trial % 4);
+        // Diagonal shift 0: H is genuinely indefinite.
+        let rq = RandomQp::new(&mut rng, n, m, 0.0);
+        let qp = rq.qp(HessianInertia::Indefinite);
+        let m_total = m + n;
+        let mut w = WorkingSet::cold(n, m);
+        for _ in 0..rng.below(n) {
+            set_slot(&mut w, m, rng.below(m_total), true);
+        }
+        let zero = vec![0.0; n + m_total];
+        let Some((_, neg0)) = fresh_k_max(&qp, &w, &zero) else {
+            continue;
+        };
+        // Reset against the base's *actual* inertia, so K_0 is unshifted
+        // whatever its working set's reduced Hessian looks like.
+        let mut state = SchurState::new(n, m);
+        let mut ls = linsol();
+        if state.reset(&mut ls, &qp, &w, neg0, &opts).is_err() || state.shift() != 0.0 {
+            continue;
+        }
+        assert_eq!(state.updated_neg_evals(), Some(neg0));
+        for _ in 0..10 {
+            let slot = rng.below(m_total);
+            let on = !SchurState::slot_active(&w, slot);
+            if on && active_count(&w, m_total) >= n {
+                continue;
+            }
+            state.apply_change(&mut ls, &qp, slot, on).unwrap();
+            set_slot(&mut w, m, slot, on);
+            let Some((_, fresh_neg)) = fresh_k_max(&qp, &w, &zero) else {
+                // Singular: Haynsworth must not claim a count either.
+                assert_eq!(state.updated_neg_evals(), None, "trial {trial}");
+                continue;
+            };
+            match state.updated_neg_evals() {
+                Some(neg) => {
+                    assert_eq!(neg, fresh_neg, "trial {trial}: Haynsworth vs fresh factor");
+                    compared += 1;
+                    if neg == active_count(&w, m_total) as i32 {
+                        right_for_w += 1;
+                    } else {
+                        wrong_for_w += 1;
+                    }
+                }
+                None => declined += 1,
+            }
+        }
+    }
+    assert!(
+        compared >= 200,
+        "only {compared} counts compared ({declined} declined)"
+    );
+    assert!(
+        declined * 10 <= compared,
+        "{declined} declined of {compared}"
+    );
+    // Both branches of the solver's drop test are exercised.
+    assert!(
+        right_for_w >= 20 && wrong_for_w >= 20,
+        "{right_for_w} right / {wrong_for_w} wrong"
+    );
+}
+
+/// gh#1206 P7: `SchurState::for_problem` gives bound slots only to variables
+/// with a finite bound, so a QP with free variables gets a smaller K_max,
+/// and over random add/drop sequences every SMW solve — right-hand side and
+/// solution in the full `n + m + n` layout — matches a fresh factor of the
+/// full K_max, free variables' sentinel rows included.
+#[test]
+fn free_variables_get_no_k_max_slot_and_solves_are_unchanged() {
+    let mut rng = Rng(0x0dd_ba11_cafe_f00d);
+    let opts = QpOptions::default();
+    let mut checked = 0;
+    for trial in 0..20 {
+        let (n, m) = (6 + trial % 3, 2 + trial % 3);
+        let mut rq = RandomQp::new(&mut rng, n, m, 3.0);
+        // Every other variable free.
+        let free: Vec<usize> = (0..n).filter(|j| j % 2 == 1).collect();
+        for &j in &free {
+            rq.xl[j] = pounce_common::types::NLP_LOWER_BOUND_INF;
+            rq.xu[j] = pounce_common::types::NLP_UPPER_BOUND_INF;
+        }
+        let qp = rq.qp(HessianInertia::Indefinite);
+        let m_total = m + n;
+        let mut state = SchurState::for_problem(&qp);
+        assert_eq!(state.dim, n + m + n - free.len(), "trial {trial}");
+        assert_eq!(SchurState::new(n, m).dim, n + m + n);
+        let slottable: Vec<usize> = (0..m_total)
+            .filter(|&s| s < m || !free.contains(&(s - m)))
+            .collect();
+        let mut w = WorkingSet::cold(n, m);
+        let mut ls = linsol();
+        if state.reset(&mut ls, &qp, &w, 0, &opts).is_err() || state.shift() != 0.0 {
+            continue;
+        }
+        // A free variable has no bound to flip.
+        assert!(state.apply_change(&mut ls, &qp, m + free[0], true).is_err());
+        for _ in 0..8 {
+            let slot = slottable[rng.below(slottable.len())];
+            let on = !SchurState::slot_active(&w, slot);
+            if on && active_count(&w, m_total) + 1 >= n {
+                continue;
+            }
+            state.apply_change(&mut ls, &qp, slot, on).unwrap();
+            set_slot(&mut w, m, slot, on);
+            let rhs: Vec<f64> = (0..n + m_total).map(|_| rng.unit()).collect();
+            let Some((want, _)) = fresh_k_max(&qp, &w, &rhs) else {
+                continue;
+            };
+            let mut got = rhs.clone();
+            if state.solve(&mut ls, &mut got).is_err() {
+                continue;
+            }
+            let scale = want.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+            for (i, (&a, &b)) in got.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() <= 1e-8 * scale,
+                    "trial {trial} rhs[{i}]: schur={a}, fresh full K_max={b}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 40, "only {checked} solves compared");
+}

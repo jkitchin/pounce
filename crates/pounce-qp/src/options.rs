@@ -120,6 +120,58 @@ pub struct QpOptions {
     pub inertia_shift_factor: Number,
     pub inertia_max_shifts: u32,
 
+    /// The `−δ_c·I` dual shift of the rank-deficiency probe (gh#1206 B6); 0
+    /// turns the probe off.
+    ///
+    /// A shift `δ·I` on the `H` block cannot remove a singularity that comes
+    /// from dependent *constraint* rows — `[H + δI, Aᵀ; A, 0]` is singular
+    /// for every `δ` when `A` is rank-deficient — so on an LICQ failure the
+    /// ladder used to climb all `inertia_max_shifts` rungs (to `1e14`, one
+    /// numeric factorization each) before reporting the failure its callers
+    /// answer by pruning the working set to an independent subset. Now, when
+    /// the unshifted KKT and the first rung both fail `Singular`, one more
+    /// factorization tries the first rung with `−δ_c` on the diagonal of
+    /// every live constraint row, as the interior point regularizes its
+    /// Jacobian block. If that factors with the right inertia the
+    /// singularity is a rank deficiency, and the ladder reports it at once.
+    ///
+    /// The regularized factor is a **diagnosis only**, never a step: its
+    /// solution has `A_W p = δ_c λ` rather than `A_W p = 0`, so stepping on
+    /// it would move the iterate off its own active rows, and its multipliers
+    /// are one arbitrary split among dependent rows — not something to drop
+    /// or certify optimality on. The callers' prune is what makes the working
+    /// set independent again.
+    pub dual_shift_probe: Number,
+
+    /// KKT dimension (`kkt.dim`, not `n + m`) from which the
+    /// [`Self::dual_shift_probe`] runs (gh#1206 B6). Below it the ladder
+    /// climbs as it always did. **Default `usize::MAX`: the probe is off
+    /// unless a caller lowers this.**
+    ///
+    /// It was on by default from 5000 and that was wrong. On Maros-Meszaros
+    /// BOYD2 (93 263 variables) under `solver_selection=qp-active-set`, the
+    /// probe's factorization aborted the process: the `−δ_c` entries it adds
+    /// on the constraint rows are new pattern entries, FERAL re-analysed and
+    /// asked for a 55.7 GB dense front (`memory allocation of 55729914368
+    /// bytes failed`; on a machine with more memory, minutes inside one
+    /// uninterruptible factorization, past `max_wall_time`). Bisected by
+    /// switching items off one at a time: only B6 off restores `main`'s
+    /// clean `MaximumWallTimeExceeded` at 150 s. A probe that can change the
+    /// pattern can change the fill without bound, and nothing before the
+    /// numeric factorization bounds it, so it stays opt-in until it can
+    /// reuse the existing pattern or check the predicted fill first.
+    ///
+    /// Swept ungated over the CLI fixtures under
+    /// `solver_selection=qp-active-set`, the probe lost Maros-Meszaros
+    /// QGFRDXPN (`Optimal`/3553 → `MaxIter`/41395 on both legs): the
+    /// degenerate phase-1 sets the old ladder "factored" at a masking
+    /// `δ ≈ 1e6` are now reported, the rank repair prunes them, and pruning
+    /// at those vertices is the cycle gh#1076 describes. A climb costs
+    /// thirteen factorizations, which on a small KKT is nothing and on
+    /// gh#1206's (4.8 s each) is a minute; the corpus has no QP at the size
+    /// that matters.
+    pub dual_shift_probe_min_dim: usize,
+
     /// Opt in to the §4.2 sparse Schur-complement update path in
     /// `solve_general`. When `true`, the inner loop uses a cached
     /// factor of the fixed-dim K_max matrix and absorbs working-
@@ -130,6 +182,35 @@ pub struct QpOptions {
     /// KKT and factors from scratch — algorithmically correct,
     /// noticeably slower on large warm-started workloads.
     pub use_schur_updates: bool,
+
+    /// On a Hessian not known PSD, let a Schur-path **drop** take the cheap
+    /// rank-2 update when the updated KKT's inertia, read off the base
+    /// factor and the small Schur block by Haynsworth additivity
+    /// ([`crate::schur::SchurState::updated_neg_evals`]), is the one the new
+    /// working set needs (gh#1206 P1). When `false`, or when the count is
+    /// wrong or cannot be settled, every such drop refactorizes under §4.5
+    /// inertia control, as before. No effect on a PSD Hessian, whose drops
+    /// always take the update.
+    pub schur_drop_inertia_test: bool,
+
+    /// Seed the l1-elastic phase 1 at the pinned warm-start point, not at
+    /// the origin, when [`crate::QpSolver::solve_with_working_set`]'s hint
+    /// pins to an infeasible point the pin repair cannot rescue (gh#1206
+    /// B7). The hint's rows are at their boundaries there, so the phase
+    /// starts with them in its working set instead of rebuilding them one
+    /// pivot at a time.
+    ///
+    /// **Off by default**, on measurement. On a hint that pins a full vertex
+    /// one row away from the optimum it is 2 working-set changes against 62
+    /// (`tests/warm_start_failed_repair_seeds_elastic.rs`), but on #428's MPC
+    /// sweep (`tests/warm_start_pin_repair.rs`, horizon 40, step −0.2) —
+    /// the same repair-declined branch — the seeded phase took 111 pivots
+    /// where the origin-seeded one takes 14: started at the vertex, the
+    /// Bland-ruled phase 1 releases the hint's wrong bounds one lowest-index
+    /// pivot at a time. Dropping Bland for the seeded phase reached a point
+    /// 8e-8 below the cold optimum, i.e. not feasible to tolerance. See
+    /// `dev-notes/known-limitations.md`.
+    pub elastic_seed_from_hint: bool,
 
     /// Trace the §4.2 parametric homotopy on a **cold** solve instead of
     /// starting the conventional phase-1/phase-2 scheme.
@@ -316,7 +397,11 @@ impl Default for QpOptions {
             inertia_shift_initial: 1e-8,
             inertia_shift_factor: 100.0,
             inertia_max_shifts: 12,
+            dual_shift_probe: 1e-8,
+            dual_shift_probe_min_dim: usize::MAX,
             use_schur_updates: false,
+            schur_drop_inertia_test: true,
+            elastic_seed_from_hint: false,
             use_homotopy: false,
             expand_tol_initial: 1e-12,
             expand_tol_growth: 1e-11,

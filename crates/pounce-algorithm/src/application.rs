@@ -4457,6 +4457,18 @@ impl IpoptApplication {
         {
             o.max_attempts = v.max(0) as u32;
         }
+        if let Ok((v, true)) = self
+            .options
+            .get_numeric_value("ipm_sqp_handover_time_ratio", "")
+        {
+            o.time_ratio = v;
+        }
+        if let Ok((v, true)) = self
+            .options
+            .get_numeric_value("ipm_sqp_handover_primal_tol", "")
+        {
+            o.primal_tol = v;
+        }
         o
     }
 
@@ -4478,6 +4490,7 @@ impl IpoptApplication {
         if !hopts.enabled {
             return None;
         }
+        let (time_ratio, handover_primal_tol) = (hopts.time_ratio, hopts.primal_tol);
         let mut trigger = crate::handover::HandoverTrigger::new(hopts);
         let xopts = crate::crossover::CrossoverOptions {
             enabled: true,
@@ -4505,16 +4518,23 @@ impl IpoptApplication {
             }
             let seed = crossover_seed(&nlp, curr);
             let x = crate::crossover::CrossoverOptions {
-                primal_tol: crate::handover::identification_primal_tol(xopts.primal_tol, mu),
+                primal_tol: if handover_primal_tol > 0.0 {
+                    handover_primal_tol
+                } else {
+                    crate::handover::identification_primal_tol(xopts.primal_tol, mu)
+                },
                 ..xopts.clone()
             };
-            // An attempt may spend at most what the interior method has
-            // spent so far (floor 1 s), and never past the solve's own
-            // budget. Without a cap a declined attempt is unbounded: on
-            // `deb7` (813 variables) one ran the crossover fallback for
-            // minutes, against a 114-iteration interior solve. With it, a
-            // declined attempt costs at most a doubling — the right scale
-            // for a bet on shortening the tail.
+            // An attempt may spend at most `ipm_sqp_handover_time_ratio`
+            // times what the interior method has spent so far (floor 1 s),
+            // and never past the solve's own budget. Without a cap a
+            // declined attempt is unbounded: on `deb7` (813 variables) one
+            // ran the crossover fallback for minutes, against a 114-iteration
+            // interior solve. With the default ratio 1, a declined attempt
+            // costs at most a doubling — the right scale for a bet on
+            // shortening the tail. gh#1206 made the ratio an option: a
+            // crossover that converges but needs longer was declined as a
+            // time limit with no way to allow it.
             let (wall_left, cpu_left) = data
                 .borrow()
                 .deadline
@@ -4522,8 +4542,11 @@ impl IpoptApplication {
                 .map_or((Number::INFINITY, Number::INFINITY), |d| {
                     (d.remaining_wall(), d.remaining_cpu())
                 });
-            let spent_wall = (pounce_common::utils::wallclock_time() - wall0).max(1.0);
-            let spent_cpu = (pounce_common::utils::cpu_time() - cpu0).max(1.0);
+            // The 1 s floor applies to the budget, after the ratio, as the
+            // option documents: a ratio below 1 must not take it under 1 s.
+            let spent_wall =
+                (time_ratio * (pounce_common::utils::wallclock_time() - wall0)).max(1.0);
+            let spent_cpu = (time_ratio * (pounce_common::utils::cpu_time() - cpu0)).max(1.0);
             let sqp_opts = crate::sqp::SqpOptions {
                 deadline: Some(pounce_common::timing::Deadline::new(
                     spent_wall.min(wall_left),
@@ -4718,6 +4741,12 @@ impl IpoptApplication {
         }
         if let Ok((v, true)) = self.options.get_numeric_value("crossover_primal_tol", "") {
             o.primal_tol = v;
+        }
+        if let Ok((v, true)) = self
+            .options
+            .get_numeric_value("crossover_stabilization", "")
+        {
+            o.stabilization = v;
         }
         o
     }
@@ -10451,6 +10480,12 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
     if let Ok((v, true)) = options.get_integer_value("sqp_dense_hessian_max_n", "") {
         opts.dense_hessian_max_n = usize::try_from(v).unwrap_or(0);
     }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_proximal", "") {
+        opts.proximal = v;
+    }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_local_phase_tol", "") {
+        opts.local_phase_tol = v;
+    }
 }
 
 /// Populate the active-set SQP **QP-subproblem** options
@@ -11073,6 +11108,28 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// gh#1206 B2/B4: the two new handover options are registered and read,
+    /// and their defaults reproduce the previous behaviour (ratio 1, primal
+    /// tolerance 0 = the automatic `max(crossover_primal_tol, √μ)` rule).
+    #[test]
+    fn handover_time_ratio_and_primal_tol_are_read() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        let o = app.handover_options();
+        assert_eq!(o.time_ratio, 1.0);
+        assert_eq!(o.primal_tol, 0.0);
+
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str(
+            "ipm_sqp_handover_time_ratio 10\nipm_sqp_handover_primal_tol 1e-5\n",
+        )
+        .unwrap();
+        let o = app.handover_options();
+        assert_eq!(o.time_ratio, 10.0);
+        assert_eq!(o.primal_tol, 1e-5);
     }
 
     #[test]

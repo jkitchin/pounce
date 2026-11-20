@@ -224,8 +224,15 @@ impl SqpAlgorithm {
         // Schur updates likewise follow the size when the caller left them
         // to the driver (`SqpOptions::step_qp_schur_updates`). This is the
         // cold rule; a warm-started step QP may override it (`warm_qp_opts`).
-        let saved = (self.qp_opts.max_iter, self.qp_opts.use_schur_updates);
+        let saved = (
+            self.qp_opts.max_iter,
+            self.qp_opts.use_schur_updates,
+            self.qp_opts.max_stall_iters,
+        );
         self.qp_opts.max_iter = step_qp_iter_budget(saved.0, nlp.n(), nlp.m());
+        if self.qp_opts.max_stall_iters.is_none() {
+            self.qp_opts.max_stall_iters = self.opts.step_qp_max_stall_iters;
+        }
         if let Some(on) = self.opts.step_qp_schur_updates(nlp.n() + nlp.m(), None) {
             self.qp_opts.use_schur_updates = on;
         }
@@ -235,7 +242,11 @@ impl SqpAlgorithm {
             .is_some_and(|d| nlp.n() + nlp.m() >= d);
         self.ipm_seed.last_iters.set(None);
         let res = self.optimize_inner(nlp, warm);
-        (self.qp_opts.max_iter, self.qp_opts.use_schur_updates) = saved;
+        (
+            self.qp_opts.max_iter,
+            self.qp_opts.use_schur_updates,
+            self.qp_opts.max_stall_iters,
+        ) = saved;
         res
     }
 
@@ -450,6 +461,13 @@ impl SqpAlgorithm {
         const MAX_SECOND_ORDER_ESCAPES: u32 = 8;
         let mut escapes: u32 = 0;
 
+        // `sqp_proximal` (gh#1206): the previous step QP's Hessian (without
+        // its own proximal term) and the term it used, from which the next
+        // one is set. Kept only when the option is on.
+        let proximal_on = self.opts.proximal > 0.0 && !lift_lbfgs;
+        let mut prox_prev_b: Option<Triplet> = None;
+        let mut rho: Number = 0.0;
+
         for outer in 0..self.opts.max_iter {
             let grad_f = nlp.eval_grad_f(&iter.x);
             let c_vals = c_cached.take().unwrap_or_else(|| nlp.eval_c(&iter.x));
@@ -558,6 +576,29 @@ impl SqpAlgorithm {
                     unreachable!("resolved at the top of the solve")
                 }
             };
+
+            // `sqp_proximal`: measure the previous model along the step just
+            // taken, before `prev_point` moves on to this iterate.
+            if proximal_on {
+                rho = match (
+                    prox_prev_b.as_ref(),
+                    curvature_pair(prev_point.as_ref(), &iter, &grad_f, &jac_c, n),
+                ) {
+                    (Some(b), Some((s, y))) => {
+                        let free = free_variable_mask(iter.working.as_ref(), n);
+                        let me = model_error(b, &s, &y, &free);
+                        let next = next_proximal(self.opts.proximal, me.e, rho);
+                        tracing::debug!(target: "pounce::sqp",
+                            "iter {outer}: model error |Bs-y|/|y| = {:.3e} (free: {:.3e}), \
+                             sBs/sy = {:.3e}, e_k = {:.3e}, |s| = {:.3e}, rho_k = {next:.3e} \
+                             (gh#1206)",
+                            me.rel_all, me.rel_free, me.sbs_over_sy, me.e, me.s_norm);
+                        next
+                    }
+                    _ => 0.0,
+                };
+                prox_prev_b = Some(hess_lag.clone());
+            }
 
             // Remember this iterate's `(x, ∇f, ∇c)` so the next
             // iteration can build its curvature pair at a fixed
@@ -812,9 +853,32 @@ impl SqpAlgorithm {
                     &xl,
                     &xu,
                     jac_c,
-                    hess_lag,
+                    // The proximal term goes on the QP's copy only: the
+                    // negative-curvature check above has already seen the
+                    // unshifted Hessian, and the next model-error measure
+                    // needs it too.
+                    add_diagonal(
+                        hess_lag,
+                        if in_local_phase(
+                            self.opts.local_phase_tol,
+                            kkt.stationarity.max(kkt.constr_viol),
+                        ) {
+                            rho
+                        } else {
+                            0.0
+                        },
+                    ),
                     self.hessian_inertia(),
                 ),
+            };
+            // A crossover's step 4 after a stabilized step 3 (gh#1206; see
+            // `SqpOptions::stabilization`): σ_k = min(σ_max, KKT residual).
+            let qp_data = match crate::crossover::stabilization_sigma(
+                self.opts.stabilization,
+                kkt.stationarity.max(kkt.constr_viol),
+            ) {
+                Some(sigma) if low_rank.is_none() => qp_data.stabilize(sigma, &iter.lambda_g),
+                _ => qp_data,
             };
 
             // Scale-relative inner-QP tolerances (issue #358 tail).
@@ -1826,6 +1890,105 @@ pub(crate) struct KktError {
 /// stationary point of the violation from passing for one.
 const ELASTIC_STEP_MIN_GAIN: Number = 1e-6;
 
+/// Whether an iterate with KKT residual `residual` is in the **local
+/// phase** (`sqp_local_phase_tol`), where `sqp_proximal` applies (gh#1206).
+///
+/// The proximal term's model error is, for an exact Hessian, the Taylor
+/// remainder along the step, which is large on a long one, so far from a
+/// solution the term would shrink every step. Measured on the fixture corpus
+/// under `algorithm=active-set-sqp` with `ρ_max = 1e2`, applying it from the
+/// first iterate made `cresc4`, `cute_hs99exp`, `cute_palmer8e`, `dallass`
+/// and `hs13_bigstart` run out of iterations or stall on short steps.
+pub(crate) fn in_local_phase(local_phase_tol: Number, residual: Number) -> bool {
+    residual.is_finite() && residual <= local_phase_tol
+}
+
+/// `h + δI` for a symmetric triplet `h` (`δ` appended as extra diagonal
+/// entries, which the QP assembly sums). `δ ≤ 0` returns `h` unchanged.
+pub(crate) fn add_diagonal(mut h: Triplet, delta: Number) -> Triplet {
+    if delta > 0.0 && delta.is_finite() {
+        for i in 0..h.n_rows {
+            h.irow.push(i as Index + 1);
+            h.jcol.push(i as Index + 1);
+            h.vals.push(delta);
+        }
+    }
+    h
+}
+
+/// `true` for each variable not held at a bound by `working` (all of them
+/// when there is no working set yet).
+pub(crate) fn free_variable_mask(working: Option<&WorkingSet>, n: usize) -> Vec<bool> {
+    match working {
+        Some(w) => (0..n)
+            .map(|j| !w.bounds.get(j).is_some_and(|b| b.is_active()))
+            .collect(),
+        None => vec![true; n],
+    }
+}
+
+/// How well the Hessian model `b` predicted the gradient change `y` along
+/// the step `s` (gh#1206's `sqp_proximal`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ModelError {
+    /// `|Bs − y| / |y|` over every variable.
+    pub rel_all: Number,
+    /// `|P(Bs − y)| / |Py|`, `P` the free-variable mask.
+    pub rel_free: Number,
+    /// `sᵀBs / sᵀy`: above 1 the model over-estimates the curvature along
+    /// the step.
+    pub sbs_over_sy: Number,
+    /// `e = |P(Bs − y)| / |Ps|`, the error per unit step that sets `ρ`.
+    pub e: Number,
+    /// `|s|`.
+    pub s_norm: Number,
+}
+
+/// Measure [`ModelError`] for the symmetric triplet `b` (either triangle, or
+/// both: off-diagonal entries are applied to `(i, j)` and `(j, i)`, as the
+/// QP assembly reads them).
+pub(crate) fn model_error(b: &Triplet, s: &[Number], y: &[Number], free: &[bool]) -> ModelError {
+    let n = s.len();
+    let mut bs = vec![0.0; n];
+    for k in 0..b.vals.len() {
+        let (i, j) = ((b.irow[k] - 1) as usize, (b.jcol[k] - 1) as usize);
+        bs[i] += b.vals[k] * s[j];
+        if i != j {
+            bs[j] += b.vals[k] * s[i];
+        }
+    }
+    let norm = |f: &dyn Fn(usize) -> Number, mask: bool| -> Number {
+        (0..n)
+            .filter(|&i| !mask || free[i])
+            .map(|i| f(i) * f(i))
+            .sum::<Number>()
+            .sqrt()
+    };
+    let r = |i: usize| bs[i] - y[i];
+    let (r_all, r_free) = (norm(&r, false), norm(&r, true));
+    let (y_all, y_free) = (norm(&|i| y[i], false), norm(&|i| y[i], true));
+    let s_free = norm(&|i| s[i], true);
+    let div = |a: Number, b: Number| if b > 0.0 { a / b } else { 0.0 };
+    let sbs: Number = (0..n).map(|i| s[i] * bs[i]).sum();
+    let sy: Number = (0..n).map(|i| s[i] * y[i]).sum();
+    ModelError {
+        rel_all: div(r_all, y_all),
+        rel_free: div(r_free, y_free),
+        sbs_over_sy: if sy != 0.0 { sbs / sy } else { Number::NAN },
+        e: div(r_free, s_free),
+        s_norm: norm(&|i| s[i], false),
+    }
+}
+
+/// `ρ_k = min(ρ_max, max(e_k, ρ_{k−1}/4))`: follows a growing model error at
+/// once and decays by a factor 4 per iteration once the model is accurate,
+/// so it vanishes and the local rate of an accurate model is kept. A
+/// non-finite `e_k` keeps the previous term.
+pub(crate) fn next_proximal(rho_max: Number, e: Number, rho_prev: Number) -> Number {
+    let e = if e.is_finite() { e } else { rho_prev };
+    rho_max.min(e.max(0.25 * rho_prev)).max(0.0)
+}
+
 /// ℓ1 violation of the step QP's own rows and bounds at step `d`: the
 /// linearization `c(x_k) + J d` against the row bounds, and `x_k + d` against
 /// the variable bounds, both as the QP poses them (shifted to step space).
@@ -2319,7 +2482,7 @@ fn negative_curvature_at_kkt_point(
 /// `pounce_convex::active_set` scales the direct driver's (10 per variable
 /// and row, floor 200, ceiling 200 000), and like there an explicitly set
 /// `sqp_qp_max_iter` — anything but the default — wins.
-fn step_qp_iter_budget(current: u32, n: usize, m: usize) -> u32 {
+pub(crate) fn step_qp_iter_budget(current: u32, n: usize, m: usize) -> u32 {
     const DEFAULT_MAX_ITER: u32 = 200;
     const PER_DIM: usize = 10;
     if current != DEFAULT_MAX_ITER {
@@ -2391,6 +2554,48 @@ pub(crate) fn solve_subproblem_qp(
     let started = std::time::Instant::now();
     let guards_before = solver.rank_guard_calls();
     let split_before = solver.linsol_time_split();
+    // A stabilized subproblem (gh#1206) starts from its own feasible point
+    // satisfying the working set — the warm one, or the equality rows on a
+    // cold start — so it needs neither the interior-point seed nor the pinned
+    // solve, hint repair or elastic phase 1 of a working-set start. One that
+    // does not end `Optimal` falls back to the standard subproblem.
+    let stabilized = data
+        .stabilized_start(
+            &warm
+                .cloned()
+                .unwrap_or_else(|| WorkingSet::cold(data.n, data.m)),
+            qp.bl,
+            qp.bu,
+        )
+        .zip(data.as_standard_qp(qp.bl, qp.bu));
+    if let Some((start, standard)) = stabilized {
+        let sol = solver.solve(&qp, Some(&start), opts);
+        let elapsed = started.elapsed();
+        match &sol {
+            Ok(s) => tracing::debug!(target: "pounce::sqp::qp",
+                "{kind} (n={}, m={}, warm={}, stabilized σ={:.3e}): {} in {:.3?}, \
+                 {} working-set changes, {} refactors, {} Schur updates, {} rank tests, \
+                 phase1={}",
+                qp.n, qp.m, warm.is_some(), data.stabilization().unwrap_or(0.0), s.status,
+                elapsed, s.stats.n_working_set_changes, s.stats.n_refactor,
+                s.stats.n_schur_updates, solver.rank_guard_calls() - guards_before,
+                s.stats.used_phase1),
+            Err(e) => tracing::debug!(target: "pounce::sqp::qp",
+                "{kind} (n={}, m={}, stabilized): error {e:?} after {elapsed:.3?}", qp.n, qp.m),
+        }
+        return match sol {
+            Ok(s) if s.status == QpStatus::Optimal => Ok(data.unlift_solution(s)),
+            other => {
+                tracing::debug!(target: "pounce::sqp::qp",
+                    "{kind}: stabilized QP ended {:?}; solving the standard subproblem",
+                    other.as_ref().map(|s| s.status));
+                match warm {
+                    Some(w) => solver.solve_with_working_set(&standard, w, opts),
+                    None => solver.solve(&standard, None, opts),
+                }
+            }
+        };
+    }
     let seeded = match (warm, seed) {
         (None, Some(seed)) => ipm_seeded_step_qp(solver, &qp, data.hess_inf, opts, seed),
         _ => None,
