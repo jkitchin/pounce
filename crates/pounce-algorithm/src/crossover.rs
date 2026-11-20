@@ -598,13 +598,13 @@ where
     // singular, and the step-3 QP otherwise went to a hint repair that gives
     // up and a cold elastic phase 1 that crawls. Stabilized, it starts from a
     // feasible point satisfying the estimate exactly.
-    let sigma = sqp_opts
-        .stabilization
-        .min(kkt_before.stationarity.max(kkt_before.constr_viol));
-    let qp_data = if sqp_opts.stabilization > 0.0 && sigma > 0.0 {
-        qp_data.stabilize(sigma, &seed.lambda_g)
-    } else {
-        qp_data
+    let qp_data = match crate::sqp::sqp_alg::stabilization_sigma(
+        sqp_opts.stabilization,
+        sqp_opts.local_phase_tol,
+        kkt_before.stationarity.max(kkt_before.constr_viol),
+    ) {
+        Some(sigma) => qp_data.stabilize(sigma, &seed.lambda_g),
+        None => qp_data,
     };
     let qp = qp_data.as_qp();
     // The step-3 QP gets whatever the solve has left (gh#1054); a QP that
@@ -641,9 +641,18 @@ where
     let mut qp_solver = ParametricActiveSetSolver::new(make_backend());
     let eqp_started = std::time::Instant::now();
     let eqp = match qp_data.stabilized_start(&working, qp.bl, qp.bu) {
-        Some(start) => qp_solver
-            .solve(&qp, Some(&start), &eqp_opts)
-            .map(|sol| qp_data.unlift_solution(sol)),
+        Some(start) => match qp_solver.solve(&qp, Some(&start), &eqp_opts) {
+            Ok(sol) if sol.status == QpStatus::Optimal => Ok(qp_data.unlift_solution(sol)),
+            // As in the SQP's step QPs: a stabilized QP that does not solve
+            // falls back to the standard one.
+            _ => qp_solver.solve_with_working_set(
+                &qp_data
+                    .as_standard_qp(qp.bl, qp.bu)
+                    .expect("a stabilized subproblem keeps its standard form"),
+                &working,
+                &eqp_opts,
+            ),
+        },
         None => qp_solver.solve_with_working_set(&qp, &working, &eqp_opts),
     };
     n_qp_solves += 1;

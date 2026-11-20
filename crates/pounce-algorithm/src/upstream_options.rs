@@ -732,7 +732,9 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          starts from a feasible point that satisfies its working set exactly, \
          so it never enters the elastic phase 1. Costs m extra QP variables \
          (one per row). Not applied to the lifted limited-memory Hessian \
-         (sqp_dense_hessian_max_n). Default 0 (off); gh#1206 used 1e-4.",
+         (sqp_dense_hessian_max_n). Applied only within \"sqp_local_phase_tol\"; \
+         a stabilized QP that does not solve falls back to the standard one. \
+         Default 0 (off); gh#1206 used 1e-4.",
     )?;
     r.add_lower_bounded_number_option(
         "sqp_proximal",
@@ -751,7 +753,24 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          black-box model). Added after the negative-curvature checks, so it \
          hides no indefiniteness from them; not applied to the lifted \
          limited-memory Hessian. The model error is logged at debug level \
-         under pounce::sqp every iteration. Default 0 (off); gh#1206 used 1e2.",
+         under pounce::sqp every iteration. Applied only within \
+         \"sqp_local_phase_tol\". Default 0 (off); gh#1206 used 1e2.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "sqp_local_phase_tol",
+        "KKT residual at or below which sqp_stabilization and sqp_proximal apply.",
+        0.0,
+        false,
+        1e-2,
+        "Both are local devices, applied only at iterates whose KKT residual \
+         max(stationarity, constraint violation) is at or below this. Far from \
+         a solution the stabilized subproblem prices a large linearization \
+         residual at 1/sigma and stalls, and even an exact Hessian has a large \
+         model error along a long step, so the proximal term would shrink \
+         every step; measured on the fixture corpus, applying either from the \
+         first iterate turned solved models into failures. The handover and \
+         crossover points they were introduced for (gh#1206) are local by \
+         construction. Only consulted when one of them is on.",
     )?;
     r.add_lower_bounded_integer_option(
         "sqp_dense_hessian_max_n",

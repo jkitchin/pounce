@@ -1948,7 +1948,17 @@ fn stabilized_sqp(sigma: Number, proximal: Number) -> SqpAlgorithm {
 fn stabilized_sqp_solves_a_problem_without_licq() {
     for dup in [false, true] {
         let mut nlp = LinkedBoundsNlp { dup };
-        let res = stabilized_sqp(1e-4, 0.0).optimize(&mut nlp).unwrap();
+        // A local-phase tolerance above this start's KKT residual (3), so
+        // every step QP here is stabilized.
+        let mut sqp = SqpAlgorithm::new(
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new())),
+            SqpOptions {
+                stabilization: 1e-1,
+                local_phase_tol: 10.0,
+                ..SqpOptions::default()
+            },
+        );
+        let res = sqp.optimize(&mut nlp).unwrap();
         assert_eq!(res.status, SqpStatus::Optimal, "dup={dup}: {res:?}");
         assert!(
             res.x.iter().all(|v| v.abs() < 1e-8),
@@ -2139,6 +2149,31 @@ fn stabilized_crossover_step3_needs_no_rank_test() {
     let (plain, _) = run(0.0);
     let plain_eqp = plain.eqp.as_ref().expect("step 3 ran");
     assert!(plain_eqp.rank_guard_calls >= 1, "{plain_eqp:?}");
+}
+
+/// Stabilization is local: `σ_k = min(σ_max, ρ)` only while the KKT residual
+/// `ρ ≤ sqp_local_phase_tol`, and never at `ρ = 0`, a non-finite `ρ` or
+/// `σ_max = 0`.
+#[test]
+fn stabilization_is_applied_in_the_local_phase_only() {
+    use crate::sqp::sqp_alg::{in_local_phase, stabilization_sigma};
+    let tol = SqpOptions::default().local_phase_tol;
+    assert_eq!(tol, 1e-2);
+    assert_eq!(stabilization_sigma(1e-4, tol, 1e-6), Some(1e-6));
+    assert_eq!(stabilization_sigma(1e-4, tol, 5e-3), Some(1e-4));
+    assert_eq!(stabilization_sigma(1e-4, tol, 1e-2), Some(1e-4));
+    assert_eq!(
+        stabilization_sigma(1e-4, tol, 2e-2),
+        None,
+        "far from a solution"
+    );
+    assert_eq!(stabilization_sigma(1e-4, tol, 163.0), None);
+    assert_eq!(stabilization_sigma(1e-4, tol, 0.0), None);
+    assert_eq!(stabilization_sigma(1e-4, tol, f64::NAN), None);
+    assert_eq!(stabilization_sigma(0.0, tol, 1e-6), None);
+    assert_eq!(stabilization_sigma(1e-4, 1e3, 163.0), Some(1e-4));
+    assert!(in_local_phase(tol, 1e-3));
+    assert!(!in_local_phase(tol, f64::INFINITY));
 }
 
 #[test]

@@ -829,14 +829,13 @@ impl SqpAlgorithm {
             let qp_time_limit =
                 qp_time_limit_now(self.opts.deadline.as_ref(), self.qp_opts.time_limit);
 
-            // `sqp_stabilization` (gh#1206): σ_k = min(σ_max, KKT residual).
-            let sigma = (self.opts.stabilization > 0.0)
-                .then(|| {
-                    self.opts
-                        .stabilization
-                        .min(kkt.stationarity.max(kkt.constr_viol))
-                })
-                .filter(|&s| s > 0.0);
+            // `sqp_stabilization` (gh#1206): σ_k = min(σ_max, KKT residual),
+            // in the local phase only (`stabilization_sigma`).
+            let sigma = stabilization_sigma(
+                self.opts.stabilization,
+                self.opts.local_phase_tol,
+                kkt.stationarity.max(kkt.constr_viol),
+            );
             let stabilize = |d: SqpQpData| match sigma {
                 Some(s) => d.stabilize(s, &iter.lambda_g),
                 None => d,
@@ -858,7 +857,17 @@ impl SqpAlgorithm {
                     // negative-curvature check above has already seen the
                     // unshifted Hessian, and the next model-error measure
                     // needs it too.
-                    add_diagonal(hess_lag, rho),
+                    add_diagonal(
+                        hess_lag,
+                        if in_local_phase(
+                            self.opts.local_phase_tol,
+                            kkt.stationarity.max(kkt.constr_viol),
+                        ) {
+                            rho
+                        } else {
+                            0.0
+                        },
+                    ),
                     self.hessian_inertia(),
                 )),
             };
@@ -1877,6 +1886,40 @@ const ELASTIC_STEP_MIN_GAIN: Number = 1e-6;
 /// the variable bounds, both as the QP poses them (shifted to step space).
 /// Only the NLP's rows and variables count; a lifted subproblem's extra
 /// rows and columns are bookkeeping, not constraints.
+/// Whether an iterate with KKT residual `residual` is in the **local
+/// phase** (`sqp_local_phase_tol`), where `sqp_stabilization` and
+/// `sqp_proximal` apply (gh#1206).
+///
+/// Both are local devices. Stabilized SQP's convergence theory is about a
+/// neighbourhood of a solution; far from one its subproblem is badly
+/// conditioned (a residual of size `‖c‖` priced at `1/σ`) and its step need
+/// not descend for the ℓ₁ merit. And the proximal term's model error is, for
+/// an exact Hessian, the Taylor remainder along the step, which is large on
+/// a long one. Measured on the fixture corpus under
+/// `algorithm=active-set-sqp`, applying either from the first iterate turned
+/// solved models into failures: stabilized (`σ_max = 1e-4`), `csfi2` stalled
+/// in its step QP (198 refactorizations for 4 working-set changes at
+/// `‖c‖ = 163`) and infeasible linearizations went unreported; proximal
+/// (`ρ_max = 1e2`), `cresc4`, `cute_hs99exp`, `cute_palmer8e`, `dallass`
+/// and `hs13_bigstart` ran out of iterations or stalled on short steps. The
+/// handover and crossover points they were asked for are local by
+/// construction.
+pub(crate) fn in_local_phase(local_phase_tol: Number, residual: Number) -> bool {
+    residual.is_finite() && residual <= local_phase_tol
+}
+
+/// The stabilized subproblem's `σ_k = min(σ_max, residual)` at an iterate in
+/// the local phase ([`in_local_phase`]), or `None` for the standard
+/// subproblem (off, outside the local phase, or a zero residual).
+pub(crate) fn stabilization_sigma(
+    sigma_max: Number,
+    local_phase_tol: Number,
+    residual: Number,
+) -> Option<Number> {
+    (sigma_max > 0.0 && residual > 0.0 && in_local_phase(local_phase_tol, residual))
+        .then(|| sigma_max.min(residual))
+}
+
 /// `h + δI` for a symmetric triplet `h` (`δ` appended as extra diagonal
 /// entries, which the QP assembly sums). `δ ≤ 0` returns `h` unchanged.
 pub(crate) fn add_diagonal(mut h: Triplet, delta: Number) -> Triplet {
@@ -2534,7 +2577,23 @@ pub(crate) fn solve_subproblem_qp(
         qp.bl,
         qp.bu,
     ) {
-        let sol = solver.solve(&qp, Some(&start), opts);
+        let mut sol = solver.solve(&qp, Some(&start), opts);
+        // Anything but `Optimal` falls back to the standard subproblem: a
+        // stabilized QP that stalls is no better a step than none, and an
+        // infeasible linearization is only visible to the standard one,
+        // whose elastic step and verdict the SQP knows how to use.
+        let fell_back = !matches!(&sol, Ok(s) if s.status == QpStatus::Optimal);
+        if fell_back && let Some(std_qp) = data.as_standard_qp(qp.bl, qp.bu) {
+            tracing::debug!(target: "pounce::sqp::qp",
+                "{kind}: stabilized QP ended {:?}; solving the standard subproblem",
+                sol.as_ref().map(|s| s.status));
+            sol = match warm {
+                Some(w) => solver.solve_with_working_set(&std_qp, w, opts),
+                None => solver.solve(&std_qp, None, opts),
+            };
+            // Already in the NLP's dimensions.
+            return sol;
+        }
         let elapsed = started.elapsed();
         match &sol {
             Ok(s) => tracing::debug!(target: "pounce::sqp::qp",

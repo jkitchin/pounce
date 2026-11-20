@@ -10476,6 +10476,9 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
     if let Ok((v, true)) = options.get_numeric_value("sqp_proximal", "") {
         opts.proximal = v;
     }
+    if let Ok((v, true)) = options.get_numeric_value("sqp_local_phase_tol", "") {
+        opts.local_phase_tol = v;
+    }
 }
 
 /// Populate the active-set SQP **QP-subproblem** options

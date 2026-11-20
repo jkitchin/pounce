@@ -231,6 +231,13 @@ pub struct SqpOptions {
     /// free variables, so it vanishes when the model is accurate. `0` (the
     /// default) adds nothing.
     pub proximal: Number,
+
+    /// `sqp_local_phase_tol`: `sqp_stabilization` and `sqp_proximal` apply
+    /// only at iterates whose KKT residual `max(stationarity, constraint
+    /// violation)` is at or below this (gh#1206). Both are local devices:
+    /// far from a solution the stabilized subproblem is badly conditioned and
+    /// even an exact Hessian has a large model error along a long step.
+    pub local_phase_tol: Number,
 }
 
 impl Default for SqpOptions {
@@ -256,6 +263,7 @@ impl Default for SqpOptions {
             deadline: None,
             stabilization: 0.0,
             proximal: 0.0,
+            local_phase_tol: 1e-2,
         }
     }
 }

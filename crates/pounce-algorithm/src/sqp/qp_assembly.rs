@@ -99,6 +99,9 @@ pub struct SqpQpData {
     lift: Option<Lift>,
     /// `σ` of a stabilized subproblem ([`Self::stabilize`]), `None` otherwise.
     stabilization: Option<Number>,
+    /// The unstabilized Hessian, kept by [`Self::stabilize`] so the standard
+    /// subproblem can still be posed ([`Self::as_standard_qp`]).
+    standard_h: Option<SymTMatrix>,
 }
 
 /// The lifted constraint matrix of a low-rank or stabilized subproblem.
@@ -198,6 +201,7 @@ impl SqpQpData {
             hess_inf,
             lift: None,
             stabilization: None,
+            standard_h: None,
         }
     }
 
@@ -325,7 +329,7 @@ impl SqpQpData {
         let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as Index, nq, irow, jcol));
         a.set_values(&vals);
 
-        self.h = h;
+        self.standard_h = Some(std::mem::replace(&mut self.h, h));
         self.g.extend_from_slice(lambda_g);
         self.xl.resize(n + m, NLP_LOWER_BOUND_INF);
         self.xu.resize(n + m, NLP_UPPER_BOUND_INF);
@@ -336,6 +340,31 @@ impl SqpQpData {
         });
         self.stabilization = Some(sigma);
         self
+    }
+
+    /// The standard (unstabilized) subproblem of a stabilized one, with the
+    /// given general-row bounds; `None` when this subproblem is not
+    /// stabilized. The fallback when a stabilized QP does not solve, and the
+    /// only form that can report an infeasible linearization: the stabilized
+    /// one is feasible by construction.
+    pub fn as_standard_qp<'a>(
+        &'a self,
+        bl: &'a [Number],
+        bu: &'a [Number],
+    ) -> Option<QpProblem<'a>> {
+        let h = self.standard_h.as_ref()?;
+        Some(QpProblem {
+            n: self.n,
+            m: self.m,
+            h,
+            g: &self.g[..self.n],
+            a: &self.a,
+            bl,
+            bu,
+            xl: &self.xl[..self.n],
+            xu: &self.xu[..self.n],
+            hessian_inertia: self.hessian_inertia,
+        })
     }
 
     /// `σ` when this subproblem is stabilized ([`Self::stabilize`]).
