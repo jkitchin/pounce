@@ -628,3 +628,78 @@ fn a_schur_update_stores_only_its_nonzeros() {
     state.apply_change(&mut ls, &qp, 1, true).unwrap();
     assert_eq!(state.stored_update_entries(), (2, 2 + n + 1));
 }
+
+/// gh#1206 P1: the inertia of `K_W = K_0 + UVᵀ` read off the base factor
+/// and the Schur block (`neg(K_W) = neg(K_0) + pos(C·S) − k`) must equal
+/// the inertia of a fresh factorization of the same K_max, over random
+/// indefinite QPs and random add/drop sequences — including the sequences
+/// whose `K_W` has the *wrong* inertia for its working set, which are the
+/// ones the drop test exists to catch.
+#[test]
+fn haynsworth_inertia_matches_fresh_factor_inertia() {
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let opts = QpOptions::default();
+    let (mut compared, mut declined, mut wrong_for_w, mut right_for_w) = (0, 0, 0, 0);
+    for trial in 0..60 {
+        let (n, m) = (4 + trial % 5, 1 + trial % 4);
+        // Diagonal shift 0: H is genuinely indefinite.
+        let rq = RandomQp::new(&mut rng, n, m, 0.0);
+        let qp = rq.qp(HessianInertia::Indefinite);
+        let m_total = m + n;
+        let mut w = WorkingSet::cold(n, m);
+        for _ in 0..rng.below(n) {
+            set_slot(&mut w, m, rng.below(m_total), true);
+        }
+        let zero = vec![0.0; n + m_total];
+        let Some((_, neg0)) = fresh_k_max(&qp, &w, &zero) else {
+            continue;
+        };
+        // Reset against the base's *actual* inertia, so K_0 is unshifted
+        // whatever its working set's reduced Hessian looks like.
+        let mut state = SchurState::new(n, m);
+        let mut ls = linsol();
+        if state.reset(&mut ls, &qp, &w, neg0, &opts).is_err() || state.shift() != 0.0 {
+            continue;
+        }
+        assert_eq!(state.updated_neg_evals(), Some(neg0));
+        for _ in 0..10 {
+            let slot = rng.below(m_total);
+            let on = !SchurState::slot_active(&w, slot);
+            if on && active_count(&w, m_total) >= n {
+                continue;
+            }
+            state.apply_change(&mut ls, &qp, slot, on).unwrap();
+            set_slot(&mut w, m, slot, on);
+            let Some((_, fresh_neg)) = fresh_k_max(&qp, &w, &zero) else {
+                // Singular: Haynsworth must not claim a count either.
+                assert_eq!(state.updated_neg_evals(), None, "trial {trial}");
+                continue;
+            };
+            match state.updated_neg_evals() {
+                Some(neg) => {
+                    assert_eq!(neg, fresh_neg, "trial {trial}: Haynsworth vs fresh factor");
+                    compared += 1;
+                    if neg == active_count(&w, m_total) as i32 {
+                        right_for_w += 1;
+                    } else {
+                        wrong_for_w += 1;
+                    }
+                }
+                None => declined += 1,
+            }
+        }
+    }
+    assert!(
+        compared >= 200,
+        "only {compared} counts compared ({declined} declined)"
+    );
+    assert!(
+        declined * 10 <= compared,
+        "{declined} declined of {compared}"
+    );
+    // Both branches of the solver's drop test are exercised.
+    assert!(
+        right_for_w >= 20 && wrong_for_w >= 20,
+        "{right_for_w} right / {wrong_for_w} wrong"
+    );
+}

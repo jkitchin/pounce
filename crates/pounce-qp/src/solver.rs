@@ -4308,7 +4308,50 @@ impl ParametricActiveSetSolver {
                     // Schur path opt-in on the SQP arm, whose exact Hessian is
                     // `Indefinite`). Adds only shrink the null space and keep
                     // the cheap update; on a PSD Hessian, drops do too.
+                    //
+                    // Unless the update's inertia can be read without the
+                    // refactorization (gh#1206 P1): by Haynsworth additivity
+                    // `In(K_W)` follows from the base factor's count and the
+                    // small Schur block (`SchurState::updated_neg_evals`).
+                    // When it is the `|W|` negatives the new working set
+                    // needs, the update *is* what inertia control would
+                    // accept at δ = 0, so it is kept; otherwise — wrong
+                    // count, a block too near singular to count, or a base
+                    // factor carrying a shift that a fresh δ = 0 attempt
+                    // might no longer need — the drop refactors as before.
+                    // On the gh#1206 handover QP every drop refactorized
+                    // (4.8 s each at `dim = 448 117`).
                     if qp.hessian_inertia != HessianInertia::Psd {
+                        let mut kept = false;
+                        if opts.schur_drop_inertia_test
+                            && schur.shift() == 0.0
+                            && schur.has_room_for_update(opts)
+                        {
+                            match schur.apply_change(&mut self.linsol, qp, slot, false) {
+                                Ok(()) => {
+                                    let want = active_slot_count(&working) as i32;
+                                    let got = schur.updated_neg_evals();
+                                    kept = got == Some(want);
+                                    if trace {
+                                        eprintln!(
+                                            "[qp] it={_iter} DROP inertia via Schur block: \
+                                             {got:?} negative, want {want} → {}",
+                                            if kept { "update kept" } else { "refactor" }
+                                        );
+                                    }
+                                }
+                                Err(e) if e.is_recoverable_factorization_failure() => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        if kept {
+                            n_changes += 1;
+                            crate::deadline::charge_working_set_change();
+                            n_schur_updates += 1;
+                            prev_was_null_step = false;
+                            floor_refactored = false;
+                            continue;
+                        }
                         reset_or_stop!('iters);
                         n_refactor += 1;
                         n_changes += 1;

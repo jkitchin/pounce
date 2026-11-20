@@ -131,6 +131,16 @@ pub struct QpOptions {
     /// noticeably slower on large warm-started workloads.
     pub use_schur_updates: bool,
 
+    /// On a Hessian not known PSD, let a Schur-path **drop** take the cheap
+    /// rank-2 update when the updated KKT's inertia, read off the base
+    /// factor and the small Schur block by Haynsworth additivity
+    /// ([`crate::schur::SchurState::updated_neg_evals`]), is the one the new
+    /// working set needs (gh#1206 P1). When `false`, or when the count is
+    /// wrong or cannot be settled, every such drop refactorizes under §4.5
+    /// inertia control, as before. No effect on a PSD Hessian, whose drops
+    /// always take the update.
+    pub schur_drop_inertia_test: bool,
+
     /// Trace the §4.2 parametric homotopy on a **cold** solve instead of
     /// starting the conventional phase-1/phase-2 scheme.
     ///
@@ -317,6 +327,7 @@ impl Default for QpOptions {
             inertia_shift_factor: 100.0,
             inertia_max_shifts: 12,
             use_schur_updates: false,
+            schur_drop_inertia_test: true,
             use_homotopy: false,
             expand_tol_initial: 1e-12,
             expand_tol_growth: 1e-11,

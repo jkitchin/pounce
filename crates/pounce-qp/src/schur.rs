@@ -117,6 +117,11 @@ pub struct SchurState {
     /// [`crate::solver::model_step_cap`].
     shift: Number,
 
+    /// Negative eigenvalues of the cached `K_0`: the count its factorization
+    /// was checked against at the last reset (zero pivots are a failed
+    /// reset, so `K_0` is nonsingular). Read by [`Self::updated_neg_evals`].
+    base_neg: i32,
+
     /// Row index of `A` ([`a_row_index`]), built at the last reset and
     /// reused by every general-row update until the next one. Without it
     /// each such update scanned all of `A` for one row — 1.44 M triplets per
@@ -234,6 +239,7 @@ impl SchurState {
             s_dim: 0,
             base_kkt: None,
             shift: 0.0,
+            base_neg: 0,
             a_rows: None,
         }
     }
@@ -443,6 +449,7 @@ impl SchurState {
                 self.clear_updates();
                 self.base_kkt = Some(kkt.clone());
                 self.shift = 0.0;
+                self.base_neg = expected_neg;
                 return Ok(());
             }
             Err(ref e) if e.is_recoverable_factorization_failure() => {
@@ -461,6 +468,7 @@ impl SchurState {
                     self.clear_updates();
                     self.base_kkt = Some(kkt.clone());
                     self.shift = current;
+                    self.base_neg = expected_neg;
                     return Ok(());
                 }
                 Err(ref e) if e.is_recoverable_factorization_failure() => {
@@ -768,8 +776,86 @@ impl SchurState {
         self.s_dim >= opts.max_schur_updates_before_refactor as usize
     }
 
+    /// Whether one more update fits before [`Self::needs_reset`] would ask
+    /// for a refactorization anyway — so a caller that refactors on a full
+    /// block does not pay the update's back-solves first.
+    pub fn has_room_for_update(&self, opts: &QpOptions) -> bool {
+        self.s_dim + 2 < opts.max_schur_updates_before_refactor as usize
+    }
+
     pub fn n_schur_updates(&self) -> u32 {
         (self.s_dim / 2) as u32
+    }
+
+    /// Negative eigenvalues of `K_W = K_0 + UVᵀ`, from the base factor's
+    /// count and the small Schur block alone — no factorization (gh#1206
+    /// P1). `None` when the block cannot settle it: `K_W` singular or so
+    /// close to it that the count would be a coin flip, or `S` failing the
+    /// symmetry it has in exact arithmetic.
+    ///
+    /// **Derivation.** The update is `UVᵀ = Σ_k (u_k v_kᵀ + v_k u_kᵀ)` with
+    /// `U = [u_0, v_0, u_1, v_1, …]` and `V = [v_0, u_0, …] = U C`, where
+    /// `C = blockdiag([[0, 1], [1, 0]])` is symmetric with `C² = I`. So
+    /// `K_W = K_0 + U C Uᵀ`, a symmetric rank-`2k` update, and the
+    /// non-symmetric `S = I + VᵀK_0⁻¹U = I + C UᵀK_0⁻¹U` is `C·G` with
+    /// `G = C + UᵀK_0⁻¹U` symmetric. Border `K_0` with
+    ///
+    /// ```text
+    ///     M = ┌ K_0   U  ┐
+    ///         └ Uᵀ   −C  ┘
+    /// ```
+    ///
+    /// The Schur complement of `K_0` in `M` is `−C − UᵀK_0⁻¹U = −G`; that of
+    /// `−C` (nonsingular, `(−C)⁻¹ = −C`) is `K_0 + U C Uᵀ = K_W`. Haynsworth
+    /// inertia additivity applied both ways gives
+    /// `In(K_0) + In(−G) = In(−C) + In(K_W)`, and `−C` has `k` eigenvalues of
+    /// each sign, so
+    ///
+    /// ```text
+    ///     neg(K_W) = neg(K_0) + pos(G) − k,   zero(K_W) = zero(K_0) + zero(G).
+    /// ```
+    ///
+    /// This is Gill, Murray, Saunders & Wright (1990), "A Schur-complement
+    /// method for sparse quadratic programming", for the rank-2 form used
+    /// here rather than their bordered one. `G` is `S` with its rows swapped
+    /// in pairs (row `2i` of `G` is row `2i + 1` of `S`), so no new data is
+    /// needed; its eigenvalues come from a cyclic Jacobi sweep, which is
+    /// `O(s_dim³)` on a block of at most `max_schur_updates_before_refactor`.
+    pub fn updated_neg_evals(&self) -> Option<i32> {
+        let s = self.s_dim;
+        if s == 0 {
+            return Some(self.base_neg);
+        }
+        let mut g = vec![0.0; s * s];
+        for i in 0..s {
+            let src = i ^ 1;
+            g[i * s..(i + 1) * s].copy_from_slice(&self.s_matrix[src * s..(src + 1) * s]);
+        }
+        let g_max = g.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        if !g_max.is_finite() {
+            return None;
+        }
+        // Symmetric in exact arithmetic; an asymmetry above round-off means
+        // the cached columns no longer describe one operator.
+        for i in 0..s {
+            for j in 0..i {
+                let (a, b) = (g[i * s + j], g[j * s + i]);
+                if (a - b).abs() > SCHUR_SYMMETRY_REL * g_max.max(1.0) {
+                    return None;
+                }
+                let mean = 0.5 * (a + b);
+                g[i * s + j] = mean;
+                g[j * s + i] = mean;
+            }
+        }
+        let eig = symmetric_eigenvalues(g, s)?;
+        let e_max = eig.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        let floor = SCHUR_INERTIA_REL * e_max.max(1.0);
+        if eig.iter().any(|v| v.abs() <= floor) {
+            return None;
+        }
+        let pos = eig.iter().filter(|&&v| v > 0.0).count() as i32;
+        Some(self.base_neg + pos - (s / 2) as i32)
     }
 
     /// `(changes, stored v entries)` of the update layer — test-only, for
@@ -828,6 +914,72 @@ fn a_row_index(qp: &QpProblem) -> (Vec<usize>, Vec<usize>) {
 /// which is what makes it recoverable: the loop discards the update layer and
 /// refactors under inertia control.
 const SCHUR_PIVOT_REL: Number = 1e-13;
+
+/// Relative eigenvalue magnitude of `G = C·S` below which
+/// [`SchurState::updated_neg_evals`] declines to count signs (gh#1206 P1).
+///
+/// An eigenvalue that small makes `K_W` numerically singular, and its sign is
+/// round-off. Declining costs one refactorization under inertia control —
+/// exactly what every drop paid before P1 — so the floor errs high: three
+/// orders above [`SCHUR_PIVOT_REL`], and still below the `3.3e-9` smallest
+/// healthy pivot ratio measured on gh#974's solve.
+const SCHUR_INERTIA_REL: Number = 1e-10;
+
+/// Relative asymmetry of `G = C·S` (symmetric in exact arithmetic) above
+/// which the block is not trusted for an inertia count (gh#1206 P1).
+const SCHUR_SYMMETRY_REL: Number = 1e-8;
+
+/// Eigenvalues of the dense symmetric `s × s` matrix `a` (row-major), by
+/// cyclic Jacobi rotations. `None` if the sweeps do not converge or a
+/// non-finite value appears. For the Schur block (`s` at most
+/// `max_schur_updates_before_refactor`, 50 by default) this is microseconds
+/// against a back-solve.
+fn symmetric_eigenvalues(mut a: Vec<Number>, s: usize) -> Option<Vec<Number>> {
+    const MAX_SWEEPS: usize = 100;
+    let frob: Number = a.iter().map(|v| v * v).sum::<Number>().sqrt();
+    if !frob.is_finite() {
+        return None;
+    }
+    for _ in 0..MAX_SWEEPS {
+        let mut off = 0.0;
+        for i in 0..s {
+            for j in 0..i {
+                off += a[i * s + j] * a[i * s + j];
+            }
+        }
+        if off.sqrt() <= Number::EPSILON * frob {
+            return Some((0..s).map(|i| a[i * s + i]).collect());
+        }
+        for p in 0..s {
+            for q in (p + 1)..s {
+                let apq = a[p * s + q];
+                if apq == 0.0 {
+                    continue;
+                }
+                let (app, aqq) = (a[p * s + p], a[q * s + q]);
+                let theta = (aqq - app) / (2.0 * apq);
+                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                let t = if theta == 0.0 { 1.0 } else { t };
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let sn = t * c;
+                for k in 0..s {
+                    let (akp, akq) = (a[k * s + p], a[k * s + q]);
+                    a[k * s + p] = c * akp - sn * akq;
+                    a[k * s + q] = sn * akp + c * akq;
+                }
+                for k in 0..s {
+                    let (apk, aqk) = (a[p * s + k], a[q * s + k]);
+                    a[p * s + k] = c * apk - sn * aqk;
+                    a[q * s + k] = sn * apk + c * aqk;
+                }
+            }
+        }
+        if a.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+    }
+    None
+}
 
 /// In-place Gauss elimination with partial pivoting for a small
 /// dense matrix `s` of size `dim × dim` (row-major). Returns
