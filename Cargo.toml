@@ -334,13 +334,26 @@ pounce-cinterface = { path = "crates/pounce-cinterface", version = "0.17.0" }
 # on arm64: the fixture sweep at default options and forced to
 # `solver_selection=qp-active-set` moves 0 of 282 fixture-legs in each.
 #
-# 0.23.0 is the current pin. If you ever need to develop against an unreleased
+# 0.24.0 (feral#147, #237, #245) moves feral to the 2024 edition with a declared
+# MSRV of 1.85, which pounce's own edition 2024 already requires. #237 makes a
+# same-pattern refactorization cheaper (the permuted values are kept and
+# overwritten in place, an unchanged pattern is not re-hashed, and InfNorm
+# scaling passes run in parallel above 2^18 entries) and adds an opt-in
+# `with_infnorm_reuse`, which pounce does not set. #245 adds a
+# `FactorStats::n_cascade_break_chain_nodes` counter; pounce does not construct
+# `FactorStats`. feral states that factors are bit-identical to 0.23. Measured
+# against 0.23.0 on arm64: the fixture sweep at default options and forced to
+# `solver_selection=qp-active-set` moves 0 of 300 fixture-legs in each, and the
+# workspace tests pass. The gain is in large refactorizations; on deb7,
+# qpnstair and gh#1176's 1547-variable column wall time is unchanged.
+#
+# 0.24.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.23.0" }
+feral = { version = "0.24.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
