@@ -35,7 +35,9 @@ changes.
   solves hand a cleaner warm start to the degenerate Scholtes subproblem,
   which then follows a different path and is downgraded by the gh#884
   unscaled-dual check from `Solve_Succeeded` to `Solved_To_Acceptable_Level`.
-  The driver verdict (`weak_fallback`) is the same. This is a local device: it does
+  The driver verdict (`weak_fallback`) is the same. At the defaults the
+  sweep diffs empty against the parent commit (302 lines, both legs). This
+  is a local device: it does
   nothing for a dual residual, and when the iterates are still far from a
   solution after μ reaches its floor it can lengthen a solve as well as
   shorten it (the reporter's L-BFGS track E at `tol=1e-4`: 706 → 797).
