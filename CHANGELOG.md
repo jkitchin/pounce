@@ -29,7 +29,8 @@ changes.
   Fixture sweep at `mu_strategy=monotone`, `tail_soc` no vs yes: outside the
   `cc:` lines (whose lowered solves inherit the option) the exact leg does
   not move; the lbfgs leg moves `autocorr_bern55-06`
-  945 → 893 and `qpnstair` 271 → 268, and `hs13_bigstart` ends one corrected
+  945 → 893 and, on Linux, `qpnstair` 271 → 268 (264 both ways on
+  macOS), and `hs13_bigstart` ends one corrected
   step to a different tolerance-legal point on the HS13 cusp (f 0.98501 →
   0.98715; f* = 1). On `cc:ralph1` (exact) the corrected earlier lowered
   solves hand a cleaner warm start to the degenerate Scholtes subproblem,

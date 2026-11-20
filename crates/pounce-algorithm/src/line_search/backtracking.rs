@@ -1726,7 +1726,9 @@ impl BacktrackingLineSearch {
         };
         let tau = data.borrow().curr_tau;
         let alpha_primal_soc = cq.borrow().aff_step_alpha_primal_max(&delta_soc, tau);
-        if !(alpha_primal_soc >= 1.0) {
+        // Discarded before `data.trial` is touched, so the accepted trial is
+        // still staged and there is nothing to restore.
+        if !tail_soc_is_full_step(alpha_primal_soc) {
             return None;
         }
         let alpha_dual_soc = cq.borrow().aff_step_alpha_dual_max(&delta_soc, tau);
@@ -1743,13 +1745,20 @@ impl BacktrackingLineSearch {
 
         let theta_soc = cq.borrow().trial_constraint_violation();
         let phi_soc = cq.borrow().trial_barrier_obj();
-        let keep = theta_soc.is_finite()
-            && phi_soc.is_finite()
-            && theta_soc < theta_trial
-            && self
-                .acceptor
-                .is_acceptable(1.0, theta, phi, d_phi, theta_soc, phi_soc);
-        if keep {
+        // Judged against the filter as it stands *after* the accepted trial's
+        // own `check_trial_point`, i.e. after its bookkeeping has run. If that
+        // call fired the filter-reset heuristic (`max_filter_resets`), the
+        // filter is empty here and the correction is judged against the
+        // iterate test alone, whereas the accepted trial was also held to the
+        // pre-reset filter. That is the same test every trial faces after a
+        // reset, so the corrected point is no less acceptable than any later
+        // one would be. Narrow: the heuristic fires only after
+        // `filter_reset_trigger` successive filter rejections, while this
+        // path runs only on a first-trial acceptance.
+        let verdict = tail_soc_verdict(theta_trial, theta_soc, phi_soc, |t, p| {
+            self.acceptor.is_acceptable(1.0, theta, phi, d_phi, t, p)
+        });
+        if verdict == TailSocVerdict::Keep {
             tracing::debug!(target: "pounce::linesearch",
                 theta_trial, theta_soc, "tail second-order correction accepted (gh#1211)");
             Some((phi_soc, alpha_dual_soc))
@@ -1843,6 +1852,49 @@ impl BacktrackingLineSearch {
     }
 }
 
+/// Why the tail second-order correction (gh#1211) kept or discarded a
+/// corrected point. See [`BacktrackingLineSearch::try_tail_soc`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailSocVerdict {
+    /// Replace the accepted trial by the corrected point.
+    Keep,
+    /// `theta` or `phi` at the corrected point is not finite.
+    NonFinite,
+    /// The corrected point does not lower `theta` strictly below the
+    /// accepted trial's.
+    NoThetaDecrease,
+    /// The acceptor refuses the corrected point at the accepted trial's
+    /// reference iterate and step size.
+    NotAcceptable,
+}
+
+/// The `O(‖d‖³)` argument behind the tail correction holds for `x + d + p`
+/// itself, so a correction the fraction-to-the-boundary rule would cut is
+/// discarded rather than shortened.
+fn tail_soc_is_full_step(alpha_primal_soc: Number) -> bool {
+    alpha_primal_soc >= 1.0
+}
+
+/// The keep/discard decision of [`BacktrackingLineSearch::try_tail_soc`] for
+/// a corrected point already evaluated at `(theta_soc, phi_soc)`. The checks
+/// run cheapest first; `acceptable` is consulted only if the others pass.
+fn tail_soc_verdict(
+    theta_trial: Number,
+    theta_soc: Number,
+    phi_soc: Number,
+    acceptable: impl FnOnce(Number, Number) -> bool,
+) -> TailSocVerdict {
+    if !theta_soc.is_finite() || !phi_soc.is_finite() {
+        TailSocVerdict::NonFinite
+    } else if !(theta_soc < theta_trial) {
+        TailSocVerdict::NoThetaDecrease
+    } else if !acceptable(theta_soc, phi_soc) {
+        TailSocVerdict::NotAcceptable
+    } else {
+        TailSocVerdict::Keep
+    }
+}
+
 /// `out = curr + alpha * delta` for all eight components, returned as a
 /// fresh `IteratesVector` with `Rc<dyn Vector>` slots. Mirrors
 /// `IpoptData::SetTrialBoundMultipliersFromStep` + the primal step
@@ -1872,6 +1924,54 @@ fn scaled_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#1211 review: the discard half of `try_tail_soc`. Each rejection
+    /// branch is reached on its own, and a later check is not consulted once
+    /// an earlier one has discarded the point.
+    #[test]
+    fn tail_soc_discards_a_correction_on_each_branch() {
+        // A boundary-cut correction is never taken, however small the cut.
+        assert!(tail_soc_is_full_step(1.0));
+        assert!(!tail_soc_is_full_step(1.0 - 1e-12));
+        assert!(!tail_soc_is_full_step(0.5));
+        assert!(!tail_soc_is_full_step(Number::NAN));
+
+        let theta_trial = 1e-2;
+        let never_called = |_: Number, _: Number| -> bool {
+            panic!("acceptor consulted after an earlier check discarded the point")
+        };
+        assert_eq!(
+            tail_soc_verdict(theta_trial, Number::NAN, 1.0, never_called),
+            TailSocVerdict::NonFinite
+        );
+        assert_eq!(
+            tail_soc_verdict(theta_trial, 1e-3, Number::INFINITY, never_called),
+            TailSocVerdict::NonFinite
+        );
+        // Strictly lower: an equal theta is not progress.
+        assert_eq!(
+            tail_soc_verdict(theta_trial, theta_trial, 1.0, never_called),
+            TailSocVerdict::NoThetaDecrease
+        );
+        assert_eq!(
+            tail_soc_verdict(theta_trial, 2e-2, 1.0, never_called),
+            TailSocVerdict::NoThetaDecrease
+        );
+        // The acceptor sees the corrected point's own (theta, phi).
+        let mut seen = None;
+        assert_eq!(
+            tail_soc_verdict(theta_trial, 1e-5, 0.5, |t, p| {
+                seen = Some((t, p));
+                false
+            }),
+            TailSocVerdict::NotAcceptable
+        );
+        assert_eq!(seen, Some((1e-5, 0.5)));
+        assert_eq!(
+            tail_soc_verdict(theta_trial, 1e-5, 0.5, |_, _| true),
+            TailSocVerdict::Keep
+        );
+    }
     use crate::ipopt_cq::IpoptCalculatedQuantities;
     use crate::ipopt_data::IpoptData;
     use crate::ipopt_nlp::Nlp;
