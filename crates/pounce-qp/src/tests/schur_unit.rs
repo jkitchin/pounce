@@ -703,3 +703,66 @@ fn haynsworth_inertia_matches_fresh_factor_inertia() {
         "{right_for_w} right / {wrong_for_w} wrong"
     );
 }
+
+/// gh#1206 P7: `SchurState::for_problem` gives bound slots only to variables
+/// with a finite bound, so a QP with free variables gets a smaller K_max,
+/// and over random add/drop sequences every SMW solve — right-hand side and
+/// solution in the full `n + m + n` layout — matches a fresh factor of the
+/// full K_max, free variables' sentinel rows included.
+#[test]
+fn free_variables_get_no_k_max_slot_and_solves_are_unchanged() {
+    let mut rng = Rng(0x0dd_ba11_cafe_f00d);
+    let opts = QpOptions::default();
+    let mut checked = 0;
+    for trial in 0..20 {
+        let (n, m) = (6 + trial % 3, 2 + trial % 3);
+        let mut rq = RandomQp::new(&mut rng, n, m, 3.0);
+        // Every other variable free.
+        let free: Vec<usize> = (0..n).filter(|j| j % 2 == 1).collect();
+        for &j in &free {
+            rq.xl[j] = pounce_common::types::NLP_LOWER_BOUND_INF;
+            rq.xu[j] = pounce_common::types::NLP_UPPER_BOUND_INF;
+        }
+        let qp = rq.qp(HessianInertia::Indefinite);
+        let m_total = m + n;
+        let mut state = SchurState::for_problem(&qp);
+        assert_eq!(state.dim, n + m + n - free.len(), "trial {trial}");
+        assert_eq!(SchurState::new(n, m).dim, n + m + n);
+        let slottable: Vec<usize> = (0..m_total)
+            .filter(|&s| s < m || !free.contains(&(s - m)))
+            .collect();
+        let mut w = WorkingSet::cold(n, m);
+        let mut ls = linsol();
+        if state.reset(&mut ls, &qp, &w, 0, &opts).is_err() || state.shift() != 0.0 {
+            continue;
+        }
+        // A free variable has no bound to flip.
+        assert!(state.apply_change(&mut ls, &qp, m + free[0], true).is_err());
+        for _ in 0..8 {
+            let slot = slottable[rng.below(slottable.len())];
+            let on = !SchurState::slot_active(&w, slot);
+            if on && active_count(&w, m_total) + 1 >= n {
+                continue;
+            }
+            state.apply_change(&mut ls, &qp, slot, on).unwrap();
+            set_slot(&mut w, m, slot, on);
+            let rhs: Vec<f64> = (0..n + m_total).map(|_| rng.unit()).collect();
+            let Some((want, _)) = fresh_k_max(&qp, &w, &rhs) else {
+                continue;
+            };
+            let mut got = rhs.clone();
+            if state.solve(&mut ls, &mut got).is_err() {
+                continue;
+            }
+            let scale = want.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+            for (i, (&a, &b)) in got.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() <= 1e-8 * scale,
+                    "trial {trial} rhs[{i}]: schur={a}, fresh full K_max={b}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 40, "only {checked} solves compared");
+}

@@ -7,6 +7,7 @@
 //! fixtures are solved with the test on and off; the answers must agree, and
 //! the counts say which branch each drop took.
 
+#![allow(clippy::unwrap_used)]
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_qp::{
     BoundStatus, HessianInertia, ParametricActiveSetSolver, QpOptions, QpProblem, QpSolution,

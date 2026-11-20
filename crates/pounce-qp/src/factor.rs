@@ -306,7 +306,7 @@ impl LinearSolver {
         expected_neg: i32,
         opts: &crate::options::QpOptions,
     ) -> Result<bool, QpError> {
-        if !(opts.dual_shift_probe > 0.0) {
+        if opts.dual_shift_probe.is_nan() || opts.dual_shift_probe <= 0.0 {
             return Ok(false);
         }
         let mut probe = kkt.clone();

@@ -60,20 +60,31 @@ use crate::kkt::KktTriplet;
 use crate::options::QpOptions;
 use crate::problem::QpProblem;
 use crate::working_set::WorkingSet;
+use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF};
 use pounce_common::{Index, Number};
 
 /// Cached Schur-complement state for one active-set solve.
 ///
-/// Layout: K_max has `dim = n + m + n` (n primals plus `m_total =
-/// m + n` slot rows). Slot indices `0..m` correspond to general
+/// Layout: K_max has `dim = n + m_total` (n primals plus `m_total =
+/// m + n_b` slot rows). Slot indices `0..m` correspond to general
 /// constraint rows of `A` (in their original order); slot indices
-/// `m..m+n` correspond to variable bounds (slot `m + j` is the
-/// bound on `x[j]`).
+/// `m..m + n_b` correspond to the bounds of the `n_b` variables that have
+/// one (slot `m + k` is the bound on `x[bound_var[k]]`).
+///
+/// Callers address slots in the **full** layout — `0..m` rows, `m + j` the
+/// bound on `x[j]`, `m + n` slots in all — and pass right-hand sides of
+/// length `n + m + n`, whatever K_max holds; see [`Self::for_problem`].
 pub struct SchurState {
     pub n: usize,
     pub m: usize,
     pub m_total: usize,
     pub dim: usize,
+
+    /// Variable of each bound slot (`bound_var[k]` for slot `m + k`), and
+    /// the inverse (`bound_slot[j]`, `None` for a free variable). The
+    /// identity when every variable has a slot.
+    bound_var: Vec<usize>,
+    bound_slot: Vec<Option<usize>>,
 
     /// Active flag per slot at the time of the LAST reset. This is
     /// what the cached factor in `LinearSolver` represents.
@@ -224,14 +235,42 @@ impl SparseCol<'_> {
 }
 
 impl SchurState {
+    /// A K_max with a bound slot for every variable.
     pub fn new(n: usize, m: usize) -> Self {
-        let m_total = m + n;
+        Self::with_bound_vars(n, m, (0..n).collect())
+    }
+
+    /// A K_max with bound slots only for the variables of `qp` that have a
+    /// finite bound (gh#1206 P7).
+    ///
+    /// A free variable's slot can never become active, so in K_max it is
+    /// nothing but a decoupled `(p, p) = 1` sentinel row — and every dense
+    /// Schur vector, back-solve and refinement matvec pays for it. The
+    /// stabilized SQP subproblem adds one free variable per constraint row,
+    /// which grows K_max from `2n + m` to `2(n + m) + m` (448 117 against
+    /// ~270 000 on gh#1206's model). Leaving those slots out removes only
+    /// decoupled identity rows, so the solve is the same linear system.
+    pub fn for_problem(qp: &QpProblem) -> Self {
+        let bounded = (0..qp.n)
+            .filter(|&j| qp.xl[j] > NLP_LOWER_BOUND_INF || qp.xu[j] < NLP_UPPER_BOUND_INF)
+            .collect();
+        Self::with_bound_vars(qp.n, qp.m, bounded)
+    }
+
+    fn with_bound_vars(n: usize, m: usize, bound_var: Vec<usize>) -> Self {
+        let m_total = m + bound_var.len();
         let dim = n + m_total;
+        let mut bound_slot = vec![None; n];
+        for (k, &j) in bound_var.iter().enumerate() {
+            bound_slot[j] = Some(k);
+        }
         Self {
             n,
             m,
             m_total,
             dim,
+            bound_var,
+            bound_slot,
             base_active: vec![false; m_total],
             changes: Vec::new(),
             kinv_u_cols: Vec::new(),
@@ -265,11 +304,39 @@ impl SchurState {
         slot < self.m
     }
 
+    /// K_max slot of full-layout slot `slot`; `None` for a free variable's
+    /// bound, which has no slot (P7).
+    fn compact_slot(&self, slot: usize) -> Option<usize> {
+        if slot < self.m {
+            Some(slot)
+        } else {
+            self.bound_slot[slot - self.m].map(|k| self.m + k)
+        }
+    }
+
+    /// Full-layout slot of K_max slot `cs`.
+    fn full_slot(&self, cs: usize) -> usize {
+        if cs < self.m {
+            cs
+        } else {
+            self.m + self.bound_var[cs - self.m]
+        }
+    }
+
+    /// Whether K_max holds a slot for every variable's bound.
+    fn has_every_bound_slot(&self) -> bool {
+        self.bound_var.len() == self.n
+    }
+
     /// [`Self::build_k_max_triplet_indexed`] with the row index of `A`
-    /// built here. Test-only: `reset` builds the index once and keeps it.
+    /// built here, from a **full-layout** active pattern (length `m + n`).
+    /// Test-only: `reset` builds the index once and keeps it.
     #[cfg(test)]
     pub(crate) fn build_k_max_triplet(&self, qp: &QpProblem, slot_active: &[bool]) -> KktTriplet {
-        self.build_k_max_triplet_indexed(qp, slot_active, &a_row_index(qp))
+        let compact: Vec<bool> = (0..self.m_total)
+            .map(|cs| slot_active[self.full_slot(cs)])
+            .collect();
+        self.build_k_max_triplet_indexed(qp, &compact, &a_row_index(qp))
     }
 
     /// Build the K_max triplet for the given active-slot pattern, reading
@@ -308,7 +375,7 @@ impl SchurState {
                     }
                 } else {
                     // Variable bound slot: single (saddle_row, var+1, 1).
-                    let var = slot - self.m;
+                    let var = self.bound_var[slot - self.m];
                     irn.push(saddle_row);
                     jcn.push((var + 1) as Index);
                     vals.push(1.0);
@@ -348,7 +415,9 @@ impl SchurState {
         slot: usize,
         going_active: bool,
     ) -> SparseChange {
-        let p = self.n + slot; // 0-based row in K_max
+        // 0-based row in K_max. `apply_change` has already refused a slot
+        // K_max does not hold.
+        let p = self.n + self.compact_slot(slot).unwrap_or(slot);
         let sign = if going_active { 1.0 } else { -1.0 };
         let mut v: Vec<(usize, Number)> = Vec::new();
         if self.slot_is_general(slot) {
@@ -425,8 +494,8 @@ impl SchurState {
         expected_neg: i32,
         opts: &QpOptions,
     ) -> Result<(), QpError> {
-        for slot in 0..self.m_total {
-            self.base_active[slot] = Self::slot_active(working, slot);
+        for cs in 0..self.m_total {
+            self.base_active[cs] = Self::slot_active(working, self.full_slot(cs));
         }
         let a_rows = a_row_index(qp);
         let mut kkt = self.build_k_max_triplet_indexed(qp, &self.base_active, &a_rows);
@@ -503,6 +572,13 @@ impl SchurState {
         slot: usize,
         going_active: bool,
     ) -> Result<(), QpError> {
+        let Some(cs) = self.compact_slot(slot) else {
+            // A free variable has no bound to activate or release.
+            return Err(QpError::LinearSolverFailure(format!(
+                "Schur update on the bound of free variable {}: K_max holds no slot for it",
+                slot - self.m
+            )));
+        };
         let change = self.build_update_vectors(qp, slot, going_active);
         let p = change.p;
         // `u = e_p`. A slot inactive at the last reset has the sentinel row
@@ -511,7 +587,7 @@ impl SchurState {
         // `K_0⁻¹ u = u` exactly — no back-solve needed (gh#1206 P4: 0.4 s
         // each at `dim = 448 117`). The base factor is what `resolve` uses,
         // so flips since the reset do not change this.
-        let kinv_u = if self.base_active[slot] {
+        let kinv_u = if self.base_active[cs] {
             let mut kinv_u = vec![0.0; self.dim];
             kinv_u[p] = 1.0;
             linsol.resolve(&mut kinv_u)?;
@@ -635,7 +711,37 @@ impl SchurState {
     ///
     /// Mirrors the convex IPM's `solve_refined`, for the same reason: a single
     /// back-solve near a degenerate optimum loses digits.
+    ///
+    /// `rhs` is in the full layout (`n + m + n`; see the type docs). When
+    /// K_max leaves free variables' slots out (P7) it is gathered into K_max
+    /// order, solved, and scattered back; a left-out slot's row is the
+    /// decoupled `(p, p) = 1` sentinel, whose solution is its right-hand side.
     pub fn solve(&self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
+        if self.has_every_bound_slot() {
+            return self.solve_compact(linsol, rhs);
+        }
+        let full = self.n + self.m + self.n;
+        if rhs.len() != full {
+            return Err(QpError::DimensionMismatch(format!(
+                "Schur solve RHS length {} but the full slot layout is {full}",
+                rhs.len()
+            )));
+        }
+        let mut c = vec![0.0; self.dim];
+        c[..self.n].copy_from_slice(&rhs[..self.n]);
+        for cs in 0..self.m_total {
+            c[self.n + cs] = rhs[self.n + self.full_slot(cs)];
+        }
+        self.solve_compact(linsol, &mut c)?;
+        rhs[..self.n].copy_from_slice(&c[..self.n]);
+        for cs in 0..self.m_total {
+            rhs[self.n + self.full_slot(cs)] = c[self.n + cs];
+        }
+        Ok(())
+    }
+
+    /// [`Self::solve`] on a right-hand side already in K_max order.
+    fn solve_compact(&self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
         /// Refinement passes.
         ///
         /// Two used to be the cap, on the reasoning quoted above — "the drift

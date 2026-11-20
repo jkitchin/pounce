@@ -17,6 +17,7 @@
 //! Opt-in (`QpOptions::elastic_seed_from_hint`, off by default): on #428's
 //! MPC sweep the same branch is slower seeded; see the option.
 
+#![allow(clippy::unwrap_used)]
 use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
 use pounce_qp::working_set::{ConsStatus, WorkingSet};
 use pounce_qp::{
