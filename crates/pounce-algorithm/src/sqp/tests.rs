@@ -2117,6 +2117,128 @@ fn stabilized_crossover_step3_needs_no_rank_test() {
     assert!(plain_eqp.rank_guard_calls >= 1, "{plain_eqp:?}");
 }
 
+/// `QuarticLowerBoundNlp` plus one inactive row `Σ xᵢ ≤ 10`, so a crossover
+/// over it has a row to stabilize.
+struct QuarticWithRowNlp;
+
+impl SqpProblemSpec for QuarticWithRowNlp {
+    fn n(&self) -> usize {
+        3
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.0; 3]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        QuarticLowerBoundNlp.variable_bounds()
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![NLP_LOWER_BOUND_INF], vec![10.0])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        QuarticLowerBoundNlp.eval_f(x)
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        QuarticLowerBoundNlp.eval_grad_f(x)
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x.iter().sum()]
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: 3,
+            irow: vec![1, 1, 1],
+            jcol: vec![1, 2, 3],
+            vals: vec![1.0; 3],
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        QuarticLowerBoundNlp.eval_hess_lag(x, &[])
+    }
+}
+
+/// gh#1206, the reporter's run of PR #1208: step 4 starts from step 3's
+/// working set (B1), which after a stabilized step 3 only a stabilized QP
+/// can pin, so step 4 is stabilized exactly when step 3 was, and its step
+/// QPs carry the stall cap. Here step 3 is stabilized and misses the
+/// tolerances (the quartic model is wrong at its point), step 4 runs with
+/// both, and the attempt converges to `x³ + x − 1 = 0`.
+#[test]
+fn crossover_step4_is_stabilized_when_step3_was() {
+    use crate::crossover::{CrossoverOptions, CrossoverPhase, CrossoverSeed};
+    let run = |sigma: Number| {
+        let seen = std::cell::Cell::new(None);
+        let mut nlp = QuarticWithRowNlp;
+        let (report, accepted) = crate::crossover::run(
+            &mut nlp,
+            &CrossoverSeed {
+                x: vec![0.0; 3],
+                lambda_g: vec![0.0],
+                lambda_x: vec![1.0; 3],
+            },
+            &CrossoverOptions {
+                enabled: true,
+                stabilization: sigma,
+                ..CrossoverOptions::default()
+            },
+            &SqpOptions::default(),
+            &QpOptions::sqp_subproblem(),
+            || Box::new(pounce_feral::FeralSolverInterface::new()),
+            |o| {
+                seen.set(Some((o.stabilization, o.step_qp_max_stall_iters)));
+                Some(SqpAlgorithm::new(
+                    ParametricActiveSetSolver::new(Box::new(
+                        pounce_feral::FeralSolverInterface::new(),
+                    )),
+                    o,
+                ))
+            },
+        );
+        (report, accepted, seen.get())
+    };
+    let x_star = 0.682_327_803_828_019_3;
+    let (report, accepted, seen) = run(1e-4);
+    assert_eq!(report.phase, Some(CrossoverPhase::ActiveSet), "{report:?}");
+    assert_eq!(seen, Some((1e-4, Some(200))), "step 4 must inherit both");
+    let res = accepted.expect("step 4 converges stabilized");
+    assert!(
+        res.x.iter().all(|&v| (v - x_star).abs() < 1e-6),
+        "{:?}",
+        res.x
+    );
+    // Step 3 not stabilized: neither is step 4, but the stall cap still is.
+    let (_, accepted, seen) = run(0.0);
+    assert_eq!(seen, Some((0.0, Some(200))));
+    assert!(accepted.is_some());
+}
+
+/// The step-4 stabilization reaches a standalone SQP only through the
+/// internal option: on the LICQ-failing NLP the stabilized SQP solves it,
+/// with the row single and duplicated.
+#[test]
+fn stabilized_sqp_solves_a_problem_without_licq() {
+    for dup in [false, true] {
+        let mut nlp = LinkedBoundsNlp { dup };
+        let mut sqp = SqpAlgorithm::new(
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new())),
+            SqpOptions {
+                stabilization: 1e-1,
+                ..SqpOptions::default()
+            },
+        );
+        let res = sqp.optimize(&mut nlp).unwrap();
+        assert_eq!(res.status, SqpStatus::Optimal, "dup={dup}: {res:?}");
+        assert!(
+            res.x.iter().all(|v| v.abs() < 1e-8),
+            "dup={dup}: {:?}",
+            res.x
+        );
+    }
+}
+
 /// gh#1206 P6 and the PR #1208 re-review: the step-3 QP gets the size-scaled
 /// iteration budget, but a pass that stops improving ends after 200, the old
 /// flat budget, so step 4 keeps the attempt's time. Explicit settings win.

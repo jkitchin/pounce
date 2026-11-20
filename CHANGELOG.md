@@ -21,10 +21,17 @@ changes.
   `σ = min(σ_max, KKT residual)`. Its KKT matrix is nonsingular whatever the
   rank, and it starts from a feasible point that satisfies the estimate
   exactly. A stabilized QP that does not solve falls back to the standard
-  one, and the crossover's never-regress test still judges the point. Only
-  step 3 is stabilized: stabilizing every SQP step QP failed 15 fixture
-  solves that had succeeded, two of them declared infeasible, because the
-  SQP's globalization judges the primal step alone. Default `0`, off.
+  one, and the crossover's never-regress test still judges the point. When
+  step 3 was stabilized, the step-4 SQP's step QPs are stabilized too: step 4
+  starts from step 3's working set, which only a stabilized QP can pin. On
+  the reporter's model the unstabilized step 4 pinned it infeasible and
+  rank-deficient and stalled 2 139 s in phase 1; stabilized, it converged in
+  three SQP iterations and the attempt was accepted. Standalone
+  `algorithm=active-set-sqp` is never stabilized: there it failed 15 corpus
+  solves that had succeeded, two of them as false infeasibility verdicts,
+  whereas inside the crossover a failed step 4 only declines the attempt.
+  Step 4's step QPs also stop after 200 non-improving iterations. Default
+  `0`, off.
 - **`sqp_proximal`: an adaptive proximal term for inexact Hessians**
   (gh#1206). `ρ_k I` is added to the step-QP Hessian, with `ρ_k` set by the
   measured error of the previous step's Hessian model on the free variables.

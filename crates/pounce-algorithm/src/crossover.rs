@@ -662,6 +662,7 @@ where
         Some(sigma) => qp_data.stabilize(sigma, &seed.lambda_g),
         None => qp_data,
     };
+    let step3_stabilized = qp_data.stabilization().is_some();
     let qp = qp_data.as_qp();
     // The step-3 QP gets whatever the solve has left (gh#1054); a QP that
     // stops on it comes back `TimeLimit`, which is a decline like any other.
@@ -857,6 +858,16 @@ where
     let step4_opts = SqpOptions {
         max_iter: opts.max_iter,
         l1_penalty: nu0,
+        // Step 4 is stabilized exactly when step 3 was: it starts from step
+        // 3's working set, which only a stabilized QP can pin (gh#1206; see
+        // `SqpOptions::stabilization`).
+        stabilization: if step3_stabilized {
+            opts.stabilization
+        } else {
+            0.0
+        },
+        // A stuck step QP ends instead of taking the attempt's time.
+        step_qp_max_stall_iters: sqp_opts.step_qp_max_stall_iters.or(Some(STEP3_STALL_ITERS)),
         ..sqp_opts.clone()
     };
     let Some(mut sqp) = make_sqp(step4_opts) else {

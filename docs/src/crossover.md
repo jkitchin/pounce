@@ -394,8 +394,19 @@ The reporter of gh#1206, using their own implementation with
 working-set changes and no rank tests. The model is not public, and this
 implementation has not been measured on it.
 
-**Only step 3 is stabilized, not the step-4 SQP.** Stabilizing every SQP
-step QP was tried and measured. Under `algorithm=active-set-sqp`
+**Step 4 is stabilized only after a stabilized step 3.** Step 4 starts from
+step 3's working set (B1), and a stabilized step 3's working set is consistent
+only because `r` absorbs the dependence among its rows. The standard step QP
+cannot pin it. On gh#1206's model (the reporter's run) it pinned infeasible
+and rank-deficient, and the cold re-solve sat 2 139 s in phase 1 until the
+attempt's time limit. With step 4 stabilized as well, it converged in three
+SQP iterations and the attempt was accepted. Step 4's step QPs also stop after
+200 non-improving iterations, so a crawl like that one ends early. Inside the
+crossover a failed step 4 only declines the attempt; the interior point
+carries on.
+
+**Standalone `algorithm=active-set-sqp` is never stabilized.** Stabilizing
+every SQP step QP there was tried and measured. Under `algorithm=active-set-sqp`
 (`σ_max = 1e-4`, applied only once the KKT residual was below `1e-2`), 15
 fixture solves that succeeded failed. Most ended
 `Search_Direction_Becomes_Too_Small` at the right objective. Near a solution

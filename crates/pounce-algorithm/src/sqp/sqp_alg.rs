@@ -224,8 +224,15 @@ impl SqpAlgorithm {
         // Schur updates likewise follow the size when the caller left them
         // to the driver (`SqpOptions::step_qp_schur_updates`). This is the
         // cold rule; a warm-started step QP may override it (`warm_qp_opts`).
-        let saved = (self.qp_opts.max_iter, self.qp_opts.use_schur_updates);
+        let saved = (
+            self.qp_opts.max_iter,
+            self.qp_opts.use_schur_updates,
+            self.qp_opts.max_stall_iters,
+        );
         self.qp_opts.max_iter = step_qp_iter_budget(saved.0, nlp.n(), nlp.m());
+        if self.qp_opts.max_stall_iters.is_none() {
+            self.qp_opts.max_stall_iters = self.opts.step_qp_max_stall_iters;
+        }
         if let Some(on) = self.opts.step_qp_schur_updates(nlp.n() + nlp.m(), None) {
             self.qp_opts.use_schur_updates = on;
         }
@@ -235,7 +242,11 @@ impl SqpAlgorithm {
             .is_some_and(|d| nlp.n() + nlp.m() >= d);
         self.ipm_seed.last_iters.set(None);
         let res = self.optimize_inner(nlp, warm);
-        (self.qp_opts.max_iter, self.qp_opts.use_schur_updates) = saved;
+        (
+            self.qp_opts.max_iter,
+            self.qp_opts.use_schur_updates,
+            self.qp_opts.max_stall_iters,
+        ) = saved;
         res
     }
 
@@ -859,6 +870,15 @@ impl SqpAlgorithm {
                     ),
                     self.hessian_inertia(),
                 ),
+            };
+            // A crossover's step 4 after a stabilized step 3 (gh#1206; see
+            // `SqpOptions::stabilization`): σ_k = min(σ_max, KKT residual).
+            let qp_data = match crate::crossover::stabilization_sigma(
+                self.opts.stabilization,
+                kkt.stationarity.max(kkt.constr_viol),
+            ) {
+                Some(sigma) if low_rank.is_none() => qp_data.stabilize(sigma, &iter.lambda_g),
+                _ => qp_data,
             };
 
             // Scale-relative inner-QP tolerances (issue #358 tail).
@@ -2534,6 +2554,48 @@ pub(crate) fn solve_subproblem_qp(
     let started = std::time::Instant::now();
     let guards_before = solver.rank_guard_calls();
     let split_before = solver.linsol_time_split();
+    // A stabilized subproblem (gh#1206) starts from its own feasible point
+    // satisfying the working set — the warm one, or the equality rows on a
+    // cold start — so it needs neither the interior-point seed nor the pinned
+    // solve, hint repair or elastic phase 1 of a working-set start. One that
+    // does not end `Optimal` falls back to the standard subproblem.
+    let stabilized = data
+        .stabilized_start(
+            &warm
+                .cloned()
+                .unwrap_or_else(|| WorkingSet::cold(data.n, data.m)),
+            qp.bl,
+            qp.bu,
+        )
+        .zip(data.as_standard_qp(qp.bl, qp.bu));
+    if let Some((start, standard)) = stabilized {
+        let sol = solver.solve(&qp, Some(&start), opts);
+        let elapsed = started.elapsed();
+        match &sol {
+            Ok(s) => tracing::debug!(target: "pounce::sqp::qp",
+                "{kind} (n={}, m={}, warm={}, stabilized σ={:.3e}): {} in {:.3?}, \
+                 {} working-set changes, {} refactors, {} Schur updates, {} rank tests, \
+                 phase1={}",
+                qp.n, qp.m, warm.is_some(), data.stabilization().unwrap_or(0.0), s.status,
+                elapsed, s.stats.n_working_set_changes, s.stats.n_refactor,
+                s.stats.n_schur_updates, solver.rank_guard_calls() - guards_before,
+                s.stats.used_phase1),
+            Err(e) => tracing::debug!(target: "pounce::sqp::qp",
+                "{kind} (n={}, m={}, stabilized): error {e:?} after {elapsed:.3?}", qp.n, qp.m),
+        }
+        return match sol {
+            Ok(s) if s.status == QpStatus::Optimal => Ok(data.unlift_solution(s)),
+            other => {
+                tracing::debug!(target: "pounce::sqp::qp",
+                    "{kind}: stabilized QP ended {:?}; solving the standard subproblem",
+                    other.as_ref().map(|s| s.status));
+                match warm {
+                    Some(w) => solver.solve_with_working_set(&standard, w, opts),
+                    None => solver.solve(&standard, None, opts),
+                }
+            }
+        };
+    }
     let seeded = match (warm, seed) {
         (None, Some(seed)) => ipm_seeded_step_qp(solver, &qp, data.hess_inf, opts, seed),
         _ => None,
