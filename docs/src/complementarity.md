@@ -669,12 +669,17 @@ per unit. From 40 starts:
 - **Declared pairs** reach the MILP-certified global minimum 18 times, and
   every answer is a local minimum of the network.
 - **Products written by hand** converge just as often, but never reach the
-  global minimum, and 23 of their answers sit on a kink the network still
+  global minimum, and 24 of their answers sit on a kink the network still
   descends from.
 
-It also times the global alternative: the big-M MILP's time to a proof grows
-from 0.1 s to beyond 120 s between 16 and 96 hidden units, while one MPCC
-solve stays near a second.
+It also times the global alternative, the big-M MILP, both to a proof and to
+the same objective value, logging every incumbent HiGHS finds. Its time to a
+proof grows from 0.14 s at 16 hidden units to beyond 120 s at 96. Most of that
+time goes to finding the optimum, not proving it. Even timed to the same value,
+a 40-start MPCC multistart is about 8 times faster at 64 units and about 40
+times faster at 96. The multistart is charged the expected cost of the starts
+that miss. At 128 units the MILP finds no feasible point in 120 s. At 16 units
+the MILP proves optimality sooner than the multistart reaches the same value.
 
 ## Evidence
 
