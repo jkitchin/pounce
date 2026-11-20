@@ -1927,46 +1927,14 @@ impl SqpProblemSpec for LinkedBoundsNlp {
     }
 }
 
-fn stabilized_sqp(sigma: Number, proximal: Number) -> SqpAlgorithm {
+fn proximal_sqp(proximal: Number) -> SqpAlgorithm {
     SqpAlgorithm::new(
         ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new())),
         SqpOptions {
-            stabilization: sigma,
             proximal,
             ..SqpOptions::default()
         },
     )
-}
-
-/// The stabilized SQP solves an NLP whose solution fails LICQ, with the
-/// constraint row single and duplicated, and lands on `x = 0`. A correctness
-/// check of the stabilized path end to end, not a regression pin: at this
-/// size the standard subproblem solves it too (its rank guard prunes the
-/// dependent rows); the difference that matters at scale is pinned by
-/// `stabilized_crossover_step3_needs_no_rank_test`.
-#[test]
-fn stabilized_sqp_solves_a_problem_without_licq() {
-    for dup in [false, true] {
-        let mut nlp = LinkedBoundsNlp { dup };
-        // A local-phase tolerance above this start's KKT residual (3), so
-        // every step QP here is stabilized.
-        let mut sqp = SqpAlgorithm::new(
-            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new())),
-            SqpOptions {
-                stabilization: 1e-1,
-                local_phase_tol: 10.0,
-                ..SqpOptions::default()
-            },
-        );
-        let res = sqp.optimize(&mut nlp).unwrap();
-        assert_eq!(res.status, SqpStatus::Optimal, "dup={dup}: {res:?}");
-        assert!(
-            res.x.iter().all(|v| v.abs() < 1e-8),
-            "dup={dup}: {:?}",
-            res.x
-        );
-        assert!(res.final_stationarity <= 1e-4, "{res:?}");
-    }
 }
 
 /// The stabilized start satisfies every row and bound, and every active one
@@ -2118,12 +2086,10 @@ fn stabilized_crossover_step3_needs_no_rank_test() {
             &CrossoverOptions {
                 enabled: true,
                 primal_tol: 1e-6,
+                stabilization: sigma,
                 ..CrossoverOptions::default()
             },
-            &SqpOptions {
-                stabilization: sigma,
-                ..SqpOptions::default()
-            },
+            &SqpOptions::default(),
             &QpOptions::sqp_subproblem(),
             || Box::new(pounce_feral::FeralSolverInterface::new()),
             |o| {
@@ -2151,28 +2117,23 @@ fn stabilized_crossover_step3_needs_no_rank_test() {
     assert!(plain_eqp.rank_guard_calls >= 1, "{plain_eqp:?}");
 }
 
-/// Stabilization is local: `σ_k = min(σ_max, ρ)` only while the KKT residual
-/// `ρ ≤ sqp_local_phase_tol`, and never at `ρ = 0`, a non-finite `ρ` or
-/// `σ_max = 0`.
+/// `σ = min(σ_max, ρ)` for the stabilized step-3 QP, and none when it is
+/// off or the residual is zero or non-finite; the proximal term's local
+/// phase is `ρ ≤ sqp_local_phase_tol`.
 #[test]
-fn stabilization_is_applied_in_the_local_phase_only() {
-    use crate::sqp::sqp_alg::{in_local_phase, stabilization_sigma};
+fn stabilization_sigma_and_the_proximal_local_phase() {
+    use crate::crossover::stabilization_sigma;
+    use crate::sqp::sqp_alg::in_local_phase;
+    assert_eq!(stabilization_sigma(1e-4, 1e-6), Some(1e-6));
+    assert_eq!(stabilization_sigma(1e-4, 5e-3), Some(1e-4));
+    assert_eq!(stabilization_sigma(1e-4, 0.0), None);
+    assert_eq!(stabilization_sigma(1e-4, f64::NAN), None);
+    assert_eq!(stabilization_sigma(0.0, 1e-6), None);
     let tol = SqpOptions::default().local_phase_tol;
     assert_eq!(tol, 1e-2);
-    assert_eq!(stabilization_sigma(1e-4, tol, 1e-6), Some(1e-6));
-    assert_eq!(stabilization_sigma(1e-4, tol, 5e-3), Some(1e-4));
-    assert_eq!(stabilization_sigma(1e-4, tol, 1e-2), Some(1e-4));
-    assert_eq!(
-        stabilization_sigma(1e-4, tol, 2e-2),
-        None,
-        "far from a solution"
-    );
-    assert_eq!(stabilization_sigma(1e-4, tol, 163.0), None);
-    assert_eq!(stabilization_sigma(1e-4, tol, 0.0), None);
-    assert_eq!(stabilization_sigma(1e-4, tol, f64::NAN), None);
-    assert_eq!(stabilization_sigma(0.0, tol, 1e-6), None);
-    assert_eq!(stabilization_sigma(1e-4, 1e3, 163.0), Some(1e-4));
     assert!(in_local_phase(tol, 1e-3));
+    assert!(in_local_phase(tol, 1e-2));
+    assert!(!in_local_phase(tol, 2e-2));
     assert!(!in_local_phase(tol, f64::INFINITY));
 }
 
@@ -2247,9 +2208,9 @@ fn proximal_add_diagonal_shifts_every_row_once() {
 #[test]
 fn proximal_sqp_converges_and_matches_the_plain_answer() {
     let mut plain = NonlinearEqNlp;
-    let a = stabilized_sqp(0.0, 0.0).optimize(&mut plain).unwrap();
+    let a = proximal_sqp(0.0).optimize(&mut plain).unwrap();
     let mut prox = NonlinearEqNlp;
-    let b = stabilized_sqp(0.0, 1e2).optimize(&mut prox).unwrap();
+    let b = proximal_sqp(1e2).optimize(&mut prox).unwrap();
     assert_eq!(a.status, SqpStatus::Optimal);
     assert_eq!(b.status, SqpStatus::Optimal);
     for (u, v) in a.x.iter().zip(b.x.iter()) {

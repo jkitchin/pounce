@@ -17,6 +17,7 @@ crossover                yes | no     (default: no)
 crossover_max_iter       integer      (default: 30)
 crossover_mult_tol       number       (default: 1e-8)
 crossover_primal_tol     number       (default: 1e-6)
+crossover_stabilization  number       (default: 0, off)
 ```
 
 > This is the NLP feature. The convex LP path has its own, separate
@@ -358,6 +359,52 @@ interior-point phase left, not a fresh budget. When it runs out, crossover
 declines with `TimeLimit` and the interior solution stands. Before gh#1054 it
 had no budget at all, and a large model could sit in crossover's first QP for
 as long as it took.
+
+## Degenerate active sets: `crossover_stabilization` (gh#1206)
+
+Step 3 pins the estimated active set and factors it. When the estimate's
+constraint gradients are linearly dependent — LICQ fails, as when a
+variable is bounded twice or bounded and pinned by an equality — or many
+bounds are weakly active, that pinned KKT is singular for every inertia
+shift. The QP then gives up its hint repair and restarts cold in the
+ℓ1-elastic phase 1. On gh#1206's 90 k-variable collocation model it never
+left that phase.
+
+`crossover_stabilization = σ_max > 0` makes the step-3 QP the *stabilized*
+subproblem (Wright 1998; Hager 1999; Fernández & Solodov 2010; Gill &
+Robinson 2013). At the interior iterate `(x, λ)`,
+
+```text
+min  ∇fᵀp + ½ pᵀHp + λᵀr + ‖r‖²/(2σ)
+s.t. bl ≤ c + Jp − r ≤ bu,   xl ≤ x + p ≤ xu,   r free
+```
+
+with `σ = min(σ_max, KKT residual)`. Optimality gives `r = σ(λ_new − λ)`, so
+the KKT matrix on the active rows is `[H Jᵀ; J −σI]`: nonsingular however
+dependent the active gradients are. Because `r` is free, every working set
+has a feasible point that satisfies it exactly. The QP starts there, from
+the estimate, so it needs no pinned solve, no hint repair and no phase 1.
+The cost is `m` extra QP variables. A stabilized QP that does not end
+`Optimal` falls back to the standard one. Either way the point goes through
+the never-regress test below, so the option cannot make a crossover accept a
+worse point.
+
+The reporter of gh#1206, using their own implementation with
+`σ_max = 1e-4`, measured the step-3 QP ending `Optimal` after 193
+working-set changes and no rank tests. The model is not public, and this
+implementation has not been measured on it.
+
+**Only step 3 is stabilized, not the step-4 SQP.** Stabilizing every SQP
+step QP was tried and measured. Under `algorithm=active-set-sqp`
+(`σ_max = 1e-4`, applied only once the KKT residual was below `1e-2`), 15
+fixture solves that succeeded failed. Most ended
+`Search_Direction_Becomes_Too_Small` at the right objective. Near a solution
+a stabilized method makes much of its progress in the multipliers, while the
+SQP's merit line search and step-size exit judge the primal step alone. Two
+feasible models (`issue981_wachter_biegler` and its redundant-row variant,
+L-BFGS) were declared infeasible. Getting this right takes a primal-dual
+merit function (Gill & Robinson 2013), which is a redesign of the SQP's
+globalization.
 
 ## Handing over before convergence (`ipm_sqp_handover`)
 

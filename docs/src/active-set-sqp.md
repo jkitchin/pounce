@@ -145,8 +145,8 @@ mirror `SqpOptions::default()`.
 | `sqp_print_level`       | `0`         | 0=silent, 1=per-iter summary, 2+=trace             |
 | `sqp_lbfgs_max_history` | `6`         | L-BFGS history size                                |
 | `sqp_dense_hessian_max_n` | `1000`    | largest `n` at which a quasi-Newton Hessian goes to the QP dense (see §6) |
-| `sqp_stabilization`     | `0` (off)   | cap σ_max on the stabilized subproblem's dual regularization (see below) |
 | `sqp_proximal`          | `0` (off)   | cap ρ_max on an adaptive proximal term on the step-QP Hessian (see below) |
+| `sqp_local_phase_tol`   | `1e-2`      | KKT residual at or below which `sqp_proximal` applies |
 
 `max_wall_time` and `max_cpu_time` bound this path too (gh#1054): the budget
 is checked every outer iteration, and what is left of it is handed to each
@@ -819,35 +819,7 @@ gh#1061 the first infeasible step QP did, and `deb7` (813 variables, feasible)
 came back `Infeasible_Problem_Detected` at iteration 0; it now solves in nine
 iterations.
 
-### Degenerate active sets and inexact Hessians (gh#1206)
-
-Two opt-in options make the step subproblem robust where the textbook one is
-not. Both are off by default and change nothing while off.
-
-**`sqp_stabilization = σ_max`** poses the *stabilized* subproblem (Wright 1998;
-Hager 1999; Fernández & Solodov 2010; Gill & Robinson 2013). At `(x_k, λ_k)`,
-
-```text
-min  ∇fᵀp + ½ pᵀHp + λ_kᵀr + ‖r‖²/(2σ)
-s.t. bl ≤ c + Jp − r ≤ bu,   xl ≤ x + p ≤ xu,   r free
-```
-
-with `σ = min(σ_max, KKT residual)`. Optimality gives `r = σ(λ − λ_k)`, so the
-KKT matrix on the active rows is `[H Jᵀ; J −σI]`: nonsingular however
-dependent the active constraint gradients are. That is the case the standard
-subproblem cannot handle: when LICQ fails (a variable bounded twice, or
-bounded and pinned by an equality) or many bounds are weakly active, the
-warm-started QP's pinned KKT is singular for every inertia shift. gh#1206's
-90 k-variable collocation model then never left the ℓ1-elastic phase 1 of
-its crossover QP. Because `r` is free, every working set has a feasible point
-that satisfies it exactly. Each stabilized QP starts there, so it needs no
-pinned solve, no hint repair and no phase 1. The cost is `m` extra QP
-variables, one per row. It applies to every step QP, to the crossover and
-handover QPs, and not to the lifted L-BFGS form. The reporter of gh#1206,
-using their own implementation of the same subproblem with `σ_max = 1e-4`,
-measured the crossover's step-3 QP ending `Optimal` after 193 working-set
-changes and no rank tests. This implementation has not been measured on that
-model, which is not public.
+### Inexact Hessians: `sqp_proximal` (gh#1206)
 
 **`sqp_proximal = ρ_max`** adds `ρ_k I` to the step-QP Hessian, with
 
@@ -860,16 +832,30 @@ current multipliers, and `P` masks the variables at active bounds. `e_k` is
 the error of the previous Hessian model along the step it took. When the model
 is accurate `ρ_k` decays to zero and the local rate is kept. When it is not,
 the step shrinks in proportion to the error, like a proximal-point or
-Levenberg–Marquardt step. This is for a Hessian that is only partly analytical:
-gh#1206's carried a limited-memory SR1 block for an embedded black-box model,
-and the reporter measured, with their own implementation of this rule and
-`ρ_max = 1e2`, the crossover's step 4 going from 9 SQP iterations and 50
-working-set changes to 3 and 8. The term is added after the
-negative-curvature checks, so it hides no indefiniteness from them. Every
-iteration logs the model error at debug level under `pounce::sqp`:
-`|Bs−y|/|y|` overall and on the free variables, `sᵀBs/sᵀy`, `e_k`, `‖s‖`
-and `ρ_k`. That line is also a way to judge whether a Hessian approximation
-is good enough for the SQP.
+Levenberg–Marquardt step. This is for a Hessian that is only partly
+analytical: gh#1206's carried a limited-memory SR1 block for an embedded
+black-box model. The reporter measured, with their own implementation of this
+rule and `ρ_max = 1e2`, the crossover's step 4 going from 9 SQP iterations and
+50 working-set changes to 3 and 8. That model is not public, so this
+implementation has not been measured on it.
+
+It applies only within `sqp_local_phase_tol` (KKT residual ≤ `1e-2` by
+default). Far from a solution even an exact Hessian has a large model error
+along a long step — the Taylor remainder — so the term shrinks every step;
+applied from the first iterate it turned five solved fixtures into failures.
+Inside the local phase it still costs something on an **exact** Hessian,
+whose model error is small but not zero. Swept over the CLI fixture corpus
+under `algorithm=active-set-sqp` with `ρ_max = 1e2` (302 fixture-legs, exact
+Hessian or L-BFGS), two solves that succeeded failed (`deb7` exact,
+`cute_palmer8e` L-BFGS), 25 took 1–7 more iterations, two took 1–2 fewer, and
+no failing solve was fixed. It is a tool for an inexact Hessian, not a
+default.
+
+The term is added after the negative-curvature checks, so it hides no
+indefiniteness from them. Every iteration logs the model error at debug level
+under `pounce::sqp`: `|Bs−y|/|y|` overall and on the free variables,
+`sᵀBs/sᵀy`, `e_k`, `‖s‖` and `ρ_k`. That line is also a way to judge whether a
+Hessian approximation is good enough for the SQP, with or without the term.
 
 ## 7. Pitfalls
 

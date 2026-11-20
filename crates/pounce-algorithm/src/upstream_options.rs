@@ -715,28 +715,6 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "Limited-memory BFGS keeps a circular buffer of the most-recent (s, y) curvature pairs; this option caps that buffer length. Mirrors upstream's \"limited_memory_max_history\". Only consulted when \"algorithm\" is \"active-set-sqp\" and \"sqp_hessian\" is \"lbfgs\".",
     )?;
     r.add_lower_bounded_number_option(
-        "sqp_stabilization",
-        "Cap on the dual regularization of the stabilized SQP step subproblem; 0 = off.",
-        0.0,
-        false,
-        0.0,
-        "Active-set SQP only (also the crossover and ipm_sqp_handover QPs). When \
-         positive, each step QP is the stabilized subproblem of Wright, Hager, \
-         Fernandez-Solodov and Gill-Robinson: a free residual r on every \
-         general row, priced by lambda_k^T r + |r|^2/(2 sigma), with sigma = \
-         min(this, the KKT residual at the iterate). Its KKT matrix stays \
-         nonsingular when the active constraint gradients are linearly \
-         dependent (LICQ fails) or weakly active, which is where the standard \
-         subproblem's warm start has nothing it can factor, and it converges \
-         superlinearly under second-order sufficiency alone. Each step QP also \
-         starts from a feasible point that satisfies its working set exactly, \
-         so it never enters the elastic phase 1. Costs m extra QP variables \
-         (one per row). Not applied to the lifted limited-memory Hessian \
-         (sqp_dense_hessian_max_n). Applied only within \"sqp_local_phase_tol\"; \
-         a stabilized QP that does not solve falls back to the standard one. \
-         Default 0 (off); gh#1206 used 1e-4.",
-    )?;
-    r.add_lower_bounded_number_option(
         "sqp_proximal",
         "Cap on an adaptive proximal term on the SQP step-QP Hessian; 0 = off.",
         0.0,
@@ -758,19 +736,16 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
     )?;
     r.add_lower_bounded_number_option(
         "sqp_local_phase_tol",
-        "KKT residual at or below which sqp_stabilization and sqp_proximal apply.",
+        "KKT residual at or below which sqp_proximal applies.",
         0.0,
         false,
         1e-2,
-        "Both are local devices, applied only at iterates whose KKT residual \
+        "The proximal term applies only at iterates whose KKT residual \
          max(stationarity, constraint violation) is at or below this. Far from \
-         a solution the stabilized subproblem prices a large linearization \
-         residual at 1/sigma and stalls, and even an exact Hessian has a large \
-         model error along a long step, so the proximal term would shrink \
-         every step; measured on the fixture corpus, applying either from the \
-         first iterate turned solved models into failures. The handover and \
-         crossover points they were introduced for (gh#1206) are local by \
-         construction. Only consulted when one of them is on.",
+         a solution even an exact Hessian has a large model error along a long \
+         step, so the term would shrink every step; measured on the fixture \
+         corpus, applying it from the first iterate turned solved models into \
+         failures. Only consulted when \"sqp_proximal\" is positive.",
     )?;
     r.add_lower_bounded_integer_option(
         "sqp_dense_hessian_max_n",
@@ -832,6 +807,29 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          Raising it makes the initial estimate more conservative (fewer rows \
          guessed active), which the active-set phase can still correct by \
          pivoting. Only consulted when \"crossover\" is \"yes\".",
+    )?;
+    r.add_lower_bounded_number_option(
+        "crossover_stabilization",
+        "Cap on the dual regularization of a stabilized crossover QP; 0 = off.",
+        0.0,
+        false,
+        0.0,
+        "When positive, the crossover's one-step QP (KNITRO section 7 step 3, \
+         also under ipm_sqp_handover) is the stabilized SQP subproblem of \
+         Wright, Hager, Fernandez-Solodov and Gill-Robinson: a free residual r \
+         on every general row priced by lambda^T r + |r|^2/(2 sigma), with \
+         sigma = min(this, the KKT residual at the interior iterate). Its KKT \
+         matrix stays nonsingular when the estimated active constraint \
+         gradients are linearly dependent (LICQ fails) or weakly active -- \
+         where the standard QP's pinned start is singular, gives up its hint \
+         repair and crawls in the elastic phase 1 (gh#1206) -- and it starts \
+         from a feasible point satisfying the estimate exactly. A stabilized QP \
+         that does not solve falls back to the standard one, and its point is \
+         put through the same never-regress test as any crossover point. Costs \
+         m extra QP variables. The full active-set SQP of step 4 is not \
+         stabilized: its line search and stopping tests judge the primal step \
+         alone, and a stabilized method's progress near a solution is largely \
+         in the multipliers. Default 0 (off); gh#1206 used 1e-4.",
     )?;
     r.add_lower_bounded_number_option(
         "crossover_primal_tol",

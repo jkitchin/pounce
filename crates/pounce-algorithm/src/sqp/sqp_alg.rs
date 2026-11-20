@@ -829,22 +829,11 @@ impl SqpAlgorithm {
             let qp_time_limit =
                 qp_time_limit_now(self.opts.deadline.as_ref(), self.qp_opts.time_limit);
 
-            // `sqp_stabilization` (gh#1206): σ_k = min(σ_max, KKT residual),
-            // in the local phase only (`stabilization_sigma`).
-            let sigma = stabilization_sigma(
-                self.opts.stabilization,
-                self.opts.local_phase_tol,
-                kkt.stationarity.max(kkt.constr_viol),
-            );
-            let stabilize = |d: SqpQpData| match sigma {
-                Some(s) => d.stabilize(s, &iter.lambda_g),
-                None => d,
-            };
             let qp_data = match low_rank.as_ref() {
                 Some(b) => SqpQpData::build_low_rank(
                     &iter.x, &grad_f, &c_vals, &bl_c, &bu_c, &xl, &xu, jac_c, b,
                 ),
-                None => stabilize(SqpQpData::build(
+                None => SqpQpData::build(
                     &iter.x,
                     &grad_f,
                     &c_vals,
@@ -869,7 +858,7 @@ impl SqpAlgorithm {
                         },
                     ),
                     self.hessian_inertia(),
-                )),
+                ),
             };
 
             // Scale-relative inner-QP tolerances (issue #358 tail).
@@ -1094,7 +1083,7 @@ impl SqpAlgorithm {
                 && let Some(b) = bfgs.as_mut()
             {
                 b.reset_to_scale();
-                qp_data = stabilize(SqpQpData::build(
+                qp_data = SqpQpData::build(
                     &iter.x,
                     &grad_f,
                     &c_vals,
@@ -1105,7 +1094,7 @@ impl SqpAlgorithm {
                     nlp.eval_jac_c(&iter.x),
                     b.as_triplet(),
                     self.hessian_inertia(),
-                ));
+                );
                 let retry = solve_step_qp(
                     &mut self.qp_solver,
                     &qp_data,
@@ -1412,7 +1401,7 @@ impl SqpAlgorithm {
                         h.jcol.push(i as Index + 1);
                         h.vals.push(delta);
                     }
-                    let convex = stabilize(SqpQpData::build(
+                    let convex = SqpQpData::build(
                         &iter.x,
                         &grad_f,
                         &c_vals,
@@ -1423,7 +1412,7 @@ impl SqpAlgorithm {
                         nlp.eval_jac_c(&iter.x),
                         h,
                         HessianInertia::Psd,
-                    ));
+                    );
                     n_qp_solves += 1;
                     if let Ok(cs) = solve_step_qp(
                         &mut self.qp_solver,
@@ -1881,43 +1870,17 @@ pub(crate) struct KktError {
 /// stationary point of the violation from passing for one.
 const ELASTIC_STEP_MIN_GAIN: Number = 1e-6;
 
-/// ℓ1 violation of the step QP's own rows and bounds at step `d`: the
-/// linearization `c(x_k) + J d` against the row bounds, and `x_k + d` against
-/// the variable bounds, both as the QP poses them (shifted to step space).
-/// Only the NLP's rows and variables count; a lifted subproblem's extra
-/// rows and columns are bookkeeping, not constraints.
 /// Whether an iterate with KKT residual `residual` is in the **local
-/// phase** (`sqp_local_phase_tol`), where `sqp_stabilization` and
-/// `sqp_proximal` apply (gh#1206).
+/// phase** (`sqp_local_phase_tol`), where `sqp_proximal` applies (gh#1206).
 ///
-/// Both are local devices. Stabilized SQP's convergence theory is about a
-/// neighbourhood of a solution; far from one its subproblem is badly
-/// conditioned (a residual of size `‖c‖` priced at `1/σ`) and its step need
-/// not descend for the ℓ₁ merit. And the proximal term's model error is, for
-/// an exact Hessian, the Taylor remainder along the step, which is large on
-/// a long one. Measured on the fixture corpus under
-/// `algorithm=active-set-sqp`, applying either from the first iterate turned
-/// solved models into failures: stabilized (`σ_max = 1e-4`), `csfi2` stalled
-/// in its step QP (198 refactorizations for 4 working-set changes at
-/// `‖c‖ = 163`) and infeasible linearizations went unreported; proximal
-/// (`ρ_max = 1e2`), `cresc4`, `cute_hs99exp`, `cute_palmer8e`, `dallass`
-/// and `hs13_bigstart` ran out of iterations or stalled on short steps. The
-/// handover and crossover points they were asked for are local by
-/// construction.
+/// The proximal term's model error is, for an exact Hessian, the Taylor
+/// remainder along the step, which is large on a long one, so far from a
+/// solution the term would shrink every step. Measured on the fixture corpus
+/// under `algorithm=active-set-sqp` with `ρ_max = 1e2`, applying it from the
+/// first iterate made `cresc4`, `cute_hs99exp`, `cute_palmer8e`, `dallass`
+/// and `hs13_bigstart` run out of iterations or stall on short steps.
 pub(crate) fn in_local_phase(local_phase_tol: Number, residual: Number) -> bool {
     residual.is_finite() && residual <= local_phase_tol
-}
-
-/// The stabilized subproblem's `σ_k = min(σ_max, residual)` at an iterate in
-/// the local phase ([`in_local_phase`]), or `None` for the standard
-/// subproblem (off, outside the local phase, or a zero residual).
-pub(crate) fn stabilization_sigma(
-    sigma_max: Number,
-    local_phase_tol: Number,
-    residual: Number,
-) -> Option<Number> {
-    (sigma_max > 0.0 && residual > 0.0 && in_local_phase(local_phase_tol, residual))
-        .then(|| sigma_max.min(residual))
 }
 
 /// `h + δI` for a symmetric triplet `h` (`δ` appended as extra diagonal
@@ -2006,6 +1969,11 @@ pub(crate) fn next_proximal(rho_max: Number, e: Number, rho_prev: Number) -> Num
     rho_max.min(e.max(0.25 * rho_prev)).max(0.0)
 }
 
+/// ℓ1 violation of the step QP's own rows and bounds at step `d`: the
+/// linearization `c(x_k) + J d` against the row bounds, and `x_k + d` against
+/// the variable bounds, both as the QP poses them (shifted to step space).
+/// Only the NLP's rows and variables count; a lifted subproblem's extra
+/// rows and columns are bookkeeping, not constraints.
 fn linearized_l1_violation(data: &SqpQpData, d: &[Number]) -> Number {
     let (m, n) = (data.m, data.n);
     let ad = mat_vec_gen(&data.a, d, m);
@@ -2566,50 +2534,6 @@ pub(crate) fn solve_subproblem_qp(
     let started = std::time::Instant::now();
     let guards_before = solver.rank_guard_calls();
     let split_before = solver.linsol_time_split();
-    // A stabilized subproblem (gh#1206) starts from its own feasible point
-    // satisfying the working set — the warm one, or the equality rows on a
-    // cold start — so it needs neither the interior-point seed nor the
-    // pinned solve, hint repair or elastic phase 1 of a working-set start.
-    if let Some(start) = data.stabilized_start(
-        &warm
-            .cloned()
-            .unwrap_or_else(|| WorkingSet::cold(data.n, data.m)),
-        qp.bl,
-        qp.bu,
-    ) {
-        let mut sol = solver.solve(&qp, Some(&start), opts);
-        // Anything but `Optimal` falls back to the standard subproblem: a
-        // stabilized QP that stalls is no better a step than none, and an
-        // infeasible linearization is only visible to the standard one,
-        // whose elastic step and verdict the SQP knows how to use.
-        let fell_back = !matches!(&sol, Ok(s) if s.status == QpStatus::Optimal);
-        if fell_back && let Some(std_qp) = data.as_standard_qp(qp.bl, qp.bu) {
-            tracing::debug!(target: "pounce::sqp::qp",
-                "{kind}: stabilized QP ended {:?}; solving the standard subproblem",
-                sol.as_ref().map(|s| s.status));
-            sol = match warm {
-                Some(w) => solver.solve_with_working_set(&std_qp, w, opts),
-                None => solver.solve(&std_qp, None, opts),
-            };
-            // Already in the NLP's dimensions.
-            return sol;
-        }
-        let elapsed = started.elapsed();
-        match &sol {
-            Ok(s) => tracing::debug!(target: "pounce::sqp::qp",
-                "{kind} (n={}, m={}, warm={}, stabilized σ={:.3e}): {} in {:.3?}, \
-                 {} working-set changes, {} refactors, {} Schur updates, {} rank tests, \
-                 phase1={}",
-                qp.n, qp.m, warm.is_some(), data.stabilization().unwrap_or(0.0), s.status,
-                elapsed, s.stats.n_working_set_changes, s.stats.n_refactor,
-                s.stats.n_schur_updates, solver.rank_guard_calls() - guards_before,
-                s.stats.used_phase1),
-            Err(e) => tracing::debug!(target: "pounce::sqp::qp",
-                "{kind} (n={}, m={}, stabilized): error {e:?} after {elapsed:.3?}",
-                qp.n, qp.m),
-        }
-        return Ok(data.unlift_solution(sol?));
-    }
     let seeded = match (warm, seed) {
         (None, Some(seed)) => ipm_seeded_step_qp(solver, &qp, data.hess_inf, opts, seed),
         _ => None,

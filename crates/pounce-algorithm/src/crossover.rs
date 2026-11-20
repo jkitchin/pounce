@@ -165,6 +165,10 @@ pub struct CrossoverOptions {
     /// (`crossover_max_iter`). `0` disables step 4 entirely, leaving
     /// crossover as the one-step refinement of step 3.
     pub max_iter: u32,
+    /// `crossover_stabilization`: cap `σ_max` on the dual regularization of
+    /// a stabilized step-3 QP; `0` (the default) poses the standard one
+    /// (gh#1206; see [`crate::sqp::qp_assembly`]).
+    pub stabilization: Number,
 }
 
 impl Default for CrossoverOptions {
@@ -174,6 +178,7 @@ impl Default for CrossoverOptions {
             mult_tol: 1e-8,
             primal_tol: 1e-6,
             max_iter: 30,
+            stabilization: 0.0,
         }
     }
 }
@@ -449,6 +454,26 @@ fn complementarity_at(
     worst
 }
 
+/// `σ = min(σ_max, residual)` for a stabilized step-3 QP at an interior
+/// iterate with KKT residual `residual`, or `None` for the standard QP (off,
+/// or a zero or non-finite residual).
+///
+/// Only the step-3 QP is stabilized, not the step-4 SQP. Measured on the
+/// fixture corpus under `algorithm=active-set-sqp` with the stabilized
+/// subproblem in every SQP step QP (`σ_max = 1e-4`, applied only once the
+/// KKT residual was below `1e-2`), 15 solves that succeeded failed
+/// instead. Most ended `Search_Direction_Becomes_Too_Small` at the right
+/// objective: a stabilized method's progress near a solution is largely in
+/// the multipliers, and the SQP's merit line search and step-size exit read
+/// the primal step alone. Two (`issue981_wachter_biegler`,
+/// `issue1176_wb_redundant_row`, L-BFGS) were declared infeasible. Getting
+/// that right needs a primal-dual merit function (Gill & Robinson 2013),
+/// which is a redesign of the SQP's globalization, not an option. One QP
+/// whose point must pass [`accepts`] cannot give a false verdict.
+pub(crate) fn stabilization_sigma(sigma_max: Number, residual: Number) -> Option<Number> {
+    (sigma_max > 0.0 && residual.is_finite() && residual > 0.0).then(|| sigma_max.min(residual))
+}
+
 /// Count the active entries of a working set, split bounds / rows.
 /// The inertia hint for a QP built on the exact Lagrangian Hessian `h`.
 ///
@@ -593,14 +618,13 @@ where
         hess_lag,
         hessian_inertia,
     );
-    // `sqp_stabilization` (gh#1206): on a degenerate active set — LICQ
+    // `crossover_stabilization` (gh#1206): on a degenerate active set — LICQ
     // failing, or bounds weakly active — the estimate's pinned KKT is
     // singular, and the step-3 QP otherwise went to a hint repair that gives
     // up and a cold elastic phase 1 that crawls. Stabilized, it starts from a
     // feasible point satisfying the estimate exactly.
-    let qp_data = match crate::sqp::sqp_alg::stabilization_sigma(
-        sqp_opts.stabilization,
-        sqp_opts.local_phase_tol,
+    let qp_data = match stabilization_sigma(
+        opts.stabilization,
         kkt_before.stationarity.max(kkt_before.constr_viol),
     ) {
         Some(sigma) => qp_data.stabilize(sigma, &seed.lambda_g),
@@ -643,8 +667,8 @@ where
     let eqp = match qp_data.stabilized_start(&working, qp.bl, qp.bu) {
         Some(start) => match qp_solver.solve(&qp, Some(&start), &eqp_opts) {
             Ok(sol) if sol.status == QpStatus::Optimal => Ok(qp_data.unlift_solution(sol)),
-            // As in the SQP's step QPs: a stabilized QP that does not solve
-            // falls back to the standard one.
+            // A stabilized QP that does not solve falls back to the
+            // standard one.
             _ => qp_solver.solve_with_working_set(
                 &qp_data
                     .as_standard_qp(qp.bl, qp.bu)

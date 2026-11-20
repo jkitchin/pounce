@@ -10,24 +10,32 @@ changes.
 ## [Unreleased]
 
 ### Added
-- **`sqp_stabilization`: a stabilized SQP step subproblem** (gh#1206). At a
+- **`crossover_stabilization`: a stabilized crossover QP** (gh#1206). At a
   degenerate solution, where the active constraint gradients are linearly
-  dependent or many bounds are weakly active, the standard step QP's pinned
-  KKT matrix is singular. The crossover QP of gh#1206's 90 k-variable
-  collocation model never left its ℓ1-elastic phase 1. With
-  `sqp_stabilization = σ_max > 0`, each step QP (and the crossover and
-  handover QPs) is the stabilized subproblem. It adds a free residual on
-  every row, priced by `λ_kᵀr + ‖r‖²/(2σ)` with `σ = min(σ_max, KKT
-  residual)`. Its KKT matrix is nonsingular whatever the rank, and it starts
-  from a feasible point that satisfies its working set exactly, so it needs
-  no hint repair and no phase 1. Default `0`, off.
+  dependent or many bounds are weakly active, the crossover's step-3 QP
+  pins a singular KKT matrix, gives up its hint repair and crawls in the
+  ℓ1-elastic phase 1. On gh#1206's 90 k-variable collocation model it never
+  left that phase. With `crossover_stabilization = σ_max > 0` that QP (also
+  under `ipm_sqp_handover`) is the stabilized subproblem. It adds a free
+  residual on every row, priced by `λᵀr + ‖r‖²/(2σ)` with
+  `σ = min(σ_max, KKT residual)`. Its KKT matrix is nonsingular whatever the
+  rank, and it starts from a feasible point that satisfies the estimate
+  exactly. A stabilized QP that does not solve falls back to the standard
+  one, and the crossover's never-regress test still judges the point. Only
+  step 3 is stabilized: stabilizing every SQP step QP failed 15 fixture
+  solves that had succeeded, two of them declared infeasible, because the
+  SQP's globalization judges the primal step alone. Default `0`, off.
 - **`sqp_proximal`: an adaptive proximal term for inexact Hessians**
   (gh#1206). `ρ_k I` is added to the step-QP Hessian, with `ρ_k` set by the
   measured error of the previous step's Hessian model on the free variables.
   It vanishes when the model is accurate and shortens the step in proportion
   to the error when it is not. It is meant for a Lagrangian Hessian that is
-  only partly analytical. A debug line under `pounce::sqp` reports the model
-  error every iteration. Default `0`, off.
+  only partly analytical, and applies only within the new
+  `sqp_local_phase_tol` (KKT residual ≤ `1e-2` by default). On an exact
+  Hessian it costs iterations: across the fixture corpus under
+  `algorithm=active-set-sqp` it added 1–7 iterations to 25 solves and failed
+  two. A debug line under `pounce::sqp` reports the model error every
+  iteration. Default `0`, off.
 - **`ipm_sqp_handover_time_ratio` and `ipm_sqp_handover_primal_tol`**
   (gh#1206). A handover attempt was capped at the interior-point time spent so
   far with no way to change it, so a crossover that converged but needed
