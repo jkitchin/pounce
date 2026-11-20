@@ -1377,7 +1377,11 @@ fn receipt_json(args: &VerifyArgs, o: &VerifyOutcome) -> String {
     use serde_json::json;
     let worst_con = o.worst_con.as_ref().map(row_json);
     let worst_bound = o.worst_bound.as_ref().map(row_json);
-    let optimality = if o.duals_present || o.bound_multipliers_present {
+    // Keyed on whether optimality was *computed*, not on whether the `.sol`
+    // carried duals: a model with no rows needs none, and its residual gates
+    // `--require-optimal` all the same. Keying on `duals_present` reported
+    // `available: false` for exactly the verdict it decided.
+    let optimality = if o.optimal.is_some() || o.bound_multipliers_present {
         // Optimality is a property of a FEASIBLE point, so this must not report
         // `true` for one that violates the constraints. The stationarity
         // residual of an infeasible point can be legitimately zero, which

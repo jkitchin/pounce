@@ -158,6 +158,16 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **`pounce verify`'s JSON receipt no longer reports `optimality.available:
+  false` for a verdict decided on optimality.** A model with no rows needs no
+  constraint duals, so verify computes its stationarity residual from a `.sol`
+  that has neither duals nor `ipopt_zL_out`/`ipopt_zU_out` suffixes, and
+  `--require-optimal` gates on that residual. The receipt included the
+  `optimality` block only when the `.sol` carried duals or suffixes, though,
+  so for exactly that case it said optimality was not checked. The block now
+  appears whenever optimality was computed. A model with rows and no duals
+  still reads `available: false`. Both cases are pinned in
+  `crates/pounce-cli/tests/verify_subcommand.rs`.
 - **`pounce verify --compl-tol` now governs the bound-projected stationarity
   residual too** (gh#1209). Both bound-activity tests in `verify` share one
   rule: on the bound to `1e-8·(1+|b|)`, or standing off it with

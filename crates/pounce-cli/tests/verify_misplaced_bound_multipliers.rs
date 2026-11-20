@@ -49,7 +49,6 @@ fn sol(x: f64, z_l: Option<f64>, z_u: Option<f64>) -> String {
 struct Verdict {
     ok: bool,
     receipt: serde_json::Value,
-    stdout: String,
 }
 
 fn verify(tag: &str, nl_text: &str, sol_text: &str, extra: &[&str]) -> Verdict {
@@ -79,7 +78,6 @@ fn verify(tag: &str, nl_text: &str, sol_text: &str, extra: &[&str]) -> Verdict {
     Verdict {
         ok: code == Some(0),
         receipt,
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
     }
 }
 
@@ -200,22 +198,10 @@ fn sol_without_suffixes(x: f64) -> String {
     format!("claim\n\nOptions\n3\n1\n1\n0\n0\n0\n1\n1\n{x:e}\nobjno 0 0\n")
 }
 
-/// The bound-projected residual, read from the text report: the receipt
-/// omits the optimality block for a row-less model without suffixes.
 fn projected(v: &Verdict) -> f64 {
-    let line = v
-        .stdout
-        .lines()
-        .find(|l| l.contains("KKT stationarity residual (bound-projected)"))
-        .unwrap_or_else(|| panic!("no projected residual in report:\n{}", v.stdout));
-    let value = line
-        .split(':')
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap();
-    value.parse().unwrap()
+    v.receipt["optimality"]["stationarity_residual"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("receipt carries stationarity_residual: {}", v.receipt))
 }
 
 /// gh#1209: without suffixes, the bound-projected residual decides bound
@@ -232,11 +218,11 @@ fn without_suffixes_a_stand_off_is_active_up_to_compl_tol() {
 
     let v = verify("nosuf_band", &model, &sol_without_suffixes(x), &[]);
     assert!(
-        !v.stdout.contains("with z_L/z_U suffixes"),
-        "fixture must take the suffix-less path:\n{}",
-        v.stdout
+        v.receipt["optimality"]["bound_multipliers_present"] == false,
+        "fixture must take the suffix-less path: {}",
+        v.receipt
     );
-    assert!(v.ok, "{}", v.stdout);
+    assert!(v.ok, "{}", v.receipt);
     assert_eq!(projected(&v), 0.0);
 
     // The same point with the suffix: the two paths now agree.
@@ -256,6 +242,6 @@ fn without_suffixes_a_stand_off_is_active_up_to_compl_tol() {
         &sol_without_suffixes(x),
         &["--compl-tol", "1e-6"],
     );
-    assert!(!tight.ok, "{}", tight.stdout);
-    assert!((projected(&tight) - 4.0).abs() < 1e-5, "{}", tight.stdout);
+    assert!(!tight.ok, "{}", tight.receipt);
+    assert!((projected(&tight) - 4.0).abs() < 1e-5, "{}", tight.receipt);
 }
