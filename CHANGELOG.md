@@ -178,6 +178,23 @@ changes.
   variable.
 
 ### Changed
+- **Notebook 48 times the MILP and the MPCC to the same objective value, not
+  only the MILP to a proof.** Time to a proof against one local solve compares a
+  global certificate with a stationary point. Section 6 now logs every HiGHS
+  incumbent and the dual bound over time, through `highspy`'s callbacks. The
+  MPCC side is solved from all 40 starts and charged the expected cumulative
+  time of a random start order, so it pays for the starts that miss. Most of
+  the MILP's time goes to finding the optimum, not proving it. Where it proves
+  (16–64 hidden units), it finds the optimum at 0.14, 0.85 and 7.05 s and proves
+  it at 0.14, 0.85 and 9.89 s. Timed to the same value, the multistart is still
+  about 8 times faster at 64 units (0.88 s) and about 40 times faster at 96
+  (1.9 s against 75 s). At 128 units the MILP finds no feasible point in 120 s.
+  At 16 units the MILP's proof (0.14 s) comes before the multistart's expected
+  0.19 s. The notebooks dependency group gains `highspy>=1.9`, the first release
+  with the callback API. In the full rerun, the product formulation leaves 24 of
+  40 answers on a descending kink (23 before), and the MILP's `f*` moves from
+  −7.066641 to −7.067265. The surrogate trains, from the same seed, to slightly
+  different weights in the new environment.
 - **FERAL 0.24.0: the same results, with cheaper refactorization.** Factoring
   a matrix whose sparsity pattern has not changed no longer copies the
   permuted pattern or re-hashes it, and InfNorm scaling passes run in parallel

@@ -99,6 +99,7 @@ notebooks = [
     "pyomo-pounce",
     "pyomo-cvp==0.7.2; python_version >= '3.10'",
     "ipykernel>=6",
+    "highspy>=1.9",
     "asdex>=0.5; python_version >= '3.11'",
 ]
 
