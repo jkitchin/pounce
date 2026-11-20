@@ -10,6 +10,38 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`tail_soc`**, an NLP-arm option, default `no` (off) (gh#1211). Once the
+  monotone barrier parameter is at its floor, a full step accepted on its
+  first trial is replaced by its second-order correction: one back-solve with
+  the factorization in hand, constraint rows set to `c(x) + c(x+d)` (the
+  right-hand side `max_soc` uses at `α = 1`), so the residual a full step
+  leaves drops from `O(‖d‖²)` to `O(‖d‖³)`. The corrected point is kept only
+  if it is a full step, lowers the constraint violation, and passes the same
+  filter test at the same reference iterate. `max_soc` cannot do this: it
+  runs only after a *rejected* first trial, which never happens in this
+  phase. Accepted corrections are tagged `H`/`F`, as for `max_soc`. The option
+  does nothing under `mu_strategy=adaptive` or a non-filter line search, and
+  is switched off inside the restoration phase (without that opt-out,
+  `circle_parabola_t1p5` took 777 iterations instead of 603 to its
+  infeasibility verdict). The reporter's minimum-lap-time collocation NLP
+  (five instances, 73k–127k variables) went from 836 to 698 iterations in
+  total, and the iterations after μ reached its floor from 149 to 11.
+  Fixture sweep at `mu_strategy=monotone`, `tail_soc` no vs yes: outside the
+  `cc:` lines (whose lowered solves inherit the option) the exact leg does
+  not move; the lbfgs leg moves `autocorr_bern55-06`
+  945 → 893 and, on Linux, `qpnstair` 271 → 268 (264 both ways on
+  macOS), and `hs13_bigstart` ends one corrected
+  step to a different tolerance-legal point on the HS13 cusp (f 0.98501 →
+  0.98715; f* = 1). On `cc:ralph1` (exact) the corrected earlier lowered
+  solves hand a cleaner warm start to the degenerate Scholtes subproblem,
+  which then follows a different path and is downgraded by the gh#884
+  unscaled-dual check from `Solve_Succeeded` to `Solved_To_Acceptable_Level`.
+  The driver verdict (`weak_fallback`) is the same. At the defaults the
+  sweep diffs empty against the parent commit (302 lines, both legs). This
+  is a local device: it does
+  nothing for a dual residual, and when the iterates are still far from a
+  solution after μ reaches its floor it can lengthen a solve as well as
+  shorten it (the reporter's L-BFGS track E at `tol=1e-4`: 706 → 797).
 - **The second-opinion ladder tries presolve before accepting a local
   infeasibility verdict** (gh#1176). A new last rung, `presolve=yes`
   (`infeasibility_presolve_retry`, default `yes`), re-solves the model once

@@ -1010,6 +1010,11 @@ pub struct LineSearchOptions {
     pub kappa_soc: Number,
     /// `soc_method` — `0` (paper method) or `1` (alpha-on-rhs variant).
     pub soc_method: Index,
+    /// `tail_soc` (gh#1211) — second-order correction of full steps
+    /// accepted on their first trial once the monotone μ is at its floor.
+    /// Off by default. Read by
+    /// `BacktrackingLineSearch::tail_soc`.
+    pub tail_soc: bool,
 }
 
 impl Default for LineSearchOptions {
@@ -1049,6 +1054,7 @@ impl Default for LineSearchOptions {
             max_soc: 4,
             kappa_soc: 0.99,
             soc_method: 0,
+            tail_soc: false,
         }
     }
 }
@@ -1789,6 +1795,7 @@ impl AlgorithmBuilder {
         line_search.max_soc = self.line_search.max_soc;
         line_search.kappa_soc = self.line_search.kappa_soc;
         line_search.soc_method = self.line_search.soc_method;
+        line_search.tail_soc = self.line_search.tail_soc;
 
         let conv_check: Box<dyn crate::conv_check::r#trait::ConvCheck> =
             Box::new(OptErrorConvCheck {

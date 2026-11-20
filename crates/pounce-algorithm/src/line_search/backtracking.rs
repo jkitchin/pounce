@@ -232,6 +232,13 @@ pub struct BacktrackingLineSearch {
     /// gradient-block variant. Both correspond to upstream's
     /// `soc_method` option.
     pub soc_method: i32,
+    /// `tail_soc` (gh#1211), off by default. In the last barrier problem
+    /// of a monotone-μ solve, replace a full step that the acceptor took on
+    /// its first trial by its second-order correction, when the corrected
+    /// point is a full step, has a smaller constraint violation than the
+    /// accepted trial, and passes the same acceptance test at the same
+    /// reference iterate. See [`Self::try_tail_soc`].
+    pub tail_soc: bool,
     /// Number of consecutive shortened iterations before the watchdog
     /// procedure activates. Disabled when `<= 0`. Mirrors upstream's
     /// `watchdog_shortened_iter_trigger` (default 10).
@@ -406,6 +413,7 @@ impl BacktrackingLineSearch {
             max_soc: 4,
             kappa_soc: 0.99,
             soc_method: 0,
+            tail_soc: false,
             watchdog_shortened_iter_trigger: 10,
             watchdog_trial_iter_max: 3,
             alpha_min: 1e-12,
@@ -1420,6 +1428,7 @@ impl BacktrackingLineSearch {
                 self.acceptor
                     .check_trial_point(alpha, theta, phi, d_phi, theta_trial, phi_trial)
             };
+            let judged_by_acceptor = !force_accept && decision == AcceptDecision::Accept;
             if decision == AcceptDecision::Reject
                 && self.passes_noise_limited_wolfe(
                     cq,
@@ -1457,9 +1466,48 @@ impl BacktrackingLineSearch {
                 };
             }
             if decision == AcceptDecision::Accept {
-                let mode = self
-                    .acceptor
-                    .update_for_next_iteration(alpha, theta, phi, d_phi, phi_trial);
+                // gh#1211: in the last barrier problem, a full step accepted
+                // on its first trial may be replaced by its second-order
+                // correction. Only a step the acceptor itself judged (not a
+                // forced or slope-test acceptance), never under watchdog,
+                // and only while the trial still leaves a constraint
+                // residual to remove.
+                let mut phi_accepted = phi_trial;
+                let mut alpha_dual_accepted = alpha_dual;
+                let mut corrected = false;
+                if self.tail_soc
+                    && judged_by_acceptor
+                    && trial == 0
+                    && !skip_first
+                    && !self.in_watchdog
+                    && alpha == 1.0
+                    && theta_trial > 0.0
+                    && data.borrow().mu_at_floor()
+                    && let (Some(sd), Some(nlp_ref)) = (soc_search_dir.as_deref_mut(), nlp)
+                    && let Some((phi_soc, alpha_dual_soc)) = self.try_tail_soc(
+                        data,
+                        cq,
+                        nlp_ref,
+                        sd,
+                        &curr,
+                        theta,
+                        phi,
+                        d_phi,
+                        theta_trial,
+                    )
+                {
+                    phi_accepted = phi_soc;
+                    alpha_dual_accepted = alpha_dual_soc;
+                    corrected = true;
+                }
+                let mode =
+                    self.acceptor
+                        .update_for_next_iteration(alpha, theta, phi, d_phi, phi_accepted);
+                let mode = if corrected {
+                    mode.to_ascii_uppercase()
+                } else {
+                    mode
+                };
                 if std::env::var_os("POUNCE_DBG_LS").is_some() {
                     let d = data.borrow();
                     tracing::debug!(target: "pounce::linesearch",
@@ -1469,7 +1517,7 @@ impl BacktrackingLineSearch {
                 }
                 let mut d = data.borrow_mut();
                 d.info_alpha_primal = alpha;
-                d.info_alpha_dual = alpha_dual;
+                d.info_alpha_dual = alpha_dual_accepted;
                 d.info_ls_count = trial + 1;
                 d.info_alpha_primal_char = mode;
                 return AlphaResult::Accepted { n_steps: trial };
@@ -1616,6 +1664,110 @@ impl BacktrackingLineSearch {
         }
     }
 
+    /// The tail second-order correction (gh#1211). Called with the full
+    /// step `x + d` already accepted and staged in `data.trial`.
+    ///
+    /// A full Newton step leaves a constraint residual
+    /// `c(x + d) = O(‖d‖²)` from the constraints' curvature. Near a
+    /// solution, with every step a full first-trial acceptance, the
+    /// existing SOC (`max_soc`) never runs — it is tried only after a
+    /// *rejected* first trial — so the residual is removed only by the next
+    /// iteration's step, which leaves a new one of the same order, and
+    /// `inf_pr` hovers above `constr_viol_tol` until `‖d‖` itself shrinks.
+    /// The correction `p` solves the current primal-dual system (the
+    /// factorization in hand, no new one) with the constraint rows set to
+    /// `c(x) + c(x + d)` — the right-hand side `max_soc` uses at `α = 1` —
+    /// so `c(x + d + p) = O(‖d‖³)` (Nocedal & Wright §15.6; Wächter &
+    /// Biegler 2006 §3.4).
+    ///
+    /// The corrected point replaces the accepted one only if
+    ///
+    /// * the correction is taken in full — the `O(‖d‖³)` argument is about
+    ///   `x + d + p` itself, so a fraction-to-the-boundary cut voids it;
+    /// * its constraint violation is strictly below the accepted trial's;
+    /// * the acceptor's side-effect-free [`BacktrackingLsAcceptor::is_acceptable`]
+    ///   accepts it at the same reference iterate and step size — the test
+    ///   an accepted `max_soc` point passes.
+    ///
+    /// On success returns `(phi_soc, alpha_dual_soc)` with the corrected
+    /// point staged as the trial; otherwise restores the original trial and
+    /// returns `None`. Costs one back-solve plus one constraint and one
+    /// objective evaluation.
+    #[allow(clippy::too_many_arguments)]
+    fn try_tail_soc(
+        &self,
+        data: &IpoptDataHandle,
+        cq: &IpoptCqHandle,
+        nlp: &Rc<RefCell<dyn IpoptNlp>>,
+        search_dir: &mut PdSearchDirCalc,
+        curr: &IteratesVector,
+        theta: Number,
+        phi: Number,
+        d_phi: Number,
+        theta_trial: Number,
+    ) -> Option<(Number, Number)> {
+        let accepted_trial = data.borrow().trial.clone()?;
+        let restore = |data: &IpoptDataHandle| data.borrow_mut().set_trial(accepted_trial.clone());
+
+        let (c_soc, dms_soc) = {
+            let cq_ref = cq.borrow();
+            let mut c_soc = cq_ref.curr_c().make_new();
+            c_soc.copy(&*cq_ref.curr_c());
+            c_soc.axpy(1.0, &*cq_ref.trial_c());
+            let mut dms_soc = cq_ref.curr_d_minus_s().make_new();
+            dms_soc.copy(&*cq_ref.curr_d_minus_s());
+            dms_soc.axpy(1.0, &*cq_ref.trial_d_minus_s());
+            (c_soc, dms_soc)
+        };
+        let Some(delta_soc) =
+            search_dir.compute_soc_step(data, cq, nlp, &*c_soc, &*dms_soc, 1.0, self.soc_method)
+        else {
+            return None;
+        };
+        let tau = data.borrow().curr_tau;
+        let alpha_primal_soc = cq.borrow().aff_step_alpha_primal_max(&delta_soc, tau);
+        // Discarded before `data.trial` is touched, so the accepted trial is
+        // still staged and there is nothing to restore.
+        if !tail_soc_is_full_step(alpha_primal_soc) {
+            return None;
+        }
+        let alpha_dual_soc = cq.borrow().aff_step_alpha_dual_max(&delta_soc, tau);
+        let mut trial_iv = curr.deep_copy();
+        trial_iv.x.axpy(1.0, &*delta_soc.x);
+        trial_iv.s.axpy(1.0, &*delta_soc.s);
+        trial_iv.y_c.axpy(1.0, &*delta_soc.y_c);
+        trial_iv.y_d.axpy(1.0, &*delta_soc.y_d);
+        trial_iv.z_l.axpy(alpha_dual_soc, &*delta_soc.z_l);
+        trial_iv.z_u.axpy(alpha_dual_soc, &*delta_soc.z_u);
+        trial_iv.v_l.axpy(alpha_dual_soc, &*delta_soc.v_l);
+        trial_iv.v_u.axpy(alpha_dual_soc, &*delta_soc.v_u);
+        data.borrow_mut().set_trial(trial_iv.freeze());
+
+        let theta_soc = cq.borrow().trial_constraint_violation();
+        let phi_soc = cq.borrow().trial_barrier_obj();
+        // Judged against the filter as it stands *after* the accepted trial's
+        // own `check_trial_point`, i.e. after its bookkeeping has run. If that
+        // call fired the filter-reset heuristic (`max_filter_resets`), the
+        // filter is empty here and the correction is judged against the
+        // iterate test alone, whereas the accepted trial was also held to the
+        // pre-reset filter. That is the same test every trial faces after a
+        // reset, so the corrected point is no less acceptable than any later
+        // one would be. Narrow: the heuristic fires only after
+        // `filter_reset_trigger` successive filter rejections, while this
+        // path runs only on a first-trial acceptance.
+        let verdict = tail_soc_verdict(theta_trial, theta_soc, phi_soc, |t, p| {
+            self.acceptor.is_acceptable(1.0, theta, phi, d_phi, t, p)
+        });
+        if verdict == TailSocVerdict::Keep {
+            tracing::debug!(target: "pounce::linesearch",
+                theta_trial, theta_soc, "tail second-order correction accepted (gh#1211)");
+            Some((phi_soc, alpha_dual_soc))
+        } else {
+            restore(data);
+            None
+        }
+    }
+
     /// The next backtracking trial step, given that `alpha` was
     /// rejected and `phi_trial = φ(alpha)` was measured there.
     ///
@@ -1700,6 +1852,49 @@ impl BacktrackingLineSearch {
     }
 }
 
+/// Why the tail second-order correction (gh#1211) kept or discarded a
+/// corrected point. See [`BacktrackingLineSearch::try_tail_soc`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailSocVerdict {
+    /// Replace the accepted trial by the corrected point.
+    Keep,
+    /// `theta` or `phi` at the corrected point is not finite.
+    NonFinite,
+    /// The corrected point does not lower `theta` strictly below the
+    /// accepted trial's.
+    NoThetaDecrease,
+    /// The acceptor refuses the corrected point at the accepted trial's
+    /// reference iterate and step size.
+    NotAcceptable,
+}
+
+/// The `O(‖d‖³)` argument behind the tail correction holds for `x + d + p`
+/// itself, so a correction the fraction-to-the-boundary rule would cut is
+/// discarded rather than shortened.
+fn tail_soc_is_full_step(alpha_primal_soc: Number) -> bool {
+    alpha_primal_soc >= 1.0
+}
+
+/// The keep/discard decision of [`BacktrackingLineSearch::try_tail_soc`] for
+/// a corrected point already evaluated at `(theta_soc, phi_soc)`. The checks
+/// run cheapest first; `acceptable` is consulted only if the others pass.
+fn tail_soc_verdict(
+    theta_trial: Number,
+    theta_soc: Number,
+    phi_soc: Number,
+    acceptable: impl FnOnce(Number, Number) -> bool,
+) -> TailSocVerdict {
+    if !theta_soc.is_finite() || !phi_soc.is_finite() {
+        TailSocVerdict::NonFinite
+    } else if !(theta_soc < theta_trial) {
+        TailSocVerdict::NoThetaDecrease
+    } else if !acceptable(theta_soc, phi_soc) {
+        TailSocVerdict::NotAcceptable
+    } else {
+        TailSocVerdict::Keep
+    }
+}
+
 /// `out = curr + alpha * delta` for all eight components, returned as a
 /// fresh `IteratesVector` with `Rc<dyn Vector>` slots. Mirrors
 /// `IpoptData::SetTrialBoundMultipliersFromStep` + the primal step
@@ -1729,6 +1924,54 @@ fn scaled_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// gh#1211 review: the discard half of `try_tail_soc`. Each rejection
+    /// branch is reached on its own, and a later check is not consulted once
+    /// an earlier one has discarded the point.
+    #[test]
+    fn tail_soc_discards_a_correction_on_each_branch() {
+        // A boundary-cut correction is never taken, however small the cut.
+        assert!(tail_soc_is_full_step(1.0));
+        assert!(!tail_soc_is_full_step(1.0 - 1e-12));
+        assert!(!tail_soc_is_full_step(0.5));
+        assert!(!tail_soc_is_full_step(Number::NAN));
+
+        let theta_trial = 1e-2;
+        let never_called = |_: Number, _: Number| -> bool {
+            panic!("acceptor consulted after an earlier check discarded the point")
+        };
+        assert_eq!(
+            tail_soc_verdict(theta_trial, Number::NAN, 1.0, never_called),
+            TailSocVerdict::NonFinite
+        );
+        assert_eq!(
+            tail_soc_verdict(theta_trial, 1e-3, Number::INFINITY, never_called),
+            TailSocVerdict::NonFinite
+        );
+        // Strictly lower: an equal theta is not progress.
+        assert_eq!(
+            tail_soc_verdict(theta_trial, theta_trial, 1.0, never_called),
+            TailSocVerdict::NoThetaDecrease
+        );
+        assert_eq!(
+            tail_soc_verdict(theta_trial, 2e-2, 1.0, never_called),
+            TailSocVerdict::NoThetaDecrease
+        );
+        // The acceptor sees the corrected point's own (theta, phi).
+        let mut seen = None;
+        assert_eq!(
+            tail_soc_verdict(theta_trial, 1e-5, 0.5, |t, p| {
+                seen = Some((t, p));
+                false
+            }),
+            TailSocVerdict::NotAcceptable
+        );
+        assert_eq!(seen, Some((1e-5, 0.5)));
+        assert_eq!(
+            tail_soc_verdict(theta_trial, 1e-5, 0.5, |_, _| true),
+            TailSocVerdict::Keep
+        );
+    }
     use crate::ipopt_cq::IpoptCalculatedQuantities;
     use crate::ipopt_data::IpoptData;
     use crate::ipopt_nlp::Nlp;

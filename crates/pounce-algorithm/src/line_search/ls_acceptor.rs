@@ -89,6 +89,27 @@ pub trait BacktrackingLsAcceptor {
         AcceptDecision::Accept
     }
 
+    /// Side-effect-free acceptance query: would
+    /// [`Self::check_trial_point`] accept this trial? Unlike that method
+    /// it records nothing — no trial counters, no filter-reset state — so
+    /// the driver can ask it about a *replacement* for a trial it has
+    /// already accepted (the tail second-order correction, gh#1211).
+    ///
+    /// Default `false`, meaning "no opinion": an acceptor that does not
+    /// implement it never has a trial replaced, so the tail correction is
+    /// inert under it.
+    fn is_acceptable(
+        &self,
+        _alpha_primal: Number,
+        _theta: Number,
+        _phi: Number,
+        _d_phi: Number,
+        _theta_trial: Number,
+        _phi_trial: Number,
+    ) -> bool {
+        false
+    }
+
     /// Post-accept hook — port of
     /// `IpFilterLSAcceptor::UpdateForNextIteration`. Both decides the
     /// `info_alpha_primal_char` tag *and* augments the filter when
