@@ -8832,6 +8832,10 @@ impl IpoptApplication {
         if let Some(v) = read_int("soc_method") {
             builder.line_search.soc_method = v;
         }
+        // `tail_soc` (gh#1211).
+        if let Ok((v, true)) = self.options.get_bool_value("tail_soc", "") {
+            builder.line_search.tail_soc = v;
+        }
 
         // Inertia-correction / Jacobian-regularization constants (#191),
         // consumed by `PdPerturbationHandler`. Registered but never read.

@@ -718,6 +718,15 @@ fn run_inner_resto_impl(
         .line_search
         .acceptor_mut()
         .set_theta_max_adaptive_trigger(0);
+    // ...and out of the tail second-order correction (`tail_soc`, gh#1211).
+    // The inner IPM is built from a clone of the outer builder, so it would
+    // inherit the option, but the correction targets the last barrier
+    // problem of the *user's* NLP; restoration ends on the outer filter's
+    // acceptance instead. Measured before this opt-out existed: corrections
+    // fired inside restoration on `circle_parabola_t1p5` and changed the
+    // point restoration handed back, taking the infeasibility verdict from
+    // 603 to 777 iterations.
+    alg_bundle.line_search.tail_soc = false;
 
     // Replace the inner-bundle mu update with a resto-configured fresh
     // copy. Upstream `IpAlgBuilder.cpp:929` looks up

@@ -190,6 +190,21 @@ fn soc_constants_reach_assembled_line_search() {
     assert_eq!(bundle.line_search.soc_method, 1);
 }
 
+/// gh#1211: `tail_soc` is off by default and the switch reaches the
+/// assembled line search, not just the builder.
+#[test]
+fn tail_soc_flows_through_to_assembled_line_search() {
+    assert!(!builder_from(|_| {}).line_search.tail_soc);
+    assert!(!AlgorithmBuilder::new().build().line_search.tail_soc);
+    let b = builder_from(|app| {
+        app.options_mut()
+            .set_string_value("tail_soc", "yes", true, false)
+            .unwrap();
+    });
+    assert!(b.line_search.tail_soc);
+    assert!(b.build().line_search.tail_soc);
+}
+
 #[test]
 fn filter_reset_constants_flow_through() {
     let d = builder_from(|_| {}).line_search;

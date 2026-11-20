@@ -90,6 +90,15 @@ pub struct IpoptData {
     /// path, so the gap is ≈ N·μ).
     pub gap_mu_floor: Option<Number>,
 
+    /// The floor the monotone μ update computed on its last call
+    /// (`max(mu_target, certificate-safe mu_min, min(tol, compl_inf_tol) /
+    /// (barrier_tol_factor + 1))`, possibly lowered by
+    /// [`Self::gap_mu_floor`]). `None` until a monotone update has run, and
+    /// always `None` under the adaptive strategy, which has no fixed floor.
+    /// Read through [`Self::mu_at_floor`]; gates the tail second-order
+    /// correction (gh#1211) to the last barrier problem.
+    pub monotone_mu_floor: Option<Number>,
+
     pub perturbations: PdPerturbations,
 
     /// KKT-factorization diagnostics for the debugger (set after a
@@ -270,6 +279,7 @@ impl IpoptData {
             curr_tau: 0.99,
             tol: 1e-8,
             gap_mu_floor: None,
+            monotone_mu_floor: None,
             perturbations: PdPerturbations::default(),
             kkt_debug: None,
             info_alpha_primal: 0.0,
@@ -292,6 +302,16 @@ impl IpoptData {
             timing: Rc::new(TimingStatistics::new()),
             deadline: None,
         }
+    }
+
+    /// True iff the monotone μ update has reached the floor it computes,
+    /// i.e. the solve is in its last barrier problem. Compares the live
+    /// `curr_mu` against the recorded floor rather than caching a flag, so
+    /// a writer of `curr_mu` other than the monotone update cannot leave a
+    /// stale "at floor" behind. Always false under the adaptive strategy.
+    pub fn mu_at_floor(&self) -> bool {
+        self.monotone_mu_floor
+            .is_some_and(|floor| floor.is_finite() && self.curr_mu <= floor)
     }
 
     /// Append text to `info_string`. Mirrors `IpIpoptData::Append_info_string`.
