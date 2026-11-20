@@ -10,6 +10,35 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **The second-opinion ladder tries presolve before accepting a local
+  infeasibility verdict** (gh#1176). A new last rung, `presolve=yes`
+  (`infeasibility_presolve_retry`, default `yes`), re-solves the model once
+  through presolve when a solve that ran without presolve ends
+  `Infeasible_Problem_Detected` and every earlier rung agrees. Presolve's bound
+  tightening derives finite bounds the model implies but does not declare, and
+  those keep the interior point's first steps physical. gh#1176's
+  catalytic-distillation column (1547 variables), which the default solve and
+  every earlier rung called infeasible, now solves at the default settings to
+  CONOPT's objective (23914.517), and `pounce verify --require-optimal`
+  accepts its `.sol`. The Wächter–Biegler textbook example goes from the
+  locally infeasible `x1 = -1` to its optimum `x1 = 1`. The rung is promoted
+  only if the re-solve converges, and its duals are presolve's postsolved ones,
+  for the model as written. Presolve's own default is unchanged. Turning it on
+  by default fails 37 workspace tests and costs three Vanderbei models, while
+  this rung runs only on a solve that has already failed. Because it runs
+  last, a model like gh#1176's still spends the base solve and rungs 1–4
+  first: 307 s on the column, against about 1 s with `presolve=yes` from the
+  start.
+- **`relative_gap_tol`**, an NLP-arm option, default `0` (off) (gh#1193). The
+  strict convergence test bounds the *largest* complementarity product. The
+  duality gap is their *sum*, about `N·μ`, so on a model with many bounds a
+  run can certify far from the optimum. MIPLIB `neos-4763324-toguru` (160k
+  products) reached `Solve_Succeeded` at a relative gap of `3.1e-6` against
+  `tol=1e-8`. When the option is set, a strict certificate is refused while
+  the relative gap is above it, for at most 30 extra iterations, and the
+  monotone μ update may go below its usual floor. The LP → NLP fallback sets
+  it to `tol` unless the caller set it. NETLIB TUFF at `tol=1e-12` now wins
+  the gh#1183 comparison on the NLP arm (`4.8e-13`, was `3.9e-9`).
 - **A custom linear solver, from any frontend, and block labels for it**
   (gh#1175). `linear_solver=custom` with `custom_linear_solver_lib=<path>`
   loads a shared library that exports `pounce_linear_solver()`, returning a
@@ -117,48 +146,16 @@ changes.
   variable.
 
 ### Changed
-- **Presolve's derived-bound dual recovery is solved sparse, with no size
-  cap, and is faster** (gh#1202 follow-up). It used to hand-roll a dense
-  normal-equations Cholesky and an active-set loop, capped at 600
-  multipliers (800 after deb7). Each proximal step is now a strictly convex
-  sparse QP solved by `pounce-qp`. The rows of `A` are split: sparse rows
-  enter the Hessian as `A_sᵀA_s`, and a dense row keeps its residual as a
-  variable, so `AᵀA` is never formed dense. Each step is in correction
-  form, so it doubles as a round of iterative refinement. The work bound is
-  now `(active-set changes + 1) × KKT dimension` (`MAX_WORK = 1e6`) instead
-  of a flop count, and is still deterministic. Recovery time against the
-  dense version:
-
-  | | before | now |
-  |---|---|---|
-  | qpnstair | 90 ms | 8 ms |
-  | deb7, both calls | 119 + 280 ms | 94 + 139 ms |
-  | synthetic, 800 multipliers on one shared variable | 0.49 s | 1.0 s |
-
-  The synthetic case is the one structure where the dense solve was faster.
-  1000 such multipliers, which the dense solve refused, now take 1.8 s;
-  larger ones roll back on the budget within a few seconds. Every fixture
-  that recovered still recovers, with the same primal and duals equal to
-  rounding, except deb7 and qpnstair, whose multipliers are not unique.
-  qpnstair's now match `presolve=no`'s to `5e-3`; they had differed by up to
-  `2.8e4`.
-
-  What made it fast, each change measured on qpnstair or deb7:
-  - Entries the QP held on their bound were read back as `1e-17` and
-    re-added every step. Reading them as exactly zero cut 587 active-set
-    changes to 54.
-  - Schur-complement updates are on; they were off, so every change
-    refactored the KKT system.
-  - The proximal weight starts at `1e-10·max‖A_c‖²` instead of `1e-6`. That
-    took qpnstair from 30 steps (222 ms) to 15 ms: a small weight lands each
-    step on the least-squares solution nearest its start.
-  - Eliminating the sparse rows took deb7's final call from 347 ms to
-    148 ms.
-  - FERAL's in-backend refinement is off, worth 10–20%; the proximal loop
-    is the refinement.
-
-  A deadline with no limit (`max_wall_time`'s default `1e20` s) is now
-  treated as no time limit; converting it to a `Duration` panicked.
+- **FERAL 0.24.0: the same results, with cheaper refactorization.** Factoring
+  a matrix whose sparsity pattern has not changed no longer copies the
+  permuted pattern or re-hashes it, and InfNorm scaling passes run in parallel
+  on large matrices (feral#237). On feral's 156k-row KKT benchmark the work
+  outside the numeric factorization falls from about 65–80 ms to about 20 ms
+  per call. FERAL states that factors are bit-identical to 0.23. On arm64, the
+  fixture sweep moves 0 of 300 fixture-legs, both at default options and with
+  `solver_selection=qp-active-set`; on the fixtures, which have at most 813
+  variables, wall time is unchanged. FERAL now requires Rust 1.85, which
+  POUNCE's edition 2024 already did.
 
 ### Fixed
 - **`pounce verify --require-optimal` rejects bound multipliers that cannot
@@ -177,40 +174,112 @@ changes.
   skipped. No `.sol` the solver writes for the fixture corpus changes
   verdict (default, `presolve=yes` and L-BFGS). The largest legitimate
   stand-off there is `9.1e-6` (`hs71_obj1e8`).
-- **`presolve=yes` reports the original problem's duals on Vanderbei
-  `qpnstair`** (gh#1202). After gh#1196 the multipliers on bounds presolve
-  derived were no longer re-attributed to the original model there, so the
-  reported duals put multiplier mass on bounds the model does not have
-  active: bound-projected stationarity `2.8e4`, bound complementarity `0.21`
-  against `presolve=no`'s `2.2e-3`. The recovery ran out of its work budget
-  because it never stopped. Its residual had met the acceptance target at
-  step 15 and reached the rounding floor by step 27, but its stop test was a
-  relative step of `1e-15`, which floating point does not reach at
-  multipliers of `9e4`. It now stops at the rounding floor, or when an
-  acceptable residual stops falling: `qpnstair` re-attributes 301
-  multipliers in `3.4e8` flops, about a tenth of the budget. The roll-back
-  warning now names its cause and what it measured (component past the
-  cap, no multiplier to carry the residual, work budget, or residual not
-  reduced).
-
-  `deb7` rolled back too, first on the 600-multiplier cap (its components
-  have 662 and 684), and past the cap on its residual: `2.4e-2` against a
-  target of `1.1e-3`. Its reduced solve hands over a cancelling pair
-  `λ = ±1.16e10` on two equalities with the same gradient at `x*`, so only
-  their sum is determined. Anchored at that split, the iteration could not
-  get below the rounding it costs. Three changes, each measured on deb7:
-  the recovery now starts from zero when rounding at the anchor alone uses a
-  tenth of the target; it weakens the proximal term when progress stalls
-  (the rate was ×0.97 a step); and it stops at the least-squares optimum of
-  an inconsistent system, by its projected gradient. Before that last
-  change, weakening the proximal term ran an ill-conditioned active-set QP
-  into the work budget. The rounding-floor estimate is now per row: one
-  `1e10` entry no longer reads as a floor of `3e-2` everywhere. deb7 now re-attributes 70 multipliers to residual `1.02e-4`,
-  the least-squares optimum at that point (the solver's own is `1.13e-4`;
-  scipy's bounded least squares finds `1.03e-4`). No multiplier sits on a
-  side that cannot carry one (`125` before), and bound complementarity is
-  `3.3e-6`, equal to `presolve=no`'s (`452` before). No roll-back remains in
-  the fixture corpus.
+- **`presolve=yes` on Vanderbei `qpnstair` and `deb7` is pinned to report
+  the original problem's duals** (gh#1202). Both used to roll back the
+  derived-bound dual recovery and write the reduced problem's multipliers.
+  qpnstair ran out of the recovery's work budget, and deb7's 684-multiplier
+  component was past the dense cap. The sparse recovery (gh#1176) now
+  recovers both, and a test holds it there: neither may roll back, and the
+  written duals must have no misplaced bound multiplier and bound
+  complementarity at `presolve=no`'s level (qpnstair 2.2e-3, deb7 3.3e-6).
+  Before, the rolled-back duals measured a misplaced `z` of `2.8e4`
+  (qpnstair) and `125` (deb7), and bound complementarity `0.21` and `452`.
+  qpnstair joins the fixture corpus, converted from Vanderbei's AMPL
+  source; its provenance is in `crates/pounce-cli/tests/fixtures/README-qpnstair.md`.
+- **The active-set QP solver no longer stops on an inertia-ladder error at a
+  working set its own rank test called independent (gh#1195).** When the
+  rank probe dropped an equality row, the re-selection that keeps equalities
+  in preference to bounds decided rank by a test about four orders tighter
+  than the probe's, and kept rows the KKT factorization could not pivot on at
+  any shift. On `pooling_rt2stp`'s SQP step QPs (balance rows whose bilinear
+  entries had fallen to about 6e-9, their other variables at bounds) the
+  solve ended `LinearSolverFailure` and the SQP stopped. After such a failure
+  the selection is now redone at the probe's rank, which drops a bound and
+  keeps the equality.
+- **`presolve=yes` reports the original model's duals on large and
+  ill-conditioned models** (gh#1176). When bound tightening derives a bound
+  that ends up active, the reduced solve may put the multiplier on it.
+  Postsolve moves that multiplier back to the original rows and bounds by a
+  least-squares solve over the affected component. That solve was dense and
+  capped at 600 multipliers. Past the cap, or when its normal equations lost
+  the answer to conditioning, it rolled back and wrote the derived-bound
+  multipliers to the `.sol`. Those are not multipliers of the model the user
+  wrote. On the catalytic-distillation column from gh#1176 (1547 variables)
+  the reported duals had a stationarity residual of `3.0e2` and bound
+  complementarity of `6.0e4`. Components past the cap, and those the dense
+  solve cannot close, now go to a sparse solve: a quasi-definite augmented
+  system factored by FERAL, with unit-norm columns. The column's duals now
+  pass `pounce verify --require-optimal` (stationarity `1.7e-7`), and so do
+  those of `deb7` (684 multipliers), which also rolled back before. The
+  warning on a rollback now says which limit was hit.
+- **A dual recovery that runs out of work no longer gives up on the
+  duals.** gh#1196 bounded the dense recovery with a flop allowance and the
+  solve's deadline, and rolled back when either ran out. A dense solve that
+  spends its flops with time left now hands the component to the sparse
+  solve, which gets the same allowance under the same deadline. Vanderbei
+  `qpnstair` used to roll back to duals with stationarity `2.8e4` against
+  the original model; they now verify at `4.0e-10`. MINLPLib `cesam2log`
+  goes from `9.9e-10` to `1.6e-10`. A crossed deadline still rolls back at
+  once.
+- **`presolve=yes` no longer leaves a multiplier on a declared bound with
+  real slack.** When the iterate sat on a bound presolve had derived, and
+  that bound was strictly tighter than the declared one, the declared bound
+  still counted as active whenever it was within `1e-6` relative, and kept
+  the multiplier. MINLPLib `ex6_2_14` has `x0 + x1 = 0.5` with `x0 ≥ 1e-7`
+  active, so `x1` sits `1e-7` inside its declared upper bound `0.5`. It was
+  reported `z_U = 12.3`, with stationarity `10.7` against the original
+  model.
+- **Convex LP time-outs from FERAL's delayed-pivot cascade** (gh#1193). Near
+  convergence the `-s/z` pivots of active bound rows fall below the pivot
+  threshold. FERAL delayed tens of thousands of them into a dense root front,
+  which it factored on its scalar, single-threaded kernel. On MIPLIB
+  `rmatr200-p5` one factorization took 266 s, against 0.1 s for the earlier
+  iterations. The convex KKT is quasi-definite, so the convex IPM now runs
+  FERAL with static pivoting when `tol ≥ 1e-8` (the default) and at most 1%
+  of the columns are free (`FeralSolverInterface::for_convex_ipm`). At a
+  tighter `tol` it keeps delayed pivoting, because static pivoting costs
+  accuracy there: NETLIB ISRAEL at `tol=1e-16` reached `2e-13` with it, and
+  the gh#1000 blend LP with its objective scaled by `1e-6` stalled at
+  `tol=1e-10` (200 iterations, against 68 delayed). Above
+  1% free columns it also keeps delayed pivoting. A free column's pivot has
+  no barrier term, so on an LP it is the regularization alone. Static
+  pivoting there slowed the DC-OPF models, whose bus angles are ~89% of the
+  columns: `case_ACTIVSg10k` went from 15 s to 57 s, and `case_SyntheticUSA`
+  lost its infeasibility certificate. Delayed pivoting does not cascade on
+  them. `POUNCE_FERAL_STATIC_PIVOTING` still overrides. The CLI and Python convex paths both use it. The active-set and
+  NLP paths are unchanged.
+- **False `DualInfeasible` on a bounded LP** (MIPLIB `leo2`, gh#1193). The
+  HSDE recession test tested the iterate `x` as the ray. On a model whose
+  boxed columns sit at a finite offset while one free column grows, the
+  slacks scale with `‖x‖∞` and hide that offset. The ray must now also pass
+  the test after projection onto the columns' sign-feasible directions
+  (`sign_projected_direction`). leo2 now solves at a relative gap of
+  `1.6e-9`. Before, it took 100 s and ended at acceptable level through the
+  NLP fallback.
+- **Farkas certificates polished to the equality rows** (gh#1193). An
+  infeasibility ray is returned from the last HSDE iterate, so its residual
+  `Aᵀy` stopped at that iterate's level. On the infeasible DC-OPF
+  `case_SyntheticUSA` that level was `6.4e-5` after normalizing `bᵀy = −1`.
+  `certificate::polish_farkas` removes the residual with a minimum-norm
+  correction of `y` through the equality rows. It keeps the polished ray only
+  when it verifies better than the original. The CLI and Python QP paths both
+  apply it.
+- **The active-set SQP no longer spends seconds on a second-order correction
+  it then throws away (gh#1195).** When the filter rejects a full step, the
+  SQP re-solves the step QP to correct it. That correction QP had the step
+  QP's iteration budget for every pass of its pivot loop, and when its warm
+  start pinned infeasible it ran through the elastic phase 1 and its recovery
+  passes, each with the full budget, to end `MaxIter` and be discarded. On
+  `pooling_rt2stp` with `hessian_approximation=limited-memory` two such
+  corrections took 4572 and 5144 KKT refactorizations (9–18 s, by machine);
+  they now stop after 728 and 1092 (about 2 s). The correction now gets one
+  pass's budget across all its passes, and a pass that goes a tenth of that
+  budget without improving ends early. Every correction on the fixture corpus that
+  came back usable still does, and `scripts/sweep-fixtures.sh` diffs empty
+  under default options and under `algorithm=active-set-sqp`, on both
+  Hessian legs. `pounce-qp` gains the two bounds as
+  `QpOptions::max_total_iter` and `QpOptions::max_stall_iters`; both are off
+  by default.
 - **`presolve=yes` no longer hangs after the solve has converged, and
   `max_wall_time` now covers postsolve** (gh#1196). Recovering the original
   problem's multipliers for bounds presolve derived could run unbounded:

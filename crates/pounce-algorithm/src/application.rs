@@ -2329,6 +2329,17 @@ impl IpoptApplication {
         // clears (gh#983 review item 1: `warnings`; `sqp_warm_working_set_applied`)
         // that patched the same leak one field at a time.
         *self.statistics.borrow_mut() = SolveStatistics::new();
+        // The row-scaling verdict belongs to this solve too. The reset at the
+        // top of `optimize_constrained` covers a solve that reaches it; one
+        // that bails before, in the presolve wrapper's setup (an inner TNLP
+        // that declines `get_bounds_info` there), returned with the previous
+        // solve's `Some(false)` standing. That stale verdict is exactly what
+        // the ℓ₁ outer loop must never read as fact (gh#794 review round 2).
+        // Found when an experiment ran with `presolve` on by default, which
+        // sent `row_scaling_active_is_cleared_when_a_later_solve_bails_early`
+        // down that route; `..._when_a_presolved_solve_bails_in_presolve_setup`
+        // pins it under `presolve=yes`.
+        self.row_scaling_active.set(None);
         if !self.run_clock_held.get() {
             self.run_clock.set((
                 pounce_common::utils::wallclock_time(),
@@ -8352,6 +8363,9 @@ impl IpoptApplication {
         if let Some(v) = read_num("obj_scale_certificate_threshold") {
             builder.conv_check.obj_scale_certificate_threshold = v;
         }
+        if let Some(v) = read_num("relative_gap_tol") {
+            builder.conv_check.relative_gap_tol = v;
+        }
         if let Some(v) = read_num("primal_noise_floor_kappa") {
             builder.conv_check.primal_noise_floor_kappa = v;
         }
@@ -11380,6 +11394,43 @@ mod tests {
              previous solve's verdict in place; the ℓ₁ outer loop would \
              read it as fact and mirror an original-units violation into \
              the scaled family (gh#794 review round 2)",
+        );
+    }
+
+    /// The same leak through the other entry point. With `presolve=yes` the
+    /// second solve bails inside the presolve wrapper's setup (its inner
+    /// TNLP declines `get_bounds_info` there), within `optimize_tnlp` and
+    /// before `optimize_constrained` -- and so before the reset at its top.
+    /// Found when CI ran the test above with `presolve` on by default
+    /// (gh#1176); `optimize_tnlp` now clears the flag with the rest of the
+    /// per-solve state. Without that it fails with `Some(false)`.
+    #[test]
+    fn row_scaling_active_is_cleared_when_a_presolved_solve_bails_in_presolve_setup() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("presolve yes\n").unwrap();
+
+        let refuse = std::rc::Rc::new(std::cell::Cell::new(false));
+        let first = std::rc::Rc::new(std::cell::RefCell::new(DescribesItselfOnce {
+            refuse: std::rc::Rc::clone(&refuse),
+            inner: ExactQuadratic,
+        }));
+        let _ = app
+            .optimize_tnlp(std::rc::Rc::clone(&first) as std::rc::Rc<std::cell::RefCell<dyn TNLP>>);
+        assert!(
+            app.row_scaling_active.get().is_some(),
+            "the first solve did not record a row-scaling verdict, so this \
+             test cannot show the second one clearing it",
+        );
+
+        refuse.set(true);
+        let _ = app.optimize_tnlp(first as std::rc::Rc<std::cell::RefCell<dyn TNLP>>);
+
+        assert_eq!(
+            app.row_scaling_active.get(),
+            None,
+            "a presolved solve that bailed in presolve setup left the previous \
+             solve's row-scaling verdict in place (gh#794 review round 2)",
         );
     }
 

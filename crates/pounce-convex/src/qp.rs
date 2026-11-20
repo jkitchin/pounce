@@ -56,6 +56,24 @@ pub struct QpProblem {
     pub ub: Vec<f64>,
 }
 
+impl QpProblem {
+    /// Fraction of the columns with neither a finite lower nor a finite upper
+    /// bound (`0.0` when `n == 0`). Such a column's `(x, x)` diagonal in the
+    /// interior-point KKT carries only `P_jj` and the primal regularization,
+    /// with no barrier term — so on an LP it is the regularization alone. The
+    /// convex IPM's backend reads it to decide static pivoting
+    /// (`pounce_feral::FeralSolverInterface::for_convex_ipm`).
+    pub fn free_column_fraction(&self) -> f64 {
+        if self.n == 0 {
+            return 0.0;
+        }
+        let free = (0..self.n)
+            .filter(|&j| self.lb_of(j) <= -BOUND_INF && self.ub_of(j) >= BOUND_INF)
+            .count();
+        free as f64 / self.n as f64
+    }
+}
+
 /// Sentinel for an absent lower bound (`-∞`). Anything `≤ -BOUND_INF` is
 /// treated as no bound.
 pub const NEG_INF: f64 = f64::NEG_INFINITY;
@@ -1387,6 +1405,30 @@ mod residual_tests {
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {
         Box::new(FeralSolverInterface::new())
+    }
+
+    /// A column is free only with *neither* bound; `±1e20` and beyond reads
+    /// as absent, and empty `lb`/`ub` mean every column is unbounded.
+    #[test]
+    fn free_column_fraction_counts_columns_with_neither_bound() {
+        let mut prob = QpProblem {
+            n: 4,
+            p_lower: vec![],
+            c: vec![0.0; 4],
+            a: vec![],
+            b: vec![],
+            g: vec![],
+            h: vec![],
+            lb: vec![0.0, NEG_INF, -1e21, NEG_INF],
+            ub: vec![POS_INF, 1.0, 1e20, POS_INF],
+        };
+        assert_eq!(prob.free_column_fraction(), 0.5);
+        prob.lb.clear();
+        prob.ub.clear();
+        assert_eq!(prob.free_column_fraction(), 1.0);
+        prob.n = 0;
+        prob.c.clear();
+        assert_eq!(prob.free_column_fraction(), 0.0);
     }
 
     /// KKT residuals vanish at the optimum even when **variable bounds are

@@ -8,11 +8,10 @@ LP with Gould's class-4 nonconvex Hessian.
 recovery (`pounce_presolve::dual_recovery`, M24) first hung for 838 s
 (gh#1196), and then, with a work budget in place, rolled back and reported
 the reduced problem's duals (gh#1202). With `presolve=yes` it reaches the
-recovery's proximal-point loop on a 499-multiplier component with
-non-unique multipliers, whose residual floors at about `2e-9` while the
-multipliers are about `9e4`. That is the branch the loop's stopping rule
-has to get right, and no synthetic fixture in the repository reaches it.
-`crates/pounce-cli/tests/issue_1202_derived_bound_dual_recovery.rs` pins it.
+recovery on a 499-multiplier component with non-unique multipliers, whose
+residual floors at about `2e-9` while the multipliers are about `9e4`.
+`crates/pounce-cli/tests/issue_1202_derived_bound_dual_recovery.rs` pins
+that the recovery succeeds there and writes valid duals.
 
 **Provenance.** Converted from the AMPL source
 

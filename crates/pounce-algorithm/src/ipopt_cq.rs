@@ -2448,6 +2448,24 @@ impl IpoptCalculatedQuantities {
     /// — used by `OptimalityErrorConvergenceCheck` to gate the
     /// per-component `compl_inf_tol` test independently of the scaled
     /// scalar `curr_nlp_error`.
+    /// `(Σ|compl|, N)`: the one-norm of all four complementarity blocks
+    /// (internally scaled space) and their total length. The sum is the
+    /// duality gap of the current iterate up to the objective scaling factor
+    /// — the constraint scaling cancels out of each `slack · multiplier`
+    /// product — which the max-norm of [`Self::curr_complementarity_max`]
+    /// bounds only to within a factor `N`.
+    pub fn curr_complementarity_sum(&self) -> (Number, usize) {
+        let blocks = [
+            self.curr_compl_x_l(),
+            self.curr_compl_x_u(),
+            self.curr_compl_s_l(),
+            self.curr_compl_s_u(),
+        ];
+        let sum = blocks.iter().map(|v| v.asum()).sum();
+        let n = blocks.iter().map(|v| v.dim() as usize).sum();
+        (sum, n)
+    }
+
     pub fn curr_complementarity_max(&self) -> Number {
         self.curr_compl_x_l()
             .amax()

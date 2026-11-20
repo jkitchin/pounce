@@ -422,6 +422,7 @@ you are reading a log:
 | `mu_strategy=adaptive` | `infeasibility_mu_strategy_retry` | the barrier trajectory |
 | `start_point_perturbation=1e-2` | `infeasibility_perturbed_start_retry` | where the trajectory starts |
 | `feral_increase_quality=no` | `feral_increase_quality_retry` | whether a stalled factorization was allowed to reroute the trajectory |
+| `presolve=yes` | `infeasibility_presolve_retry` | the model the interior point sees: presolve's derived bounds and reduced rows |
 
 Only rung 3 moves the starting point, and only by a small deterministic
 displacement (`1e-2·(1 + |xᵢ|)`, clipped inside the bounds). That restores rank
@@ -439,7 +440,21 @@ just failed* — it needs `quality_escalations >= 1`, and an escalation leaves n
 other trace, not in the status, the objective, the iteration count or the
 engine.
 
-After the four rungs comes one more stage, and it is not a rung: it does not
+The presolve rung ([pounce#1176](https://github.com/jkitchin/pounce/issues/1176))
+runs last, on local infeasibility only, and only when the failing solve ran
+without presolve. It re-solves the model through presolve, whose bound
+tightening derives finite bounds the model implies but does not declare; those
+keep the first interior-point steps physical. On #1176's catalytic-distillation
+column every earlier rung ends infeasible and this one solves it to CONOPT's
+objective; on the Wächter–Biegler textbook example it turns the locally
+infeasible `x1 = -1` into the optimum `x1 = 1`. It is promoted only if the
+re-solve converges, and the duals it reports are presolve's postsolved ones, for
+the model as you wrote it. Because it comes last, on a model like #1176 it runs
+only after the base solve and rungs 1–4 have spent their time — minutes, there.
+If you already suspect that kind of model, run with `presolve=yes` from the
+start. Turn the rung off with `infeasibility_presolve_retry=no`.
+
+After the rungs comes one more stage, and it is not a rung: it does not
 re-run the interior-point method under a different option, it replaces it. On a
 **square** model — as many free variables (after removing fixed ones) as
 equality rows, no inequality rows — whose objective is **constant**, every

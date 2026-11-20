@@ -2,32 +2,24 @@
 //! where it rolled back, Vanderbei `qpnstair` and `deb7` (the second test,
 //! documented on it).
 //!
-//! With `presolve=yes`, Vanderbei `qpnstair` reported the reduced
-//! problem's duals, because postsolve's derived-bound dual recovery
-//! (`pounce_presolve::dual_recovery`, M24) rolled back.
-//!
-//! The roll-back was the work budget (gh#1196's `MAX_WORK_FLOPS`), and the
-//! budget was not too small: the proximal-point loop never stopped. Its
-//! residual contracted ×0.44 per step and met the acceptance target
-//! (`4.4e-5`) at step 15, then floored at `2e-9` from rounding by step 27.
-//! The stop test, a relative step of `1e-15`, is not reachable there (the
-//! step stalls near `4e-12` relative, against multipliers of `9e4`), so the
-//! loop iterated noise for its remaining 170 steps, and the inner
-//! active-set QP cycled on near-zero entries to its iteration cap. With the
-//! budget lifted the recovery cost `3.6e10` flops, twelve times the budget.
-//! It now stops on the residual, at the rounding floor `100·ε·‖A‖∞·‖w‖∞`:
-//! step 25, `1.6e-8`, `3.4e8` flops.
+//! With `presolve=yes`, qpnstair reported the reduced problem's duals,
+//! because postsolve's derived-bound dual recovery
+//! (`pounce_presolve::dual_recovery`, M24) rolled back: the dense
+//! recovery's work budget (gh#1196) ran out. It did not need more budget.
+//! Its proximal loop met the acceptance target at step 15 and reached the
+//! rounding floor by step 27, but its stop test, a relative step of
+//! `1e-15`, is unreachable at multipliers of `9e4`, so it iterated noise
+//! until the budget was gone. The sparse recovery (gh#1176) now takes the
+//! component and closes it. This test holds it there.
 //!
 //! The duals this pins are a KKT multiplier set of the *original* model:
 //! bound-projected stationarity and bound complementarity at
 //! `presolve=no`'s level. On 6 rows and 50 variables the multipliers are not
 //! unique: two valid sets were measured stationary to `2e-8` with the same
-//! signs and complementarity, so their difference is a null vector. The
-//! recovery first returned one differing from `presolve=no`'s by up to
-//! `2.8e4` there. Since its proximal weight became small (each step lands on
-//! the least-squares solution nearest its start), it returns `presolve=no`'s
-//! to `5e-3`. Everywhere else the two agree to `1.4e-4` against magnitudes
-//! of `9e4`. The test asserts validity, not the choice.
+//! signs and complementarity, so their difference is a null vector.
+//! Everywhere else the recovered duals agree with `presolve=no`'s to
+//! `1.4e-4` against magnitudes of `9e4`. The test asserts validity, not
+//! which of the valid sets comes back.
 //!
 //! The rolled-back `.sol` used to pass `pounce verify --require-optimal`.
 //! That check gated only on the residual *with* the `.sol`'s bound
@@ -147,15 +139,14 @@ fn qpnstair_presolve_duals_are_re_attributed_to_the_original_model() {
     assert!(e <= 1e-6, "stationarity with bound multipliers {e:e}");
 }
 
-/// deb7: the recovery rolled back twice over. Its component (684
-/// multipliers) was past the dense solve's 600 cap (the recovery is now
-/// sparse and uncapped); past the cap, the solve missed its
-/// target (`2.4e-2` against `1.1e-3`). The reduced solve hands over a
-/// cancelling pair `λ = ±1.16e10` on two equalities with the same gradient
-/// at `x*`, and anchored there the iteration could not get below the
-/// rounding that pair costs. Started from zero, it reaches the least-squares
-/// optimum, `1.02e-4`, with multipliers of size `1.4e3` (scipy's bounded
-/// least squares on the same system finds `1.03e-4`).
+/// deb7: the recovery rolled back, its 684-multiplier component past the
+/// dense solve's 600 cap. Past the cap, the dense solve also missed its
+/// target: the reduced solve hands over a cancelling pair `λ = ±1.16e10` on
+/// two equalities with the same gradient at `x*`, and anchored there the
+/// iteration could not get below the rounding that pair costs. Sparse
+/// (gh#1176), the recovery reaches the least-squares optimum at that point,
+/// `1.02e-4`: scipy's bounded least squares on the same system finds
+/// `1.03e-4`, with multipliers of size `1.4e3`.
 ///
 /// `verify --require-optimal` rejects deb7 whatever its duals, for its
 /// declared integer columns, so this reads the receipt's fields instead of

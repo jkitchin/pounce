@@ -795,6 +795,20 @@ so past that point the warm solve has spent what a seed would have. gh#1061's
 handover QP needs 156 working-set changes warm (72 s, or 126 s with Schur
 updates); budgeted and then seeded it takes 34 s.
 
+The second-order-correction QP is also held to a tighter iteration budget than
+a step QP, because the correction is optional: if it does not finish, the line
+search backtracks as if it had never asked. `sqp_qp_max_iter` bounds one *pass*
+of the QP's pivot loop. A correction whose warm start pins infeasible goes
+through the elastic phase 1 and its recovery stages, each a pass with that
+budget of its own, so on `pooling_rt2stp` (limited-memory) two corrections ran
+4583 and 5137 iterations (4572 and 5144 KKT refactorizations, 9–18 s by
+machine) before being discarded. The correction now gets one pass's budget in total,
+and any pass of it that goes a tenth of that budget without lowering the QP
+objective ends there (gh#1195). Those two corrections now stop after 728 and
+1092 refactorizations, about 2 s. On the fixture corpus every correction that
+came back optimal used at most 0.6 of the total budget, and no solve's status,
+objective or iteration count changed.
+
 A step QP whose linearization is infeasible does not end the solve. The QP's
 elastic phase returns the step that minimizes the linearized ℓ1 violation, and
 the SQP takes it under its line search (Fletcher's Sℓ1QP); only a step that

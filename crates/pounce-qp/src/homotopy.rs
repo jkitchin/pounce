@@ -717,6 +717,7 @@ impl ParametricActiveSetSolver {
         // Each iteration either advances `t` or changes the working set, and the
         // budget bounds the total.
         for _step in 0..opts.max_iter {
+            crate::deadline::charge_iteration();
             if crate::deadline::expired() {
                 return Ok(Some(QpSolution {
                     obj: crate::solver::quad_objective(qp, &x),

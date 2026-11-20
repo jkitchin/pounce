@@ -257,6 +257,13 @@ def test_close_reports_final_status(session):
 # x2, x3 >= 0, from (-2, 1, 1). Enters restoration and ends locally
 # infeasible, so its run has `terminated` pauses from restoration's inner
 # solve (final: false) before the real one.
+#
+# That trajectory is the interior point's own, without presolve: presolve's
+# bound tightening (gh#1176) solves this model to its optimum x1 = 1 in 9
+# iterations and never enters restoration. These tests are about the
+# debugger at restoration's pauses, so they ask for the trajectory they
+# exercise rather than inherit whatever the default is.
+_WB_OPTS = {"presolve": "no"}
 _WB_NL = (
     "g3 1 1 0\n 3 2 1 0 2\n 1 0\n 0 0\n 1 0 0\n 0 0 0 1 0\n 0 0 0 0 0\n"
     " 4 1\n 0 0\n 0 0 0 0 0\nC0\no5\nv0\nn2.0\nC1\nn0\nO0 0\nn0\nr\n"
@@ -275,7 +282,7 @@ def wb_nl(tmp_path):
 def test_restoration_terminal_pause_is_not_the_end(wb_nl):
     """`continue` must not report `finished` at a restoration sub-solve's
     terminal checkpoint: that read the inner solve's status as the result."""
-    st = debug_start(nl_file=wb_nl)
+    st = debug_start(nl_file=wb_nl, options=_WB_OPTS)
     sid = st["session_id"]
     try:
         stops = []
@@ -301,7 +308,7 @@ def test_close_after_finish_exits_promptly(wb_nl):
     re-parked on stdin)."""
     import time
 
-    st = debug_start(nl_file=wb_nl)
+    st = debug_start(nl_file=wb_nl, options=_WB_OPTS)
     sid = st["session_id"]
     for _ in range(20):
         if debug_command(sid, "continue", timeout_seconds=60)["outcome"] != "paused":

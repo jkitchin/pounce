@@ -1180,22 +1180,29 @@ impl PresolveTnlp {
             g_u: &s.decl_g_u,
             derived_l: &derived_l,
             derived_u: &derived_u,
+            solve_x_l: &s.bounds.x_l,
+            solve_x_u: &s.bounds.x_u,
         };
-        let budget = dual_recovery::Budget::new(dual_recovery::MAX_WORK, self.deadline.as_ref());
-        let started = std::time::Instant::now();
+        let budget =
+            dual_recovery::Budget::new(dual_recovery::MAX_WORK_FLOPS, self.deadline.as_ref());
         let out = dual_recovery::reattribute(&view, lambda, z_l, z_u, budget);
-        let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
         if out.rolled_back {
-            let cause = out
-                .cause
-                .map_or_else(|| "unknown cause".to_string(), |c| c.to_string());
             tracing::warn!(
                 target: "pounce_presolve",
-                residual_before = out.residual_before,
-                elapsed_ms,
                 "presolve postsolve: multipliers on derived bounds could not be \
-                 re-attributed to the original problem: {cause}; the reported \
-                 duals keep the reduced problem's attribution"
+                 re-attributed to the original problem ({}; component reached {} \
+                 multipliers over {} variables, residual {:.3e}); the reported duals \
+                 keep the reduced problem's attribution",
+                if out.over_cap {
+                    "component past the size cap"
+                } else if out.budget_exhausted {
+                    "work budget or deadline spent"
+                } else {
+                    "residual not reduced"
+                },
+                out.component_unknowns,
+                out.component_vars,
+                out.residual_before,
             );
         } else if out.n_spurious > 0 {
             tracing::debug!(
@@ -1204,8 +1211,6 @@ impl PresolveTnlp {
                 n_unknowns = out.n_unknowns,
                 residual_before = out.residual_before,
                 residual_after = out.residual_after,
-                restarted = out.restarted,
-                elapsed_ms,
                 "presolve postsolve: re-attributed derived-bound multipliers"
             );
         }
