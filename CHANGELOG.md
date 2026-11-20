@@ -145,6 +145,18 @@ changes.
   task-graph driver ignores it. The Python QP path reads the environment
   variable.
 
+### Changed
+- **FERAL 0.24.0: the same results, with cheaper refactorization.** Factoring
+  a matrix whose sparsity pattern has not changed no longer copies the
+  permuted pattern or re-hashes it, and InfNorm scaling passes run in parallel
+  on large matrices (feral#237). On feral's 156k-row KKT benchmark the work
+  outside the numeric factorization falls from about 65–80 ms to about 20 ms
+  per call. FERAL states that factors are bit-identical to 0.23. On arm64, the
+  fixture sweep moves 0 of 300 fixture-legs, both at default options and with
+  `solver_selection=qp-active-set`; on the fixtures, which have at most 813
+  variables, wall time is unchanged. FERAL now requires Rust 1.85, which
+  POUNCE's edition 2024 already did.
+
 ### Fixed
 - **The active-set QP solver no longer stops on an inertia-ladder error at a
   working set its own rank test called independent (gh#1195).** When the
