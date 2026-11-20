@@ -10,6 +10,15 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`ipm_sqp_handover_time_ratio` and `ipm_sqp_handover_primal_tol`**
+  (gh#1206). A handover attempt was capped at the interior-point time spent so
+  far with no way to change it, so a crossover that converged but needed
+  longer — the reporter's 90 k-variable collocation model spent 697 s in its
+  step-3 QP after 270 s of interior point — was declined as a time limit and
+  its work lost. The ratio (default `1`, the old rule) scales that cap. And the
+  identification tolerance was `max(crossover_primal_tol, √μ)`, so no option
+  could tighten it below `√μ`; a positive `ipm_sqp_handover_primal_tol` is now
+  used as is. Both default to the previous behaviour.
 - **The second-opinion ladder tries presolve before accepting a local
   infeasibility verdict** (gh#1176). A new last rung, `presolve=yes`
   (`infeasibility_presolve_retry`, default `yes`), re-solves the model once
@@ -158,6 +167,30 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **Crossover step 4 no longer re-solves step 3's QP from scratch** (gh#1206
+  B1). When the step-3 point missed the stopping tolerances, the active-set
+  SQP started from the interior iterate with the step-2 *estimate* — but its
+  first step QP is step 3's QP again, so every pivot step 3 had paid for was
+  repeated (591 s and 167 working-set changes on the reporter's model). It now
+  starts from step 3's optimal working set when that QP solved. Off the
+  handover path the fixture sweep is empty; under `ipm_sqp_handover=yes` it
+  moves 12 of 300 lines, mostly fewer iterations, but `cc:design_cent_3` and
+  `cc:opf_vv_lower_knee` (exact leg) go from `Solve_Succeeded` to
+  `Solved_To_Acceptable_Level` at a slightly lower objective — recorded with
+  the mechanism in `dev-notes/known-limitations.md`.
+- **`classify_working_set` honours `mult_tol` as documented** (gh#1206 B3).
+  Two fallback arms took any at-bound row whose multiplier had the right sign
+  as active however small it was, so `crossover_mult_tol` changed nothing
+  within `primal_tol`. A row with `|λ| < mult_tol` is now `Inactive`, bounds
+  and constraint rows alike; `mult_tol = 0` keeps the old reading.
+- **`KktTriplet::add_h_diagonal_shift` shifts a duplicated diagonal once**
+  (gh#1206 B8). A diagonal stored as `k` triplet entries moved by `k·δ`, so
+  the QP inertia ladder applied a different shift from the one it reported.
+- **Schur updates in `pounce-qp` skip work whose result is known** (gh#1206
+  P4, P5): the back-solve of `e_p` on a slot that was inactive at the last
+  refactorization (`K₀⁻¹e_p = e_p` on its sentinel row; 0.4 s each on the
+  reporter's KKT), and a scan of all of `A` for every general-row change (the
+  row index built at the refactorization is now kept).
 - **The active-set QP solver no longer stops on an inertia-ladder error at a
   working set its own rank test called independent (gh#1195).** When the
   rank probe dropped an equality row, the re-selection that keeps equalities

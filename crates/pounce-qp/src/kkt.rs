@@ -49,6 +49,14 @@ impl KktTriplet {
     /// `1..=n_h_rows`). Existing diagonal entries are incremented in
     /// place; missing ones are appended. Used by the §4.5 inertia-
     /// control retry loop.
+    ///
+    /// A triplet matrix may legally store one diagonal as several
+    /// entries (summed on assembly) — the SQP's convexification
+    /// appends its shift as extra `(i, i)` entries, for one. Only the
+    /// *first* `(i, i)` entry of each row is shifted, so the assembled
+    /// diagonal moves by exactly `delta` however many times it is
+    /// stored (gh#1206 B8: it used to move by `k·delta`, and the
+    /// inertia ladder then reported a shift it had not applied).
     pub fn add_h_diagonal_shift(&mut self, n_h_rows: usize, delta: Number) {
         if delta == 0.0 {
             return;
@@ -58,7 +66,7 @@ impl KktTriplet {
         for k in 0..self.irn.len() {
             let i = self.irn[k];
             let j = self.jcn[k];
-            if i == j && i >= 1 && i <= n_h {
+            if i == j && i >= 1 && i <= n_h && !have_diag[(i - 1) as usize] {
                 self.vals[k] += delta;
                 have_diag[(i - 1) as usize] = true;
             }

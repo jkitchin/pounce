@@ -12,6 +12,70 @@ merges.
 
 ---
 
+## Handover: two declared-pair fixtures end acceptable after crossover step 4 seeds from step 3 (gh#1206 B1)
+
+*Measured on `claude/optimistic-lamport-8vweis` against `main` at `e0b4442`,
+`scripts/sweep-fixtures.sh <bin> <out> ipm_sqp_handover=yes`, both legs, with a
+third binary that reverts B1 alone to attribute every line. Recorded
+2026-11-20.*
+
+**The change.** When crossover's step-3 QP solves but its point misses the
+stopping tolerances, step 4 (the full active-set SQP) now starts from that
+QP's optimal working set instead of the step-2 estimate. Step 4's first step
+QP is step 3's QP again, so the estimate made it redo every pivot step 3 had
+paid for — 591 s and 167 working-set changes on gh#1206's 90 k-variable
+collocation model. Off the handover path nothing moves: the default sweep and
+the `crossover=yes` sweep are empty (one `tot=` count on `cc:qpec_small`
+under `crossover=yes`, 240 → 224).
+
+### What is worse
+
+Under `ipm_sqp_handover=yes`, B1 alone moves 12 of 300 lines. Two are worse in
+status, both exact leg, both declared-pair (`cc:`) fixtures, and both reach a
+slightly *lower* objective:
+
+| fixture | `main` | branch |
+|---|---|---|
+| `cc:design_cent_3` | `SolveSucceeded`, it=12, tot=614, obj 3.723369071 | `SolvedToAcceptableLevel`, it=21, tot=134, obj 3.723366071 |
+| `cc:opf_vv_lower_knee` | `SolveSucceeded`, it=3, tot=247, obj −0.3954687711 | `SolvedToAcceptableLevel`, it=64, tot=281, obj −0.3954730625 |
+
+The rest are better or neutral: `cc:qpec_small` 13 → 1 iterations (tot 153 →
+85) exact and tot 329 → 208 L-BFGS; L-BFGS `cc:mixed_pair` 39 → 19;
+L-BFGS `cc:opf_vv_lower_knee` 61 → 39; L-BFGS `mpcc_worse_local_solution`
+31 → 28; `csfi2` 30 → 37 (below).
+
+### Mechanism
+
+`cc:design_cent_3`, third lowered solve, handover at interior iteration 12:
+step 3's QP is `Optimal` with one pivot; step 4 from the estimate repeats that
+pivot and converges in 5 SQP iterations. From step 3's set the iterates agree
+with `main`'s to the printed digits through SQP iteration 4, where `main`'s
+step QP refactors with a rank test and returns `‖p‖ = 2.4e-8` while the
+branch's takes its warm factorization with no refactor and no rank test and
+returns `‖p‖ = 1.14`. The model is the lifted MPCC with multipliers near
+`1e26` in its step QPs — exactly the LICQ-failing, degenerate active set
+gh#1206 §1 describes — and the next QP hits its iteration cap in phase 1, so
+the attempt is declined `ActiveSetNotConverged` and the complementarity
+driver takes a different path. So the defect is the QP accepting an
+unchecked factorization on a near-singular working set; B1 changes which
+working set reaches it. `cc:opf_vv_lower_knee` moves earlier: a different
+accepted handover point in an early lowered solve sends the driver down
+another sequence.
+
+`csfi2` (30 → 37, same point) is the gh#797 negative-curvature probe reading
+roundoff: the point step 4 returns differs at `1e-15`, and the probe then
+measures `dᵀ(W+Σ)d = −1.85e-19`, escapes, finds nothing, and restores it.
+
+### How to tell whether a fix works
+
+Rerun the `ipm_sqp_handover=yes` sweep: both lines back to `SolveSucceeded`
+with the improvements above kept. A fix belongs in `pounce-qp`'s handling of a
+warm start whose working set is rank-deficient (gh#1206 B6/B7), not in
+reverting B1, which on the model that reported it is the difference between
+a step-4 first QP of 591 s and one of 23 s.
+
+---
+
 ## NLP: L-BFGS fixtures slower after restoration matched upstream (gh#1146)
 
 *Measured on `claude/charming-carson-cz5psg` against `main` at `358ecbb`,

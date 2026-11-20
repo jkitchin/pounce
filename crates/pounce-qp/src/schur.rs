@@ -110,6 +110,12 @@ pub struct SchurState {
     /// true Newton step or a shifted one — see
     /// [`crate::solver::model_step_cap`].
     shift: Number,
+
+    /// Row index of `A` ([`a_row_index`]), built at the last reset and
+    /// reused by every general-row update until the next one. Without it
+    /// each such update scanned all of `A` for one row — 1.44 M triplets per
+    /// working-set change on the gh#1206 collocation model (P5).
+    a_rows: Option<(Vec<usize>, Vec<usize>)>,
 }
 
 /// One half of a rank-2 update vector pair.
@@ -135,6 +141,7 @@ impl SchurState {
             s_dim: 0,
             base_kkt: None,
             shift: 0.0,
+            a_rows: None,
         }
     }
 
@@ -159,10 +166,22 @@ impl SchurState {
         slot < self.m
     }
 
-    /// Build the K_max triplet for the given active-slot pattern.
-    /// Active slots carry the actual constraint row; inactive
-    /// slots carry the `(p, p) = 1` sentinel.
+    /// [`Self::build_k_max_triplet_indexed`] with the row index of `A`
+    /// built here. Test-only: `reset` builds the index once and keeps it.
+    #[cfg(test)]
     pub(crate) fn build_k_max_triplet(&self, qp: &QpProblem, slot_active: &[bool]) -> KktTriplet {
+        self.build_k_max_triplet_indexed(qp, slot_active, &a_row_index(qp))
+    }
+
+    /// Build the K_max triplet for the given active-slot pattern, reading
+    /// `A`'s rows through `a_rows` ([`a_row_index`]). Active slots carry the
+    /// actual constraint row; inactive slots carry the `(p, p) = 1` sentinel.
+    fn build_k_max_triplet_indexed(
+        &self,
+        qp: &QpProblem,
+        slot_active: &[bool],
+        a_rows: &(Vec<usize>, Vec<usize>),
+    ) -> KktTriplet {
         let n_i = self.n as Index;
         let mut irn = Vec::new();
         let mut jcn = Vec::new();
@@ -184,7 +203,7 @@ impl SchurState {
         // One row per slot.
         let a_jcols = qp.a.jcols();
         let a_vals = qp.a.values();
-        let (row_ptr, row_entries) = a_row_index(qp);
+        let (row_ptr, row_entries) = (&a_rows.0, &a_rows.1);
         for slot in 0..self.m_total {
             let saddle_row = n_i + (slot as Index) + 1; // 1-based row in K_max
             if slot_active[slot] {
@@ -244,12 +263,28 @@ impl SchurState {
 
         let mut v = vec![0.0; self.dim];
         if self.slot_is_general(slot) {
-            let row_1based = (slot + 1) as Index;
             let sign = if going_active { 1.0 } else { -1.0 };
-            for k in 0..qp.a.irows().len() {
-                if qp.a.irows()[k] == row_1based {
-                    let col_0 = (qp.a.jcols()[k] - 1) as usize;
-                    v[col_0] += sign * qp.a.values()[k];
+            let (a_jcols, a_vals) = (qp.a.jcols(), qp.a.values());
+            // The row index cached at the last reset, when it still describes
+            // this `A`; a full scan otherwise. Both visit the row's triplets
+            // in ascending order (the counting sort is stable), so `v` is the
+            // same to the bit either way.
+            match &self.a_rows {
+                Some((ptr, entries)) if entries.len() == a_jcols.len() && ptr.len() == qp.m + 1 => {
+                    for &k in &entries[ptr[slot]..ptr[slot + 1]] {
+                        let col_0 = (a_jcols[k] - 1) as usize;
+                        v[col_0] += sign * a_vals[k];
+                    }
+                }
+                _ => {
+                    let row_1based = (slot + 1) as Index;
+                    let a_irows = qp.a.irows();
+                    for k in 0..a_irows.len() {
+                        if a_irows[k] == row_1based {
+                            let col_0 = (a_jcols[k] - 1) as usize;
+                            v[col_0] += sign * a_vals[k];
+                        }
+                    }
                 }
             }
             v[p] = if going_active { -0.5 } else { 0.5 };
@@ -279,7 +314,9 @@ impl SchurState {
         for slot in 0..self.m_total {
             self.base_active[slot] = Self::slot_active(working, slot);
         }
-        let mut kkt = self.build_k_max_triplet(qp, &self.base_active);
+        let a_rows = a_row_index(qp);
+        let mut kkt = self.build_k_max_triplet_indexed(qp, &self.base_active, &a_rows);
+        self.a_rows = Some(a_rows);
         let mut rhs = vec![0.0; self.dim];
 
         // First attempt: no shift.
@@ -345,8 +382,19 @@ impl SchurState {
         going_active: bool,
     ) -> Result<(), QpError> {
         let UpdateVectors { u, v } = self.build_update_vectors(qp, slot, going_active);
-        let mut kinv_u = u.clone();
-        linsol.resolve(&mut kinv_u)?;
+        // `u = e_p`. A slot inactive at the last reset has the sentinel row
+        // `(p, p) = 1` and nothing else in row or column `p` of `K_0` (the
+        // inertia shift touches the H block only), so `K_0 e_p = e_p` and
+        // `K_0⁻¹ u = u` exactly — no back-solve needed (gh#1206 P4: 0.4 s
+        // each at `dim = 448 117`). The base factor is what `resolve` uses,
+        // so flips since the reset do not change this.
+        let kinv_u = if self.base_active[slot] {
+            let mut kinv_u = u.clone();
+            linsol.resolve(&mut kinv_u)?;
+            kinv_u
+        } else {
+            u.clone()
+        };
         let mut kinv_v = v.clone();
         linsol.resolve(&mut kinv_v)?;
 
@@ -623,7 +671,7 @@ impl SchurState {
 /// `entries[ptr[i]..ptr[i + 1]]`, each a position in `A`'s triplet arrays,
 /// in the order they appear there.
 ///
-/// [`SchurState::build_k_max_triplet`] used to find an active row's entries by
+/// `SchurState::build_k_max_triplet` used to find an active row's entries by
 /// scanning every triplet of `A`, once per active row — `O(m · nnz(A))` per
 /// reset, against the `O(nnz(A))` of the refactor path's assembly
 /// (`kkt::assemble_active_set_kkt`). On gh#1061's SQP step QP (`m = 13 998`,

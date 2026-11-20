@@ -94,3 +94,30 @@ fn add_h_diagonal_shift_accumulates_across_calls() {
     assert!((k.vals[0] - 1.3).abs() < 1e-12);
     assert!((k.vals[1] - 2.3).abs() < 1e-12);
 }
+
+#[test]
+fn add_h_diagonal_shift_shifts_a_duplicated_diagonal_once() {
+    // gh#1206 B8: a diagonal stored as several triplet entries (they
+    // are summed on assembly) must move by exactly `delta`, not by
+    // `k·delta`. Row 1 is stored as three entries, row 2 as one.
+    let mut k = KktTriplet {
+        dim: 2,
+        irn: vec![1, 1, 2, 1],
+        jcn: vec![1, 1, 2, 1],
+        vals: vec![1.0, 0.25, 2.0, 0.25],
+    };
+    k.add_h_diagonal_shift(2, 0.5);
+    let assembled = |row: pounce_common::Index| -> f64 {
+        k.irn
+            .iter()
+            .zip(k.jcn.iter())
+            .zip(k.vals.iter())
+            .filter(|&((&r, &c), _)| r == row && c == row)
+            .map(|(_, &v)| v)
+            .sum()
+    };
+    assert!((assembled(1) - 2.0).abs() < 1e-15);
+    assert!((assembled(2) - 2.5).abs() < 1e-15);
+    // No entry appended: both diagonals were present.
+    assert_eq!(k.irn.len(), 4);
+}

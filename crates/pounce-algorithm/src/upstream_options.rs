@@ -847,6 +847,36 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          set never settles can spend on them. Only consulted when \
          \"ipm_sqp_handover\" is yes.",
     )?;
+    r.add_lower_bounded_number_option(
+        "ipm_sqp_handover_time_ratio",
+        "Time budget of one handover attempt, relative to the interior-point time spent so far.",
+        0.0,
+        true,
+        1.0,
+        "An attempt may spend this multiple of the wall-clock and CPU time the \
+         interior method has spent before it (floor 1 s), and never more than \
+         the solve's own max_wall_time / max_cpu_time leave. The default 1 \
+         bounds a declined attempt at a doubling of the solve. Raise it for a \
+         model whose crossover converges but needs longer than the interior \
+         point took to reach it -- an attempt that runs out of budget is \
+         declined as a time limit and its work is lost (gh#1206). Only \
+         consulted when \"ipm_sqp_handover\" is yes.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "ipm_sqp_handover_primal_tol",
+        "Primal tolerance for identifying the active set at a handover; 0 = automatic.",
+        0.0,
+        false,
+        0.0,
+        "The distance to a bound below which a row is taken binding when the \
+         handover classifies the interior iterate. 0 (the default) uses \
+         max(\"crossover_primal_tol\", sqrt(mu)): at an interior iterate an \
+         active bound sits about mu/z inside it and an inactive one far from \
+         it, and sqrt(mu) separates the two. A positive value is used as is, \
+         below that floor too -- for a model whose weakly active bounds sit \
+         inside sqrt(mu) and should be left out of the estimate (gh#1206). \
+         Only consulted when \"ipm_sqp_handover\" is yes.",
+    )?;
     // ----- Inner QP-subproblem knobs (`sqp_qp_*`) -----
     //
     // Consulted only on `solver_selection=qp-active-set` (the active-set SQP

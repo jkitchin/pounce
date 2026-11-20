@@ -1751,6 +1751,112 @@ fn issue_1061_an_accepted_crossover_reports_its_step3_qp() {
     assert_eq!(eqp.outcome, Ok(QpStatus::Optimal));
 }
 
+/// `min Σ ½(xᵢ − 1)² + ¼xᵢ⁴  s.t.  xᵢ ≥ 0` — quartic, with every bound
+/// inactive at the solution (`x³ + x − 1 = 0`, `x ≈ 0.6823`). Seeded at the
+/// bound with a positive multiplier, the step-2 estimate takes all three
+/// bounds active, step 3's QP drops them, and its point (`x = 1`) misses the
+/// stopping tolerances because the quadratic model is wrong there.
+struct QuarticLowerBoundNlp;
+
+impl SqpProblemSpec for QuarticLowerBoundNlp {
+    fn n(&self) -> usize {
+        3
+    }
+    fn m(&self) -> usize {
+        0
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.0; 3]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![0.0; 3], vec![NLP_UPPER_BOUND_INF; 3])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![], vec![])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        x.iter()
+            .map(|&v| 0.5 * (v - 1.0).powi(2) + 0.25 * v.powi(4))
+            .sum()
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        x.iter().map(|&v| v - 1.0 + v.powi(3)).collect()
+    }
+    fn eval_c(&mut self, _x: &[f64]) -> Vec<f64> {
+        vec![]
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 0,
+            n_cols: 3,
+            irow: vec![],
+            jcol: vec![],
+            vals: vec![],
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 3,
+            n_cols: 3,
+            irow: vec![1, 2, 3],
+            jcol: vec![1, 2, 3],
+            vals: x.iter().map(|&v| 1.0 + 3.0 * v * v).collect(),
+        }
+    }
+}
+
+/// gh#1206 B1: when step 3's QP solves but its point misses the stopping
+/// tolerances, step 4 starts from step 3's optimal working set, not the
+/// step-2 estimate. Step 4's first step QP is step 3's QP again (same point,
+/// same multipliers), so seeding it with the estimate redid every pivot.
+///
+/// Here the estimate has all three bounds active and step 3's QP drops all
+/// three. Seeded with the estimate, step 4's first QP drops them again;
+/// seeded with step 3's set, it pivots nothing.
+#[test]
+fn issue_1206_step4_starts_from_the_step3_working_set() {
+    use crate::crossover::{CrossoverOptions, CrossoverPhase, CrossoverSeed};
+    let seed = CrossoverSeed {
+        x: vec![0.0; 3],
+        lambda_g: vec![],
+        lambda_x: vec![1.0; 3],
+    };
+    let mut nlp = QuarticLowerBoundNlp;
+    let (report, accepted) = crate::crossover::run(
+        &mut nlp,
+        &seed,
+        &CrossoverOptions {
+            enabled: true,
+            ..CrossoverOptions::default()
+        },
+        &SqpOptions::default(),
+        &QpOptions::sqp_subproblem(),
+        || Box::new(pounce_feral::FeralSolverInterface::new()),
+        |o| {
+            Some(SqpAlgorithm::new(
+                ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new())),
+                o,
+            ))
+        },
+    );
+    assert_eq!(report.estimated_active, 3, "{report:?}");
+    let eqp = report.eqp.as_ref().expect("step 3 ran");
+    assert_eq!(eqp.outcome, Ok(QpStatus::Optimal));
+    assert_eq!(eqp.working_set_changes, 3, "{eqp:?}");
+    assert_eq!(report.phase, Some(CrossoverPhase::ActiveSet), "{report:?}");
+    let res = accepted.expect("step 4 converges");
+    let x_star = 0.682_327_803_828_019_3;
+    assert!(
+        res.x.iter().all(|&v| (v - x_star).abs() < 1e-6),
+        "{:?}",
+        res.x
+    );
+    assert_eq!(
+        res.n_qp_working_set_changes, 0,
+        "step 4 repeated step 3's pivots: it did not start from step 3's working set ({res:?})"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────
 // gh#1054: L-BFGS in lifted low-rank form.
 // ─────────────────────────────────────────────────────────────────

@@ -48,7 +48,10 @@
 //!    crossover costs about one iteration.
 //! 4. Otherwise run the full active-set algorithm from the interior iterate,
 //!    seeded with `A` and with `ν₀` a little above the largest `|multiplier|`
-//!    at the interior solution.
+//!    at the interior solution. When step 3's QP solved, the seed is that
+//!    QP's optimal working set rather than `A`: step 4's first step QP is
+//!    step 3's QP again, and starting it from `A` would redo every pivot
+//!    (gh#1206 B1).
 //!
 //! # Where this departs from the paper
 //!
@@ -635,6 +638,17 @@ where
         Ok(sol) if sol.status == QpStatus::TimeLimit => CrossoverDecline::TimeLimit,
         _ => CrossoverDecline::QpFailed,
     };
+    // Step 3's optimal working set, kept for step 4 (gh#1206 B1). Step 4's
+    // first step QP is built at the same point with the same multipliers as
+    // step 3's, so it *is* step 3's QP; warm-starting it from the step-2
+    // estimate re-solves that QP from scratch and throws away every pivot
+    // step 3 paid for (591 s and 167 working-set changes on the reporter's
+    // 90 k-variable collocation model). The QP's own optimal set is the
+    // better hint whenever it exists.
+    let step3_working = match &eqp {
+        Ok(sol) if sol.status == QpStatus::Optimal => Some(sol.working.clone()),
+        _ => None,
+    };
     if let Ok(sol) = eqp
         && sol.status == QpStatus::Optimal
     {
@@ -763,7 +777,7 @@ where
             None,
         );
     };
-    iter.working = Some(working);
+    iter.working = Some(step3_working.unwrap_or(working));
     let res = match sqp.optimize_with_warm_start(nlp, Some(iter)) {
         Ok(r) => r,
         Err(e) => {

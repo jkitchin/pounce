@@ -368,3 +368,69 @@ fn k_max_assembly_matches_the_per_row_scan() {
     assert_eq!(got.jcn, jcn);
     assert_eq!(got.vals, vals);
 }
+
+/// gh#1206 P4 + P5: activating a general row that was inactive at the reset
+/// (the sentinel shortcut `K_0⁻¹ e_p = e_p`, and the row read through the
+/// cached `A` row index), then dropping a slot that was active at the reset
+/// (the back-solve path), must each match a fresh factor of the resulting
+/// K_max.
+#[test]
+fn schur_row_add_then_base_active_drop_match_fresh_factor() {
+    let (h, a, g, bl, bu, xl, xu) = tiny_qp();
+    let qp = QpProblem {
+        n: 2,
+        m: 1,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Psd,
+    };
+
+    // Base: the x₀ bound active, the general row inactive.
+    let mut working = WorkingSet::cold(2, 1);
+    working.bounds[0] = BoundStatus::AtLower;
+    let mut state = SchurState::new(2, 1);
+    let mut ls = linsol();
+    state
+        .reset(&mut ls, &qp, &working, 1, &QpOptions::default())
+        .unwrap();
+
+    let fresh = |w: &WorkingSet, neg: i32, rhs: &[f64]| -> Vec<f64> {
+        let mut st = SchurState::new(2, 1);
+        let mut l = linsol();
+        st.reset(&mut l, &qp, w, neg, &QpOptions::default())
+            .unwrap();
+        let mut r = rhs.to_vec();
+        st.solve(&mut l, &mut r).unwrap();
+        r
+    };
+    let close = |got: &[f64], want: &[f64], what: &str| {
+        for (i, (&a, &b)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-9,
+                "{what} rhs[{i}]: schur={a}, fresh={b}"
+            );
+        }
+    };
+    let rhs0 = [0.3, -0.7, 1.0, 0.25, 0.0];
+
+    // Add the general row (slot 0, inactive at the reset).
+    state.apply_change(&mut ls, &qp, 0, true).unwrap();
+    let mut w1 = working.clone();
+    w1.constraints[0] = ConsStatus::AtLower;
+    let mut got = rhs0.to_vec();
+    state.solve(&mut ls, &mut got).unwrap();
+    close(&got, &fresh(&w1, 2, &rhs0), "after row add");
+
+    // Drop the x₀ bound (slot 1, active at the reset).
+    state.apply_change(&mut ls, &qp, 1, false).unwrap();
+    let mut w2 = w1.clone();
+    w2.bounds[0] = BoundStatus::Inactive;
+    let mut got = rhs0.to_vec();
+    state.solve(&mut ls, &mut got).unwrap();
+    close(&got, &fresh(&w2, 1, &rhs0), "after bound drop");
+}

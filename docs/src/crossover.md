@@ -368,6 +368,8 @@ ipm_sqp_handover               yes | no   (default: no; yes under
 ipm_sqp_handover_tol           number     (default: 1e-4)
 ipm_sqp_handover_stall_iter    integer    (default: 0, off)
 ipm_sqp_handover_max_attempts  integer    (default: 3)
+ipm_sqp_handover_time_ratio    number     (default: 1)
+ipm_sqp_handover_primal_tol    number     (default: 0, automatic)
 ```
 
 Crossover runs after the interior method has converged, so it cannot shorten
@@ -382,8 +384,9 @@ offers the *unconverged* iterate to the same bridge:
   the best error has not halved in `k` iterations, whatever its value.
 - **What**: the active set is read off the multipliers against the slacks.
   At an interior iterate `s·z ≈ μ`, so `√μ` separates active from inactive and
-  the primal tolerance is `max(crossover_primal_tol, √μ)`; the equality rows
-  are always in. One QP step is taken over that set, and if it does not meet
+  the primal tolerance is `max(crossover_primal_tol, √μ)` — or
+  `ipm_sqp_handover_primal_tol` as is, when that is positive, which is the
+  only way to go *below* `√μ` (gh#1206); the equality rows are always in. One QP step is taken over that set, and if it does not meet
   the stopping tolerances the active-set SQP runs from that working set for
   up to `crossover_max_iter` iterations — the same two phases as above.
 - **Accepting**: only a point that meets the stopping tolerances, in the
@@ -417,9 +420,14 @@ negative-curvature escape before it is certified, exactly as its convergence
 exit does: the SQP's one-step path has no curvature test, and without the
 escape the handover ended at the stationary point the interior method leaves
 on `nonconvex_qp`, `nonconvex_qp_ineq` and `nonconvex_two_escapes`. And each
-attempt may spend at most the interior-point time used so far (at least one
-second), within the solve's own budget — on `deb7` an unbounded attempt ran the
-full-SQP fallback for minutes against a 114-iteration interior solve.
+attempt may spend at most `ipm_sqp_handover_time_ratio` times the interior-point
+time used so far (at least one second), within the solve's own budget — on
+`deb7` an unbounded attempt ran the full-SQP fallback for minutes against a
+114-iteration interior solve. The default ratio of 1 bounds a declined attempt
+at a doubling; raise it when the crossover converges but needs longer than the
+interior method took to get there (gh#1206: a 90 k-variable collocation model
+whose step-3 QP alone took 697 s against 270 s of interior point), since an
+attempt that runs out is declined as a time limit and its work is lost.
 
 What it does not change is the cost of the QP itself. An attempt is one
 active-set QP over the whole model warm-started from the identified set, so it
