@@ -286,18 +286,10 @@ impl SchurState {
         let mut jcn = Vec::new();
         let mut vals = Vec::new();
 
-        // H block (lower-triangle 1-based; normalize defensively).
-        let h_irows = qp.h.irows();
-        let h_jcols = qp.h.jcols();
-        let h_vals = qp.h.values();
-        for k in 0..h_irows.len() {
-            let i = h_irows[k];
-            let j = h_jcols[k];
-            let (lo, hi) = if i >= j { (j, i) } else { (i, j) };
-            irn.push(hi);
-            jcn.push(lo);
-            vals.push(h_vals[k]);
-        }
+        // H block (lower-triangle 1-based; normalize defensively), with an
+        // explicit zero on every diagonal `H` does not store, so an inertia
+        // shift changes values and not the pattern (gh#1206 P2).
+        crate::kkt::push_h_block(qp, &mut irn, &mut jcn, &mut vals);
 
         // One row per slot.
         let a_jcols = qp.a.jcols();

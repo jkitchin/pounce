@@ -121,3 +121,117 @@ fn add_h_diagonal_shift_shifts_a_duplicated_diagonal_once() {
     // No entry appended: both diagonals were present.
     assert_eq!(k.irn.len(), 4);
 }
+
+/// A 4-variable QP whose `H` stores no diagonal for columns 2 and 4 (one of
+/// them coupled off-diagonally, one structurally zero), with two rows.
+fn qp_with_zero_h_columns<R>(f: impl FnOnce(&crate::problem::QpProblem) -> R) -> R {
+    use crate::problem::{HessianInertia, QpProblem};
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+    let mut h = SymTMatrix::new(SymTMatrixSpace::new(4, vec![1, 3, 2], vec![1, 3, 1]));
+    h.set_values(&[2.0, 1.0, 0.5]);
+    let mut a = GenTMatrix::new(GenTMatrixSpace::new(
+        2,
+        4,
+        vec![1, 1, 2, 2],
+        vec![1, 2, 3, 4],
+    ));
+    a.set_values(&[1.0, 1.0, 1.0, -1.0]);
+    let g = [0.0; 4];
+    let (bl, bu) = ([0.0; 2], [1.0; 2]);
+    let (xl, xu) = ([-1.0; 4], [1.0; 4]);
+    f(&QpProblem {
+        n: 4,
+        m: 2,
+        h: &h,
+        g: &g,
+        a: &a,
+        bl: &bl,
+        bu: &bu,
+        xl: &xl,
+        xu: &xu,
+        hessian_inertia: HessianInertia::Indefinite,
+    })
+}
+
+/// gh#1206 P2: every KKT assembly stores a diagonal for every `H` row, so
+/// the §4.5 retry's `add_h_diagonal_shift` moves values only and the δ > 0
+/// matrix has the δ = 0 matrix's pattern. Before, the shift appended the
+/// missing diagonals and the backend re-analysed the new pattern.
+#[test]
+fn an_inertia_shift_keeps_every_assembled_kkt_pattern() {
+    use crate::kkt::{
+        assemble_active_set_kkt, assemble_box_with_active, assemble_equality_plus_bounds,
+        assemble_soft_active_set_kkt,
+    };
+    use crate::schur::SchurState;
+    qp_with_zero_h_columns(|qp| {
+        let kkts = [
+            ("equality_only", KktTriplet::assemble_equality_only(qp)),
+            ("box_with_active", assemble_box_with_active(qp, &[0, 3])),
+            ("active_set", assemble_active_set_kkt(qp, &[1], &[0])),
+            (
+                "equality_plus_bounds",
+                assemble_equality_plus_bounds(qp, &[2]),
+            ),
+            (
+                "soft_active_set",
+                assemble_soft_active_set_kkt(qp, &[0, 1], &[false, true], &[2], &[true]),
+            ),
+            (
+                "k_max",
+                SchurState::new(4, 2)
+                    .build_k_max_triplet(qp, &[true, false, false, true, false, false]),
+            ),
+        ];
+        for (what, kkt) in kkts {
+            let mut shifted = kkt.clone();
+            shifted.add_h_diagonal_shift(qp.n, 1e-4);
+            assert_eq!(shifted.irn, kkt.irn, "{what}: rows moved");
+            assert_eq!(shifted.jcn, kkt.jcn, "{what}: columns moved");
+            // The zeros were inert: every H diagonal moved by exactly δ.
+            for i in 1..=qp.n as pounce_common::Index {
+                let d = |k: &KktTriplet| -> f64 {
+                    (0..k.irn.len())
+                        .filter(|&p| k.irn[p] == i && k.jcn[p] == i)
+                        .map(|p| k.vals[p])
+                        .sum()
+                };
+                let moved = d(&shifted) - d(&kkt);
+                assert!((moved - 1e-4).abs() < 1e-15, "{what}: diagonal {i} moved {moved}");
+            }
+        }
+    });
+}
+
+/// gh#1206 P2, end to end: a KKT that fails at δ = 0 and factors at δ > 0
+/// reuses the δ = 0 attempt's symbolic analysis: FERAL's summary records one
+/// pattern change (the first factorization) and a reuse for every rung after
+/// it. Before, the first shift appended the missing diagonals, a second
+/// pattern change.
+#[test]
+fn the_shifted_retry_reuses_the_symbolic_analysis() {
+    use crate::kkt::assemble_box_with_active;
+    use crate::options::QpOptions;
+    use crate::solver::ParametricActiveSetSolver;
+    use pounce_linsol::summary::LinearSolverSummary;
+    use std::sync::{Arc, Mutex};
+    qp_with_zero_h_columns(|qp| {
+        let sink = Arc::new(Mutex::new(LinearSolverSummary::default()));
+        let backend =
+            pounce_feral::FeralSolverInterface::new().with_summary_sink(Arc::clone(&sink));
+        let mut s = ParametricActiveSetSolver::new(Box::new(backend));
+        // No bound active: column 4's zero H column is uncovered, so the
+        // unshifted KKT is singular.
+        let kkt = assemble_box_with_active(qp, &[]);
+        let mut rhs = vec![1.0; kkt.dim];
+        let delta = s
+            .factorize_with_inertia_control(kkt, &mut rhs, 0, qp.n, &QpOptions::default())
+            .unwrap();
+        assert!(delta > 0.0, "the unshifted KKT should not have factored");
+        let sum = sink.lock().unwrap().clone();
+        // Every rung of the ladder is recorded; only the first analysed.
+        assert!(sum.n_factors >= 2, "{sum:?}");
+        assert_eq!(sum.n_pattern_changes, 1, "{sum:?}");
+        assert_eq!(sum.n_pattern_reuse, sum.n_factors - 1, "{sum:?}");
+    });
+}
