@@ -164,6 +164,25 @@ pub struct QpOptions {
     /// always take the update.
     pub schur_drop_inertia_test: bool,
 
+    /// Seed the l1-elastic phase 1 at the pinned warm-start point, not at
+    /// the origin, when [`crate::QpSolver::solve_with_working_set`]'s hint
+    /// pins to an infeasible point the pin repair cannot rescue (gh#1206
+    /// B7). The hint's rows are at their boundaries there, so the phase
+    /// starts with them in its working set instead of rebuilding them one
+    /// pivot at a time.
+    ///
+    /// **Off by default**, on measurement. On a hint that pins a full vertex
+    /// one row away from the optimum it is 2 working-set changes against 62
+    /// (`tests/warm_start_failed_repair_seeds_elastic.rs`), but on #428's MPC
+    /// sweep (`tests/warm_start_pin_repair.rs`, horizon 40, step −0.2) —
+    /// the same repair-declined branch — the seeded phase took 111 pivots
+    /// where the origin-seeded one takes 14: started at the vertex, the
+    /// Bland-ruled phase 1 releases the hint's wrong bounds one lowest-index
+    /// pivot at a time. Dropping Bland for the seeded phase reached a point
+    /// 8e-8 below the cold optimum, i.e. not feasible to tolerance. See
+    /// `dev-notes/known-limitations.md`.
+    pub elastic_seed_from_hint: bool,
+
     /// Trace the §4.2 parametric homotopy on a **cold** solve instead of
     /// starting the conventional phase-1/phase-2 scheme.
     ///
@@ -352,6 +371,7 @@ impl Default for QpOptions {
             dual_shift_probe: 1e-8,
             use_schur_updates: false,
             schur_drop_inertia_test: true,
+            elastic_seed_from_hint: false,
             use_homotopy: false,
             expand_tol_initial: 1e-12,
             expand_tol_growth: 1e-11,

@@ -2681,11 +2681,28 @@ impl ParametricActiveSetSolver {
     /// polish was reached by none of the issue generator's 200 seeds, so it is
     /// gone rather than kept as an untested branch.
     fn solve_elastic(&mut self, qp: &QpProblem, opts: &QpOptions) -> Result<QpSolution, QpError> {
+        self.solve_elastic_seeded(qp, opts, None)
+    }
+
+    /// [`Self::solve_elastic`], with the phase-1 seeded at `seed` (projected
+    /// into the variable box) instead of at the origin; see
+    /// [`Self::solve_elastic_rows`].
+    fn solve_elastic_seeded(
+        &mut self,
+        qp: &QpProblem,
+        opts: &QpOptions,
+        seed: Option<&[Number]>,
+    ) -> Result<QpSolution, QpError> {
         let mut spent = QpStats::default();
-        if let Some(sol) = self.solve_pruned(qp, opts, Self::solve_elastic_rows, &mut spent)? {
+        if let Some(sol) = self.solve_pruned(
+            qp,
+            opts,
+            |s, q, o| s.solve_elastic_rows(q, o, seed),
+            &mut spent,
+        )? {
             return Ok(sol);
         }
-        let mut sol = self.solve_elastic_rows(qp, opts)?;
+        let mut sol = self.solve_elastic_rows(qp, opts, seed)?;
         sol.stats.add_work(&spent);
         Ok(sol)
     }
@@ -2743,10 +2760,20 @@ impl ParametricActiveSetSolver {
     /// Unpacks the augmented solution into the original variable
     /// space and reports `QpStatus::Infeasible` when residual
     /// slacks exceed `feas_tol`.
+    ///
+    /// `seed` replaces the origin as the point the elastic slacks are
+    /// measured from (gh#1206 B7): a warm start whose pinned point is
+    /// infeasible — the hint repair having given up — is still near a
+    /// feasible point, and every row it pins is at its boundary there, so
+    /// [`ElasticReformulation::initial_seed`] puts those rows back in the
+    /// working set and the slacks only have to absorb the violated rows. The
+    /// origin is kept as a recovery seed below, so nothing the cold seed
+    /// could reach is lost.
     fn solve_elastic_rows(
         &mut self,
         qp: &QpProblem,
         opts: &QpOptions,
+        seed: Option<&[Number]>,
     ) -> Result<QpSolution, QpError> {
         let started = Instant::now();
         let n = qp.n;
@@ -2755,18 +2782,30 @@ impl ParametricActiveSetSolver {
         let reform = crate::elastic::ElasticReformulation::build(qp, opts.elastic_gamma);
         let qp_aug = reform.as_qp();
 
-        // Initial `x_orig` for the augmented seed: project 0 into
-        // the original variable box. Slacks then absorb any
-        // remaining infeasibility.
-        let mut x_orig = vec![0.0; n];
-        for (xi, (&l, &u)) in x_orig.iter_mut().zip(qp.xl.iter().zip(qp.xu.iter())) {
-            if l > NLP_LOWER_BOUND_INF && *xi < l {
-                *xi = l;
+        // Initial `x_orig` for the augmented seed: project 0 (or the
+        // caller's seed) into the original variable box. Slacks then absorb
+        // any remaining infeasibility.
+        let project = |x: &mut [Number]| {
+            for (xi, (&l, &u)) in x.iter_mut().zip(qp.xl.iter().zip(qp.xu.iter())) {
+                if l > NLP_LOWER_BOUND_INF && *xi < l {
+                    *xi = l;
+                }
+                if u < NLP_UPPER_BOUND_INF && *xi > u {
+                    *xi = u;
+                }
             }
-            if u < NLP_UPPER_BOUND_INF && *xi > u {
-                *xi = u;
+        };
+        let mut x_zero = vec![0.0; n];
+        project(&mut x_zero);
+        let x_orig = match seed {
+            Some(s) if s.len() == n && s.iter().all(|v| v.is_finite()) => {
+                let mut x = s.to_vec();
+                project(&mut x);
+                x
             }
-        }
+            _ => x_zero.clone(),
+        };
+        let seeded = x_orig != x_zero;
         let (x_aug, working_aug) = reform.initial_seed(qp, &x_orig, opts.feas_tol);
 
         let ws = QpWarmStart {
@@ -2951,6 +2990,9 @@ impl ParametricActiveSetSolver {
         // with points feasible to slack 1.66, and the SQP reported
         // `Infeasible_Problem_Detected` at iteration 0 (gh#484 follow-up).
         let mut candidates = vec![x.clone(), x_orig.clone()];
+        if seeded {
+            candidates.push(x_zero);
+        }
         // The convex phase-1's point earns a place in the seed list
         // whether or not it cleared `feas_tol`: it is the closest thing
         // to a feasible point anyone here has, and phase-2 warm-started
@@ -6406,6 +6448,45 @@ impl ParametricActiveSetSolver {
             Ok(ws) => ws,
             Err(timed_out) => return Ok(timed_out),
         };
+        // gh#1206 B7. A pinned point still infeasible after the repair (it
+        // gave up: too many violated rows, or `|W| + violated > n`) fails
+        // `solve`'s admission pre-check, which sends it to the l1-elastic
+        // phase 1 seeded at the *origin* — discarding the hint entirely and
+        // paying about one working-set change per row to rebuild it. Seed
+        // that phase at the pinned point instead: the hint's rows are active
+        // there, and only the violated ones need slacks. Everything else
+        // about the route — the phase, its recovery seeds, the second-order
+        // pass `solve` would run — is unchanged.
+        //
+        // Only a point the pin actually determined qualifies: one solved
+        // from an *unshifted* pinned KKT (`pinned_factor` is kept only then)
+        // over a non-empty working set. A shifted pin leaves the free
+        // directions at `−g/δ` — on an LP with an empty hint, a point ~1e8
+        // out — and seeding there cost `h_zero_general_inequalities` its
+        // 1e-8 answer; such a hint keeps the origin.
+        //
+        // And only a hint that is *nearly* right. The repair declines for two
+        // reasons, and only one is B7's: `|W| + violated > n` (the hint pins
+        // a full vertex, so it cannot add rows without a drop). The other —
+        // more violated rows than `max(|W|/4, PIN_REPAIR_MIN_ROWS)` — is the
+        // badly-wrong hint the pre-check was written for, and seeded there
+        // it cost #428's MPC sweep 111 pivots where the origin needs 14.
+        let active = ws.working.active_count();
+        let nearly_right = || {
+            violated_inactive(qp, &ws.x, &ws.working, opts.feas_tol)
+                .is_some_and(|(c, b)| c.len() + b.len() <= (active / 4).max(PIN_REPAIR_MIN_ROWS))
+        };
+        let pin_determined = self.pinned_factor.is_some() && active > 0;
+        if opts.elastic_seed_from_hint
+            && pin_determined
+            && nearly_right()
+            && !point_is_feasible_scaled(qp, &ws.x, opts.feas_tol)
+        {
+            let _deadline = crate::deadline::enter(opts);
+            return self
+                .solve_elastic_seeded(qp, opts, Some(&ws.x))
+                .and_then(|sol| self.escape_negative_curvature(qp, sol, opts));
+        }
         self.solve(qp, Some(&ws), opts)
     }
 
