@@ -116,8 +116,15 @@ pub(crate) fn expired() -> bool {
     changes_spent() || iters_spent() || time_passed()
 }
 
+/// The current solve's wall-clock deadline, if it has one. The rank probe
+/// takes it (gh#1206 B5): the test-only check counter and the change and
+/// iteration budgets do not reach it, so the probe never spends them.
+pub(crate) fn wall_deadline() -> Option<Instant> {
+    DEADLINE.with(Cell::get)
+}
+
 /// The wall-clock deadline has passed.
-fn time_passed() -> bool {
+pub(crate) fn time_passed() -> bool {
     DEADLINE.with(|slot| {
         slot.get()
             .is_some_and(|deadline| Instant::now() >= deadline)

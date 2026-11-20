@@ -242,6 +242,27 @@ changes.
   (qpnstair) and `125` (deb7), and bound complementarity `0.21` and `452`.
   qpnstair joins the fixture corpus, converted from Vanderbei's AMPL
   source; its provenance is in `crates/pounce-cli/tests/fixtures/README-qpnstair.md`.
+- **The active-set QP's rank test stops at the solve's deadline, and is no
+  longer quadratic in the number of dependent rows (gh#1206).** The
+  dependent-row probe (`pounce_feral::determine_dependent_rows`) factors the
+  augmented system `[s·I Jᵀ; J 0]` with a threshold-Markowitz LU that could not
+  be stopped. On the IPM→SQP handover of a 90 797-variable, 88 800-row
+  collocation NLP one call ran for more than 2 400 s of CPU and grew past
+  11.6 GB, past the handover's deadline. The elimination now runs in pounce,
+  under the QP's `time_limit` and caps on fill (64× the input's storage, within
+  256 MiB to 2 GiB) and work. Past any of them it stops at once, and the QP is
+  told that no rank test ran, which it already handles. It no longer stores the
+  `L` and `U` factors, which the probe never read. Two costs are gone: every
+  numerically empty column (one per dependent row) was popped, scanned and
+  pushed back at every pivot step, and every entry in a long column was found
+  by scanning it. On a 188 870-dimension recurrence system with 8 854
+  dependent rows the probe went from 37 s to 0.6 s, and at twice that size from
+  144 s to 1.5 s. It is still an unsymmetric LU: FERAL's symmetric LDLᵀ does not
+  reveal rank, and it reports only how many pivots were zero, not which rows
+  they belong to. On every input that finishes inside the budget the pivots are
+  feral's, bit for bit, so the same rows are dropped. The fixture sweep diffs
+  empty on both legs, at the defaults, with `ipm_sqp_handover=yes` and with
+  `algorithm=active-set-sqp`.
 - **The active-set QP solver no longer stops on an inertia-ladder error at a
   working set its own rank test called independent (gh#1195).** When the
   rank probe dropped an equality row, the re-selection that keeps equalities

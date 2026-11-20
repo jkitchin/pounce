@@ -5397,6 +5397,13 @@ fn independent_active_subset_any(
     // Past it no rank test runs, and the caller is told so: "nothing
     // dropped" is "cannot help" to a pruning caller but "full rank" to the
     // masked-deficiency guards, which must not accept on it.
+    //
+    // A probe stopped by the solve's deadline (gh#1206 B5) gets no dense
+    // fallback either: the time is already spent, and the caller is told no
+    // rank test ran.
+    if crate::deadline::time_passed() {
+        return None;
+    }
     let k = (active_cons.len() + active_bounds.len()) as Number;
     if k * k * qp.n as Number > DENSE_GUARD_FLOP_BUDGET {
         return None;
@@ -7711,6 +7718,88 @@ mod issue1061_unchecked_rank_tests {
             "accepted an unchecked shifted factor: {:?}",
             r.as_ref().map(|x| &x[..4])
         );
+    }
+}
+
+#[cfg(test)]
+mod issue1206_rank_probe_deadline_tests {
+    //! gh#1206 B5: the rank guard's sparse probe ran unbounded inside a QP
+    //! with a `time_limit` — one call on the IPM→SQP handover's step QP of a
+    //! 90 797-variable collocation NLP ran for more than 2 400 s of CPU and
+    //! 11.6 GB. The probe now stops at the solve's wall-clock deadline, and the
+    //! guard reports that no rank test ran instead of grinding on.
+    use std::time::Duration;
+
+    use pounce_common::types::{Index, Number};
+    use pounce_feral::{FeralSolverInterface, ProbeBailout};
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+
+    use super::{ParametricActiveSetSolver, checked_independent_active_subset};
+    use crate::{HessianInertia, QpOptions, QpProblem};
+
+    /// `x_i − x_{i+p} = 0` for `i < p`, each row repeated once scaled by 2
+    /// (`2p` equality rows of rank `p`), the rank test run over all of them
+    /// on a FERAL-backed solver, inside a solve scope with `time_limit`.
+    fn rank_test_in_scope(p: usize, time_limit: Option<Duration>) -> Option<usize> {
+        let (n, m) = (2 * p, 2 * p);
+        let diag: Vec<Index> = (1..=n as Index).collect();
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as Index, diag.clone(), diag));
+        h.set_values(&vec![1.0; n]);
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..p {
+            for (row, scale) in [(i, 1.0), (p + i, 2.0)] {
+                irn.extend([row as Index + 1, row as Index + 1]);
+                jcn.extend([i as Index + 1, (i + p) as Index + 1]);
+                vals.extend([scale, -scale]);
+            }
+        }
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as Index, n as Index, irn, jcn));
+        a.set_values(&vals);
+        let g: Vec<Number> = vec![1.0; n];
+        let (bl, bu) = (vec![0.0; m], vec![0.0; m]);
+        let (xl, xu) = (vec![-1e20; n], vec![1e20; n]);
+        let qp = QpProblem {
+            n,
+            m,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let mut solver = ParametricActiveSetSolver::new(Box::new(FeralSolverInterface::new()));
+        let opts = QpOptions {
+            time_limit,
+            ..QpOptions::default()
+        };
+        let _scope = crate::deadline::enter(&opts);
+        let rows: Vec<usize> = (0..m).collect();
+        checked_independent_active_subset(&mut solver.linsol, &qp, &rows, &[])
+            .map(|(kc, _)| kc.len())
+    }
+
+    #[test]
+    fn the_rank_test_stops_at_the_solve_deadline() {
+        // Control: with time left, the probe finds the `p` independent rows.
+        assert_eq!(
+            rank_test_in_scope(40, Some(Duration::from_secs(3600))),
+            Some(40)
+        );
+        assert_eq!(pounce_feral::last_probe_bailout(), None);
+        // Out of time: the probe stops, and the dense fallback (well inside
+        // its flop budget here) is not run in its place. Before gh#1206 the
+        // probe ignored the deadline and this read `Some(40)`.
+        assert_eq!(rank_test_in_scope(40, Some(Duration::ZERO)), None);
+        assert_eq!(
+            pounce_feral::last_probe_bailout(),
+            Some(ProbeBailout::Deadline)
+        );
+        // The deadline is the solve's: outside a scope nothing is imposed.
+        let _ = rank_test_in_scope(40, None);
+        assert_eq!(pounce_feral::last_probe_bailout(), None);
     }
 }
 

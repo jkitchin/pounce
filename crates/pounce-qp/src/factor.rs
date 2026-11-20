@@ -317,6 +317,13 @@ impl LinearSolver {
     /// `n ≈ 15 000` and `≈ 10 800` equalities, gigabytes and `~10¹²` flops
     /// per pass. The probe factors a throwaway matrix, so which backend owns
     /// the KKT factor is irrelevant to it.
+    ///
+    /// Either way the FERAL probe runs under the solve's wall-clock deadline
+    /// ([`pounce_feral::rank_probe_deadline`]) and its own fill and work caps,
+    /// and past any of them reports "could not determine" (gh#1206 B5).
+    /// Unbudgeted, one call on a 1.8·10⁵-dimension augmented system ran for
+    /// more than 2 400 s of CPU and 11.6 GB, past the IPM→SQP handover's
+    /// deadline, which this solver otherwise checks only between its steps.
     pub fn determine_dependent_rows(
         &mut self,
         n_rows: Index,
@@ -326,6 +333,7 @@ impl LinearSolver {
         vals: &[Number],
         c_deps: &mut Vec<Index>,
     ) -> ESymSolverStatus {
+        let _deadline = pounce_feral::rank_probe_deadline(crate::deadline::wall_deadline());
         if self.backend.provides_degeneracy_detection() {
             self.backend
                 .determine_dependent_rows(n_rows, n_cols, irn, jcn, vals, c_deps)
