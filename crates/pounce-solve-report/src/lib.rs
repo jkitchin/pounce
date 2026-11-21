@@ -1493,6 +1493,29 @@ fn unix_nanos_to_iso(nanos: i128) -> String {
 mod tests {
     use super::*;
 
+    /// A per-iteration row whose step norm went non-finite reads back.
+    /// `serde_json` writes NaN as `null`; before the reader accepted it, a
+    /// report holding such a row could not be loaded at all ("invalid type:
+    /// null, expected f64") — measured on gh#1217's failure-2 model on
+    /// aarch64 macOS, whose restoration rows reach a NaN `d_norm`.
+    #[test]
+    fn iter_record_with_non_finite_floats_round_trips() {
+        let row = IterRecord {
+            iter: 321,
+            objective: 29.8,
+            d_norm: f64::NAN,
+            alpha_primal: f64::INFINITY,
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&row).expect("serialize");
+        assert!(text.contains("\"d_norm\":null"), "{text}");
+        let back: IterRecord = serde_json::from_str(&text).expect("deserialize");
+        assert_eq!(back.iter, 321);
+        assert_eq!(back.objective, 29.8);
+        assert!(back.d_norm.is_nan());
+        assert!(back.alpha_primal.is_nan());
+    }
+
     /// A complementarity block round-trips, including the quantities that are
     /// `null` because they were not measured: JSON has no infinity, and a
     /// plain `f64` field holding one would serialize as `null` and then fail

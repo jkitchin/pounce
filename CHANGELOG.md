@@ -330,6 +330,12 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **A JSON report with a non-finite per-iteration value can be read back.**
+  `serde_json` writes NaN as `null`, and the `iterations` rows (`d_norm`,
+  `alpha_primal`, the residuals, ...) were plain floats, so a report whose
+  trajectory reached a NaN step norm failed to load with "invalid type: null,
+  expected f64" — in pounce's own reader and in pounce-studio's. Those slots
+  now read back as NaN.
 - **`g` of the live iterate at an equality row with a nonzero right-hand
   side.** The algorithm holds an equality row as the residual `g − rhs`, and
   the iterate packed for the user returned that residual as `g`. So
