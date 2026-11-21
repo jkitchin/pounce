@@ -150,9 +150,22 @@ const ALPHA_INTERP_MIN_TRIALS: i32 = 6;
 /// never came back (`Error_In_Step_Computation` where Ipopt converges in
 /// 64 iterations — pounce now reproduces those 64 line for line).
 ///
-/// `driver_floor` remains the answer for an acceptor that has no floor of
-/// its own: the trait default returns `0`, and a zero `alpha_min` would
-/// let the loop halve to underflow.
+/// `driver_floor` remains the answer whenever the acceptor's value is `0`,
+/// which a zero `alpha_min` would otherwise let the loop halve to
+/// underflow. That happens in two places, and the second is the common
+/// one:
+///
+/// * an acceptor with no floor of its own (the trait default returns `0`);
+/// * the filter acceptor at an **exactly feasible** iterate with descent:
+///   `θ = 0` zeroes both descent terms, so `CalculateAlphaMin` is `0` and
+///   the old `1e-12` floor still applies.
+///
+/// A *nearly* feasible iterate is the sharp edge of that: its floor is
+/// `≈ θ^{s_θ}/(−∇φᵀd)^{s_φ}`, far below `1e-12` (`5e-226` at
+/// `θ = 1e-200`, `−∇φᵀd = 1`), so a sweep there may run hundreds of
+/// trials (750 from `alpha = 1` at the default `0.5` factor) — see
+/// [`trials_to_reach`] — where `θ = 0` stops after ~40. Upstream has the
+/// same edge, except that at `θ = 0` it halves on until `alpha` underflows.
 fn effective_alpha_min(acceptor_alpha_min: Number, driver_floor: Number) -> Number {
     if acceptor_alpha_min > 0.0 && acceptor_alpha_min.is_finite() {
         acceptor_alpha_min
@@ -2475,18 +2488,28 @@ mod tests {
         bls
     }
 
-    /// The interpolated step is what the model says, when the model is
-    /// inside the safeguards. `φ(α) = 1 − α + 50α²` has `φ(0) = 1`,
-    /// `φ'(0) = −1` and minimizer `1/100`; at the rejected `α = 1`,
-    /// `φ(1) = 50`, so the fit is exact and `next_alpha` must return
-    /// `0.01` — a 100× reduction the fixed factor would have needed
-    /// seven halvings to reach.
     /// gh#1217: the filter acceptor's `alpha_min` is upstream's floor and
     /// is not raised to the driver's `1e-12`.
     #[test]
     fn acceptor_alpha_min_below_the_driver_floor_is_kept() {
         assert_eq!(effective_alpha_min(5e-24, 1e-12), 5e-24);
         assert_eq!(effective_alpha_min(1e-3, 1e-12), 1e-3);
+    }
+
+    /// The common path into the driver floor (gh#1217 review): at an
+    /// exactly feasible iterate with descent the filter's own `alpha_min`
+    /// is `alpha_min_frac · min(γ_θ, γ_φ·0/(−∇φᵀd), δ·0^{s_θ}/…) = 0`, so
+    /// `θ = 0` keeps the old `1e-12` floor while a nearly feasible iterate
+    /// gets the acceptor's far deeper one.
+    #[test]
+    fn an_exactly_feasible_iterate_keeps_the_driver_floor() {
+        let mut acc = FilterLsAcceptor::new();
+        let at_zero = acc.calc_alpha_min(-1.0, 0.0);
+        assert_eq!(at_zero, 0.0);
+        assert_eq!(effective_alpha_min(at_zero, 1e-12), 1e-12);
+        let near_zero = acc.calc_alpha_min(-1.0, 1e-200);
+        assert!(near_zero > 0.0 && near_zero < 1e-200, "got {near_zero}");
+        assert_eq!(effective_alpha_min(near_zero, 1e-12), near_zero);
     }
 
     /// The other branch: an acceptor with no floor (the trait default `0`,
@@ -2521,6 +2544,12 @@ mod tests {
         assert_eq!(trials_to_reach(1.0, 5e-324, 0.5, 50), 1075);
     }
 
+    /// The interpolated step is what the model says, when the model is
+    /// inside the safeguards. `φ(α) = 1 − α + 50α²` has `φ(0) = 1`,
+    /// `φ'(0) = −1` and minimizer `1/100`; at the rejected `α = 1`,
+    /// `φ(1) = 50`, so the fit is exact and `next_alpha` must return
+    /// `0.01` — a 100× reduction the fixed factor would have needed
+    /// seven halvings to reach.
     #[test]
     fn next_alpha_jumps_to_the_interpolated_minimizer() {
         let bls = ls_for_next_alpha(0.5, 1e-4);

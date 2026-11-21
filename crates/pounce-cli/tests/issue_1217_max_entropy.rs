@@ -235,26 +235,23 @@ fn control_cold_start_at_mean_300_solves() {
 }
 
 #[test]
-fn failure1_start_at_the_solution_solves_on_the_first_solve() {
-    let r = solve(&write_nl(300.0, &at_solution(300.0)), &[]);
-    assert_solved(&r, 6.65357129, "failure 1");
-}
-
-#[test]
 fn failure2_cold_start_at_mean_450_solves_on_the_first_solve() {
     let r = solve(&write_nl(450.0, &cold()), &[]);
     // Ipopt + MA57 reports 6.89240414; the exact optimum is 6.89240663.
     assert_solved(&r, 6.8924054, "failure 2");
 }
 
-/// The branch the fix is about: a step accepted below the old `1e-12`
-/// clamp, after more trials than the old 50-trial cap allowed, with no
-/// restoration anywhere in the solve — Ipopt's iteration 20, `5.20e-23f 75`.
-/// Before the fix that iteration was `1.79e-12R 40` and restoration ran
-/// thirteen times.
+/// Failure 1 solves on the first solve, and through the branch the fix is
+/// about: a step accepted below the old `1e-12` clamp, after more trials
+/// than the old 50-trial cap allowed, with no restoration anywhere in the
+/// solve — Ipopt's iteration 20, `5.20e-23f 75`. Before the fix that
+/// iteration was `1.79e-12R 40` and restoration ran thirteen times. One
+/// solve serves both checks, since the 2000-variable model is the
+/// expensive part.
 #[test]
-fn failure1_takes_the_step_below_the_old_alpha_floor() {
+fn failure1_solves_through_a_step_below_the_old_alpha_floor() {
     let r = solve(&write_nl(300.0, &at_solution(300.0)), &[]);
+    assert_solved(&r, 6.65357129, "failure 1");
     let main: Vec<_> = r
         .iterations
         .iter()
@@ -283,5 +280,77 @@ fn failure1_takes_the_step_below_the_old_alpha_floor() {
             .iter()
             .all(|it| it.phase != IterPhase::Restoration && it.alpha_primal_char != 'R'),
         "the solve entered restoration; Ipopt's does not"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The gh#1000 square-certificate counter, away from the float tie.
+//
+// `issue_508_infeasible_gap_1em4` reaches its verdict through this counter
+// only because its least violation lands exactly on `constr_viol_tol = 1e-4`,
+// which this PR made inclusive (`reaches_tolerance`). That fixture tests the
+// tie, not the rule. The same model with a gap of `3e-4` sits clearly above
+// the tolerance and reaches the counter on its first solve before and after
+// the change (557 iterations, exact Hessian), so it pins the counter in both
+// directions without depending on how the violation rounds.
+
+/// `min (x-5)^2 s.t. x^2 + gap = 0`: the gh#508 probe with its gap replaced.
+fn gap_model(gap: &str) -> PathBuf {
+    let mut src = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    src.push("tests/fixtures/issue_508_infeasible_gap_1em4.nl");
+    let text = std::fs::read_to_string(&src).expect("read gh#508 fixture");
+    assert!(text.contains("\n4 -0.0001\n"), "fixture's bound line moved");
+    let path = tmp_path("gap.nl");
+    std::fs::write(
+        &path,
+        text.replace("\n4 -0.0001\n", &format!("\n4 -{gap}\n")),
+    )
+    .expect("write gap model");
+    path
+}
+
+/// Console output of one first solve, with the restoration debug log on.
+fn solve_console(nl: &PathBuf, extra: &[&str]) -> String {
+    let sol_path = tmp_path("gap.sol");
+    let mut cmd = Command::new(pounce_exe());
+    cmd.env("RUST_LOG", "pounce::restoration=debug")
+        .arg(nl)
+        .arg(&sol_path)
+        .arg("max_wall_time=300");
+    for o in NO_LADDER.iter().chain(extra) {
+        cmd.arg(o);
+    }
+    let out = cmd.output().expect("spawn pounce");
+    let _ = std::fs::remove_file(&sol_path);
+    let _ = std::fs::remove_file(nl);
+    String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+}
+
+#[test]
+fn square_certificate_above_constr_viol_tol_is_honoured() {
+    let console = solve_console(&gap_model("0.0003"), &[]);
+    assert!(
+        console.contains("[PN_SQUARE_CERTIFICATE]"),
+        "a 3e-4 violation is above constr_viol_tol = 1e-4; the counter must \
+         honour the repeated certificate:\n{console}"
+    );
+    assert!(
+        console.contains("EXIT: Converged to a point of local infeasibility"),
+        "expected the infeasibility verdict:\n{console}"
+    );
+}
+
+#[test]
+fn square_certificate_inside_constr_viol_tol_is_not_counted() {
+    let console = solve_console(&gap_model("0.0003"), &["constr_viol_tol=1e-3"]);
+    assert!(
+        !console.contains("[PN_SQUARE_CERTIFICATE]"),
+        "a 3e-4 violation is inside constr_viol_tol = 1e-3; no certificate \
+         may be honoured:\n{console}"
+    );
+    assert!(
+        !console.contains("local infeasibility"),
+        "a violation the user declared feasible must not be claimed \
+         infeasible:\n{console}"
     );
 }

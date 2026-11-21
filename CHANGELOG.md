@@ -311,8 +311,13 @@ changes.
   for good. Two pounce-only limits caused this. The filter acceptor's
   `CalculateAlphaMin` was clamped from below to `1e-12`, and a sweep was
   capped at 50 trials. The acceptor's value is now used as is, with `1e-12`
-  only for an acceptor that reports no floor. The trial budget is now
-  whatever it takes to reach `alpha_min`. Both reported runs now succeed on
+  only when the acceptor's value is `0`. That includes the filter acceptor
+  at an *exactly* feasible iterate with descent (`θ = 0` zeroes
+  `CalculateAlphaMin`), so that common path keeps the old floor. A *nearly*
+  feasible iterate now gets the much deeper upstream floor. At `θ = 1e-200`
+  that is about `5e-226`, i.e. up to 750 trials from `alpha = 1`, where
+  `θ = 0` stops after about 40. The trial budget is now whatever it takes to
+  reach `alpha_min`. Both reported runs now succeed on
   the first solve: 64 iterations from the optimum, as Ipopt does, and 124
   cold at mean 450. Fixture sweep: `dallass` (lbfgs) goes from
   `Error_In_Step_Computation` to solved. Three infeasibility fixtures keep

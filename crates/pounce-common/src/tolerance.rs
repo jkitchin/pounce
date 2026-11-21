@@ -63,16 +63,19 @@ use crate::types::Number;
 /// assert!(!is_significant(1.0e-20, 1.0, 1e-8));
 /// ```
 pub fn is_significant(value: Number, scale: Number, tol: Number) -> bool {
-    if !value.is_finite() {
-        return false;
-    }
+    value.is_finite() && value.abs() > significance_threshold(scale, tol)
+}
+
+/// The threshold [`is_significant`] and [`reaches_tolerance`] compare
+/// against: `tol * |scale|`, or the absolute `tol` when `scale` is zero or
+/// non-finite. Shared so the two cannot drift apart on the scaling rule.
+fn significance_threshold(scale: Number, tol: Number) -> Number {
     let s = scale.abs();
-    let threshold = if s.is_finite() && s > 0.0 {
+    if s.is_finite() && s > 0.0 {
         tol * s
     } else {
         tol
-    };
-    value.abs() > threshold
+    }
 }
 
 /// [`is_significant`] with the boundary included: `value` *at* `tol * |scale|`
@@ -93,16 +96,7 @@ pub fn is_significant(value: Number, scale: Number, tol: Number) -> bool {
 /// assert!(!reaches_tolerance(f64::NAN, 1.0, 1e-4));
 /// ```
 pub fn reaches_tolerance(value: Number, scale: Number, tol: Number) -> bool {
-    if !value.is_finite() {
-        return false;
-    }
-    let s = scale.abs();
-    let threshold = if s.is_finite() && s > 0.0 {
-        tol * s
-    } else {
-        tol
-    };
-    value.abs() >= threshold
+    value.is_finite() && value.abs() >= significance_threshold(scale, tol)
 }
 
 /// Whether `value` is small enough, relative to its own natural magnitude, to
