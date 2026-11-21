@@ -616,7 +616,7 @@ impl ParametricActiveSetSolver {
             w_cur = w_new;
         }
 
-        point_is_feasible(qp, &x_cur, opts.feas_tol).then_some((x_cur, w_cur))
+        point_is_feasible_scaled(qp, &x_cur, opts.feas_tol).then_some((x_cur, w_cur))
     }
 
     /// How wrong the caller's working set turns out to be, measured on `qp`
@@ -2433,7 +2433,13 @@ impl ParametricActiveSetSolver {
         sol: QpSolution,
         opts: &QpOptions,
     ) -> Result<QpSolution, QpError> {
-        if !matches!(sol.status, QpStatus::Optimal) || point_is_feasible(qp, &sol.x, opts.feas_tol)
+        // Row-scaled (gh#1219 §3.3), as every other feasibility gate on a
+        // solved point in this file already was: a backward-stable solve
+        // leaves `|aᵢᵀx − bᵢ|` at the round-off of row `i`'s largest term, so
+        // an absolute `feas_tol` sent a correct optimum on a large-coefficient
+        // row to the repin and, failing that, to elastic.
+        if !matches!(sol.status, QpStatus::Optimal)
+            || point_is_feasible_scaled(qp, &sol.x, opts.feas_tol)
         {
             return Ok(sol);
         }
@@ -6583,7 +6589,7 @@ impl ParametricActiveSetSolver {
         // already had right. Repair it instead — pin the violated rows too —
         // and hand the pre-check a feasible point (#428). A hint the repair
         // cannot rescue keeps the old path untouched.
-        let (x_init, fwd_working) = if point_is_feasible(qp, &x_init, opts.feas_tol) {
+        let (x_init, fwd_working) = if point_is_feasible_scaled(qp, &x_init, opts.feas_tol) {
             (x_init, fwd_working)
         } else {
             self.repair_pinned_hint(qp, &x_init, &fwd_working, opts, PIN_REPAIR_MAX_ROUNDS)
@@ -7101,36 +7107,48 @@ fn active_kkt_residual(qp: &QpProblem, sol: &QpSolution) -> Number {
 /// round-off of its largest term.
 fn point_is_feasible_scaled(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
     let ax = a_times_x(qp.a, x, qp.m);
+    let mag = row_term_magnitudes(qp, x);
+    for i in 0..qp.m {
+        if qp.bl[i] > NLP_LOWER_BOUND_INF && qp.bl[i] - ax[i] > row_tol(feas_tol, qp.bl[i], mag[i])
+        {
+            return false;
+        }
+        if qp.bu[i] < NLP_UPPER_BOUND_INF && ax[i] - qp.bu[i] > row_tol(feas_tol, qp.bu[i], mag[i])
+        {
+            return false;
+        }
+    }
+    for (i, &xi) in x.iter().enumerate() {
+        if qp.xl[i] > NLP_LOWER_BOUND_INF && qp.xl[i] - xi > bound_tol(feas_tol, qp.xl[i]) {
+            return false;
+        }
+        if qp.xu[i] < NLP_UPPER_BOUND_INF && xi - qp.xu[i] > bound_tol(feas_tol, qp.xu[i]) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `Σⱼ |aᵢⱼ xⱼ|` for every row: the size of the terms that meet in row `i`,
+/// and so the scale of the round-off its residual carries.
+fn row_term_magnitudes(qp: &QpProblem, x: &[Number]) -> Vec<Number> {
     let mut mag = vec![0.0; qp.m];
     let (ir, jc, av) = (qp.a.irows(), qp.a.jcols(), qp.a.values());
     for k in 0..ir.len() {
         mag[(ir[k] - 1) as usize] += (av[k] * x[(jc[k] - 1) as usize]).abs();
     }
-    for i in 0..qp.m {
-        if qp.bl[i] > NLP_LOWER_BOUND_INF {
-            let tol = feas_tol * 1.0_f64.max(qp.bl[i].abs()).max(mag[i]);
-            if qp.bl[i] - ax[i] > tol {
-                return false;
-            }
-        }
-        if qp.bu[i] < NLP_UPPER_BOUND_INF {
-            let tol = feas_tol * 1.0_f64.max(qp.bu[i].abs()).max(mag[i]);
-            if ax[i] - qp.bu[i] > tol {
-                return false;
-            }
-        }
-    }
-    for (i, &xi) in x.iter().enumerate() {
-        if qp.xl[i] > NLP_LOWER_BOUND_INF && qp.xl[i] - xi > feas_tol * 1.0_f64.max(qp.xl[i].abs())
-        {
-            return false;
-        }
-        if qp.xu[i] < NLP_UPPER_BOUND_INF && xi - qp.xu[i] > feas_tol * 1.0_f64.max(qp.xu[i].abs())
-        {
-            return false;
-        }
-    }
-    true
+    mag
+}
+
+/// [`point_is_feasible_scaled`]'s tolerance on a row with side `bound` and
+/// term magnitude `mag` (see [`row_term_magnitudes`]).
+fn row_tol(feas_tol: Number, bound: Number, mag: Number) -> Number {
+    feas_tol * 1.0_f64.max(bound.abs()).max(mag)
+}
+
+/// [`point_is_feasible_scaled`]'s tolerance on a variable bound.
+fn bound_tol(feas_tol: Number, bound: Number) -> Number {
+    feas_tol * 1.0_f64.max(bound.abs())
 }
 
 /// The magnitude behind [`point_is_feasible`]'s boolean, needed so a recovery
@@ -7173,11 +7191,19 @@ fn violated_inactive(
     working: &WorkingSet,
     feas_tol: Number,
 ) -> Option<(Vec<(usize, ConsStatus)>, Vec<(usize, BoundStatus)>)> {
+    // Row-scaled, as `point_is_feasible_scaled` — the gate the repair loop
+    // calling this ends on — is (gh#1219 §3.3). Against the absolute
+    // `feas_tol`, an *active* row whose pinned residual is only the round-off
+    // of its large terms read as violated and the repair gave up (`None`), and
+    // an inactive one at the same round-off was pinned for nothing.
     let ax = a_times_x(qp.a, x, qp.m);
+    let mag = row_term_magnitudes(qp, x);
     let mut cons = Vec::new();
     for i in 0..qp.m {
-        let below = qp.bl[i] > NLP_LOWER_BOUND_INF && ax[i] < qp.bl[i] - feas_tol;
-        let above = qp.bu[i] < NLP_UPPER_BOUND_INF && ax[i] > qp.bu[i] + feas_tol;
+        let below = qp.bl[i] > NLP_LOWER_BOUND_INF
+            && qp.bl[i] - ax[i] > row_tol(feas_tol, qp.bl[i], mag[i]);
+        let above = qp.bu[i] < NLP_UPPER_BOUND_INF
+            && ax[i] - qp.bu[i] > row_tol(feas_tol, qp.bu[i], mag[i]);
         if !below && !above {
             continue;
         }
@@ -7198,8 +7224,8 @@ fn violated_inactive(
 
     let mut bounds = Vec::new();
     for (i, &xi) in x.iter().enumerate() {
-        let below = qp.xl[i] > NLP_LOWER_BOUND_INF && xi < qp.xl[i] - feas_tol;
-        let above = qp.xu[i] < NLP_UPPER_BOUND_INF && xi > qp.xu[i] + feas_tol;
+        let below = qp.xl[i] > NLP_LOWER_BOUND_INF && qp.xl[i] - xi > bound_tol(feas_tol, qp.xl[i]);
+        let above = qp.xu[i] < NLP_UPPER_BOUND_INF && xi - qp.xu[i] > bound_tol(feas_tol, qp.xu[i]);
         if !below && !above {
             continue;
         }
@@ -7221,6 +7247,7 @@ fn violated_inactive(
     Some((cons, bounds))
 }
 
+#[cfg(test)]
 fn point_is_feasible(qp: &QpProblem, x: &[Number], feas_tol: Number) -> bool {
     let ax = a_times_x(qp.a, x, qp.m);
     for i in 0..qp.m {
@@ -8956,5 +8983,68 @@ pub(crate) mod issue1076_tests {
         assert!(reset_failure_ends_pass(&singular, 0));
         assert!(!reset_failure_ends_pass(&singular, 1));
         assert!(!reset_failure_ends_pass(&other, 0));
+    }
+}
+
+#[cfg(test)]
+mod row_scaled_feasibility_tests {
+    //! gh#1219 §3.3: the pinned-hint repair (`violated_inactive`) and the
+    //! post-solve audit judge a row against its own scale, as
+    //! `point_is_feasible_scaled` does, not against an absolute `feas_tol`.
+    use super::*;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+    use std::rc::Rc;
+
+    /// Two rows, `1e5·x₀ + 1e5·x₁ ≥ 2e8` (terms ~1e8) and `x₀ − x₁ ≥ 0`,
+    /// evaluated at `x` with row 0 off by `miss`.
+    fn check(miss: Number, row0_active: bool) -> Option<(usize, usize)> {
+        let mut a = GenTMatrix::new(Rc::clone(&GenTMatrixSpace::new(
+            2,
+            2,
+            vec![1, 1, 2, 2],
+            vec![1, 2, 1, 2],
+        )));
+        a.set_values(&[1e5, 1e5, 1.0, -1.0]);
+        let h = SymTMatrix::new(SymTMatrixSpace::new(2, Vec::new(), Vec::new()));
+        let g = [0.0; 2];
+        let (bl, bu) = ([2e8, 0.0], [1e20, 1e20]);
+        let (xl, xu) = ([-1e20; 2], [1e20; 2]);
+        let qp = QpProblem {
+            n: 2,
+            m: 2,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        // x₀ = x₁ = 1000 − δ puts row 0 at 2e8 − 2e5·δ.
+        let d = miss / 2e5;
+        let x = [1000.0 - d, 1000.0 - d];
+        let mut w = WorkingSet::cold(2, 2);
+        if row0_active {
+            w.constraints[0] = ConsStatus::AtLower;
+        }
+        violated_inactive(&qp, &x, &w, 1e-9).map(|(c, b)| (c.len(), b.len()))
+    }
+
+    /// Round-off branch: a residual of 3e-8 on a row whose terms are 1e8 is
+    /// ~1e-16 relative. Active, it used to make the repair give up (`None`);
+    /// inactive, it was pinned for nothing.
+    #[test]
+    fn round_off_on_a_large_row_is_not_a_violation() {
+        assert_eq!(check(3e-8, true), Some((0, 0)));
+        assert_eq!(check(3e-8, false), Some((0, 0)));
+    }
+
+    /// Violation branch: a miss well above the row's scale (1e-9 · 2e8 =
+    /// 0.2) is still reported, and an active row so violated still declines.
+    #[test]
+    fn a_real_miss_on_a_large_row_is_still_a_violation() {
+        assert_eq!(check(10.0, false), Some((1, 0)));
+        assert_eq!(check(10.0, true), None);
     }
 }

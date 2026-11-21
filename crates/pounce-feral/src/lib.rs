@@ -1592,6 +1592,12 @@ impl FeralSolverInterface {
             }
             FactorStatus::Singular => {
                 self.last_singular_certified = true;
+                // No inertia was measured on this factor. Leaving the last
+                // successful count in place let a caller that reads
+                // `number_of_neg_evals()` after `Singular` see the previous
+                // matrix's inertia as this one's (gh#1219 §3.1); `-1` is the
+                // "unknown" value no real count can take.
+                self.negevals = -1;
                 ESymSolverStatus::Singular
             }
             FactorStatus::WrongInertia { .. } => {
@@ -2393,6 +2399,44 @@ mod tests {
         assert_eq!(s.number_of_neg_evals(), 1);
         assert!((rhs[0] - 1.0).abs() < 1e-12);
         assert!((rhs[1] - 1.0).abs() < 1e-12);
+    }
+
+    /// gh#1219 §3.1: a `Singular` factor must not leave the previous
+    /// factor's inertia readable through `number_of_neg_evals()`.
+    #[test]
+    fn singular_factor_does_not_report_stale_inertia() {
+        // MC64 so that a numerically empty row is left unmatched and feral
+        // itself returns `FactorStatus::Singular`; under the default scaling
+        // the same matrix factors `Success` with a zero pivot, which takes the
+        // other arm (whose count is fresh) and would not test this one.
+        let mut s = FeralSolverInterface::with_config(FeralConfig {
+            scaling: ScalingStrategy::Mc64Symmetric,
+            ..FeralConfig::default()
+        });
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        s.values_array_mut().copy_from_slice(&[1.0, 2.0, 1.0]);
+        let mut rhs = [3.0, 3.0];
+        assert_eq!(
+            s.multi_solve(true, &irn, &jcn, 1, &mut rhs, true, 1),
+            ESymSolverStatus::Success
+        );
+        assert_eq!(s.number_of_neg_evals(), 1);
+
+        // Row 2 is numerically empty: MC64 leaves it unmatched.
+        s.values_array_mut().copy_from_slice(&[1.0, 0.0, 0.0]);
+        let mut rhs = [1.0, 1.0];
+        let status = s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0);
+        assert_eq!(status, ESymSolverStatus::Singular);
+        assert_ne!(
+            s.number_of_neg_evals(),
+            1,
+            "the indefinite matrix's count survived a singular refactor"
+        );
     }
 
     /// Wrong expected inertia → `WrongInertia` (and no solve).

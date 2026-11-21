@@ -39,5 +39,5 @@ pub use options::{SqpGlobalization, SqpHessianSource, SqpOptions};
 pub use problem::SqpProblemSpec;
 pub use qp_assembly::{SqpQpData, Triplet};
 pub use result::{SqpError, SqpResult, SqpStatus};
-pub use sqp_alg::SqpAlgorithm;
+pub use sqp_alg::{SeedBackendFactory, SqpAlgorithm};
 pub use warm_start::classify_working_set;
