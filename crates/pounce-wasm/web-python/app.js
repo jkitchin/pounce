@@ -22,6 +22,7 @@ const figuresBox = $('figures');
 const GROUPS = {
   pounce: 'pounce-solver (the package)',
   pyomo: 'Pyomo + .nl',
+  'pyomo-pounce': 'Pyomo + pyomo-pounce (sensitivity)',
 };
 
 const EXAMPLES = {
@@ -201,6 +202,32 @@ res = pounce_browser.solve(m, options="print_level 5")
 print(res)
 print(f"x[1] = {value(m.x[1]):.6f}, y[1] = {value(m.y[1]):.6f}")
 print("each pair solves x^2 + 0.5/x^2 -> x = (0.5)**0.25 =", 0.5 ** 0.25)
+` },
+
+  'Sensitivity to a parameter': { group: 'pyomo-pounce', code: `# Declare the parameter, solve once, then read dx*/dp and a perturbed
+# solution from the stored KKT factorization instead of re-solving.
+import pyomo.environ as pyo
+from pyomo_pounce import declare_sens_param, sens_jacobian, sens_solution
+
+# Two plants meet a demand at least cost. Marginal costs rise with output.
+m = pyo.ConcreteModel()
+m.demand = pyo.Param(initialize=10.0, mutable=True)
+m.d = pyo.Var(initialize=10.0)
+m.set_d = pyo.Constraint(expr=m.d == m.demand)   # the parameter's one defining equality
+m.x = pyo.Var([1, 2], bounds=(0, None), initialize=5.0)
+m.meet = pyo.Constraint(expr=m.x[1] + m.x[2] == m.d)
+m.cost = pyo.Objective(
+    expr=2 * m.x[1] + 0.1 * m.x[1] ** 2 + 3 * m.x[2] + 0.05 * m.x[2] ** 2
+)
+declare_sens_param(m.demand)
+
+pyo.SolverFactory("pounce").solve(m, tee=True)
+
+print(f"x1 = {pyo.value(m.x[1]):.4f}, x2 = {pyo.value(m.x[2]):.4f}")
+print(f"dx1/d demand = {sens_jacobian(m.x[1], wrt=m.demand):.4f}  (exact 1/3)")
+print(f"dx2/d demand = {sens_jacobian(m.x[2], wrt=m.demand):.4f}  (exact 2/3)")
+est = sens_solution(m, [(m.demand, 12.0)])
+print(f"at demand 12: x1 = {est[m.x[1]]:.4f}, x2 = {est[m.x[2]]:.4f}")
 ` },
 };
 

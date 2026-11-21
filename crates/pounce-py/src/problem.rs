@@ -12,6 +12,7 @@ use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::init::warm_start::{BlockVerdict, WarmStartDiagnostics};
 use pounce_common::types::{Index, Number};
 use pounce_linsol::sparse_sym_iface::SparseSymLinearSolverInterface;
+use pounce_nlp::live_iterate::{scaled_iterate, with_current_user_iterate};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::solve_statistics::SolveStatistics;
 use pounce_nlp::tnlp::TNLP;
@@ -261,6 +262,42 @@ impl PyProblem {
             .iter()
             .map(|p| (p.row, p.var))
             .collect()
+    }
+
+    /// The current iterate, for an `intermediate` callback, as cyipopt's
+    /// `get_current_iterate` gives it: a dict of `x`, `mult_x_L`,
+    /// `mult_x_U`, `g` and `mult_g`, in this problem's order and units,
+    /// the values `solve` would report if the solve ended at this
+    /// iteration. With `scaled=True` they are in the scaled problem the
+    /// algorithm solves. `None` outside an `intermediate` call, and during
+    /// restoration, where the iterate is the restoration problem's.
+    ///
+    /// The receiver is `&Bound<Self>`, not `&self`, so the call does not
+    /// borrow the `Problem`: `solve` holds it mutably for the whole solve,
+    /// and this is called from inside that solve.
+    #[pyo3(signature = (scaled = false))]
+    fn get_current_iterate<'py>(
+        slf: &Bound<'py, Self>,
+        scaled: bool,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let py = slf.py();
+        with_current_user_iterate(|it| {
+            let rescaled;
+            let it = if scaled {
+                rescaled = scaled_iterate(it);
+                &rescaled
+            } else {
+                it
+            };
+            let d = PyDict::new_bound(py);
+            d.set_item("x", it.x.clone().into_pyarray_bound(py))?;
+            d.set_item("mult_x_L", it.z_l.clone().into_pyarray_bound(py))?;
+            d.set_item("mult_x_U", it.z_u.clone().into_pyarray_bound(py))?;
+            d.set_item("g", it.g.clone().into_pyarray_bound(py))?;
+            d.set_item("mult_g", it.lambda.clone().into_pyarray_bound(py))?;
+            Ok(d)
+        })
+        .transpose()
     }
 
     #[pyo3(signature = (x0, lagrange=None, zl=None, zu=None, working_set=None, report_path=None, report_detail=None))]

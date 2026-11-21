@@ -41,6 +41,7 @@ Diagnose which binary will run:
 import re
 import shutil
 import subprocess
+import sys
 import warnings
 
 from pyomo.opt import SolverFactory
@@ -283,13 +284,16 @@ class POUNCE(ASL):
         model = args[0] if args else kwds.get("model")
         explicit = {k: kwds.pop(k) for k in
                     ("sens_params", "fitted", "residuals") if k in kwds}
-        if explicit and model is None:
+        # A per-iteration callback, which only the in-process path can call.
+        intermediate = kwds.pop("intermediate", None)
+        given = sorted(explicit) + (["intermediate"] if intermediate else [])
+        if given and model is None:
             # The sensitivity declarations were given with no model to solve;
             # surface the mistake rather than silently dropping them (they
             # have already been popped and would otherwise vanish).
             raise ValueError(
                 "pounce solve: "
-                f"{', '.join(sorted(explicit))}= given but no model was "
+                f"{', '.join(given)}= given but no model was "
                 "passed; call solve(model, ...) with the model positionally "
                 "or as the `model` keyword")
         reject_discrete_vars(model)
@@ -312,9 +316,14 @@ class POUNCE(ASL):
             # (gh #486 stage 2). A request with nothing to apply still
             # says so.
             warn_if_no_suffix(model)
-        if model is not None and (has_declarations(model) or explicit):
+        # Pyodide (emscripten) cannot run the `pounce` executable, so every
+        # solve there takes the in-process route a declared model takes.
+        in_browser = sys.platform == "emscripten"
+        if model is not None and (has_declarations(model) or explicit
+                                  or in_browser or intermediate):
             return sens_solve(model, tee=kwds.get("tee", False),
-                              options=opts, **explicit)
+                              options=opts, intermediate=intermediate,
+                              **explicit)
         from pyomo.common.errors import ApplicationError
         from pyomo_pounce.mpec import lower_complementarity
 

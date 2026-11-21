@@ -179,6 +179,37 @@ does not; the v2 route, whose reader maps that band to
 `raise_exception_on_nonoptimal_result=True`. If your code special-cased
 POUNCE for either, it no longer needs to.
 
+## Following a solve: `intermediate=`
+
+`SolverFactory("pounce").solve(m, intermediate=f)` calls `f` once per
+iteration with a `pyomo_pounce.Iteration`:
+
+```python
+import pyomo.environ as pyo
+import pyomo_pounce
+
+history = []
+
+def watch(it):
+    # it.iteration, it.restoration, it.objective (the model's own units and
+    # sense), it.inf_pr, it.inf_du, it.mu, it.alpha_pr, it.alpha_du, and
+    # it.values, which maps each variable data to its current value
+    history.append((it.iteration, it.objective))
+    return it.inf_pr > 1e-6 or it.iteration < 5   # False stops the solve
+
+pyo.SolverFactory("pounce").solve(m, intermediate=watch)
+```
+
+`it.values[m.x[1]]` reads one variable. At the last call, `values` holds
+the point the solve loads into the model. During restoration the iterate
+belongs to the restoration problem, so `restoration` is True, `values` is
+None and `objective` is NaN. Returning False ends the solve with
+`userInterrupt` at the current point. Returning None or True continues.
+
+The callback needs the solve to run in-process, so passing it sends the
+solve down the same path a model with declared sensitivity parameters
+takes. The answer is the same as the `.nl` route's.
+
 ## Complementarity constraints (`pyomo.mpec`)
 
 `Complementarity` components need no transformation: `SolverFactory("pounce")`

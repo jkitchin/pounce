@@ -74,7 +74,7 @@ heap carries from one file into the next.
 
 ## The Python page
 
-Pyodide supplies CPython compiled to WebAssembly, and there are two ways to
+Pyodide supplies CPython compiled to WebAssembly, and there are three ways to
 reach the solver from it. A script picks one by what it imports; neither is
 installed until a run asks for it.
 
@@ -122,7 +122,33 @@ from the file it just wrote — `crates/pounce-wasm/tests/pyomo_roundtrip.py`
 pins that with a model whose optimum and multipliers are known in closed
 form, and CI runs it on every PR with Node standing in for the browser.
 
-`import matplotlib` is a third on-demand install, orthogonal to both routes:
+`import pyomo_pounce` runs pyomo-pounce on the `pounce` package, so a Pyomo
+model gets its declared-parameter sensitivity in the browser:
+
+```python
+import pyomo.environ as pyo
+from pyomo_pounce import declare_sens_param, sens_jacobian
+
+m = pyo.ConcreteModel()
+m.demand = pyo.Param(initialize=10.0, mutable=True)
+m.d = pyo.Var()
+m.set_d = pyo.Constraint(expr=m.d == m.demand)
+m.x = pyo.Var([1, 2], bounds=(0, None), initialize=5.0)
+m.meet = pyo.Constraint(expr=m.x[1] + m.x[2] == m.d)
+m.cost = pyo.Objective(expr=2*m.x[1] + 0.1*m.x[1]**2 + 3*m.x[2] + 0.05*m.x[2]**2)
+declare_sens_param(m.demand)
+
+pyo.SolverFactory("pounce").solve(m)
+print(sens_jacobian(m.x[1], wrt=m.demand))   # 1/3
+```
+
+The solve and every sensitivity call run in Pyodide's own wasm instance, as
+on a desktop. A solve without declarations takes the same in-process path,
+since Pyodide cannot start the `pounce` executable. The route installs numpy,
+the wheel and pyomo-pounce without their dependencies, and Pyomo. scipy and
+pandas are not loaded, because pyomo-pounce uses neither on this path.
+
+`import matplotlib` is another on-demand install, orthogonal to the routes:
 the worker sets `MPLBACKEND=AGG` before anything imports matplotlib, since
 Pyodide's interactive backends draw into the DOM and a worker has none, and
 replaces `plt.show()` with a function that saves every open figure to a PNG

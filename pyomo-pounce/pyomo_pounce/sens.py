@@ -65,6 +65,7 @@ import threading
 import time
 import warnings
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -1090,7 +1091,10 @@ def _stream_solve(solver, x0, **solve_kwargs):
         live = sys.stdout.fileno() == 1
     except Exception:                                     # noqa: BLE001
         live = False
-    if live:
+    if live or sys.platform == "emscripten":
+        # Pyodide (emscripten) can start neither a thread nor a second
+        # process, so there is nothing to tail with. Its fd 1 is the
+        # page's stdout handler, which shows the log as the engine writes it.
         banner()
         return _timed()
 
@@ -1160,8 +1164,65 @@ def _stream_solve(solver, x0, **solve_kwargs):
     return out, solve_secs
 
 
+@dataclass(frozen=True)
+class Iteration:
+    """What an `intermediate` callback receives at each iteration of an
+    in-process solve (`SolverFactory("pounce").solve(m, intermediate=f)`).
+
+    `objective` is the model's objective in its own units and sense.
+    `inf_pr`, `inf_du`, `mu`, `alpha_pr` and `alpha_du` are the columns of
+    the iteration log, as `pounce.Problem`'s `intermediate` receives them.
+    `values` maps each of the model's variable data to its current value,
+    the point the solve would load if it ended here. During restoration
+    the iterate is the restoration problem's, so `restoration` is True,
+    `values` is None and `objective` is NaN."""
+
+    iteration: int
+    restoration: bool
+    objective: float
+    inf_pr: float
+    inf_du: float
+    mu: float
+    alpha_pr: float
+    alpha_du: float
+    values: "SolutionMap | None"
+
+
+def _iteration_callback(fn, prob, model, var_names, sign):
+    """The `intermediate` method the bridge's Problem calls: `fn` with an
+    `Iteration`, its return passed back (False stops the solve). The map
+    from columns to variable data is built at the first call."""
+    columns = []
+
+    def intermediate(**stats):
+        if not columns:
+            keys, index_of = [], {}
+            for i, name in enumerate(var_names):
+                vd = model.find_component(name)
+                if vd is not None:
+                    index_of[id(vd)] = i
+                    keys.append(vd)
+            columns.append((keys, index_of))
+        keys, index_of = columns[0]
+        restoration = int(stats["alg_mod"]) == 1
+        it = None if restoration else prob.get_current_iterate()
+        return fn(Iteration(
+            iteration=int(stats["iter_count"]),
+            restoration=restoration,
+            objective=sign * float(stats["obj_value"]),
+            inf_pr=float(stats["inf_pr"]),
+            inf_du=float(stats["inf_du"]),
+            mu=float(stats["mu"]),
+            alpha_pr=float(stats["alpha_pr"]),
+            alpha_du=float(stats["alpha_du"]),
+            values=None if it is None else SolutionMap(keys, index_of, it["x"]),
+        ))
+
+    return intermediate
+
+
 def sens_solve(model, tee=False, sens_params=None, fitted=None,
-               residuals=None, options=None, capture=None):
+               residuals=None, options=None, capture=None, intermediate=None):
     """Solve `model` in-process with POUNCE and keep the KKT factorization
     for sens_jacobian()/sens_solution()/sens_covariance(). Called
     automatically by
@@ -1185,7 +1246,12 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     and row order to do it. Populated for a failed solve too, which is
     exactly when the session is dropped and there is nothing else left
     to read the outcome from. Ignored when None (the default), so the
-    legacy path pays nothing for it."""
+    legacy path pays nothing for it.
+
+    `intermediate`, when given, is called once per iteration with an
+    `Iteration`: the iteration's statistics, the objective in the model's
+    units and sense, and the current value of every variable. Returning
+    False stops the solve, which then ends `userInterrupt` at that point."""
     import pounce
 
     reg = _registry(model)
@@ -1259,6 +1325,9 @@ def sens_solve(model, tee=False, sens_params=None, fitted=None,
     bridge = _NlBridge(nl)
     prob = pounce.Problem(nl.n, nl.m, bridge,
                           lb=nl.x_l, ub=nl.x_u, cl=nl.g_l, cu=nl.g_u)
+    if intermediate is not None:
+        bridge.intermediate = _iteration_callback(
+            intermediate, prob, model, var_names, _objective_sign(nl))
     if not tee:
         # Pyomo convention is silence unless tee=True; print_level 0 makes
         # the engine emit nothing at all.
