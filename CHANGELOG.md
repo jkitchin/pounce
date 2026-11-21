@@ -301,6 +301,28 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **Active-set SQP's interior-point seed honours the linear-solver options**
+  (gh#1219). The convex interior point that seeds a large cold step QP, and
+  its PSD check, used a default FERAL, ignoring `linear_solver` and every
+  `feral_*` option that the QP subproblems themselves obeyed. A custom solver
+  without inertia keeps the seed on the configured FERAL.
+- **A step QP's time limit covers its whole fallback chain** (gh#1219). The
+  stabilized → standard, warm → seed → warm and seed → cold fallbacks each
+  restarted the full `time_limit`, so one subproblem could run several times
+  past it. Each stage now gets what is left, and the seed does not start its
+  PSD-check factorization on an empty budget.
+- **An `OptimalInaccurate` interior-point seed is used, not discarded**
+  (gh#1219). A seed that stopped within `1e3·tol` sent the step QP back to the
+  cold or elastic start; it now supplies the starting working set, and the
+  active-set solve from it must still reach `Optimal`.
+- **The active-set QP judges feasibility at each row's scale** (gh#1219). The
+  post-solve audit and the warm-start hint repair compared residuals with an
+  absolute `feas_tol`, so a row with large coefficients failed on round-off: a
+  correct optimum was sent to repair, and the hint repair gave up on an active
+  row. They now use the row-scaled test the rest of the solver already did.
+- **FERAL no longer reports a stale inertia count after a singular factor**
+  (gh#1219). `number_of_neg_evals()` returned the previous matrix's count; it
+  now returns −1.
 - **Crossover step 4 no longer re-solves step 3's QP from scratch** (gh#1206
   B1). When the step-3 point missed the stopping tolerances, the active-set
   SQP started from the interior iterate with the step-2 *estimate* — but its
