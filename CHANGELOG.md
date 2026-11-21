@@ -301,6 +301,20 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **The LP / convex-QP → NLP fallback is not spent on a convex answer already
+  within `tol`.** When the convex arm stopped `Solved_To_Acceptable_Level`,
+  `auto` re-solved on the NLP arm even if the convex point's relative KKT
+  error, the measure the fallback compares the two answers by (gh #1183), was
+  already within `tol`. On Maros–Mészáros BOYD2 (`tol=1e-8`,
+  `max_wall_time=300`) that meant a convex point at `1.1e-10` after 44.5 s,
+  then 270 s of NLP iterations to `Maximum_WallTime_Exceeded`, and the
+  convex answer reported anyway at 312 s. It now reports at 50 s. The skip
+  takes only a `Solved_To_Acceptable_Level` convex answer whose relative error
+  is within `tol` and whose absolute stopping-rule error is within the convex
+  arm's reduced-accuracy band (`1e3·tol`). Iteration-limit and numerical
+  failures still fall back. The cost: a model where the NLP arm would have
+  certified the same accuracy now reports `Solved_To_Acceptable_Level` from
+  the convex arm instead of `Solve_Succeeded` from the NLP arm.
 - **Crossover step 4 no longer re-solves step 3's QP from scratch** (gh#1206
   B1). When the step-3 point missed the stopping tolerances, the active-set
   SQP started from the interior iterate with the step-2 *estimate* — but its

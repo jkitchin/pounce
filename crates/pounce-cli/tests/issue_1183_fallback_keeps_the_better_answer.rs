@@ -16,7 +16,7 @@
 //! | fixture | convex | NLP | reports | decided by |
 //! |---|---|---|---|---|
 //! | `lp_tuff.nl` (NETLIB TUFF) at `tol=1e-12`, `relative_gap_tol=0` | `1.4e-12`, acceptable | `3.9e-9`, succeeded | convex | accuracy |
-//! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable | `1.5e-16`, succeeded | NLP | accuracy |
+//! | `issue880_sigma_uncertified.nl` at `tol=1e-15` | `5.7e-13`, acceptable | `0` (exact) / `1.5e-16` (L-BFGS), succeeded | NLP | accuracy |
 //! | `lp_israel.nl` at `tol=1e-16` | `2.0e-16`, iteration limit | `5.2e-14`, acceptable | NLP | the status guard |
 //! | `lp_afiro.nl` at `tol=1e-20` | `2.4e-16`, iteration limit | `5.5e-13`, search direction too small | convex, its own failing status | accuracy |
 //!
@@ -35,6 +35,14 @@
 //! the issue's WOOD1P / WOODW among them), so the convex-wins fixture runs at
 //! `tol=1e-12`. `lp_tuff.nl` was produced by `benchmarks/lp/generate_nl.py`
 //! from the NETLIB MPS file. Every case takes well under a second.
+//!
+//! The `issue880` row ran at the default `tol` until the fallback stopped
+//! re-solving an acceptable convex answer whose relative error already meets
+//! `tol` (`convex_answer_meets_tol`; Maros-Meszaros BOYD2). Its convex answer
+//! reads `1.6e-15` there, so it now reports without the fallback; at
+//! `tol=1e-15` the convex arm stops at `5.7e-13`, above `tol`, and the row
+//! tests what it always did. Both sides of the skip are pinned in
+//! `convex_in_tol_skips_nlp_fallback.rs`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -180,7 +188,9 @@ fn a_more_accurate_convex_answer_is_kept() {
 #[test]
 fn a_more_accurate_nlp_answer_still_reports() {
     for leg in [&[][..], &[LBFGS][..]] {
-        let r = run("issue880_sigma_uncertified.nl", leg);
+        let mut args = vec!["tol=1e-15"];
+        args.extend_from_slice(leg);
+        let r = run("issue880_sigma_uncertified.nl", &args);
         let fb = r
             .report
             .convex_fallback
