@@ -1219,8 +1219,21 @@ impl FeralSolverInterface {
     /// 1.09× of the first factorization through SyntheticUSA's solve, against
     /// 11–69× on rmatr200-p5 and waihi, which have no free column).
     pub fn for_convex_ipm(tol: f64, free_fraction: f64) -> Self {
+        Self::for_convex_ipm_with(None, tol, free_fraction)
+    }
+
+    /// [`Self::for_convex_ipm`] with the caller's explicit
+    /// `feral_static_pivoting` setting, which wins over the
+    /// `POUNCE_FERAL_STATIC_PIVOTING` environment variable and over the
+    /// convex rule. `None` is exactly [`Self::for_convex_ipm`].
+    pub fn for_convex_ipm_with(
+        static_pivoting: Option<bool>,
+        tol: f64,
+        free_fraction: f64,
+    ) -> Self {
         let mut cfg = FeralConfig::from_env();
-        cfg.static_pivoting = convex_ipm_static_pivoting(cfg.static_pivoting, tol, free_fraction);
+        let explicit = static_pivoting.or(cfg.static_pivoting);
+        cfg.static_pivoting = convex_ipm_static_pivoting(explicit, tol, free_fraction);
         Self::with_config(cfg)
     }
 

@@ -513,7 +513,12 @@ fn demote_optimum_above_tol(prob: &QpProblem, sol: QpSolution, opts: &QpOptions)
 /// [`solve_qp_core`] for why the mixture is not reportable and the margin is
 /// the estimator's own uncertainty rather than a knob.
 fn demote_uncertified_sigma_optimum(sol: QpSolution, sigma_uncertified: bool) -> QpSolution {
-    if !sigma_uncertified || sol.status != QpStatus::Optimal {
+    let demote = sigma_uncertified && sol.status == QpStatus::Optimal;
+    // Published for callers that must tell this demotion from the others
+    // (`take_last_sigma_demotion`). Written on every call, so a nested
+    // entry's value is overwritten by the outer frame's, which runs last.
+    crate::sigma_verdict::note_demotion(demote);
+    if !demote {
         return sol;
     }
     QpSolution {

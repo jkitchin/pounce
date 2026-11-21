@@ -1022,7 +1022,25 @@ where
         } else {
             0.0
         };
-        let comp_ok = comp_max <= tol_gap && true_comp <= tol_true_comp;
+        // The duality gap of the point being returned is `ŝᵀẑ`, a sum of
+        // nonnegative terms -- not the signed `gap` above. The two differ by
+        // the residual couplings `x̂ᵀρ̂_x`, `ŷᵀρ̂_y`, `ẑᵀρ̂_z`, and along the
+        // embedding's path those residuals shrink at the same rate as `μ`, so
+        // on a model with large `‖x̂‖₁` the coupling cancels most of `ŝᵀẑ`.
+        // MIPLIB `traininstance6`'s reduced LP stopped at a signed gap of
+        // `9.8e-9` with `ŝᵀẑ = 3.3e-6` (`x̂ᵀρ̂_x = -3.3e-6`): every product was
+        // below `tol` (`comp_max = 5.9e-9`), but the multipliers, once the
+        // dual residual is folded into the bound duals, are those of a dual
+        // objective `2.5e-6` below the primal one, and an independent check
+        // of `(x, λ)` refused the point at `tol = 1e-8`. So the sum is held to
+        // the gap's own tolerance too: absolute (`tol_gap`, in the objective's
+        // unit) or relative to the caller's objective (`scale_g`), whichever
+        // is looser -- the relative half keeps a large objective from being
+        // asked for `1e-8` of absolute gap it never was before. Cancellation-
+        // free, so no noise floor applies. Every cone has `⟨s, z⟩ ≥ 0`.
+        let comp_sum = sz / (tau * tau);
+        let comp_sum_ok = comp_sum <= tol_gap.max(opts.tol * scale_g);
+        let comp_ok = comp_max <= tol_gap && true_comp <= tol_true_comp && comp_sum_ok;
         let loose_ok = rel_ok || abs_ok;
         let converged = (abs_ok || rel_in_floor) && comp_ok;
         if !converged {
@@ -1164,7 +1182,18 @@ where
         let expected_neg = (m_eq + m_ineq) as Index;
         let mut tries = 0usize;
         let mut factored = false;
+        let mut out_of_time = false;
         loop {
+            // Each retry below is a full refactorization, and the loop is not
+            // otherwise interruptible: on ns1116954 one iteration ran four
+            // ~22 s factorizations past a deadline crossed after the first.
+            // The iterate has not moved yet, so stopping here returns exactly
+            // the point the top-of-loop deadline check would have returned
+            // one iteration later.
+            if tries > 0 && crate::deadline::expired() {
+                out_of_time = true;
+                break;
+            }
             kkt.update_blocks(cone, &s, &z, reg_eff, &mut kkt_vals);
             kkt.update_eq_reg(delta_c, &mut kkt_vals);
             kkt.update_primal_reg(delta_w, &mut kkt_vals);
@@ -1258,6 +1287,10 @@ where
                 continue;
             }
             factored = true;
+            break;
+        }
+        if out_of_time {
+            status = QpStatus::TimeLimit;
             break;
         }
         if !factored {

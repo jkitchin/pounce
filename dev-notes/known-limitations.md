@@ -12,6 +12,193 @@ merges.
 
 ---
 
+## Convex IPM: default static pivoting ends ns1116954 acceptable, and switching to delayed pivoting on demand costs other models
+
+*Measured on `integrate-0.18-fixes` (parent `22ae155e`), MIPLIB ns1116954's
+LP relaxation and the cpo3 benchmark set (`research/cpo3-benchmarks`) at
+`tol=1e-8`, `max_wall_time=300`, `RAYON_NUM_THREADS=1`. Recorded 2026-11-21.*
+
+### What is wrong
+
+Since gh#1193 the convex IPM's FERAL backend factors with static pivoting
+when `tol >= 1e-8` and at most 1% of columns are free
+(`convex_ipm_static_pivoting`, `crates/pounce-feral/src/lib.rs`). On
+ns1116954, at μ ≈ 1.7e-7, `res_p` jumps from 1e-13 to 2.9e-6, and no δ bump of
+the HSDE regularization ladder (`hsde.rs`) brings it back below
+`DYN_REG_RES_TOL`. From the next iteration on, the factor reports 30–50 more
+negative pivots than a quasi-definite KKT can have, and each iteration pays
+four ~22 s factorizations. The solve ends `Solved_To_Acceptable_Level` at
+1.0e-6 after 12 iterations and 368 s. Before gh#1193 (e176b8fa) it was
+`Solve_Succeeded` in 16 iterations and 277 s. `feral_static_pivoting=no`
+reproduces that, digit for digit. Since 0.18.0 the deadline is checked
+between refactorization retries, so `max_wall_time=300` is honoured: the
+default now stops `Solved_To_Acceptable_Level` after 12 iterations at 305 s,
+and `feral_static_pivoting=no` reaches `Solve_Succeeded` in 16 iterations
+and 261 s.
+
+### What was tried
+
+The fix tried was to give up the *defaulted* static choice the first time a
+refined solve stayed above `DYN_REG_RES_TOL`: switch to delayed pivoting once
+and refactor at the same δ. It rescued ns1116954, but it also fired late in
+the solve on other models, where the δ ladder recovers without it:
+
+| model | μ at first trip | default | switched |
+|---|---|---|---|
+| neos-933966 | 4.9e-10 | 17 it, 41.8 s | 17 it, 73.9 s |
+| netdiversion | 4.0e-11 | 30 it, 105 s | 31 it, 261 s |
+| QPLIB_8602 | 4.0e-13 | 27 it, 125 s | 27 it, 204 s |
+| atlanta-ip | 6.4e-10 | 124 it Optimal, 39 s | 200 it Acceptable, 300 s |
+
+Requiring μ > 1e-8 before switching kept those four at their old numbers
+and still rescued ns1116954, which trips at μ = 1.7e-7. A re-run of the
+66 cpo3 models whose results had moved then showed slowdowns that are
+from the switch, because `feral_static_pivoting=yes` restores the old
+numbers:
+
+| model | default | with the μ-gated switch |
+|---|---|---|
+| CRE-D | 49 it, 8.1 s | 54 it, 16.0 s |
+| momentum1 | 83 it, 10.2 s | 82 it, 18.6 s |
+| leo2 | 98 it, 43.0 s (34.9 s forced static) | 98 it, 57.4 s |
+
+Each threshold was fitted to the handful of models measured at the time, so
+the switch was dropped before 0.18.0.
+
+### How to tell whether a fix works
+
+- ns1116954 at `tol=1e-8` reports `Solve_Succeeded` within `max_wall_time=300`
+  at default options.
+- Every model in the two tables above keeps its default numbers. The
+  switched/gated columns are the regression to rule out.
+- The full cpo3 non-Mittelmann set does not lose a verified model or gain a
+  >1.3× wall-time slowdown against the parent, run on an otherwise idle
+  machine.
+- The rmatr200-p5, waihi and turia cascades that static pivoting exists for
+  stay unchanged.
+
+---
+
+## Convex IPM: the KKT verdict's rounding floor ignores row length, so long rows read as reduced accuracy
+
+*Measured on `fix-boyd2-fallback-skip` (parent `22ae155e`), Maros–Mészáros
+BOYD2 at `tol=1e-8`, `RAYON_NUM_THREADS=1`. Recorded 2026-11-20.*
+
+### What is wrong
+
+`QpSolution::kkt_residuals_above_floor` (`crates/pounce-convex/src/qp.rs`),
+the verdict behind `Optimal` vs `OptimalInaccurate` (`demote_optimum_above_tol`
+in `ipm.rs`), excuses each residual entry up to `k·mag`. Here `mag` is the
+magnitude of the terms that entry is a sum of, and `k = REPORT_FLOOR_FACTOR
+(4) · REL_FLOOR_KAPPA (64) · ε ≈ 5.7e-14`. `k` does not depend on how many
+terms the entry sums. The rounding error of evaluating an `n`-term dot product
+grows with `n`: about `√n·ε·mag` typically and `n·ε·mag` (γ_n) at worst. A long
+row's honest rounding therefore reads as an unexcused residual.
+
+### How big
+
+On BOYD2 the convex arm stops after 77 iterations and 44.5 s at a point the
+benchmark verifier passes: relative primal `5.4e-15`, dual `2.1e-12`, gap
+`1.1e-10`. The verdict reads `1.96e-7` against `tol = 1e-8` and labels it
+`Solved_To_Acceptable_Level`.
+
+- **The binding entry** is equality row 0: `b = 1.6e7`, 10 992 nonzeros, term
+  magnitude `3.2e7`. Its `|Ax − b|` is `2.0e-6`, which is `6.3e-14` of the
+  term magnitude, just above the `5.7e-14` floor.
+- **The rounding there** would be `√n·ε·mag ≈ 7.5e-7` typically and
+  `n·ε·mag ≈ 7.8e-5` at worst.
+- **The raw (unfloored) error** is `1.16e-3`. It sits on rows with
+  `b ≈ 2e11`, `2.9e-15` relative, and the floor already excuses it.
+
+The cost used to be 270 s. The `Acceptable` label sent BOYD2 to the
+LP/QP → NLP fallback, which ran to `Maximum_WallTime_Exceeded`. Since
+`convex_answer_meets_tol` (`crates/pounce-cli/src/main.rs`), an in-tol answer
+like this one skips the fallback. What remains is the label: a well-solved
+large QP reports `Solved_To_Acceptable_Level`.
+
+### What was not tried, and why
+
+This entry does not change the floor. A floor that grows with row length
+(`k·nnz(row)` or `k·√nnz(row)`) changes the convex arm's verdict, and through
+it every reroute gated on `OptimalInaccurate`. That is a convex trajectory and
+verdict change. It needs the fixture sweep, `benchmarks/qp`, and the σ-path
+and acceptable-band tests named in `CLAUDE.md`, as its own change.
+
+The HSDE stopping test (`hsde.rs`, "Absolute test always governs") uses the
+same `REL_FLOOR_KAPPA·ε·scale` cap. A fix to one without the other would let
+the solver stop where the verdict demotes, or the reverse.
+
+### How to tell whether a fix works
+
+- BOYD2 at `tol=1e-8` reports `Solve_Succeeded` from `cvx-qp` with the same
+  point; the verifier reads kkt `1.1e-10`.
+- `benchmarks/qp` gains no `Optimal` that the verifier fails.
+- `issue414_cost_normalized_false_optimal.rs`,
+  `illconditioned_huge_scale.rs` and the gh#984 / gh#1180 demotion tests
+  (QPILOTNO: a real `1.57e-7` violation on rows whose floor is `1e-11`) stay
+  green. A floor loose enough to excuse BOYD2's row must not excuse QPILOTNO's.
+
+---
+
+## NLP: one uninterruptible factorization can overrun `max_wall_time`, and the predictive guard misroutes when it fires
+
+*Measured on `22ae155e`, Maros–Mészáros BOYD2 forced onto the NLP arm by the
+LP/QP fallback (`tol=1e-8 max_wall_time=300`, `RAYON_NUM_THREADS=1`). The
+misroute is from reading the code, not from a run. Recorded 2026-11-20.*
+
+### What is wrong
+
+**The overrun.** A FERAL factorization cannot be interrupted
+(`dev-notes/feral-factor-interrupt.md`). The between-step deadline checks of
+pounce#244/#245 therefore let one factorization overshoot.
+
+- The proactive guard of pounce#254 (`factor_overshoot_predicted` in
+  `crates/pounce-algorithm/src/kkt/pd_full_space_solver.rs`) engages only once
+  a factorization has cost at least `FACTOR_OVERSHOOT_BUDGET_FRACTION = 0.5`
+  of the whole budget.
+- On BOYD2 the convex arm spent 44.5 s, and the NLP arm got the remaining
+  ~255 s (`charge_wall_budget`; the budget is handed down correctly).
+- Endgame factorizations took 36–40 s each. `sample` shows them in
+  `feral::dense::schur_kernel::axpy_minus_unroll4_nofma`, a large dense front.
+- At 36 s, below 0.5 × 255 s, the guard stayed off. Iteration 1020's
+  factorization started with 29 s left and finished 11 s past the deadline.
+- The solve ended at 312 s (a repeat: 324 s) against `max_wall_time=300`.
+
+**The misroute.** When the guard *does* fire, the deadline has not been
+crossed yet.
+
+- `PdFullSpaceSolver::solve` returns `false`.
+- `IpoptAlgorithm::iterate` (`ipopt_alg.rs`, after
+  `compute_search_direction`) asks `deadline_status()`, which reads
+  `Deadline::exceeded()` and returns `None`.
+- The `!ok` branch then sends the iteration to restoration instead of
+  `Maximum_WallTime_Exceeded`.
+- Restoration builds its own KKT solver, with no factorization estimate yet.
+  So it can start the very factorization the guard refused, or end
+  `Restoration_Failed`.
+
+### Why the fraction was not simply lowered
+
+Lowering `FACTOR_OVERSHOOT_BUDGET_FRACTION` to about 0.1 would bound BOYD2's
+overrun: 36 s ≥ 0.1 × 255 s, and 29 s left < 36 s, so the guard fires. But it
+would also make the misroute above fire more often, turning time-limit exits
+into restoration entries. The guard has to terminate cleanly before it is
+engaged more widely.
+
+### How to tell whether a fix works
+
+- A fired guard ends the solve `Maximum_WallTime_Exceeded` (or
+  `Maximum_CpuTime_Exceeded`) at the last accepted iterate, never in
+  restoration. One way: have the guard mark the deadline as spent, so that
+  `deadline_status()` sees it.
+- A unit test exists for each branch: 36 s factor / 255 s budget / 29 s left
+  fires, and the existing small-factor and ample-remaining cases do not.
+- A timed NLP run on BOYD2 (`solver_selection=nlp tol=1e-8 max_wall_time=N`)
+  ends by `N` plus less than one factorization.
+- The fixture sweep is unaffected, because it sets no time limit.
+
+---
+
 ## NLP: infeasibility fixtures slower after the line search kept upstream's `alpha_min` (gh#1217)
 
 *Measured on `claude/eloquent-faraday-e3oeac` against `main` at `22ae155`,

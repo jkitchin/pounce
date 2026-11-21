@@ -15,7 +15,7 @@
 //!
 //! | fixture | convex | NLP | reports | decided by |
 //! |---|---|---|---|---|
-//! | `lp_tuff.nl` (NETLIB TUFF) at `tol=1e-12`, `relative_gap_tol=0` | `1.4e-12`, acceptable | `3.9e-9`, succeeded | convex | accuracy |
+//! | `lp_etamacro.nl` (NETLIB ETAMACRO) at `tol=1e-12`, `relative_gap_tol=0` | `1.6e-12`, acceptable | `4.2e-11`, succeeded (`1.0e-10`, acceptable, under L-BFGS) | convex | accuracy |
 //! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable | `1.5e-16`, succeeded | NLP | accuracy |
 //! | `lp_israel.nl` at `tol=1e-16` | `2.0e-16`, iteration limit | `5.2e-14`, acceptable | NLP | the status guard |
 //! | `lp_afiro.nl` at `tol=1e-20` | `2.4e-16`, iteration limit | `5.5e-13`, search direction too small | convex, its own failing status | accuracy |
@@ -33,7 +33,17 @@
 //! unreduced retry the convex arm certifies most of the NETLIB models that
 //! used to reach the fallback at the default `tol` (ETAMACRO, SHARE2B, and
 //! the issue's WOOD1P / WOODW among them), so the convex-wins fixture runs at
-//! `tol=1e-12`. `lp_tuff.nl` was produced by `benchmarks/lp/generate_nl.py`
+//! a tightened `tol`. The fixture was NETLIB TUFF until two changes met on
+//! it: the HSDE stop began holding the complementarity sum `ŝᵀẑ` to the gap
+//! tolerance (the `traininstance6` fix), after which TUFF declines only in a
+//! narrow `tol` window (`1.5e-13`–`6e-13`) and certifies outside it; and the
+//! fallback is now skipped when the convex answer already meets `tol` on this
+//! ruler (BOYD2), which every point in that window does (`1.2e-14` at
+//! `3e-13`). The convex-wins branch therefore needs a convex answer *outside*
+//! `tol` that still beats the NLP one, which ETAMACRO at `tol=1e-12` gives on
+//! both legs by 26x and 62x. Re-measure it if the convex trajectory moves.
+//! `lp_tuff.nl` and `lp_etamacro.nl` were produced by
+//! `benchmarks/lp/generate_nl.py`
 //! from the NETLIB MPS file. Every case takes well under a second.
 
 use std::path::{Path, PathBuf};
@@ -98,13 +108,13 @@ fn status_lines(stdout: &str) -> Vec<&str> {
 fn a_more_accurate_convex_answer_is_kept() {
     for leg in [&[][..], &[LBFGS][..]] {
         // `relative_gap_tol=0`: the fallback otherwise holds the NLP arm to the
-        // convex arm's duality gap, which lifts it to 4.8e-13 here and makes it
+        // convex arm's duality gap, which lifts it to 4.7e-13 here and makes it
         // the winner — that branch is pinned in
         // `relative_gap_tol_closes_the_nlp_gap.rs`. This test is about the
         // comparison, so it keeps the NLP arm on Ipopt's own test.
         let mut args = vec!["tol=1e-12", "relative_gap_tol=0"];
         args.extend_from_slice(leg);
-        let r = run("lp_tuff.nl", &args);
+        let r = run("lp_etamacro.nl", &args);
         assert!(
             r.stderr.to_lowercase().contains("did not certify"),
             "{leg:?}: precondition — the convex solve must decline; stderr=\n{}",
@@ -158,10 +168,10 @@ fn a_more_accurate_convex_answer_is_kept() {
             "{leg:?}: the .sol is the convex arm's; head=\n{}",
             r.sol.lines().take(2).collect::<Vec<_>>().join("\n")
         );
-        // NETLIB TUFF's published optimum.
+        // NETLIB ETAMACRO's published optimum.
         let obj = r.report.solution.objective;
         assert!(
-            ((obj - 0.29214776509) / 0.29214776509).abs() < 1e-6,
+            ((obj - -755.71523) / 755.71523).abs() < 1e-6,
             "{leg:?}: objective {obj}"
         );
         // The run paid for both solves: its wall time is the sum, and each
@@ -298,7 +308,7 @@ fn when_both_fail_the_verdict_stays_honest() {
 /// which answer it kept — the console counterpart of `convex_fallback`.
 #[test]
 fn the_comparison_is_announced() {
-    let r = run("lp_tuff.nl", &["tol=1e-12", "relative_gap_tol=0"]);
+    let r = run("lp_etamacro.nl", &["tol=1e-12", "relative_gap_tol=0"]);
     let line = r
         .stderr
         .lines()
