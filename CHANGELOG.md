@@ -10,6 +10,35 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **The current iterate inside a Python `intermediate` callback, and an
+  `intermediate=` argument for Pyomo solves.** `Problem.get_current_iterate()`
+  returns `x`, `mult_x_L`, `mult_x_U`, `g` and `mult_g` during an
+  `intermediate` call, in the problem's own order and units, as cyipopt's
+  method of that name does (`scaled=True` for the scaled problem). It
+  returns `None` outside the callback and during restoration.
+  `SolverFactory("pounce").solve(m, intermediate=f)` calls `f` once per
+  iteration with a `pyomo_pounce.Iteration`: the statistics, the objective
+  in the model's units and sense, and the value of every variable. Returning
+  False stops the solve. Passing it runs the solve in-process, which in
+  Pyodide every solve already does. That route refuses a model with
+  active `Complementarity` components with a `ValueError` naming the
+  cause (Pyomo's NL writer used to fail there with a message about
+  unknown components, for declared models too), and warns about `solve()`
+  arguments it ignores, such as `load_solutions=False` or `timelimit`.
+- **pyomo-pounce in Pyodide, and an `import pyomo_pounce` route on the
+  Python page.** pyomo-pounce's solves and its declared-parameter
+  sensitivity (`sens_jacobian`, `sens_solution`, `sens_covariance` and the
+  rest) run in Pyodide on the emscripten wheel. Under Pyodide,
+  `SolverFactory("pounce")` always solves in-process, since there is no
+  `pounce` executable to start, and `tee=True` writes the log without the
+  thread that streams it elsewhere. The page installs numpy, the wheel,
+  Pyomo and pyomo-pounce for a script that imports `pyomo_pounce`, and not
+  scipy or pandas, which this path never uses. `build.sh` builds the
+  pyomo-pounce wheel beside the pounce-solver one, and
+  `tests/pyomo_pounce_pyodide.mjs` runs it under Pyodide in CI. The
+  wheel's file name is recorded in `wheels/pyomo-pounce-wheel.json`, since
+  pyomo-pounce is versioned apart from the committed pounce-solver wheel,
+  and both Pyomo routes and the test install a pinned Pyomo (6.11.0).
 - **A per-iteration host call in the WebAssembly module.** With
   `wasm_iterate_callback yes`, `pounce_solve` calls the host function the
   module imports as `iterate` from module `pounce` once per iteration,
@@ -301,6 +330,39 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **A JSON report with a non-finite per-iteration value can be read back.**
+  `serde_json` writes NaN as `null`, and the `iterations` rows (`d_norm`,
+  `alpha_primal`, the residuals, ...) were plain floats, so a report whose
+  trajectory reached a NaN step norm failed to load with "invalid type: null,
+  expected f64" — in pounce's own reader and in pounce-studio's. Those slots
+  now read back as NaN.
+- **`g` of the live iterate at an equality row with a nonzero right-hand
+  side.** The algorithm holds an equality row as the residual `g − rhs`, and
+  the iterate packed for the user returned that residual as `g`. So
+  `GetIpoptCurrentIterate`'s `g` from the C interface, the new
+  `Problem.get_current_iterate()`, and the converged `g` the sensitivity
+  layer reports read `g − rhs` at those rows (0 at a satisfied equality
+  instead of its right-hand side). They now read `g`, as upstream's
+  `TNLPAdapter::ResortG` gives it. The live-iterate test's equality row had
+  right-hand side 0, which is why it did not see this, and it now has 0.5.
+- **The objective a Python `intermediate` callback receives.** `obj_value`
+  was the algorithm's internal objective, multiplied by the total objective
+  scale, so with `obj_scaling_factor` or gradient-based NLP scaling it was
+  not the problem's objective. `pounce.minimize`'s `callback` reported it as
+  `fun`. It is now the objective in the problem's own units, as cyipopt
+  passes it, and NaN during restoration, where the previous value was the
+  restoration problem's objective. The C interface's intermediate
+  callback had the same defect and now receives the unscaled objective
+  too, as upstream's `unscaled_curr_f()` (restoration iterations
+  unchanged).
+- **`pounce.read_nl` and `pounce.parse_nl_text` in Pyodide.** Both read the
+  file on a worker thread with a large stack, and Pyodide cannot start a
+  thread, so both raised `PanicException` in the emscripten wheel. That
+  build now reads on the calling thread, with the reader's depth limit set
+  from the stack emscripten reports free, so a file nested deeper than that
+  stack holds is refused as it is on a native worker whose stack came up
+  short. A walk over a deeper `NlExpr` built in Python raises instead of
+  overflowing.
 - **The convex IPM no longer stops on a duality gap that cancellation made
   small.** The HSDE stop tested the *signed* gap `x̂ᵀPx̂ + cᵀx̂ + bᵀŷ + hᵀẑ`,
   which differs from the complementarity sum `ŝᵀẑ` by the residual couplings

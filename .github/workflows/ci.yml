@@ -193,6 +193,14 @@ jobs:
       # The per-iteration host call (`pounce.iterate`), through web/wasi.js.
       - name: Per-iteration host call in wasm
         run: node crates/pounce-wasm/tests/iterate_callback.mjs
+      # pyomo-pounce on the committed emscripten wheel under Pyodide, as the
+      # Python page's `import pyomo_pounce` route runs it. build.sh above
+      # staged the pyomo-pounce wheel. Keep the version in step with
+      # PYODIDE_VERSION in web-python/worker.js.
+      - name: pyomo-pounce under Pyodide
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/pyodide" pyodide@0.28.3
+          POUNCE_PYODIDE_DIR="$RUNNER_TEMP/pyodide" node crates/pounce-wasm/tests/pyomo_pounce_pyodide.mjs
 
       # The emscripten `pounce-solver` wheel the Python page installs for
       # `import pounce` is committed, not built here: it needs a pinned

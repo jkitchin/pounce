@@ -32,6 +32,8 @@
 
 use numpy::{PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pounce_common::types::{Index, Number};
+use pounce_nlp::live_iterate::unscaled_objective;
+use pounce_nlp::return_codes::AlgorithmMode;
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, NlpInfo, ScalingRequest, Solution,
     SparsityRequest, StartingPoint, TNLP,
@@ -438,6 +440,20 @@ impl TNLP for PyTnlp {
         }
     }
 
+    /// An `intermediate` method may call `Problem.get_current_iterate()`,
+    /// and nothing says whether it will, so the iterate is built for every
+    /// call when the object has one. The objective `intermediate` receives
+    /// is unscaled with that iterate's scaling too.
+    fn wants_current_iterate(&self) -> bool {
+        Python::with_gil(|py| {
+            self.state
+                .py_obj
+                .bind(py)
+                .hasattr("intermediate")
+                .unwrap_or(false)
+        })
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,
@@ -448,6 +464,18 @@ impl TNLP for PyTnlp {
         // algorithm's internal scaled slack-form residual -- the report's
         // `iterations[*].inf_pr_internal`, not its `inf_pr`. On a badly
         // scaled model the two differ (up to 1.74 on the column example).
+        //
+        // `obj_value` is the objective in this problem's own units, as
+        // cyipopt passes it: `stats.obj_value` is the algorithm's, which
+        // carries the total objective scale, and the iterate holds that
+        // scale. A restoration iteration has no iterate of this problem,
+        // and its `stats.obj_value` is the restoration problem's, so it
+        // passes NaN.
+        let obj_value = if matches!(stats.mode, AlgorithmMode::RestorationPhaseMode) {
+            Number::NAN
+        } else {
+            unscaled_objective(stats.obj_value).unwrap_or(stats.obj_value)
+        };
         //
         // Optional. If the user object has no `intermediate` method we
         // just keep going; any exception aborts the iteration with a
@@ -471,7 +499,7 @@ impl TNLP for PyTnlp {
                 method.call1((
                     stats.mode as i32,
                     stats.iter,
-                    stats.obj_value,
+                    obj_value,
                     stats.inf_pr,
                     stats.inf_du,
                     stats.mu,
@@ -485,7 +513,7 @@ impl TNLP for PyTnlp {
                 let kwargs = PyDict::new_bound(py);
                 kwargs.set_item(INTERMEDIATE_ARGS[0], stats.mode as i32)?;
                 kwargs.set_item(INTERMEDIATE_ARGS[1], stats.iter)?;
-                kwargs.set_item(INTERMEDIATE_ARGS[2], stats.obj_value)?;
+                kwargs.set_item(INTERMEDIATE_ARGS[2], obj_value)?;
                 kwargs.set_item(INTERMEDIATE_ARGS[3], stats.inf_pr)?;
                 kwargs.set_item(INTERMEDIATE_ARGS[4], stats.inf_du)?;
                 kwargs.set_item(INTERMEDIATE_ARGS[5], stats.mu)?;

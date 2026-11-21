@@ -3773,11 +3773,19 @@ impl TNLP for CCallbackTnlp {
         // dispatch that called us), so it needs the callbacks, `user_data`
         // and the declared bounds for exactly the duration of `cb`.
         let _bridge = BridgeGuard::install(self);
+        // Upstream passes `unscaled_curr_f()`; `stats.obj_value` is the
+        // algorithm's `curr_f()`, which carries the total objective scale
+        // (`obj_scaling_factor`, gradient-based scaling). The iterate this
+        // bridge always asks for (`wants_current_iterate`) holds that scale.
+        // No iterate is installed during restoration, so that value is left
+        // as it was.
+        let obj_value = pounce_nlp::live_iterate::unscaled_objective(stats.obj_value)
+            .unwrap_or(stats.obj_value);
         let ok = unsafe {
             cb(
                 stats.mode as Index,
                 stats.iter as Index,
-                stats.obj_value,
+                obj_value,
                 stats.inf_pr,
                 stats.inf_du,
                 stats.mu,

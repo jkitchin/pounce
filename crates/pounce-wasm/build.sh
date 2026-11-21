@@ -95,6 +95,26 @@ fi
 cp "$here/web/pounce.wasm" "$here/web-python/pounce.wasm"
 cp "$here/web/wasi.js" "$here/web-python/wasi.js"
 
+# The Python page's `import pyomo_pounce` route installs pyomo-pounce from a
+# pure-Python wheel built here from this checkout. pyomo-pounce is versioned
+# and released on its own tag, apart from the committed `pounce-solver` wheel,
+# so the two versions need not match: the wheel's actual filename goes into
+# `pyomo-pounce-wheel.json`, which the page and the Pyodide test read rather
+# than guessing it from `pounce-wheel.json`. It is built from a copy because
+# setuptools leaves `build/` and `*.egg-info` next to the source it builds.
+pyomo_src="$(mktemp -d)"
+trap 'rm -rf "$pyomo_src"' EXIT
+cp -r "$root/pyomo-pounce/." "$pyomo_src/"
+rm -f "$here/web-python/wheels/"pyomo_pounce-*.whl "$here/web-python/wheels/pyomo-pounce-wheel.json"
+python3 -m pip wheel --quiet --no-deps --wheel-dir "$here/web-python/wheels" "$pyomo_src"
+pyomo_wheels=("$here/web-python/wheels/"pyomo_pounce-*-py3-none-any.whl)
+if [[ ${#pyomo_wheels[@]} -ne 1 || ! -f "${pyomo_wheels[0]}" ]]; then
+  echo "build.sh: expected exactly one pyomo-pounce wheel, got: ${pyomo_wheels[*]}" >&2
+  exit 1
+fi
+printf '{\n  "wheel": "%s"\n}\n' "$(basename "${pyomo_wheels[0]}")" \
+  > "$here/web-python/wheels/pyomo-pounce-wheel.json"
+
 size=$(wc -c < "$here/web/pounce.wasm")
 printf 'web/pounce.wasm  %s bytes (%.1f MB)\n' "$size" "$(echo "$size" | awk '{print $1/1048576}')"
 

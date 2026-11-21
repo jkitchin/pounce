@@ -23,6 +23,7 @@ pub struct IterRecord {
     /// Iteration index, starting at 0.
     pub iter: Index,
     /// Unscaled objective `f(x_k)` at the start of iter `k`.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "null_as_nan"))]
     pub objective: Number,
     /// Primal infeasibility exactly as the console table prints it in
     /// the `inf_pr` column: under the default `inf_pr_output=original`,
@@ -30,6 +31,7 @@ pub struct IterRecord {
     /// restoration rows, of the *original* NLP at the restoration
     /// iterate's `x`). See [`Self::inf_pr_internal`] for the residual
     /// the filter and the convergence test read (gh#979).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "null_as_nan"))]
     pub inf_pr: Number,
     /// The algorithm's internal primal infeasibility `‖(c(x), d(x) − s)‖∞`
     /// in the scaled slack form, with the slack pushed off its bound —
@@ -37,20 +39,26 @@ pub struct IterRecord {
     /// callback's `inf_pr` see. On restoration rows it is the
     /// restoration NLP's own residual. Differs from [`Self::inf_pr`]
     /// whenever a slack sits away from `d(x)` or scaling is active.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(feature = "serde", serde(default, deserialize_with = "null_as_nan"))]
     pub inf_pr_internal: Number,
     /// Dual infeasibility (max-norm of grad-Lagrangian).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "null_as_nan"))]
     pub inf_du: Number,
     /// Barrier parameter μ.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "null_as_nan"))]
     pub mu: Number,
     /// `||d_xs||_∞` of the search step. `0.0` on iter 0 (no step yet).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "null_as_nan"))]
     pub d_norm: Number,
     /// Hessian regularization `δ_w` applied this iter; `0.0` when
     /// no regularization was needed (printed as `-` in the console).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "null_as_nan"))]
     pub regularization: Number,
     /// Dual step length.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "null_as_nan"))]
     pub alpha_dual: Number,
     /// Primal step length.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "null_as_nan"))]
     pub alpha_primal: Number,
     /// Single-character tag for the alpha-primal column (`f`, `h`,
     /// `r` for restoration etc.) — matches upstream's per-iter tag.
@@ -64,6 +72,21 @@ pub struct IterRecord {
     /// last restoration row's index — exactly as the console does.
     #[cfg_attr(feature = "serde", serde(default))]
     pub phase: IterPhase,
+}
+
+/// Accept `null` for a non-finite per-iteration float.
+///
+/// `serde_json` writes NaN and ±∞ as `null`, so a row whose step or
+/// residual went non-finite — a restoration iterate whose step norm is
+/// NaN, for one — produced a report its own reader rejected with
+/// "invalid type: null, expected f64". Read such a slot back as NaN.
+#[cfg(feature = "serde")]
+fn null_as_nan<'de, D>(de: D) -> Result<Number, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(Option::<Number>::deserialize(de)?.unwrap_or(Number::NAN))
 }
 
 /// Phase of an [`IterRecord`] row (gh#979).

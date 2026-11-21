@@ -1,0 +1,27 @@
+name: Feature request
+description: A new option, engine, frontend capability or output you would like POUNCE to have.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem it solves
+      description: What you are trying to do, and what stops you today. A model or workflow that shows it is the strongest argument.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: How it would look to you as a user, such as an option name, a Python call or a report field. If Ipopt or another solver already does this, say which and how.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds and alternatives
+      description: What you do now instead, and what else you considered.
+    validations:
+      required: false

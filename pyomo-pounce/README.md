@@ -133,6 +133,14 @@ solver.options['print_level'] = 5
 Options are forwarded to POUNCE's `OptionsList` (ipopt.opt-compatible
 keys).
 
+## Following a solve
+
+`solve(m, intermediate=f)` calls `f` once per iteration with a
+`pyomo_pounce.Iteration`, which holds the iteration's statistics, the
+objective in the model's own units and sense, and `values`, which maps each
+variable data to its current value. Returning False stops the solve. The
+callback runs the solve in-process. See `docs/src/pyomo.md`.
+
 ## User scaling
 
 The standard `scaling_factor` Suffix works as it does with IPOPT:
