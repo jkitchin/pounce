@@ -317,8 +317,10 @@ pub trait IpoptNlp: Nlp {
 
     /// Pack the algorithm-side `(c, d)` constraint values into the user
     /// TNLP's `g` array (length `n_full_g`, ordered by the original `g`
-    /// index, in user-unscaled space). Default impl returns an empty
-    /// vector; `OrigIpoptNlp` overrides.
+    /// index, in user-unscaled space). An equality row's `c` is the
+    /// residual `g − rhs`, and the packed value adds the right-hand side
+    /// back. Default impl returns an empty vector; `OrigIpoptNlp`
+    /// overrides.
     fn pack_g_for_user(&self, _c: &dyn Vector, _d: &dyn Vector) -> Vec<Number> {
         Vec::new()
     }

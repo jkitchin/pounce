@@ -188,6 +188,12 @@ const ready = (async () => {
 // negative lookahead, which is the difference between the two routes here.
 const WANTS_POUNCE = /^[ \t]*(?:import|from)[ \t]+pounce(?![\w])/m;
 const WANTS_PYOMO = /^[ \t]*(?:import|from)[ \t]+(?:pyomo|pounce_browser)(?![\w])/m;
+// pyomo-pounce solves in-process through the `pounce` package, so a script
+// that imports it needs that wheel and not the standalone module. Its own
+// `import pyomo.environ` matches WANTS_PYOMO, so the standalone module is
+// loaded for it only when it names `pounce_browser` too.
+const WANTS_PYOMO_POUNCE = /^[ \t]*(?:import|from)[ \t]+pyomo_pounce(?![\w])/m;
+const WANTS_POUNCE_BROWSER = /^[ \t]*(?:import|from)[ \t]+pounce_browser(?![\w])/m;
 // `pylab` and `mpl_toolkits` are matplotlib too, and a script that reaches for
 // either without naming matplotlib is otherwise indistinguishable from one
 // that does not plot at all.
@@ -240,6 +246,32 @@ plt.show = lambda *args, **kwargs: _pounce_flush_figures()
   say('ready');
 }
 
+// pyomo-pounce's solves and sensitivity calls use numpy and none of
+// pounce-solver's scipy paths (`minimize`, `curve_fit`, the QP helpers), and
+// pandas only for `Jacobian.to_dataframe()`. So this route installs both
+// wheels without their dependencies and skips the ~20 MB of scipy, OpenBLAS
+// and pandas. A script that also imports `pounce` for those paths gets scipy
+// from `installPounceSolver`.
+async function installPyomoPounce() {
+  say('installing pounce-solver, Pyomo and pyomo-pounce…');
+  await pyodide.loadPackage('numpy');
+  await micropip.install.callKwargs(await pounceWheelUrl(), { deps: false });
+  const wheels = params.get('pyomo');
+  await micropip.install(wheels ? wheels.split(',') : 'pyomo');
+  // `build.sh` builds pyomo-pounce beside the pounce-solver wheel, at the
+  // same version.
+  const manifest = await (await fetch('./wheels/pounce-wheel.json')).json();
+  const wheel = new URL(
+    `./wheels/pyomo_pounce-${manifest.version}-py3-none-any.whl`,
+    self.location.href,
+  ).href;
+  if (!(await fetch(wheel, { method: 'HEAD' })).ok) {
+    throw new Error('no pyomo-pounce wheel is deployed here. Run crates/pounce-wasm/build.sh.');
+  }
+  await micropip.install.callKwargs(wheel, { deps: false });
+  say('ready');
+}
+
 async function installPyomoRoute() {
   say('loading the POUNCE solver module…');
   await loadSolver();
@@ -273,8 +305,12 @@ self.onmessage = async (event) => {
     const code = event.data.code;
     // Installing before the timer starts: the download is not the model's
     // solve time, and reporting it as such would be a lie about the solver.
+    const pyomoPounce = WANTS_PYOMO_POUNCE.test(code);
     if (WANTS_POUNCE.test(code)) await ensure('pounce', installPounceSolver);
-    if (WANTS_PYOMO.test(code)) await ensure('pyomo', installPyomoRoute);
+    if (pyomoPounce) await ensure('pyomo-pounce', installPyomoPounce);
+    if (WANTS_POUNCE_BROWSER.test(code) || (WANTS_PYOMO.test(code) && !pyomoPounce)) {
+      await ensure('pyomo', installPyomoRoute);
+    }
     const plots = WANTS_MPL.test(code);
     if (plots) await ensure('matplotlib', installMatplotlib);
     self.postMessage({ type: 'running' });

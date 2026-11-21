@@ -8,19 +8,20 @@ rustup target add wasm32-wasip1                # once
 crates/pounce-wasm/build.sh --serve-python     # http://localhost:8000
 ```
 
-## Two routes to the solver, chosen by what a script imports
+## Three routes to the solver, chosen by what a script imports
 
 ```python
 import pounce           # the pounce-solver package itself, built for emscripten
 import pounce_browser   # Pyomo writes an .nl, a separate POUNCE wasm solves it
+import pyomo_pounce     # Pyomo with pyomo-pounce's sensitivity, on the package
 ```
 
-Neither is installed up front — both are large and a script needs at most one.
-The worker gets CPython running, then installs whichever route the first run
-asks for and caches it. The example dropdown offers both.
+None is installed up front, because each is large and a script usually needs
+one. The worker gets CPython running, then installs whichever route the first
+run asks for and caches it. The example dropdown offers all three.
 
-`import matplotlib` is a third on-demand install, orthogonal to the two routes
-— see [Figures](#figures) below.
+`import matplotlib` is another on-demand install, orthogonal to the routes. See
+[Figures](#figures) below.
 
 ### `import pounce` — the real package
 
@@ -61,6 +62,27 @@ landed on the right components. CI runs it on every PR.
 The route survives because it is not redundant: it is the one that keeps
 working when no emscripten wheel is deployed, and it is how a Pyomo model
 reaches POUNCE without a Pyomo-to-`Problem` translation layer.
+
+### `import pyomo_pounce`: Pyomo with sensitivity
+
+pyomo-pounce runs in Pyodide on the emscripten wheel. Its solves and its
+sensitivity calls (`declare_sens_param`, `sens_jacobian`, `sens_solution`,
+`sens_covariance` and the rest) write the model to `.nl` text, read it with
+`pounce.read_nl` and answer from a `pounce.Solver` session in the same wasm
+instance, as on a desktop. A plain `SolverFactory("pounce").solve(m)` takes
+that in-process path too, because Pyodide cannot start the `pounce`
+executable.
+
+The route installs numpy, the pounce-solver wheel and pyomo-pounce without
+their dependencies, and Pyomo from PyPI. pyomo-pounce uses none of
+pounce-solver's scipy paths (`minimize`, `curve_fit`, the QP helpers) and
+needs pandas only for `Jacobian.to_dataframe()`, so neither is loaded.
+`build.sh` builds the pyomo-pounce wheel from the checkout into `wheels/`,
+at the pounce-solver wheel's version.
+
+`crates/pounce-wasm/tests/pyomo_pounce_pyodide.mjs` runs a declared-parameter
+solve, `sens_jacobian`, `sens_solution` and a plain solve under Pyodide in
+Node, on a model whose sensitivities are known in closed form.
 
 ## The emscripten wheel
 

@@ -95,6 +95,17 @@ fi
 cp "$here/web/pounce.wasm" "$here/web-python/pounce.wasm"
 cp "$here/web/wasi.js" "$here/web-python/wasi.js"
 
+# The Python page's `import pyomo_pounce` route installs pyomo-pounce from a
+# pure-Python wheel built here from this checkout, so the page serves the
+# same source as the `pounce-solver` wheel beside it (the two versions move
+# in step). It is built from a copy because setuptools leaves `build/` and
+# `*.egg-info` next to the source it builds.
+pyomo_src="$(mktemp -d)"
+trap 'rm -rf "$pyomo_src"' EXIT
+cp -r "$root/pyomo-pounce/." "$pyomo_src/"
+rm -f "$here/web-python/wheels/"pyomo_pounce-*.whl
+python3 -m pip wheel --quiet --no-deps --wheel-dir "$here/web-python/wheels" "$pyomo_src"
+
 size=$(wc -c < "$here/web/pounce.wasm")
 printf 'web/pounce.wasm  %s bytes (%.1f MB)\n' "$size" "$(echo "$size" | awk '{print $1/1048576}')"
 

@@ -90,6 +90,7 @@ pub(crate) const INLINE_DEPTH: u32 = 512;
 /// Stack for the worker thread. Reserved, not committed: only the pages
 /// actually touched cost anything. See [`MAX_DEPTH`] for the margin this
 /// buys.
+#[cfg(not(target_os = "emscripten"))]
 const WORKER_STACKS: [usize; 3] = [1 << 30, 256 << 20, 64 << 20];
 
 /// Run `f` on a worker thread with a stack sized for recursion over a
@@ -98,7 +99,72 @@ const WORKER_STACKS: [usize; 3] = [1 << 30, 256 << 20, 64 << 20];
 /// For work whose depth is not known ahead of time — parsing a `.nl` file
 /// is exactly that, since the depth is what the file says — rather than
 /// [`on_deep_stack`], which skips the worker for shallow input.
+///
+/// Pyodide cannot start a thread, so the emscripten build runs `f` on the
+/// calling thread instead, with the `.nl` reader told how much of that
+/// thread's stack is free. The reader then refuses a file nested deeper than
+/// that stack holds, as it does on a worker whose reservation came up short.
 pub(crate) fn on_worker_stack<T, F>(f: F) -> T
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    #[cfg(target_os = "emscripten")]
+    {
+        on_calling_stack(f)
+    }
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        on_spawned_stack(f)
+    }
+}
+
+/// The emscripten build's stand-in for the worker thread: run `f` here.
+/// `.nl` parsing gets a stack budget of what is free now, less a margin
+/// for the frames between this call and the reader's recursion.
+#[cfg(target_os = "emscripten")]
+fn on_calling_stack<T, F>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    /// Restores the reader's default budget however `f` returns, panics
+    /// included, so a later parse on this thread does not inherit it.
+    struct ResetBudget;
+    impl Drop for ResetBudget {
+        fn drop(&mut self) {
+            pounce_nl::nl_reader::set_parse_stack_budget(None);
+        }
+    }
+    let free = emscripten_stack_free();
+    pounce_nl::nl_reader::set_parse_stack_budget(Some(free.saturating_sub(CALL_MARGIN)));
+    let _reset = ResetBudget;
+    f()
+}
+
+/// Stack left free on the calling thread, from emscripten's own record of
+/// the stack bounds. Pyodide gives its one thread 5 MiB.
+#[cfg(target_os = "emscripten")]
+fn emscripten_stack_free() -> usize {
+    unsafe extern "C" {
+        fn emscripten_stack_get_free() -> usize;
+    }
+    // SAFETY: a pure read of the current stack pointer and the stack's
+    // limit, which emscripten's runtime always provides.
+    unsafe { emscripten_stack_get_free() }
+}
+
+/// Stack kept back from a budget on the calling thread for the frames
+/// between the budget's caller and the recursive walk.
+#[cfg(target_os = "emscripten")]
+const CALL_MARGIN: usize = 256 << 10;
+
+/// Stack one level of a recursive walk is assumed to need on the calling
+/// thread, the reader's own worst case for an optimised build.
+#[cfg(target_os = "emscripten")]
+const LEVEL_BYTES: usize = 4 << 10;
+
+#[cfg(not(target_os = "emscripten"))]
+fn on_spawned_stack<T, F>(f: F) -> T
 where
     T: Send,
     F: FnOnce() -> T + Send,
@@ -152,6 +218,18 @@ where
 {
     if depth <= INLINE_DEPTH {
         return f();
+    }
+    // With no worker to move to, a walk deeper than the free stack holds
+    // would overflow it and kill the interpreter, so it is refused here
+    // and pyo3 raises the panic as a Python exception.
+    #[cfg(target_os = "emscripten")]
+    if (depth as usize).saturating_mul(LEVEL_BYTES)
+        > emscripten_stack_free().saturating_sub(CALL_MARGIN)
+    {
+        panic!(
+            "pounce: this expression is nested {depth} levels deep, more than the              browser's {} KiB of free stack can walk",
+            emscripten_stack_free() >> 10
+        );
     }
     on_worker_stack(f)
 }
