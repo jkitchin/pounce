@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-21
+
 ### Added
 - **The current iterate inside a Python `intermediate` callback, and an
   `intermediate=` argument for Pyomo solves.** `Problem.get_current_iterate()`
@@ -26723,7 +26725,8 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/jkitchin/pounce/releases/tag/v0.18.0
 [0.17.0]: https://github.com/jkitchin/pounce/releases/tag/v0.17.0
 [0.16.0]: https://github.com/jkitchin/pounce/releases/tag/v0.16.0
 [0.15.0]: https://github.com/jkitchin/pounce/releases/tag/v0.15.0
