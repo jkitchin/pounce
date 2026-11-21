@@ -1962,6 +1962,88 @@ mod tests {
         assert_eq!(r["iterations"], 2);
     }
 
+    /// `simple.nl` plus `x2 = x1`, a linear equality presolve's linear-eq
+    /// reduction eliminates a column with. The host still gets x in the
+    /// model's three variables, and its last x is the `.sol` point.
+    const SIMPLE_WITH_ELIMINABLE_NL: &str = "g3 1 1 0
+ 3 3 1 0 2
+ 1 0 0 0 0 0
+ 0 0
+ 2 0 0
+ 0 0 0 1
+ 0 0 0 0 0
+ 6 1
+ 0 0
+ 0 0 0 0 0
+C0
+o0
+o5
+v0
+n2
+o5
+v1
+n2
+C1
+n0
+C2
+n0
+O0 0
+n0
+x3
+0 0.5
+1 0.5
+2 0.5
+r
+4 1.0
+2 0.0
+4 0.0
+b
+0 -10 10
+0 -10 10
+0 -10 10
+k2
+2
+5
+J0 2
+0 0
+1 0
+J1 2
+0 1
+1 1
+J2 2
+1 -1
+2 1
+G0 1
+0 1
+";
+
+    #[test]
+    fn under_presolve_elimination_x_is_the_models_and_ends_at_the_sol_point() {
+        call_load(SIMPLE_WITH_ELIMINABLE_NL, "", "");
+        let (r, calls) = solve_recording(
+            "print_level 0\npresolve yes\npresolve_linear_eq_reduction yes\n\
+             wasm_iterate_callback yes\n",
+            None,
+        );
+        assert_eq!(r["success"], true, "{r}");
+        // The branch under test: a column really was eliminated.
+        assert!(
+            r["presolve"]["eliminated_columns"].as_u64().unwrap_or(0) > 0,
+            "no column eliminated, so this test reaches nothing: {r}"
+        );
+        assert!(!calls.is_empty());
+        assert!(calls.iter().all(|(c, x)| c.restoration || x.len() == 3));
+        let (last, x) = calls.last().unwrap();
+        let sol_x = LAST_SOLVE.with(|s| s.borrow().as_ref().unwrap().x.clone());
+        assert_eq!(x, &sol_x, "the last call's x is the .sol primal block");
+        assert!((x[2] - x[1]).abs() < 1e-8, "{x:?}");
+        let objective = r["objective"].as_f64().unwrap();
+        assert!(
+            (last.objective - objective).abs() < 1e-12,
+            "{last:?} against {objective}"
+        );
+    }
+
     #[test]
     fn a_maximize_model_reports_its_own_objective() {
         // `max -x0` over the same rows is the same problem, solved as

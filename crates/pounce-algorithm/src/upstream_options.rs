@@ -2868,14 +2868,21 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         "wasm_iterate_callback",
         "Call the host's `pounce.iterate` import once per iteration of a WebAssembly solve.",
         false,
-        "POUNCE extension, read only by the WebAssembly module (crates/pounce-wasm). With yes,          `pounce_solve` calls the host function the module imports as `iterate` from module          `pounce` at every iteration, iteration 0 included, with the iteration's statistics and          the current x in the .nl file's variable order and units, the coordinates of the .sol          primal block. A nonzero return from the host stops the solve with          User_Requested_Stop. See docs/src/wasm.md. Refused by every other entry point.",
+        "POUNCE extension, read only by the WebAssembly module (crates/pounce-wasm). With yes, \
+         `pounce_solve` calls the host function the module imports as `iterate` from module \
+         `pounce` at every iteration, iteration 0 included, with the iteration's statistics and \
+         the current x in the .nl file's variable order and units, the coordinates of the .sol \
+         primal block. A nonzero return from the host stops the solve with \
+         User_Requested_Stop. See docs/src/wasm.md. Refused by every other entry point.",
     )?;
     r.add_lower_bounded_integer_option(
         "wasm_iterate_callback_every",
         "Call the host's `pounce.iterate` import only at iterations that are a multiple of this.",
         1,
         1,
-        "POUNCE extension, read only by the WebAssembly module, with wasm_iterate_callback=yes:          the call is made at iteration k when k is a multiple of this value, so 1 calls at every          iteration and 10 at iterations 0, 10, 20 and so on. Refused by every other entry point.",
+        "POUNCE extension, read only by the WebAssembly module, with wasm_iterate_callback=yes: \
+         the call is made at iteration k when k is a multiple of this value, so 1 calls at every \
+         iteration and 10 at iterations 0, 10, 20 and so on. Refused by every other entry point.",
     )?;
 
     // Pounce extension: the options of every registered
