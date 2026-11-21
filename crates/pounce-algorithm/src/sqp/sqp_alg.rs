@@ -27,6 +27,7 @@ use crate::sqp::qp_assembly::{SqpQpData, Triplet};
 use crate::sqp::result::{SqpError, SqpResult, SqpStatus};
 use pounce_common::types::{Index, NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_linalg::triplet::GenTMatrix;
+use pounce_linsol::SparseSymLinearSolverInterface;
 use pounce_qp::{
     BoundStatus, ConsStatus, HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver,
     QpStatus, WorkingSet,
@@ -144,11 +145,28 @@ pub struct SqpAlgorithm {
     ipm_seed: IpmSeed,
 }
 
+/// Builds the linear-solver backend the interior-point seed (and its PSD
+/// certificate) factor with. See [`SqpAlgorithm::with_seed_backend`].
+pub type SeedBackendFactory = Box<dyn FnMut() -> Box<dyn SparseSymLinearSolverInterface>>;
+
 /// State the IPM-seeded subproblem solves share across one SQP solve.
 #[derive(Default)]
 pub(crate) struct IpmSeed {
     /// Interior-point iterations of the most recent successful seed.
     pub(crate) last_iters: std::cell::Cell<Option<usize>>,
+    /// The configured backend (gh#1219 §3.6); `None` is a default FERAL,
+    /// for an `SqpAlgorithm` built without one (the crate's own tests).
+    pub(crate) backend: std::cell::RefCell<Option<SeedBackendFactory>>,
+}
+
+impl IpmSeed {
+    /// A fresh backend for one factorization sequence of the seed.
+    fn make_backend(&self) -> Box<dyn SparseSymLinearSolverInterface> {
+        match self.backend.borrow_mut().as_mut() {
+            Some(make) => make(),
+            None => Box::new(pounce_feral::FeralSolverInterface::new()),
+        }
+    }
 }
 
 impl SqpAlgorithm {
@@ -183,6 +201,16 @@ impl SqpAlgorithm {
     /// flip `use_schur_updates = true` for warm-started workloads.
     pub fn with_qp_options(mut self, qp_opts: QpOptions) -> Self {
         self.qp_opts = qp_opts;
+        self
+    }
+
+    /// The backend the convex interior-point seed of a cold step QP factors
+    /// with (see [`SqpOptions::qp_ipm_cold_start_min_dim`]). Without it the
+    /// seed used a bare `FeralSolverInterface::new()`, dropping every
+    /// `feral_*` option and the user's `linear_solver` on that one path while
+    /// the QP subproblems themselves honoured them (gh#1219 §3.6).
+    pub fn with_seed_backend(self, make: SeedBackendFactory) -> Self {
+        *self.ipm_seed.backend.borrow_mut() = Some(make);
         self
     }
 
@@ -2559,6 +2587,15 @@ pub(crate) fn solve_subproblem_qp(
     let started = std::time::Instant::now();
     let guards_before = solver.rank_guard_calls();
     let split_before = solver.linsol_time_split();
+    // `opts.time_limit` is this subproblem's budget, not each stage's: the
+    // chain below (stabilized → standard, warm → seed → warm again, seed →
+    // cold) used to hand every stage the full limit afresh, so one step QP
+    // could run several times past it (gh#1219 §4.4). Each stage gets what
+    // is left.
+    let left = |o: &QpOptions| QpOptions {
+        time_limit: opts.time_limit.map(|t| t.saturating_sub(started.elapsed())),
+        ..o.clone()
+    };
     // A stabilized subproblem (gh#1206) starts from its own feasible point
     // satisfying the working set — the warm one, or the equality rows on a
     // cold start — so it needs neither the interior-point seed nor the pinned
@@ -2595,8 +2632,8 @@ pub(crate) fn solve_subproblem_qp(
                     "{kind}: stabilized QP ended {:?}; solving the standard subproblem",
                     other.as_ref().map(|s| s.status));
                 match warm {
-                    Some(w) => solver.solve_with_working_set(&standard, w, opts),
-                    None => solver.solve(&standard, None, opts),
+                    Some(w) => solver.solve_with_working_set(&standard, w, &left(opts)),
+                    None => solver.solve(&standard, None, &left(opts)),
                 }
             }
         };
@@ -2629,7 +2666,7 @@ pub(crate) fn solve_subproblem_qp(
         (None, Some(w)) if seed.is_some() => {
             let seed = seed.expect("guarded");
             let lifted = data.lift_working_set(w);
-            let warm_opts = budget_opts.as_ref().unwrap_or(opts);
+            let warm_opts = &left(budget_opts.as_ref().unwrap_or(opts));
             match solver.solve_with_working_set_if_feasible(&qp, &lifted, warm_opts) {
                 // Over budget: seed, or if the seed declines, carry on from
                 // where the warm solve stopped with the full budget.
@@ -2639,9 +2676,9 @@ pub(crate) fn solve_subproblem_qp(
                          changes in {:.3?}); seeding from the interior point",
                         warm_opts.max_iter, qp.n, qp.m, sol.stats.n_working_set_changes,
                         started.elapsed());
-                    match ipm_seeded_step_qp(solver, &qp, data.hess_inf, opts, seed) {
+                    match ipm_seeded_step_qp(solver, &qp, data.hess_inf, &left(opts), seed) {
                         Some(seeded) => Ok(seeded),
-                        None => solver.solve_with_working_set(&qp, &sol.working, opts),
+                        None => solver.solve_with_working_set(&qp, &sol.working, &left(opts)),
                     }
                 }
                 Ok(Some(sol)) => Ok(sol),
@@ -2649,16 +2686,18 @@ pub(crate) fn solve_subproblem_qp(
                     tracing::debug!(target: "pounce::sqp::qp",
                         "warm start pins infeasible (n={}, m={}); seeding from the interior point",
                         qp.n, qp.m);
-                    match ipm_seeded_step_qp(solver, &qp, data.hess_inf, opts, seed) {
+                    match ipm_seeded_step_qp(solver, &qp, data.hess_inf, &left(opts), seed) {
                         Some(sol) => Ok(sol),
-                        None => solver.solve_with_working_set(&qp, &lifted, opts),
+                        None => solver.solve_with_working_set(&qp, &lifted, &left(opts)),
                     }
                 }
                 Err(e) => Err(e),
             }
         }
-        (None, Some(w)) => solver.solve_with_working_set(&qp, &data.lift_working_set(w), opts),
-        (None, None) => solver.solve(&qp, None, opts),
+        (None, Some(w)) => {
+            solver.solve_with_working_set(&qp, &data.lift_working_set(w), &left(opts))
+        }
+        (None, None) => solver.solve(&qp, None, &left(opts)),
     };
     let elapsed = started.elapsed();
     let rank_guard_calls = solver.rank_guard_calls() - guards_before;
@@ -2705,16 +2744,20 @@ fn ipm_seeded_step_qp(
     use pounce_convex::Triplet as T;
     let started = std::time::Instant::now();
     let (n, m) = (qp.n, qp.m);
-    let feral = || {
-        Box::new(pounce_feral::FeralSolverInterface::new())
-            as Box<dyn pounce_linsol::SparseSymLinearSolverInterface>
-    };
+    let feral = || seed.make_backend();
     let p_lower: Vec<T> = (0..qp.h.irows().len())
         .map(|k| {
             let (i, j) = (qp.h.irows()[k] as usize - 1, qp.h.jcols()[k] as usize - 1);
             T::new(i.max(j), i.min(j), qp.h.values()[k])
         })
         .collect();
+    // What is left of this seed's budget; the certificate below is one
+    // factorization nothing can interrupt, so do not start it on an empty
+    // budget, and charge it to the interior point that follows (gh#1219 §4.4).
+    let left = || opts.time_limit.map(|t| t.saturating_sub(started.elapsed()));
+    if left().is_some_and(|t| t.is_zero()) {
+        return None;
+    }
     if qp.hessian_inertia != HessianInertia::Psd {
         // Absolute, as the certificate's contract is, at the scale of `H`.
         let tol = 1e-9 * (1.0 + hess_inf);
@@ -2777,7 +2820,7 @@ fn ipm_seeded_step_qp(
             .collect(),
     };
     let ipm_opts = pounce_convex::QpOptions {
-        time_limit: opts.time_limit,
+        time_limit: left(),
         max_iter: IPM_SEED_MAX_ITER,
         ..pounce_convex::QpOptions::default()
     };
