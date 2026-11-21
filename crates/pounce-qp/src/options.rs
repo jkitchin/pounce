@@ -193,6 +193,37 @@ pub struct QpOptions {
     /// always take the update.
     pub schur_drop_inertia_test: bool,
 
+    /// Two Schur-path economies that change the trajectory at round-off
+    /// level, so they are scoped to the QPs they were measured on (gh#1214).
+    ///
+    /// - **A drop of a slot active at the last reset costs one back-solve,
+    ///   not two.** Column `p` of `K_0` is then the slot's constraint normal,
+    ///   which is the `x`-part of the update vector `v`, so
+    ///   `K_0⁻¹v = ±e_p + v_p·K_0⁻¹e_p` exactly
+    ///   ([`crate::schur::SchurState::apply_change`]).
+    /// - **Refinement stops at the round-off floor**: once every component
+    ///   of the residual is inside the bound on its own rounding error, a
+    ///   further correction is a solve of noise
+    ///   ([`crate::schur::SchurState::solve`]).
+    ///
+    /// On a step-3 crossover QP of a 15 k-variable collocation model they
+    /// take the back-solves from 2 298 to 1 409 with the same pivots. Both
+    /// are as accurate as the path they replace — the first is exact where
+    /// the back-solve it skips is not — but on degenerate QPs whose outcome
+    /// rests on the exact rounding of every step they move it: turned on for
+    /// every Schur QP, `solver_selection=qp-active-set` lost Maros-Meszaros
+    /// QGFRDXPN (`Optimal`/3553 → `MaxIter`/23477) and `algorithm=
+    /// active-set-sqp` lost `qpnstair`'s first step QP, each recovered by
+    /// turning off *either* economy, so neither is the cause on its own.
+    /// See `dev-notes/known-limitations.md`.
+    ///
+    /// `false` (the default). The crossover turns it on for its step-3 QP and
+    /// its step-4 step QPs, where the `crossover=yes` and
+    /// `ipm_sqp_handover=yes` sweeps are empty with it. The reuse of
+    /// `K_0⁻¹b` for a repeated right-hand side is bit-identical and is not
+    /// gated by this.
+    pub schur_lean_backsolves: bool,
+
     /// Seed the l1-elastic phase 1 at the pinned warm-start point, not at
     /// the origin, when [`crate::QpSolver::solve_with_working_set`]'s hint
     /// pins to an infeasible point the pin repair cannot rescue (gh#1206
@@ -401,6 +432,7 @@ impl Default for QpOptions {
             dual_shift_probe_min_dim: usize::MAX,
             use_schur_updates: false,
             schur_drop_inertia_test: true,
+            schur_lean_backsolves: false,
             elastic_seed_from_hint: false,
             use_homotopy: false,
             expand_tol_initial: 1e-12,

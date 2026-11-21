@@ -261,6 +261,12 @@ pub struct SqpOptions {
     /// cold re-solve made 1 311 adds at step lengths ~1e-25 with the
     /// infeasibility flat, for 2 139 s). `None` (the default): no cap.
     pub step_qp_max_stall_iters: Option<u32>,
+
+    /// Turn on `QpOptions::schur_lean_backsolves` for every step QP of this
+    /// run (gh#1214). Not a user option: the crossover sets it for step 4,
+    /// whose step QPs are its step-3 QP's size and shape. `false` (the
+    /// default) leaves the QP options as given.
+    pub step_qp_lean_schur: bool,
 }
 
 impl Default for SqpOptions {
@@ -288,6 +294,7 @@ impl Default for SqpOptions {
             local_phase_tol: 1e-2,
             stabilization: 0.0,
             step_qp_max_stall_iters: None,
+            step_qp_lean_schur: false,
         }
     }
 }

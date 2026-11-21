@@ -84,6 +84,113 @@ warm start whose working set is rank-deficient (gh#1206 B6/B7), not in
 reverting B1, which on the model that reported it is the difference between
 a step-4 first QP of 591 s and one of 23 s.
 
+### Review (gh#1214, 2026-11-20): the two lines have different mechanisms
+
+Both lines are unchanged by gh#1214 (its `ipm_sqp_handover=yes` sweep is
+empty). Traced with `sqp_print_level=5`, `POUNCE_QP_TRACE=1` and
+`RUST_LOG=pounce::handover=debug,pounce::sqp::qp=debug`, they are two
+defects, not one, and neither is "an unchecked factorization" alone.
+
+**`cc:design_cent_3`: a zero-model step taken at full length.** Step 4's
+iterates 0–3 shrink the step `1.0e-4 → 1.2e-6 → 3.2e-7 → 2.5e-8` with the
+working set unchanged and `θ` down to `4.4e-16`. Iterate 4's step QP, warm,
+one factorization, no rank test, takes one Newton step on that same working
+set (`ws = 0`) with `‖p‖∞ = 1.14` and a QP objective change of
+**`+1.9e-15`**: the reduced Hessian is singular along `p` and the gradient
+is orthogonal to it, so the QP's minimizers form a line and the solver
+returned a point far along it instead of staying put. The NLP's curvature
+turns that free step into `f = −3.7234 → −4.6024` and `θ = 4.4e-16 → 0.19`,
+and the filter accepts it: Armijo on `f` holds against a predicted decrease
+of ~0, and `θ` is far under `θ_max`. From there the next step QP's Newton
+steps run to `obj ≈ −6e31` (`max-iter`, 320 refactors), the cold retry
+stalls in phase 1, the attempt is declined `ActiveSetNotConverged`, and the
+interior point finishes on the gh#884 downgrade (unscaled dual
+infeasibility `1.54e-2`, multipliers `~3.7e9`). Two candidate fixes, neither
+tried yet: in `pounce-qp`, treat a Newton step whose model decrease is at
+round-off as a null step (`x` is already a minimizer on the working set, and
+on a PSD reduced Hessian the multipliers carry over when `Hp ≈ 0`); or in
+the SQP, refuse a step whose predicted decrease is ~0 while it raises `θ`,
+i.e. require such a step to be `θ`-type. B1 only changed which working set
+reached iterate 4: on `main` that QP refactored with a rank test and returned
+`‖p‖ = 2.4e-8`, so `main` never met the zero-model step at all.
+
+**`cc:opf_vv_lower_knee`: a degenerate tail, at a better point.** The
+lowered solve that decides the verdict hands over at interior iteration 8
+(error `3.65e-8`) at a biactive pair on a curve knee. Step 4 halves its step
+each iteration (`1.8e-6 → 4.5e-7 → 2.3e-7 → 1.1e-7`) with QP multipliers
+`5.7e6 → 1.5e6` — linear convergence at a point without strict
+complementarity — and the attempt is declined. The interior point then crawls
+the same halving sequence for 64 iterations and ends acceptable. Its
+objective, `−0.3954730625`, is *lower* than `main`'s `−0.3954687711`, so this
+line is a status regression at a better point; the earlier lowered solves,
+where B1 moved which handover was accepted, are what send the driver there.
+A fix would be the driver's or the handover's handling of a biactive point,
+not B1's.
+
+---
+
+## Active-set QP: the gh#1214 back-solve economies run only in the crossover (`QpOptions::schur_lean_backsolves`)
+
+*Measured on `claude/peaceful-dijkstra-lpkx32` against its parent (gh#1206's
+branch at `09380ae` merged with `main` at `994121e`),
+`scripts/sweep-fixtures.sh` on five legs, both Hessian legs each, with a
+binary carrying one environment switch per economy to attribute each line.
+Recorded 2026-11-20.*
+
+**The change.** gh#1214 cut the Schur path's back-solves three ways:
+
+1. a repeated right-hand side reuses `K_0⁻¹b` (every step after a drop);
+2. a drop of a slot active at the last reset solves once, not twice
+   (`K_0⁻¹v = ±e_p + v_p·K_0⁻¹e_p`, exact);
+3. refinement stops once the residual is inside its own rounding error.
+
+On a step-3 crossover QP of a synthetic 15 k-variable collocation model
+(413 working-set changes, unchanged) they take the back-solves from 2 298 to
+1 409 and the back-solve time from 19.7 s to 12.6 s. (1) is bit-identical and
+runs everywhere. (2) and (3) round differently from the path they replace,
+so they run only where they were measured: the crossover's step-3 QP and
+step-4 step QPs, whose `crossover=yes` and `ipm_sqp_handover=yes` sweeps are
+empty with them on.
+
+### What is worse, ungated
+
+With (2) and (3) on for every Schur QP, the default, `crossover=yes` and
+`ipm_sqp_handover=yes` legs are empty and these move (both Hessian legs for
+the convex lines):
+
+| leg | fixture | parent | ungated |
+|---|---|---|---|
+| `solver_selection=qp-active-set` | `convex_qp_qgfrdxpn` | `SolveSucceeded`/3553 | `MaximumIterationsExceeded`/23477 |
+| `solver_selection=qp-active-set` | `convex_qp_qscfxm1` | 4242 | 9402 |
+| `solver_selection=qp-active-set` | `convex_qp_qforplan` | 12465 | 14976 |
+| `solver_selection=qp-active-set` | `convex_qp_share1b` | 2299 | 2259 |
+| `algorithm=active-set-sqp` (exact) | `qpnstair` | `SolveSucceeded`/1 | `MaximumIterationsExceeded`/0 |
+
+QGFRDXPN is pinned by `issue_1076_qgfrdxpn_active_set_prune_cap.rs`.
+`qpnstair` loses its first step QP, a degenerate ℓ1-elastic phase 1 of
+~3 000 pivots and 85 rank tests.
+
+### What was tried
+
+Attribution: (1) alone moves nothing. QGFRDXPN fails with (2) alone
+(22 830) and with (3) alone (45 021) and solves only with both off;
+`qpnstair` solves with either off, along three different paths (2 350,
+2 629 and 3 600 pivots). Neither economy is less accurate than what it
+replaces — (2) is exact where the back-solve it skips is not — so this is
+the sensitivity the QGFRDXPN entries below already record (its outcome is
+non-monotone in the prune cap), now to rounding. Three floors for (3) were
+tried with (2) on: the worst-case bound `γ_{k+1}` (shipped), and `c·u` of the
+row scale with `c = 1` and `c = 2`. All three lose QGFRDXPN (23 477, 26 635,
+8 837 iterations); `c = 1` with (2) off ends it `SolvedToAcceptableLevel`.
+
+### How to tell whether a fix works
+
+Turn `schur_lean_backsolves` on by default in `QpOptions::default()` and
+rerun the `solver_selection=qp-active-set` and `algorithm=active-set-sqp`
+sweeps: QGFRDXPN and `qpnstair` must stay `SolveSucceeded`. A fix belongs in
+what makes those solves follow the last bit (the degenerate phase-1 cycling
+the QGFRDXPN entries describe), not in the economies.
+
 ---
 
 ## Active-set QP: the gh#1206 H-diagonal padding is size-gated, and the rank probe and hint-seeded phase 1 are opt-in (gh#1206 B6, P2, B7)

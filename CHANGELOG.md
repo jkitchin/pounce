@@ -225,6 +225,39 @@ changes.
   variable.
 
 ### Changed
+- **The crossover's QPs spend about 40% fewer back-solves** (gh#1214). On
+  gh#1206's model the step-3 QP spent 192 of its 259 s in 645 back-solves,
+  about 3.8 per working-set change. Three causes, three changes, all in
+  `pounce-qp`'s Schur path:
+  - A step after a drop has the same right-hand side as the step before it
+    (`x` does not move), and `K_0⁻¹b` depends only on `b` and the base
+    factor, so it is now reused, bit for bit.
+  - A drop of a slot active at the last refactorization paid two
+    back-solves; column `p` of `K_0` is then the slot's own normal, so
+    `K_0⁻¹v = ±e_p + v_p·K_0⁻¹e_p` and one suffices.
+  - Refinement spent its last correction on round-off: one ulp of noise
+    reads as a halving (`1.4e-14 → 7.1e-15` against `‖b‖∞ = 90`) and paid
+    another pass. It now also stops once every residual component is inside
+    the bound on its own rounding error, with the Arioli–Demmel–Duff scale on
+    rows whose operands vanish.
+
+  On a step-3 QP of a synthetic 15 k-variable collocation model, with the
+  same 413 working-set changes, back-solves go from 2 298 to 1 409 and their
+  time from 19.7 s to 12.6 s. The first change is bit-identical and applies
+  to every Schur-path QP. The other two move a degenerate QP's pivots at
+  round-off level, so they are the internal `QpOptions::schur_lean_backsolves`,
+  on only for the crossover's step-3 and step-4 QPs: on every Schur QP they
+  lost Maros-Meszaros QGFRDXPN under `solver_selection=qp-active-set` and
+  `qpnstair` under `algorithm=active-set-sqp`. Sweeps against the parent,
+  both Hessian legs: default, `crossover=yes`, `ipm_sqp_handover=yes`,
+  `solver_selection=qp-active-set` and `algorithm=active-set-sqp` all
+  empty. Recorded with the ungated measurements in
+  `dev-notes/known-limitations.md`. Not done: the in-KKT `−σI` form of the
+  stabilized QP that the issue proposes. `r` enters K_max as a degree-one
+  column with an `I/σ` pivot, which eliminates with no fill into exactly that
+  form, so it costs `O(m)` per back-solve. Measured on the same model, the
+  stabilized step-3 QP back-solves at 8.5 ms against 17 ms for the
+  unstabilized one.
 - **Notebook 48 times the MILP and the MPCC to the same objective value, not
   only the MILP to a proof.** Time to a proof against one local solve compares a
   global certificate with a stationary point. Section 6 now logs every HiGHS

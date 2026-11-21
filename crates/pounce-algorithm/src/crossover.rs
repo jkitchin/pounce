@@ -695,6 +695,9 @@ where
         // gh#1206 P6: see `step3_iteration_limits`.
         max_iter: step3_iteration_limits(qp_opts, n, m).0,
         max_stall_iters: step3_iteration_limits(qp_opts, n, m).1,
+        // Back-solves dominate this QP at scale (gh#1214: 192 of 259 s on
+        // gh#1206's model); see `QpOptions::schur_lean_backsolves`.
+        schur_lean_backsolves: true,
         ..qp_opts.clone()
     };
     let mut qp_solver = ParametricActiveSetSolver::new(make_backend());
@@ -868,6 +871,8 @@ where
         },
         // A stuck step QP ends instead of taking the attempt's time.
         step_qp_max_stall_iters: sqp_opts.step_qp_max_stall_iters.or(Some(STEP3_STALL_ITERS)),
+        // Step 4's step QPs are step 3's QP re-centred (gh#1214).
+        step_qp_lean_schur: true,
         ..sqp_opts.clone()
     };
     let Some(mut sqp) = make_sqp(step4_opts) else {

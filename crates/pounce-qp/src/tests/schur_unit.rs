@@ -766,3 +766,278 @@ fn free_variables_get_no_k_max_slot_and_solves_are_unchanged() {
     }
     assert!(checked >= 40, "only {checked} solves compared");
 }
+
+// ---------------------------------------------------------------------------
+// gh#1214: back-solves per working-set change on the Schur path.
+// ---------------------------------------------------------------------------
+
+/// Back-solves `f` spends on `ls`.
+fn resolves_in(ls: &mut LinearSolver, f: impl FnOnce(&mut LinearSolver)) -> u64 {
+    let before = ls.time_split().n_resolve;
+    f(ls);
+    ls.time_split().n_resolve - before
+}
+
+/// A well-conditioned random QP with rows 0 and 1 and the bounds on `x₀`
+/// and `x₁` active at the reset, for the counting tests below.
+fn counting_fixture(rng: &mut Rng) -> (RandomQp, WorkingSet) {
+    let (n, m) = (8, 3);
+    let rq = RandomQp::new(rng, n, m, 4.0);
+    let mut w = WorkingSet::cold(n, m);
+    for slot in [0, 1, m, m + 1] {
+        set_slot(&mut w, m, slot, true);
+    }
+    (rq, w)
+}
+
+/// gh#1214: under `schur_lean_backsolves`, a drop of a slot that was active
+/// at the last reset costs one back-solve, not two — column `p` of `K_0` is
+/// the slot's normal, so `K_0⁻¹v = ±e_p + v_p·K_0⁻¹e_p` — for a general row
+/// and for a bound alike, and the update it builds solves like a fresh
+/// factor of the new K_max. Without the option the same drop pays two (the
+/// branch the gate keeps), and an add of a slot inactive at the reset pays
+/// one either way.
+#[test]
+fn a_lean_drop_of_a_base_active_slot_costs_one_backsolve() {
+    let opts = QpOptions::default();
+    for lean in [true, false] {
+        let mut rng = Rng(0x1214);
+        let (rq, mut w) = counting_fixture(&mut rng);
+        let (n, m) = (rq.n, rq.m);
+        let qp = rq.qp(HessianInertia::Psd);
+        let mut state = SchurState::new(n, m).with_lean_backsolves(lean);
+        let mut ls = linsol();
+        state.reset(&mut ls, &qp, &w, 4, &opts).unwrap();
+        let drop_cost = if lean { 1 } else { 2 };
+        // (slot, going active, expected back-solves)
+        for (slot, on, want) in [
+            (0, false, drop_cost), // base-active general row
+            (m, false, drop_cost), // base-active bound
+            (2, true, 1),          // base-inactive general row
+            (0, true, drop_cost),  // the first row again: still base-active
+        ] {
+            let got = resolves_in(&mut ls, |l| state.apply_change(l, &qp, slot, on).unwrap());
+            assert_eq!(got, want, "lean={lean} slot {slot} on={on}");
+            set_slot(&mut w, m, slot, on);
+            let rhs: Vec<f64> = (0..n + m + n).map(|_| rng.unit()).collect();
+            let (want_x, _) = fresh_k_max(&qp, &w, &rhs).expect("nonsingular K_max");
+            let mut x = rhs.clone();
+            state.solve(&mut ls, &mut x).unwrap();
+            let scale = want_x.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+            for (i, (&a, &b)) in x.iter().zip(want_x.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() <= 1e-10 * scale,
+                    "lean={lean} after slot {slot}: rhs[{i}] schur={a}, fresh={b}"
+                );
+            }
+        }
+    }
+}
+
+/// gh#1214: `K_0⁻¹b` depends on `b` and the base factor only, so a solve
+/// whose right-hand side matches the previous one's to the bit — every step
+/// after a drop, where `x` and so `b` do not move — reuses it: one back-solve
+/// fewer, and the same bits as a state that paid for it. A reset discards
+/// it, since the factor it came from is gone. Not gated: it changes nothing
+/// but the count.
+#[test]
+fn a_repeated_right_hand_side_reuses_its_first_backsolve() {
+    let opts = QpOptions::default();
+    let mut rng = Rng(0x7a1e);
+    let (rq, w) = counting_fixture(&mut rng);
+    let (n, m) = (rq.n, rq.m);
+    let qp = rq.qp(HessianInertia::Psd);
+    let b: Vec<f64> = (0..n + m + n).map(|_| rng.unit()).collect();
+
+    // Reused: solve `b`, drop row 0, solve `b` again.
+    let mut a = SchurState::new(n, m);
+    let mut la = linsol();
+    a.reset(&mut la, &qp, &w, 4, &opts).unwrap();
+    let mut xa = b.clone();
+    a.solve(&mut la, &mut xa).unwrap();
+    a.apply_change(&mut la, &qp, 0, false).unwrap();
+    let mut xa = b.clone();
+    let reused = resolves_in(&mut la, |l| a.solve(l, &mut xa).unwrap());
+
+    // Paid for: the same drop, `b` solved once.
+    let mut c = SchurState::new(n, m);
+    let mut lc = linsol();
+    c.reset(&mut lc, &qp, &w, 4, &opts).unwrap();
+    c.apply_change(&mut lc, &qp, 0, false).unwrap();
+    let mut xc = b.clone();
+    let paid = resolves_in(&mut lc, |l| c.solve(l, &mut xc).unwrap());
+
+    assert_eq!(
+        reused + 1,
+        paid,
+        "the repeated solve skips exactly one back-solve"
+    );
+    for (i, (&p, &q)) in xa.iter().zip(xc.iter()).enumerate() {
+        assert_eq!(p.to_bits(), q.to_bits(), "rhs[{i}]: reused {p} vs paid {q}");
+    }
+
+    // A reset forgets it: the first solve after one pays in full.
+    let mut w1 = w.clone();
+    set_slot(&mut w1, m, 0, false);
+    a.reset(&mut la, &qp, &w1, 3, &opts).unwrap();
+    let mut fresh = SchurState::new(n, m);
+    let mut lf = linsol();
+    fresh.reset(&mut lf, &qp, &w1, 3, &opts).unwrap();
+    let mut xa = b.clone();
+    let after_reset = resolves_in(&mut la, |l| a.solve(l, &mut xa).unwrap());
+    let mut xf = b.clone();
+    let fresh_cost = resolves_in(&mut lf, |l| fresh.solve(l, &mut xf).unwrap());
+    assert_eq!(after_reset, fresh_cost);
+    assert!(after_reset >= 1);
+}
+
+/// gh#1214: under `schur_lean_backsolves`, refinement stops once the residual
+/// is inside its own rounding error. On a well-conditioned K_max the first
+/// SMW solve is usually already there, so most solves are one back-solve and
+/// none costs more than without the option, where the gain test spends at
+/// least one correction on every solve. The answers agree to round-off.
+#[test]
+fn lean_refinement_stops_at_the_round_off_floor() {
+    let opts = QpOptions::default();
+    let mut rng = Rng(0xf100);
+    let (rq, w) = counting_fixture(&mut rng);
+    let (n, m) = (rq.n, rq.m);
+    let qp = rq.qp(HessianInertia::Psd);
+    let mut solved = Vec::new();
+    let mut all_costs = Vec::new();
+    for lean in [true, false] {
+        let mut rng = Rng(0xf101);
+        let mut state = SchurState::new(n, m).with_lean_backsolves(lean);
+        let mut ls = linsol();
+        state.reset(&mut ls, &qp, &w, 4, &opts).unwrap();
+        state.apply_change(&mut ls, &qp, 2, true).unwrap();
+        state.apply_change(&mut ls, &qp, m + 1, false).unwrap();
+        let mut costs = Vec::new();
+        let mut xs = Vec::new();
+        for _ in 0..5 {
+            let mut x: Vec<f64> = (0..n + m + n).map(|_| rng.unit()).collect();
+            costs.push(resolves_in(&mut ls, |l| state.solve(l, &mut x).unwrap()));
+            xs.push(x);
+        }
+        solved.push(xs);
+        all_costs.push(costs);
+    }
+    let (lean, unlean) = (&all_costs[0], &all_costs[1]);
+    assert!(unlean.iter().all(|&c| c >= 2), "unlean costs {unlean:?}");
+    assert!(
+        lean.iter().zip(unlean.iter()).all(|(l, u)| l <= u),
+        "lean {lean:?} vs unlean {unlean:?}"
+    );
+    assert!(
+        lean.iter().filter(|&&c| c == 1).count() >= 3,
+        "lean costs {lean:?}: the floor should end most solves after one back-solve"
+    );
+    for (xl, xu) in solved[0].iter().zip(solved[1].iter()) {
+        let scale = xu.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+        for (&a, &b) in xl.iter().zip(xu.iter()) {
+            assert!((a - b).abs() <= 1e-13 * scale, "lean {a} vs unlean {b}");
+        }
+    }
+}
+
+/// A FERAL backend whose back-solves against a cached factor come back with
+/// a relative error of `1e-9` — an approximate inverse, which is what a
+/// perturbed or statically pivoted factor is. Factorizations are untouched.
+struct NoisyBacksolve(FeralSolverInterface);
+
+impl pounce_linsol::SparseSymLinearSolverInterface for NoisyBacksolve {
+    fn initialize_structure(
+        &mut self,
+        dim: pounce_common::Index,
+        nonzeros: pounce_common::Index,
+        ia: &[pounce_common::Index],
+        ja: &[pounce_common::Index],
+    ) -> pounce_linsol::ESymSolverStatus {
+        self.0.initialize_structure(dim, nonzeros, ia, ja)
+    }
+    fn values_array_mut(&mut self) -> &mut [f64] {
+        self.0.values_array_mut()
+    }
+    fn multi_solve(
+        &mut self,
+        new_matrix: bool,
+        ia: &[pounce_common::Index],
+        ja: &[pounce_common::Index],
+        nrhs: pounce_common::Index,
+        rhs_vals: &mut [f64],
+        check_neg_evals: bool,
+        number_of_neg_evals: pounce_common::Index,
+    ) -> pounce_linsol::ESymSolverStatus {
+        let st = self.0.multi_solve(
+            new_matrix,
+            ia,
+            ja,
+            nrhs,
+            rhs_vals,
+            check_neg_evals,
+            number_of_neg_evals,
+        );
+        if !new_matrix {
+            for (i, v) in rhs_vals.iter_mut().enumerate() {
+                *v *= 1.0 + if i % 2 == 0 { 1e-9 } else { -1e-9 };
+            }
+        }
+        st
+    }
+    fn number_of_neg_evals(&self) -> pounce_common::Index {
+        self.0.number_of_neg_evals()
+    }
+    fn increase_quality(&mut self) -> bool {
+        false
+    }
+    fn provides_inertia(&self) -> bool {
+        self.0.provides_inertia()
+    }
+    fn matrix_format(&self) -> pounce_linsol::EMatrixFormat {
+        self.0.matrix_format()
+    }
+}
+
+/// gh#1214, the other branch of the round-off stop: a residual that is real
+/// is still refined. With back-solves carrying a `1e-9` relative error the
+/// first SMW solve is far above the floor, so a lean solve must keep
+/// correcting — more than one back-solve — and land as close to the exact
+/// solution as the unlean one does.
+#[test]
+fn lean_refinement_still_refines_a_residual_above_the_floor() {
+    let opts = QpOptions::default();
+    let mut rng = Rng(0xbad5);
+    let (rq, w) = counting_fixture(&mut rng);
+    let (n, m) = (rq.n, rq.m);
+    let qp = rq.qp(HessianInertia::Psd);
+    let mut w1 = w.clone();
+    set_slot(&mut w1, m, 2, true);
+    set_slot(&mut w1, m, m + 1, false);
+    for lean in [true, false] {
+        let mut rng = Rng(0xbad6);
+        let mut state = SchurState::new(n, m).with_lean_backsolves(lean);
+        let mut ls = LinearSolver::new(Box::new(NoisyBacksolve(FeralSolverInterface::new())));
+        state.reset(&mut ls, &qp, &w, 4, &opts).unwrap();
+        state.apply_change(&mut ls, &qp, 2, true).unwrap();
+        state.apply_change(&mut ls, &qp, m + 1, false).unwrap();
+        for _ in 0..5 {
+            let rhs: Vec<f64> = (0..n + m + n).map(|_| rng.unit()).collect();
+            let (want, _) = fresh_k_max(&qp, &w1, &rhs).expect("nonsingular K_max");
+            let mut x = rhs.clone();
+            let cost = resolves_in(&mut ls, |l| state.solve(l, &mut x).unwrap());
+            assert!(
+                cost >= 2,
+                "lean={lean}: {cost} back-solve(s) left a 1e-9 error unrefined"
+            );
+            let scale = want.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+            let err = x
+                .iter()
+                .zip(want.iter())
+                .fold(0.0_f64, |e, (&a, &b)| e.max((a - b).abs()));
+            assert!(
+                err <= 1e-13 * scale,
+                "lean={lean}: error {err:.3e} against {scale:.3e}"
+            );
+        }
+    }
+}

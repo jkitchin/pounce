@@ -4001,7 +4001,8 @@ impl ParametricActiveSetSolver {
         }
 
         // Initialize Schur and factor the base K_max.
-        let mut schur = crate::schur::SchurState::for_problem(qp);
+        let mut schur = crate::schur::SchurState::for_problem(qp)
+            .with_lean_backsolves(opts.schur_lean_backsolves);
         self.schur_reset_rank_repaired(
             &mut schur,
             qp,
