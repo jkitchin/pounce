@@ -1,0 +1,95 @@
+name: Bug report
+description: A wrong answer, a failed or slow solve, a crash, or a frontend that misbehaves.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A solver bug is usually only fixable if we can
+        re-run your model, so the most useful thing you can attach is the
+        model itself, as a `.nl` file. Most frontends can write one; with
+        Pyomo, `model.write("problem.nl")`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The status, objective and iteration count POUNCE reported, and what is wrong with them.
+      placeholder: |
+        pounce returns Restoration_Failed after 212 iterations.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and how you know
+      description: |
+        An oracle if you have one: Ipopt's result on the same model, a
+        published optimum, a closed-form answer, or an earlier POUNCE
+        version that worked (which one?).
+      placeholder: |
+        Ipopt 3.14 solves it in 31 iterations, objective 1.2345.
+        pounce 0.16.0 also solved it.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: frontend
+    attributes:
+      label: How you call POUNCE
+      multiple: true
+      options:
+        - CLI (`pounce problem.nl`)
+        - Python (`pounce-solver`)
+        - Pyomo (`pyomo-pounce`)
+        - CasADi plugin
+        - GAMS link
+        - C interface
+        - Rust crate
+        - Browser / Pyodide
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: |
+        The command or script, with every option you set. Attach the model
+        (`.nl`, or a short script that builds it) by dragging it into this
+        box. Zip it if GitHub refuses the extension.
+      placeholder: |
+        pounce problem.nl tol=1e-8 mu_strategy=adaptive --json-output report.json
+    validations:
+      required: true
+
+  - type: textarea
+    id: about
+    attributes:
+      label: Version and build
+      description: Output of `pounce --about`. From Python, `python -c "import pounce; print(pounce.__version__)"` plus your OS.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: Solve log or JSON report
+      description: |
+        The console output, or better, the report from
+        `--json-output report.json` (add `--json-detail full` for the
+        per-iteration record). Attach large files instead of pasting them.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: What you already tried (other options, warm starts, scaling), and whether it changed anything.
+    validations:
+      required: false
