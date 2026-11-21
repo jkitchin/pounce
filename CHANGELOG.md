@@ -388,13 +388,9 @@ changes.
   for good. Two pounce-only limits caused this. The filter acceptor's
   `CalculateAlphaMin` was clamped from below to `1e-12`, and a sweep was
   capped at 50 trials. The acceptor's value is now used as is, with `1e-12`
-  only when the acceptor's value is `0`. That includes the filter acceptor
-  at an *exactly* feasible iterate with descent (`θ = 0` zeroes
-  `CalculateAlphaMin`), so that common path keeps the old floor. A *nearly*
-  feasible iterate now gets the much deeper upstream floor. At `θ = 1e-200`
-  that is about `5e-226`, i.e. up to 750 trials from `alpha = 1`, where
-  `θ = 0` stops after about 40. The trial budget is now whatever it takes to
-  reach `alpha_min`. Both reported runs now succeed on
+  only when the acceptor's value is `0`, and as a lower bound in the
+  filter's switching region `θ ≤ θ_min` (gh#1226, next entry). The trial
+  budget is now whatever it takes to reach `alpha_min`. Both reported runs now succeed on
   the first solve: 64 iterations from the optimum, as Ipopt does, and 124
   cold at mean 450. Fixture sweep: `dallass` (lbfgs) goes from
   `Error_In_Step_Computation` to solved. Three infeasibility fixtures keep
@@ -404,6 +400,28 @@ changes.
   `cc:design_cent_3` (lbfgs) moves 10967 → 11031 inner iterations. Each of
   these accepts a step below the old clamp that previously went to
   restoration.
+- **The `1e-12` step floor holds again in the filter's switching region**
+  (gh#1226). The previous entry let a *nearly* feasible iterate backtrack to
+  the acceptor's floor, whose `δ·θ^{s_θ}/(−∇φᵀd)^{s_φ}` term falls with `θ`
+  itself (`5e-226` at `θ = 1e-200`). discopt's `max` and norm models are
+  NLPs with an objective that is nonsmooth at the iterate. They reach the
+  kink at `θ ≈ 1e-15`, and `‖d‖` grows every iteration. Each iteration
+  backtracked 30–46 times and accepted an `f`-step near `alpha = 1e-25`
+  that left the objective fixed to eight digits, until `max_iter`. Before
+  the previous entry these solves failed after 35–54 iterations, an outcome
+  discopt expects. After it they ran 3000, and the B&B solves became 5–37×
+  slower: 0.7 s → 27 s on `min ‖v‖_∞`. One of them also returned a
+  different point (`min max(v)`: 1.4 → 1.400006690639468). The floor is
+  now `max(1e-12, CalculateAlphaMin)` when `θ ≤ θ_min` and the acceptor's
+  value outside that region. gh#1217's step is outside it (`θ = 4e3`; the
+  value is deep because `−∇φᵀd` is huge), and both gh#1217 runs still
+  solve on the first solve. The four discopt models are back to their
+  pre-gh#1217 times and answers. Fixture sweep against the parent, 304
+  lines, 3 move: `issue_508_infeasible_gap_1em4` (exact) returns to
+  441/1828 iterations, and `cc:design_cent_3` (lbfgs) to 9550 inner
+  iterations. `dallass` (lbfgs) returns to `Error_In_Step_Computation`. It
+  had been solved only by accepting a null step (`alpha = 1.0e-13` along
+  `‖d‖ = 1.1e-3` at iteration 163); see `dev-notes/known-limitations.md`.
 - **A square problem's restoration certificate counts at `constr_viol_tol`**
   (gh#1217). The gh#1000 counter honours a locally-infeasible certificate
   on a square problem after 20 repeats at the same point. It compared the

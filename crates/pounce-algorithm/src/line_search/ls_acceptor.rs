@@ -62,6 +62,19 @@ pub trait BacktrackingLsAcceptor {
         0.0
     }
 
+    /// Whether `theta` lies in the acceptor's switching-condition region,
+    /// `theta <= theta_min` (`IpFilterLSAcceptor.cpp`'s Armijo regime), as
+    /// fixed by the last [`Self::calc_alpha_min`] call. There the deepest
+    /// term of `calc_alpha_min`, `delta·theta^s_theta/(-d_phi)^s_phi`,
+    /// falls with `theta` itself, so the floor it reports says how close
+    /// the iterate is to feasible rather than how long the step is. The
+    /// backtracking driver keeps its own `1e-12` under that floor there
+    /// (gh#1226). Default `false`: an acceptor with no `theta_min` reports
+    /// no floor either, and gets the driver's.
+    fn in_switching_region(&self, _theta: Number) -> bool {
+        false
+    }
+
     /// Tell the acceptor the round-off floor of `theta` at the current
     /// iterate (gh#945), in `theta`'s own units. Default: ignore it, which
     /// is what every acceptor without a filter does.

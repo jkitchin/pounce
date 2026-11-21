@@ -134,41 +134,52 @@ use std::rc::Rc;
 const ALPHA_INTERP_MIN_TRIALS: i32 = 6;
 
 /// The smallest step the backtracking loop tries before it gives up on
-/// the direction (gh#1217).
+/// the direction (gh#1217, gh#1226).
 ///
 /// Upstream's loop is `while (alpha_primal >= alpha_min || n_steps == 0)`
 /// with `alpha_min` from the acceptor's `CalculateAlphaMin` and nothing
 /// else (`IpBacktrackingLineSearch.cpp:740`). The filter acceptor's value
 /// is `alpha_min_frac · min(γ_θ, γ_φ·θ/(−∇φᵀd), δ·θ^{s_θ}/(−∇φᵀd)^{s_φ})`,
-/// which falls far below `1e-12` whenever the directional derivative is
-/// large. pounce used to clamp it to `driver_floor` (the `alpha_min` field,
-/// `1e-12`) from below, so on such a step it went to restoration where
-/// upstream keeps halving. gh#1217's maximum-entropy model is the case:
-/// at iteration 20 of the solve started at the optimum, the step has
-/// `‖d‖ = 3.7e17` and upstream accepts it after 75 halvings at
-/// `α = 5.2e-23`; pounce stopped at `1.8e-12`, entered restoration, and
-/// never came back (`Error_In_Step_Computation` where Ipopt converges in
-/// 64 iterations — pounce now reproduces those 64 line for line).
+/// the last term only in the switching region `θ ≤ θ_min`. pounce used to
+/// clamp it to `driver_floor` (the `alpha_min` field, `1e-12`) from below
+/// everywhere. Since gh#1217 it does so only in the switching region:
 ///
-/// `driver_floor` remains the answer whenever the acceptor's value is `0`,
-/// which a zero `alpha_min` would otherwise let the loop halve to
-/// underflow. That happens in two places, and the second is the common
-/// one:
+/// * **Outside it (`θ > θ_min`) the acceptor's value is used as is.** There
+///   it falls below `1e-12` only through `γ_φ·θ/(−∇φᵀd)`, i.e. because
+///   the directional derivative is huge — a long step, which may need a
+///   tiny `α` to move a sensible distance. gh#1217's maximum-entropy model
+///   is the case: at iteration 20 of the solve started at the optimum,
+///   `θ = 4.0e3`, the step has `‖d‖ = 3.7e17`, and upstream accepts it
+///   after 75 halvings at `α = 5.2e-23`; the clamp sent it to restoration
+///   instead, and it never came back (`Error_In_Step_Computation` where
+///   Ipopt converges in 64 iterations — pounce reproduces those 64 line
+///   for line).
+/// * **Inside it (`θ ≤ θ_min`) the floor stays at least `driver_floor`.**
+///   There `δ·θ^{s_θ}` falls with `θ` itself, so at a nearly feasible
+///   iterate the acceptor's value says how close to feasible the point is,
+///   not how long the step is: `5e-226` at `θ = 1e-200`, `−∇φᵀd = 1`.
+///   gh#1226 is what using it costs. discopt's `max`/norm objectives are
+///   nonsmooth at the iterate, `θ ≈ 1e-15`, and `‖d‖` grows each iteration
+///   (to `1.8e11`): every iteration backtracked 30–46 times and accepted an
+///   `f`-step near `α = 1e-25` that left the objective fixed to eight
+///   digits, until `max_iter` — 5–37× the wall time of the restoration
+///   exit this floor sends such an iterate to, as it did before gh#1217.
 ///
-/// * an acceptor with no floor of its own (the trait default returns `0`);
-/// * the filter acceptor at an **exactly feasible** iterate with descent:
-///   `θ = 0` zeroes both descent terms, so `CalculateAlphaMin` is `0` and
-///   the old `1e-12` floor still applies.
-///
-/// A *nearly* feasible iterate is the sharp edge of that: its floor is
-/// `≈ θ^{s_θ}/(−∇φᵀd)^{s_φ}`, far below `1e-12` (`5e-226` at
-/// `θ = 1e-200`, `−∇φᵀd = 1`), so a sweep there may run hundreds of
-/// trials (750 from `alpha = 1` at the default `0.5` factor) — see
-/// [`trials_to_reach`] — where `θ = 0` stops after ~40. Upstream has the
-/// same edge, except that at `θ = 0` it halves on until `alpha` underflows.
-fn effective_alpha_min(acceptor_alpha_min: Number, driver_floor: Number) -> Number {
+/// `driver_floor` is also the answer whenever the acceptor's value is not
+/// a positive finite number: an acceptor with no floor of its own (the
+/// trait default returns `0`), and the filter acceptor at an **exactly**
+/// feasible iterate with descent, where `θ = 0` zeroes both descent terms.
+fn effective_alpha_min(
+    acceptor_alpha_min: Number,
+    driver_floor: Number,
+    in_switching_region: bool,
+) -> Number {
     if acceptor_alpha_min > 0.0 && acceptor_alpha_min.is_finite() {
-        acceptor_alpha_min
+        if in_switching_region {
+            acceptor_alpha_min.max(driver_floor)
+        } else {
+            acceptor_alpha_min
+        }
     } else {
         driver_floor
     }
@@ -320,9 +331,10 @@ pub struct BacktrackingLineSearch {
     /// Mirrors upstream's `watchdog_trial_iter_max` (default 3).
     pub watchdog_trial_iter_max: i32,
     /// Smallest α tried when the acceptor reports no floor of its own
-    /// (its `calc_alpha_min` returns `0`). When it does report one — the
-    /// filter acceptor always does, upstream's `CalculateAlphaMin` — that
-    /// value is used as is, however small; see [`effective_alpha_min`].
+    /// (its `calc_alpha_min` returns `0`), and the least floor in the
+    /// acceptor's switching region (`θ ≤ θ_min`). Outside that region the
+    /// acceptor's floor — upstream's `CalculateAlphaMin` — is used as is,
+    /// however small; see [`effective_alpha_min`].
     pub alpha_min: Number,
     /// `filter_theta_roundoff_retry` (gh#945) — whether a line search that
     /// has run out of `alpha` at an iterate that is *already feasible to
@@ -1431,7 +1443,11 @@ impl BacktrackingLineSearch {
             alpha_init
         } else {
             let acceptor_alpha_min = self.acceptor.calc_alpha_min(d_phi, theta);
-            effective_alpha_min(acceptor_alpha_min, self.alpha_min)
+            effective_alpha_min(
+                acceptor_alpha_min,
+                self.alpha_min,
+                self.acceptor.in_switching_region(theta),
+            )
         };
         let max_trials =
             trials_to_reach(alpha, alpha_min_eff, self.alpha_red_factor, self.max_trials);
@@ -2488,37 +2504,83 @@ mod tests {
         bls
     }
 
-    /// gh#1217: the filter acceptor's `alpha_min` is upstream's floor and
-    /// is not raised to the driver's `1e-12`.
+    /// gh#1217: outside the switching region the filter acceptor's
+    /// `alpha_min` is upstream's floor and is not raised to the driver's
+    /// `1e-12`.
     #[test]
-    fn acceptor_alpha_min_below_the_driver_floor_is_kept() {
-        assert_eq!(effective_alpha_min(5e-24, 1e-12), 5e-24);
-        assert_eq!(effective_alpha_min(1e-3, 1e-12), 1e-3);
+    fn acceptor_alpha_min_below_the_driver_floor_is_kept_outside_the_switching_region() {
+        assert_eq!(effective_alpha_min(5e-24, 1e-12, false), 5e-24);
+        assert_eq!(effective_alpha_min(1e-3, 1e-12, false), 1e-3);
+    }
+
+    /// gh#1226: inside it the driver floor stays under the acceptor's, and
+    /// an acceptor floor above it is unaffected.
+    #[test]
+    fn the_switching_region_keeps_the_driver_floor() {
+        assert_eq!(effective_alpha_min(5e-24, 1e-12, true), 1e-12);
+        assert_eq!(effective_alpha_min(1e-3, 1e-12, true), 1e-3);
+    }
+
+    /// The filter acceptor's own answers on both sides of `θ_min`
+    /// (`1e-4` once initialised from a reference `θ ≤ 1`), pinned against
+    /// the two iterates the floor was set by.
+    ///
+    /// * gh#1226: nearly feasible (`θ = 1e-15`) with a long step — the
+    ///   acceptor's value is far below `1e-12` only because `θ` is small;
+    ///   the floor is the driver's.
+    /// * gh#1217's iteration 20: `θ = 4.0e3` with `−∇φᵀd` huge — the
+    ///   acceptor's value is far below `1e-12` because the step is long;
+    ///   it is kept. (`θ_min` there is the solve's, initialised below `θ`.)
+    #[test]
+    fn the_filter_acceptor_floor_on_each_side_of_theta_min() {
+        let mut acc = FilterLsAcceptor::new();
+        let near_feasible = acc.calc_alpha_min(-1e11, 1e-15);
+        assert!(acc.in_switching_region(1e-15));
+        assert!(near_feasible < 1e-30, "got {near_feasible}");
+        assert_eq!(
+            effective_alpha_min(near_feasible, 1e-12, acc.in_switching_region(1e-15)),
+            1e-12
+        );
+
+        let long_step = acc.calc_alpha_min(-1e20, 4.0e3);
+        assert!(!acc.in_switching_region(4.0e3));
+        assert!(long_step < 1e-20, "got {long_step}");
+        assert_eq!(
+            effective_alpha_min(long_step, 1e-12, acc.in_switching_region(4.0e3)),
+            long_step
+        );
     }
 
     /// The common path into the driver floor (gh#1217 review): at an
     /// exactly feasible iterate with descent the filter's own `alpha_min`
-    /// is `alpha_min_frac · min(γ_θ, γ_φ·0/(−∇φᵀd), δ·0^{s_θ}/…) = 0`, so
-    /// `θ = 0` keeps the old `1e-12` floor while a nearly feasible iterate
-    /// gets the acceptor's far deeper one.
+    /// is `alpha_min_frac · min(γ_θ, γ_φ·0/(−∇φᵀd), δ·0^{s_θ}/…) = 0`.
     #[test]
     fn an_exactly_feasible_iterate_keeps_the_driver_floor() {
         let mut acc = FilterLsAcceptor::new();
         let at_zero = acc.calc_alpha_min(-1.0, 0.0);
         assert_eq!(at_zero, 0.0);
-        assert_eq!(effective_alpha_min(at_zero, 1e-12), 1e-12);
-        let near_zero = acc.calc_alpha_min(-1.0, 1e-200);
-        assert!(near_zero > 0.0 && near_zero < 1e-200, "got {near_zero}");
-        assert_eq!(effective_alpha_min(near_zero, 1e-12), near_zero);
+        assert_eq!(effective_alpha_min(at_zero, 1e-12, false), 1e-12);
+        assert_eq!(effective_alpha_min(at_zero, 1e-12, true), 1e-12);
     }
 
     /// The other branch: an acceptor with no floor (the trait default `0`,
-    /// or a non-finite value) gets the driver's.
+    /// or a non-finite value) gets the driver's, on either side.
     #[test]
     fn acceptor_without_a_floor_gets_the_driver_floor() {
-        assert_eq!(effective_alpha_min(0.0, 1e-12), 1e-12);
-        assert_eq!(effective_alpha_min(Number::NAN, 1e-12), 1e-12);
-        assert_eq!(effective_alpha_min(Number::INFINITY, 1e-12), 1e-12);
+        for region in [false, true] {
+            assert_eq!(effective_alpha_min(0.0, 1e-12, region), 1e-12);
+            assert_eq!(effective_alpha_min(Number::NAN, 1e-12, region), 1e-12);
+            assert_eq!(effective_alpha_min(Number::INFINITY, 1e-12, region), 1e-12);
+        }
+    }
+
+    /// The default acceptor reports no switching region.
+    #[test]
+    fn the_default_acceptor_has_no_switching_region() {
+        let plain = RecordingAcceptor {
+            first_alpha: Rc::new(RefCell::new(None)),
+        };
+        assert!(!plain.in_switching_region(0.0));
     }
 
     /// gh#1217's sweep: 75 halvings from `α ≈ 1` to `5.2e-23` must fit in

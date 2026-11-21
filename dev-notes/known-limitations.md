@@ -248,14 +248,54 @@ iterations. On `1em2` Ipopt takes 83 (exact) and 84 (lbfgs). The old clamp
 reached the same verdicts sooner only by happening to send these orbits to
 restoration. Restoring the clamp would bring back gh#1217's failure.
 
+### Update: the floor holds in the switching region again (gh#1226)
+
+*Measured on `claude/eloquent-cerf-rt8q3r` against `main` at `04d4ea5`,
+`scripts/sweep-fixtures.sh`, both legs, 304 lines. Recorded 2026-11-21.*
+
+Dropping the clamp everywhere also dropped it where the acceptor's floor
+comes from the `δ·θ^{s_θ}/(−∇φᵀd)^{s_φ}` term, which is applied only for
+`θ ≤ θ_min` and falls with `θ` itself. A nearly feasible iterate with a
+poor direction then accepts null steps until `max_iter`. discopt's
+nonsmooth `max`/norm NLPs do exactly that (gh#1226;
+`crates/pounce-algorithm/tests/issue_1226_nonsmooth_null_steps.rs`). The
+clamp now holds for `θ ≤ θ_min` and nowhere else. gh#1217's iteration 20 is
+at `θ = 4e3`, so it is unaffected. Against `04d4ea5`, 3 lines move:
+
+| fixture | leg | `04d4ea5` | `θ ≤ θ_min` clamp |
+|---|---|---|---|
+| `issue_508_infeasible_gap_1em4` | exact | infeasible, it=569, tot=2502 | infeasible, it=441, tot=1828 (`22ae155`'s) |
+| `cc:design_cent_3` | lbfgs | solved, inner tot=11031 | solved, inner tot=9550 |
+| `dallass` | lbfgs | solved (`mu=monotone` re-solve), it=174 | `Error_In_Step_Computation`, it=243 (`22ae155`'s verdict) |
+
+The two other lines in the table above, `issue_508_infeasible_gap_1em2`
+(lbfgs) and `circle_parabola_t1p5` (lbfgs), do not move. Their sub-`1e-12`
+steps are taken outside the switching region, and they remain open as
+described above.
+
+**`dallass` (lbfgs) is a regression against `04d4ea5`, and it is accepted.**
+Run with `print_level=5`, the two binaries agree through iteration 162.
+At iteration 163 `04d4ea5` accepts `alpha = 1.04e-13` after 32 trials
+along `‖d‖ = 1.14e-3`. That step moves the iterate by about `1e-16`, i.e.
+it does not move it at all, at `θ ≈ 7.6e-15`, inside the switching region.
+The first attempt then went on to `Solved_To_Acceptable_Level` at 414
+iterations, and the `mu_strategy_fallback` re-solve was promoted. With the
+clamp, iteration 162 stops at `1.67e-12`, restoration follows, and the
+solve ends `Error_In_Step_Computation` at 243 with no fallback, as it did
+on `22ae155`. The win came from accepting a null step: exactly the class
+of step gh#1226 stops accepting. No floor that rejects gh#1226's
+`~1e-14` moves can accept this `~1e-16` one.
+
 ### How to tell whether a fix works
 
-A fix shortens these lines with all four statuses unchanged and leaves
-`crates/pounce-cli/tests/issue_1217_max_entropy.rs` green. That file pins
-the step below `1e-12` taken after more than 50 trials. Restoring the clamp
-for infeasible-looking iterates alone is the obvious candidate. It needs a
-signal that separates these orbits from gh#1217's iteration 20, whose
-`theta` is `4.0e3` and far from any floor.
+A fix for the two remaining lbfgs lines shortens them with both statuses
+unchanged and leaves `crates/pounce-cli/tests/issue_1217_max_entropy.rs` and
+`crates/pounce-algorithm/tests/issue_1226_nonsmooth_null_steps.rs` green.
+The first pins a step below `1e-12` taken after more than 50 trials outside
+the switching region. The second pins the clamp inside it. A fix for
+`dallass` (lbfgs) has to reach its answer without iteration 163's null
+step. The likelier lever is the L-BFGS model or the `mu_strategy_fallback`
+trigger, not the line-search floor.
 
 ---
 
