@@ -3042,12 +3042,16 @@ impl IpoptNlp for OrigIpoptNlp {
             // `GetIpoptCurrentIterate`. The sibling `pack_z_*_for_user` /
             // `pack_lambda_for_user` scatters already lift it out. gh#698.
             let c_vals = dc.expanded_values();
+            // `c` is the scaled residual `s·(g − rhs)` that `eval_c_internal`
+            // forms, so the row's `g` adds the right-hand side back, as
+            // upstream `TNLPAdapter::ResortG(…, correctrhs = true)` does.
             for (i, &g_idx) in cls.c_map.iter().enumerate() {
                 let v = c_vals[i];
-                g[g_idx as usize] = match cs.as_ref() {
+                let residual = match cs.as_ref() {
                     Some(s) => v / s[i],
                     None => v,
                 };
+                g[g_idx as usize] = residual + self.c_rhs[i];
             }
         }
         if cls.n_d > 0 {

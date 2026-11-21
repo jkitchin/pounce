@@ -177,6 +177,23 @@ where
     CURRENT.with(|c| c.borrow().as_ref().map(f))
 }
 
+/// The objective in the user's own units at the installed iterate, from the
+/// `IterStats::obj_value` the algorithm reports alongside it.
+///
+/// `obj_value` is the algorithm's `curr_f()`: the user's objective times the
+/// total objective scale (`obj_scaling_factor`, gradient-based scaling, or a
+/// sign flip). The installed iterate carries that scale, so dividing it back
+/// out costs no evaluation and gives what upstream passes to
+/// `intermediate_callback` (`unscaled_curr_f()`). `None` when no iterate is
+/// installed (outside a callback window, during restoration, or for a TNLP
+/// whose `wants_current_iterate` is false) or its scale is zero; the caller
+/// then decides what to report.
+pub fn unscaled_objective(obj_value: Number) -> Option<Number> {
+    with_current_user_iterate(|it| it.scaling.as_ref().map_or(1.0, |s| s.obj))
+        .filter(|&scale| scale != 0.0)
+        .map(|scale| obj_value / scale)
+}
+
 /// A copy of the installed iterate, for a decorator about to lift it.
 pub fn current_user_iterate() -> Option<UserIterate> {
     CURRENT.with(|c| c.borrow().clone())

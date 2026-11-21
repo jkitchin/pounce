@@ -27,6 +27,12 @@
 const PYODIDE_VERSION = '0.28.3';
 const params = new URLSearchParams(self.location.search);
 const PYODIDE_URL = params.get('pyodide') || `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
+// Pinned for the same reason: micropip takes Pyomo from PyPI, and an unpinned
+// install would let a Pyomo release change (or break) both Pyomo routes and
+// the CI test that runs this one. Keep it in step with PYOMO_VERSION in
+// crates/pounce-wasm/tests/pyomo_pounce_pyodide.mjs. `?pyomo=<url>[,<url>…]`
+// still overrides it.
+const PYOMO_VERSION = '6.11.0';
 
 // The emscripten build of `pounce-solver` is named by a manifest that
 // `crates/pounce-wasm/build-wheel.sh` writes beside it, rather than by a
@@ -188,6 +194,12 @@ const ready = (async () => {
 // negative lookahead, which is the difference between the two routes here.
 const WANTS_POUNCE = /^[ \t]*(?:import|from)[ \t]+pounce(?![\w])/m;
 const WANTS_PYOMO = /^[ \t]*(?:import|from)[ \t]+(?:pyomo|pounce_browser)(?![\w])/m;
+// pyomo-pounce solves in-process through the `pounce` package, so a script
+// that imports it needs that wheel and not the standalone module. Its own
+// `import pyomo.environ` matches WANTS_PYOMO, so the standalone module is
+// loaded for it only when it names `pounce_browser` too.
+const WANTS_PYOMO_POUNCE = /^[ \t]*(?:import|from)[ \t]+pyomo_pounce(?![\w])/m;
+const WANTS_POUNCE_BROWSER = /^[ \t]*(?:import|from)[ \t]+pounce_browser(?![\w])/m;
 // `pylab` and `mpl_toolkits` are matplotlib too, and a script that reaches for
 // either without naming matplotlib is otherwise indistinguishable from one
 // that does not plot at all.
@@ -240,6 +252,31 @@ plt.show = lambda *args, **kwargs: _pounce_flush_figures()
   say('ready');
 }
 
+// pyomo-pounce's solves and sensitivity calls use numpy and none of
+// pounce-solver's scipy paths (`minimize`, `curve_fit`, the QP helpers), and
+// pandas only for `Jacobian.to_dataframe()`. So this route installs both
+// wheels without their dependencies and skips the ~20 MB of scipy, OpenBLAS
+// and pandas. A script that also imports `pounce` for those paths gets scipy
+// from `installPounceSolver`.
+async function installPyomoPounce() {
+  say('installing pounce-solver, Pyomo and pyomo-pounce…');
+  await pyodide.loadPackage('numpy');
+  await micropip.install.callKwargs(await pounceWheelUrl(), { deps: false });
+  const wheels = params.get('pyomo');
+  await micropip.install(wheels ? wheels.split(',') : `pyomo==${PYOMO_VERSION}`);
+  // `build.sh` builds pyomo-pounce beside the pounce-solver wheel and names
+  // it in its own manifest: pyomo-pounce is released on its own version, so
+  // its file name cannot be derived from `pounce-wheel.json`.
+  const res = await fetch('./wheels/pyomo-pounce-wheel.json');
+  if (!res.ok) {
+    throw new Error('no pyomo-pounce wheel is deployed here. Run crates/pounce-wasm/build.sh.');
+  }
+  const manifest = await res.json();
+  const wheel = new URL(`./wheels/${manifest.wheel}`, self.location.href).href;
+  await micropip.install.callKwargs(wheel, { deps: false });
+  say('ready');
+}
+
 async function installPyomoRoute() {
   say('loading the POUNCE solver module…');
   await loadSolver();
@@ -250,7 +287,7 @@ async function installPyomoRoute() {
   // be built for wasm. `?pyomo=<url>[,<url>…]` points at self-hosted wheels
   // (offline, or where PyPI is unreachable); the default resolves from PyPI.
   const wheels = params.get('pyomo');
-  await micropip.install(wheels ? wheels.split(',') : 'pyomo');
+  await micropip.install(wheels ? wheels.split(',') : `pyomo==${PYOMO_VERSION}`);
 
   say('wiring POUNCE into Python…');
   const shim = await (await fetch('./pounce_browser.py')).text();
@@ -273,8 +310,12 @@ self.onmessage = async (event) => {
     const code = event.data.code;
     // Installing before the timer starts: the download is not the model's
     // solve time, and reporting it as such would be a lie about the solver.
+    const pyomoPounce = WANTS_PYOMO_POUNCE.test(code);
     if (WANTS_POUNCE.test(code)) await ensure('pounce', installPounceSolver);
-    if (WANTS_PYOMO.test(code)) await ensure('pyomo', installPyomoRoute);
+    if (pyomoPounce) await ensure('pyomo-pounce', installPyomoPounce);
+    if (WANTS_POUNCE_BROWSER.test(code) || (WANTS_PYOMO.test(code) && !pyomoPounce)) {
+      await ensure('pyomo', installPyomoRoute);
+    }
     const plots = WANTS_MPL.test(code);
     if (plots) await ensure('matplotlib', installMatplotlib);
     self.postMessage({ type: 'running' });
