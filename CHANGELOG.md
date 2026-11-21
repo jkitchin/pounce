@@ -452,9 +452,11 @@ changes.
   capped at 50 trials. The acceptor's value is now used as is, with `1e-12`
   only when the acceptor's value is `0`, and as a lower bound in the
   filter's switching region `θ ≤ θ_min` (gh#1226, next entry). The trial
-  budget is now whatever it takes to reach `alpha_min`. Both reported runs now succeed on
-  the first solve: 64 iterations from the optimum, as Ipopt does, and 124
-  cold at mean 450. Fixture sweep: `dallass` (lbfgs) goes from
+  budget is now whatever it takes to reach `alpha_min`. The run from the
+  optimum now succeeds on the first solve in 64 iterations, as Ipopt does.
+  The cold run at mean 450 succeeds on the first solve on x86 and aarch64
+  Linux; on aarch64 macOS its first solve ends `Infeasible_Problem_Detected`
+  and the default second-opinion ladder solves it (gh#1224). Fixture sweep: `dallass` (lbfgs) goes from
   `Error_In_Step_Computation` to solved. Three infeasibility fixtures keep
   their verdict at a higher cost: `issue_508_infeasible_gap_1em2` (lbfgs)
   takes 65 → 419 iterations, `issue_508_infeasible_gap_1em4` (exact)
@@ -476,8 +478,9 @@ changes.
   different point (`min max(v)`: 1.4 → 1.400006690639468). The floor is
   now `max(1e-12, CalculateAlphaMin)` when `θ ≤ θ_min` and the acceptor's
   value outside that region. gh#1217's step is outside it (`θ = 4e3`; the
-  value is deep because `−∇φᵀd` is huge), and both gh#1217 runs still
-  solve on the first solve. The four discopt models are back to their
+  value is deep because `−∇φᵀd` is huge): failure 1 still matches Ipopt's
+  64 iterations on the first solve, and failure 2 is unchanged (its
+  first-solve outcome is platform-dependent, gh#1224). The four discopt models are back to their
   pre-gh#1217 times and answers. Fixture sweep against the parent, 304
   lines, 3 move: `issue_508_infeasible_gap_1em4` (exact) returns to
   441/1828 iterations, and `cc:design_cent_3` (lbfgs) to 9550 inner

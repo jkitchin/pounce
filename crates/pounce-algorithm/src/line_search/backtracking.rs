@@ -165,6 +165,21 @@ const ALPHA_INTERP_MIN_TRIALS: i32 = 6;
 ///   digits, until `max_iter` — 5–37× the wall time of the restoration
 ///   exit this floor sends such an iterate to, as it did before gh#1217.
 ///
+/// Why `θ` is the line to draw (gh#1227 review): outside the switching
+/// region a trial is accepted only on the filter's sufficient-decrease
+/// test, `θ⁺ ≤ (1−γ_θ)·θ` or `φ⁺ ≤ φ − γ_φ·θ`, a decrease proportional to
+/// `θ > θ_min` — so an accepted step there is never a null step, however
+/// small `α` is. Inside it an `f`-step is accepted on Armijo,
+/// `φ⁺ ≤ φ + η·α·∇φᵀd`, whose required decrease shrinks with `α`; that is
+/// how gh#1226's `α ≈ 1e-25` steps got through. The clamp sits exactly
+/// where acceptance stops guaranteeing progress.
+///
+/// The floor is therefore **discontinuous at `θ_min`, on purpose**: just
+/// above it, a huge `−∇φᵀd` can still give `≈ 1e-24`; just below it, the
+/// floor is `1e-12`. A nearly feasible iterate that genuinely needs a
+/// tiny `α` goes to restoration, as on 0.17.0. Smoothing the jump would
+/// readmit the Armijo-accepted null steps above.
+///
 /// `driver_floor` is also the answer whenever the acceptor's value is not
 /// a positive finite number: an acceptor with no floor of its own (the
 /// trait default returns `0`), and the filter acceptor at an **exactly**

@@ -130,11 +130,12 @@ fn solve(x0: [Number; 2]) -> (SolveStatistics, ApplicationReturnStatus) {
     let mut app = IpoptApplication::new();
     let opts = app.options_mut();
     opts.set_integer_value("print_level", 0, true, false)
-        .unwrap();
+        .expect("print_level is a registered integer option");
     opts.set_integer_value("max_iter", 3000, true, false)
-        .unwrap();
-    opts.set_numeric_value("tol", 1e-7, true, false).unwrap();
-    app.initialize().unwrap();
+        .expect("max_iter is a registered integer option");
+    opts.set_numeric_value("tol", 1e-7, true, false)
+        .expect("tol is a registered numeric option");
+    app.initialize().expect("IpoptApplication initializes");
     let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(NormInf { x0 }));
     let status = app.optimize_tnlp(tnlp);
     (app.statistics(), status)

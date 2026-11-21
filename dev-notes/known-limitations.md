@@ -280,7 +280,8 @@ along `‖d‖ = 1.14e-3`. That step moves the iterate by about `1e-16`, i.e.
 it does not move it at all, at `θ ≈ 7.6e-15`, inside the switching region.
 The first attempt then went on to `Solved_To_Acceptable_Level` at 414
 iterations, and the `mu_strategy_fallback` re-solve was promoted. With the
-clamp, iteration 162 stops at `1.67e-12`, restoration follows, and the
+clamp, iteration 163's sweep stops at the `1e-12` floor (both binaries
+take iteration 162 at `1.67e-12`, above it), restoration follows, and the
 solve ends `Error_In_Step_Computation` at 243 with no fallback, as it did
 on `22ae155`. The win came from accepting a null step: exactly the class
 of step gh#1226 stops accepting. No floor that rejects gh#1226's
