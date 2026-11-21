@@ -2740,6 +2740,40 @@ fn ipm_seeded_cold_step_qp_finds_the_working_set() {
     }
 }
 
+/// gh#1219 §3.6: the interior-point seed factors with the backend the
+/// builder was given, not a bare `FeralSolverInterface::new()`. The QP
+/// subproblem solver takes one backend from the factory at build time; every
+/// call after that is the seed's (its PSD certificate is skipped here because
+/// `SimplexProjNlp`'s step QPs are marked PSD, so these are the interior
+/// point's own factorizations).
+#[test]
+fn ipm_seed_uses_the_configured_backend() {
+    use crate::alg_builder::{AlgorithmBuilder, AlgorithmChoice as AC};
+    use pounce_linsol::SparseSymLinearSolverInterface;
+    let calls = Rc::new(std::cell::Cell::new(0usize));
+    let counted = Rc::clone(&calls);
+    let factory: crate::alg_builder::LinearBackendFactory =
+        Box::new(move |_choice| -> Box<dyn SparseSymLinearSolverInterface> {
+            counted.set(counted.get() + 1);
+            Box::new(pounce_feral::FeralSolverInterface::new())
+        });
+    let mut builder = AlgorithmBuilder::default();
+    builder.algorithm = AC::ActiveSetSqp;
+    builder.sqp.qp_ipm_cold_start_min_dim = Some(0);
+    let mut alg = builder.build_sqp_with_backend(factory).expect("SQP");
+    assert_eq!(calls.get(), 1, "the QP solver's own backend");
+    let res = alg.optimize(&mut SimplexProjNlp).unwrap();
+    assert_eq!(res.status, SqpStatus::Optimal);
+    assert_eq!(
+        res.n_qp_working_set_changes, 0,
+        "the seed must still have supplied the working set"
+    );
+    assert!(
+        calls.get() > 1,
+        "the seed never asked the configured factory for a backend"
+    );
+}
+
 /// A nonconvex NLP under the exact Hessian. Where the Hessian is not PSD the
 /// certificate declines and the step QP is solved from cold exactly as
 /// before, so the answer cannot change; where an iterate's Hessian happens to
@@ -2927,6 +2961,162 @@ fn a_warm_step_qp_over_its_budget_is_seeded() {
     // A one-iteration seed allows four iterations: two drops, then the seed,
     // whose working set is already right.
     assert_eq!(solve(Some(1)).stats.n_working_set_changes, 0);
+}
+
+/// gh#1219 §4.4: a step QP's `time_limit` is the whole subproblem's budget.
+/// The seed's backend here takes longer to build than the budget, so the
+/// seed spends all of it and declines; the cold solve it falls back to used
+/// to be handed the full limit afresh (and, this QP being tiny, finish
+/// `Optimal` well past the budget). It must get only what is left.
+#[test]
+fn a_step_qp_fallback_chain_shares_one_time_budget() {
+    use crate::sqp::sqp_alg::{IpmSeed, solve_subproblem_qp};
+    use pounce_linsol::SparseSymLinearSolverInterface;
+    use std::time::{Duration, Instant};
+    let n = 20;
+    let grad: Vec<Number> = (0..n).map(|i| -0.1 - 0.04 * i as Number).collect();
+    let idx: Vec<Index> = (1..=n as Index).collect();
+    let data = SqpQpData::build(
+        &vec![0.0; n],
+        &grad,
+        &[0.0],
+        &[NLP_LOWER_BOUND_INF],
+        &[100.0],
+        &vec![0.0; n],
+        &vec![1.0; n],
+        Triplet {
+            n_rows: 1,
+            n_cols: n,
+            irow: vec![1; n],
+            jcol: idx.clone(),
+            vals: vec![1.0; n],
+        },
+        Triplet {
+            n_rows: n,
+            n_cols: n,
+            irow: idx.clone(),
+            jcol: idx,
+            vals: vec![1.0; n],
+        },
+        HessianInertia::Indefinite,
+    );
+    let budget = Duration::from_millis(150);
+    let opts = QpOptions {
+        time_limit: Some(budget),
+        ..QpOptions::sqp_subproblem()
+    };
+    let mut solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let seed = IpmSeed::default();
+    *seed.backend.borrow_mut() = Some(Box::new(|| -> Box<dyn SparseSymLinearSolverInterface> {
+        std::thread::sleep(Duration::from_millis(250));
+        Box::new(pounce_feral::FeralSolverInterface::new())
+    }));
+    let started = Instant::now();
+    let sol = solve_subproblem_qp(
+        &mut solver,
+        &data,
+        data.as_qp(),
+        None,
+        &opts,
+        Some(&seed),
+        "step QP",
+    )
+    .unwrap();
+    assert_eq!(
+        sol.status,
+        QpStatus::TimeLimit,
+        "the fallback was given a fresh budget after the seed spent it"
+    );
+    // The certificate's one factorization cannot be interrupted, so the
+    // overrun is that, not a second budget on top.
+    assert!(started.elapsed() < Duration::from_millis(1000));
+}
+
+/// gh#1219 §4.3: an interior-point seed that ends `OptimalInaccurate` is
+/// still used as the active-set solve's starting working set, rather than
+/// thrown away for a cold start.
+///
+/// `min ½‖x‖² − cᵀx  s.t.  0 ≤ x ≤ 1` with half of `c` above 1: the cold
+/// active-set solve has to add every one of those upper bounds, one change
+/// each, while a seed close to the optimum names them all. The seed is
+/// stopped short of its `tol` by capping its iterations; the test scans caps
+/// for one that ends `OptimalInaccurate`, and fails if none does (the fixture
+/// would then no longer reach this branch).
+#[test]
+fn an_inaccurate_ipm_seed_still_seeds_the_step_qp() {
+    use crate::sqp::sqp_alg::{IpmSeed, solve_subproblem_qp};
+    let n = 20;
+    let c: Vec<Number> = (0..n).map(|i| if i % 2 == 0 { 2.0 } else { 0.5 }).collect();
+    let grad: Vec<Number> = c.iter().map(|v| -v).collect();
+    let idx: Vec<Index> = (1..=n as Index).collect();
+    let data = SqpQpData::build(
+        &vec![0.0; n],
+        &grad,
+        &[],
+        &[],
+        &[],
+        &vec![0.0; n],
+        &vec![1.0; n],
+        Triplet {
+            n_rows: 0,
+            n_cols: n,
+            irow: vec![],
+            jcol: vec![],
+            vals: vec![],
+        },
+        Triplet {
+            n_rows: n,
+            n_cols: n,
+            irow: idx.clone(),
+            jcol: idx,
+            vals: vec![1.0; n],
+        },
+        HessianInertia::Psd,
+    );
+    let opts = QpOptions::sqp_subproblem();
+    let solve = |cap: Option<usize>| {
+        let mut solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let seed = IpmSeed {
+            max_iter: cap,
+            ..IpmSeed::default()
+        };
+        let sol = solve_subproblem_qp(
+            &mut solver,
+            &data,
+            data.as_qp(),
+            None,
+            &opts,
+            Some(&seed),
+            "step QP",
+        )
+        .unwrap();
+        assert_eq!(sol.status, QpStatus::Optimal);
+        for (xi, ci) in sol.x.iter().zip(&c) {
+            assert!((xi - ci.min(1.0)).abs() < 1e-8, "{:?}", sol.x);
+        }
+        (sol.stats.n_working_set_changes, seed.last_status.get())
+    };
+    let (cold_changes, _) = {
+        let mut solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let sol = solver.solve(&data.as_qp(), None, &opts).unwrap();
+        (sol.stats.n_working_set_changes, ())
+    };
+    assert!(cold_changes >= (n / 2) as u32, "cold: {cold_changes}");
+    let (clean, status) = solve(None);
+    assert_eq!(status, Some(pounce_convex::QpStatus::Optimal));
+    assert!(clean < cold_changes);
+    let inaccurate = (1..30)
+        .map(|k| solve(Some(k)))
+        .find(|(_, s)| *s == Some(pounce_convex::QpStatus::OptimalInaccurate))
+        .expect("no iteration cap left the seed OptimalInaccurate");
+    assert!(
+        inaccurate.0 < cold_changes,
+        "an inaccurate seed was discarded: {} changes, as many as cold ({cold_changes})",
+        inaccurate.0
+    );
 }
 
 /// gh#1091: the lifted L-BFGS subproblem reaches the warm Schur rule as
