@@ -75,6 +75,36 @@ pub fn is_significant(value: Number, scale: Number, tol: Number) -> bool {
     value.abs() > threshold
 }
 
+/// [`is_significant`] with the boundary included: `value` *at* `tol * |scale|`
+/// counts.
+///
+/// For a question asked with `constr_viol_tol` — "is this constraint
+/// violation real?" — the user's declared tolerance is the line between
+/// feasible and violated, and a violation sitting exactly on it is a
+/// violation (gh#508: the status mapping already reads it that way, and
+/// gh#1217 found the restoration certificate reading it the other way).
+/// Same scaling rule and same fail-closed handling of a non-finite `value`.
+///
+/// ```
+/// use pounce_common::tolerance::{is_significant, reaches_tolerance};
+/// assert!(reaches_tolerance(1e-4, 1.0, 1e-4));
+/// assert!(!is_significant(1e-4, 1.0, 1e-4));
+/// assert!(!reaches_tolerance(0.99e-4, 1.0, 1e-4));
+/// assert!(!reaches_tolerance(f64::NAN, 1.0, 1e-4));
+/// ```
+pub fn reaches_tolerance(value: Number, scale: Number, tol: Number) -> bool {
+    if !value.is_finite() {
+        return false;
+    }
+    let s = scale.abs();
+    let threshold = if s.is_finite() && s > 0.0 {
+        tol * s
+    } else {
+        tol
+    };
+    value.abs() >= threshold
+}
+
 /// Whether `value` is small enough, relative to its own natural magnitude, to
 /// be treated as satisfied — the **accepting** direction.
 ///

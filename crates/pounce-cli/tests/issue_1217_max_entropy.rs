@@ -17,22 +17,18 @@
 //! is `-(p * exp(h / p)) >= -1`). It needs the issue's own `N = 1000`: at
 //! `N <= 300` both runs solved before the fix as well.
 //!
-//! Two defects, each pinned on the run that reaches it:
+//! **Cause.** pounce followed Ipopt 3.14 line for line on failure 1 through
+//! iteration 19 (checked against Ipopt + MUMPS, which also solves both runs).
+//! At iteration 20 the step has `‖d‖ = 3.7e17`; Ipopt backtracks 75 times
+//! and accepts `alpha = 5.2e-23`, because its only floor is the filter
+//! acceptor's `CalculateAlphaMin`. pounce clamped that floor to `1e-12` and
+//! capped a sweep at 50 trials, so it went to restoration instead and never
+//! recovered. The line search now keeps the acceptor's `alpha_min` and a
+//! trial budget that reaches it (`pounce_algorithm::line_search::
+//! backtracking`), and reproduces Ipopt's 64 iterations.
 //!
-//! * **A second-order correction cut to a non-step.** Failure 1's first
-//!   trial overflows `exp(h/p)` to ~1e154; the SOC built on it was
-//!   fraction-to-the-boundary cut to `alpha = 5e-157`, accepted, and its
-//!   dual update took `inf_du` from 1 to 5e4.
-//!   `failure1_first_step_is_not_a_degenerate_soc` pins the guard in
-//!   `pounce_algorithm::line_search::backtracking`.
-//! * **A non-finite KKT solution accepted as a step.** After restoration
-//!   resets `y_d = 0`, `h` has no curvature and its only KKT entry is
-//!   `exp(h/p) ~ 1e-186`; the factor is accepted and the back-solve returns
-//!   inf/NaN, which iterative refinement could not reject (every comparison
-//!   with a NaN residual ratio is false). The NaN step cycled through
-//!   restoration to `Error_In_Step_Computation`.
-//!   `no_iteration_takes_a_nan_step` pins the `δ_x` escalation in
-//!   `pounce_algorithm::kkt::pd_full_space_solver`.
+//! The tests run with every second-opinion rung off: the claim is that the
+//! *first* solve succeeds, as it does in Ipopt.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -41,6 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pounce_cli::solve_report::SolveReport;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_nlp::solve_statistics::IterPhase;
 
 const N: usize = 1000;
 
@@ -178,10 +175,21 @@ fn at_solution(mean: f64) -> Vec<(f64, f64)> {
     exact(mean).into_iter().map(|q| (q, -q * q.ln())).collect()
 }
 
-/// Solve, returning the report and the console output (which prints the
-/// iteration rows of every solve the second-opinion ladder runs, not only
-/// the promoted one).
-fn solve(nl: &PathBuf, extra: &[&str]) -> (SolveReport, String) {
+/// Every second-opinion rung off, so a success is the first solve's own.
+const NO_LADDER: &[&str] = &[
+    "mu_strategy_fallback=no",
+    "infeasibility_mu_strategy_retry=no",
+    "feral_infeasibility_scaling_retry=no",
+    "feral_increase_quality_retry=no",
+    "infeasibility_saddle_escape_retry=no",
+    "infeasibility_presolve_retry=no",
+    "infeasibility_perturbed_start_retry=no",
+    "dual_divergence_retry=no",
+    "square_system_recovery=no",
+];
+
+/// Solve with the full per-iteration history in the report.
+fn solve(nl: &PathBuf, extra: &[&str]) -> SolveReport {
     let json_path = tmp_path("report.json");
     let sol_path = tmp_path("out.sol");
     let mut cmd = Command::new(pounce_exe());
@@ -189,35 +197,18 @@ fn solve(nl: &PathBuf, extra: &[&str]) -> (SolveReport, String) {
         .arg(&sol_path)
         .arg("--json-output")
         .arg(&json_path)
+        .arg("--json-detail")
+        .arg("full")
         .arg("max_wall_time=300");
-    for o in extra {
+    for o in NO_LADDER.iter().chain(extra) {
         cmd.arg(o);
     }
-    let out = cmd.output().expect("spawn pounce");
-    let console =
-        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    let _ = cmd.output().expect("spawn pounce");
     let text = std::fs::read_to_string(&json_path).expect("read json report");
     let _ = std::fs::remove_file(&json_path);
     let _ = std::fs::remove_file(&sol_path);
     let _ = std::fs::remove_file(nl);
-    (
-        serde_json::from_str(&text).expect("deserialize SolveReport"),
-        console,
-    )
-}
-
-/// The iteration rows of the console log: `iter[r] objective inf_pr inf_du
-/// lg(mu) ||d|| ...`, split into fields.
-fn iteration_rows(console: &str) -> Vec<Vec<String>> {
-    console
-        .lines()
-        .map(|l| l.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
-        .filter(|f| {
-            f.len() >= 10
-                && f[0].trim_end_matches('r').parse::<usize>().is_ok()
-                && f[1].parse::<f64>().is_ok()
-        })
-        .collect()
+    serde_json::from_str(&text).expect("deserialize SolveReport")
 }
 
 fn assert_solved(r: &SolveReport, want: f64, label: &str) {
@@ -227,7 +218,7 @@ fn assert_solved(r: &SolveReport, want: f64, label: &str) {
             ApplicationReturnStatus::SolveSucceeded
                 | ApplicationReturnStatus::SolvedToAcceptableLevel
         ),
-        "{label}: status {:?}",
+        "{label}: first solve ended {:?}",
         r.solution.status
     );
     let obj = r.solution.objective;
@@ -239,67 +230,58 @@ fn assert_solved(r: &SolveReport, want: f64, label: &str) {
 
 #[test]
 fn control_cold_start_at_mean_300_solves() {
-    let (r, _) = solve(&write_nl(300.0, &cold()), &[]);
+    let r = solve(&write_nl(300.0, &cold()), &[]);
     assert_solved(&r, 6.65357129, "control");
 }
 
 #[test]
-fn failure1_start_at_the_solution_solves() {
-    let (r, _) = solve(&write_nl(300.0, &at_solution(300.0)), &[]);
+fn failure1_start_at_the_solution_solves_on_the_first_solve() {
+    let r = solve(&write_nl(300.0, &at_solution(300.0)), &[]);
     assert_solved(&r, 6.65357129, "failure 1");
 }
 
 #[test]
-fn failure2_cold_start_at_mean_450_solves() {
-    let (r, _) = solve(&write_nl(450.0, &cold()), &[]);
+fn failure2_cold_start_at_mean_450_solves_on_the_first_solve() {
+    let r = solve(&write_nl(450.0, &cold()), &[]);
     // Ipopt + MA57 reports 6.89240414; the exact optimum is 6.89240663.
     assert_solved(&r, 6.8924054, "failure 2");
 }
 
-/// Before the fix iteration 1 of failure 1 was the SOC
-/// `5.23e-157H` — a step the line search would never have tried itself.
+/// The branch the fix is about: a step accepted below the old `1e-12`
+/// clamp, after more trials than the old 50-trial cap allowed, with no
+/// restoration anywhere in the solve — Ipopt's iteration 20, `5.20e-23f 75`.
+/// Before the fix that iteration was `1.79e-12R 40` and restoration ran
+/// thirteen times.
 #[test]
-fn failure1_first_step_is_not_a_degenerate_soc() {
-    let (_, console) = solve(
-        &write_nl(300.0, &at_solution(300.0)),
-        &["max_iter=1", "mu_strategy_fallback=no"],
-    );
-    let rows = iteration_rows(&console);
-    let it1 = rows
+fn failure1_takes_the_step_below_the_old_alpha_floor() {
+    let r = solve(&write_nl(300.0, &at_solution(300.0)), &[]);
+    let main: Vec<_> = r
+        .iterations
         .iter()
-        .find(|f| f[0] == "1")
-        .unwrap_or_else(|| panic!("no iteration-1 row in:\n{console}"));
-    let alpha: f64 = it1[8]
-        .trim_end_matches(|c: char| c.is_ascii_alphabetic())
-        .parse()
-        .expect("alpha_pr column");
+        .filter(|it| it.phase == IterPhase::Main)
+        .collect();
+    let deep = main
+        .iter()
+        // A backtracked step, `f` or `h`: iteration 1 is a second-order
+        // correction taken at `5.2e-157` (`H`), which Ipopt takes too and
+        // which the floor never governed.
+        .find(|it| {
+            matches!(it.alpha_primal_char, 'f' | 'h')
+                && it.alpha_primal > 0.0
+                && it.alpha_primal < 1e-12
+        })
+        .unwrap_or_else(|| panic!("no backtracked step accepted below alpha = 1e-12"));
     assert!(
-        alpha > 1e-12,
-        "iteration 1 took alpha_pr = {alpha} ({}); a correction below the \
-         line search's alpha_min must not be accepted",
-        it1[8]
+        deep.ls_trials > 50,
+        "iteration {} accepted alpha = {:e} after {} trials; Ipopt takes 75",
+        deep.iter,
+        deep.alpha_primal,
+        deep.ls_trials
     );
-}
-
-/// Before the fix both runs printed NaN in the `||d||` column on every
-/// outer iteration that left restoration (9 rows on failure 1, 14 on
-/// failure 2, counted across all the ladder's solves).
-#[test]
-fn no_iteration_takes_a_nan_step() {
-    for (label, mean, start) in [
-        ("failure 1", 300.0, at_solution(300.0)),
-        ("failure 2", 450.0, cold()),
-    ] {
-        let (_, console) = solve(&write_nl(mean, &start), &[]);
-        let nan_rows: Vec<String> = iteration_rows(&console)
-            .into_iter()
-            .filter(|f| f[5].eq_ignore_ascii_case("nan") || f[5] == "inf")
-            .map(|f| f.join(" "))
-            .collect();
-        assert!(
-            nan_rows.is_empty(),
-            "{label}: iterations took a non-finite step:\n{}",
-            nan_rows.join("\n")
-        );
-    }
+    assert!(
+        r.iterations
+            .iter()
+            .all(|it| it.phase != IterPhase::Restoration && it.alpha_primal_char != 'R'),
+        "the solve entered restoration; Ipopt's does not"
+    );
 }
