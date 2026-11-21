@@ -90,6 +90,7 @@ pub use pipeline::{
     qp_options_from_overrides, solve_presolved,
 };
 pub use presolve::{ConvexPresolveFingerprint, ConvexWarmReport, convex_presolve_fingerprint};
+pub use sigma_verdict::take_last_sigma_demotion;
 // Defined in `pounce-qp` alongside the `QpOptions` it overlays, and shared
 // with the SQP subproblem reader there; re-exported so the public path is
 // unchanged for callers who reach it through this crate.

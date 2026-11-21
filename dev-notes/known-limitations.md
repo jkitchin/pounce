@@ -12,6 +12,126 @@ merges.
 
 ---
 
+## Convex IPM: the KKT verdict's rounding floor ignores row length, so long rows read as reduced accuracy
+
+*Measured on `fix-boyd2-fallback-skip` (parent `22ae155e`), Maros–Mészáros
+BOYD2 at `tol=1e-8`, `RAYON_NUM_THREADS=1`. Recorded 2026-11-20.*
+
+### What is wrong
+
+`QpSolution::kkt_residuals_above_floor` (`crates/pounce-convex/src/qp.rs`),
+the verdict behind `Optimal` vs `OptimalInaccurate` (`demote_optimum_above_tol`
+in `ipm.rs`), excuses each residual entry up to `k·mag`. Here `mag` is the
+magnitude of the terms that entry is a sum of, and `k = REPORT_FLOOR_FACTOR
+(4) · REL_FLOOR_KAPPA (64) · ε ≈ 5.7e-14`. `k` does not depend on how many
+terms the entry sums. The rounding error of evaluating an `n`-term dot product
+grows with `n`: about `√n·ε·mag` typically and `n·ε·mag` (γ_n) at worst. A long
+row's honest rounding therefore reads as an unexcused residual.
+
+### How big
+
+On BOYD2 the convex arm stops after 77 iterations and 44.5 s at a point the
+benchmark verifier passes: relative primal `5.4e-15`, dual `2.1e-12`, gap
+`1.1e-10`. The verdict reads `1.96e-7` against `tol = 1e-8` and labels it
+`Solved_To_Acceptable_Level`.
+
+- **The binding entry** is equality row 0: `b = 1.6e7`, 10 992 nonzeros, term
+  magnitude `3.2e7`. Its `|Ax − b|` is `2.0e-6`, which is `6.3e-14` of the
+  term magnitude, just above the `5.7e-14` floor.
+- **The rounding there** would be `√n·ε·mag ≈ 7.5e-7` typically and
+  `n·ε·mag ≈ 7.8e-5` at worst.
+- **The raw (unfloored) error** is `1.16e-3`. It sits on rows with
+  `b ≈ 2e11`, `2.9e-15` relative, and the floor already excuses it.
+
+The cost used to be 270 s. The `Acceptable` label sent BOYD2 to the
+LP/QP → NLP fallback, which ran to `Maximum_WallTime_Exceeded`. Since
+`convex_answer_meets_tol` (`crates/pounce-cli/src/main.rs`), an in-tol answer
+like this one skips the fallback. What remains is the label: a well-solved
+large QP reports `Solved_To_Acceptable_Level`.
+
+### What was not tried, and why
+
+This entry does not change the floor. A floor that grows with row length
+(`k·nnz(row)` or `k·√nnz(row)`) changes the convex arm's verdict, and through
+it every reroute gated on `OptimalInaccurate`. That is a convex trajectory and
+verdict change. It needs the fixture sweep, `benchmarks/qp`, and the σ-path
+and acceptable-band tests named in `CLAUDE.md`, as its own change.
+
+The HSDE stopping test (`hsde.rs`, "Absolute test always governs") uses the
+same `REL_FLOOR_KAPPA·ε·scale` cap. A fix to one without the other would let
+the solver stop where the verdict demotes, or the reverse.
+
+### How to tell whether a fix works
+
+- BOYD2 at `tol=1e-8` reports `Solve_Succeeded` from `cvx-qp` with the same
+  point; the verifier reads kkt `1.1e-10`.
+- `benchmarks/qp` gains no `Optimal` that the verifier fails.
+- `issue414_cost_normalized_false_optimal.rs`,
+  `illconditioned_huge_scale.rs` and the gh#984 / gh#1180 demotion tests
+  (QPILOTNO: a real `1.57e-7` violation on rows whose floor is `1e-11`) stay
+  green. A floor loose enough to excuse BOYD2's row must not excuse QPILOTNO's.
+
+---
+
+## NLP: one uninterruptible factorization can overrun `max_wall_time`, and the predictive guard misroutes when it fires
+
+*Measured on `22ae155e`, Maros–Mészáros BOYD2 forced onto the NLP arm by the
+LP/QP fallback (`tol=1e-8 max_wall_time=300`, `RAYON_NUM_THREADS=1`). The
+misroute is from reading the code, not from a run. Recorded 2026-11-20.*
+
+### What is wrong
+
+**The overrun.** A FERAL factorization cannot be interrupted
+(`dev-notes/feral-factor-interrupt.md`). The between-step deadline checks of
+pounce#244/#245 therefore let one factorization overshoot.
+
+- The proactive guard of pounce#254 (`factor_overshoot_predicted` in
+  `crates/pounce-algorithm/src/kkt/pd_full_space_solver.rs`) engages only once
+  a factorization has cost at least `FACTOR_OVERSHOOT_BUDGET_FRACTION = 0.5`
+  of the whole budget.
+- On BOYD2 the convex arm spent 44.5 s, and the NLP arm got the remaining
+  ~255 s (`charge_wall_budget`; the budget is handed down correctly).
+- Endgame factorizations took 36–40 s each. `sample` shows them in
+  `feral::dense::schur_kernel::axpy_minus_unroll4_nofma`, a large dense front.
+- At 36 s, below 0.5 × 255 s, the guard stayed off. Iteration 1020's
+  factorization started with 29 s left and finished 11 s past the deadline.
+- The solve ended at 312 s (a repeat: 324 s) against `max_wall_time=300`.
+
+**The misroute.** When the guard *does* fire, the deadline has not been
+crossed yet.
+
+- `PdFullSpaceSolver::solve` returns `false`.
+- `IpoptAlgorithm::iterate` (`ipopt_alg.rs`, after
+  `compute_search_direction`) asks `deadline_status()`, which reads
+  `Deadline::exceeded()` and returns `None`.
+- The `!ok` branch then sends the iteration to restoration instead of
+  `Maximum_WallTime_Exceeded`.
+- Restoration builds its own KKT solver, with no factorization estimate yet.
+  So it can start the very factorization the guard refused, or end
+  `Restoration_Failed`.
+
+### Why the fraction was not simply lowered
+
+Lowering `FACTOR_OVERSHOOT_BUDGET_FRACTION` to about 0.1 would bound BOYD2's
+overrun: 36 s ≥ 0.1 × 255 s, and 29 s left < 36 s, so the guard fires. But it
+would also make the misroute above fire more often, turning time-limit exits
+into restoration entries. The guard has to terminate cleanly before it is
+engaged more widely.
+
+### How to tell whether a fix works
+
+- A fired guard ends the solve `Maximum_WallTime_Exceeded` (or
+  `Maximum_CpuTime_Exceeded`) at the last accepted iterate, never in
+  restoration. One way: have the guard mark the deadline as spent, so that
+  `deadline_status()` sees it.
+- A unit test exists for each branch: 36 s factor / 255 s budget / 29 s left
+  fires, and the existing small-factor and ample-remaining cases do not.
+- A timed NLP run on BOYD2 (`solver_selection=nlp tol=1e-8 max_wall_time=N`)
+  ends by `N` plus less than one factorization.
+- The fixture sweep is unaffected, because it sets no time limit.
+
+---
+
 ## Handover: two declared-pair fixtures end acceptable after crossover step 4 seeds from step 3 (gh#1206 B1)
 
 *Measured on `claude/optimistic-lamport-8vweis` against `main` at `e0b4442`,
