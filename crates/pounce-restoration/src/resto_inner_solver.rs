@@ -48,7 +48,7 @@ use pounce_algorithm::ipopt_data::{IpoptData, IpoptDataHandle};
 use pounce_algorithm::ipopt_nlp::IpoptNlp;
 use pounce_algorithm::iterates_vector::IteratesVector;
 use pounce_algorithm::mu::monotone::MonotoneMuUpdate;
-use pounce_common::tolerance::is_significant;
+use pounce_common::tolerance::{is_significant, reaches_tolerance};
 use pounce_common::types::Index;
 use pounce_linalg::dense_vector::{DenseVector, DenseVectorSpace};
 use pounce_linalg::{CompoundVector, Vector};
@@ -1390,6 +1390,18 @@ fn run_inner_resto_impl(
     // guards: the verdict this sub-solve earned and the carve-out withheld.
     // The driver honours it once the same point has been certified
     // [`crate::min_c_1nrm::SQUARE_CERTIFICATE_REPEATS`] times (gh#1000).
+    //
+    // Inclusive at `constr_viol_tol` (gh#1217): a converged restoration
+    // whose original violation sits *at* the user's declared tolerance has
+    // found a point that tolerance calls infeasible — the gh#508 rule the
+    // cycle exit above already follows. `issue_508_infeasible_gap_1em4` is
+    // square with a least violation of exactly `1e-4`, the default
+    // `constr_viol_tol`, so under `is_significant` this count never started
+    // and the orbit this counter exists to bound — restoration settles,
+    // an f-type step leaves, the main phase creeps back — ran to `max_iter`
+    // once the line search kept upstream's `alpha_min` (gh#1217). Upstream
+    // fails restoration there outright (`RestoConvergenceCheck`:
+    // `orig_trial_primal_inf > 1e2·tol`).
     let square_certificate_suppressed = is_square_problem
         && !locally_infeasible
         && !solver_would_call_it_feasible
@@ -1400,7 +1412,7 @@ fn run_inner_resto_impl(
             SolverReturn::Success | SolverReturn::StopAtAcceptablePoint
         )
         && inner_stationarity_converged
-        && is_significant(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol);
+        && reaches_tolerance(orig_inf_pr_at_final, violation_scale, outer_constr_viol_tol);
 
     if std::env::var_os("POUNCE_DBG_RESTO_LOCINF").is_some() {
         tracing::debug!(target: "pounce::restoration",

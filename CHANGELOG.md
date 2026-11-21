@@ -357,6 +357,65 @@ changes.
   stack holds is refused as it is on a native worker whose stack came up
   short. A walk over a deeper `NlExpr` built in Python raises instead of
   overflowing.
+- **Active-set SQP's interior-point seed honours the linear-solver options**
+  (gh#1219). The convex interior point that seeds a large cold step QP, and
+  its PSD check, used a default FERAL, ignoring `linear_solver` and every
+  `feral_*` option that the QP subproblems themselves obeyed. A custom solver
+  without inertia keeps the seed on the configured FERAL.
+- **A step QP's time limit covers its whole fallback chain** (gh#1219). The
+  stabilized → standard, warm → seed → warm and seed → cold fallbacks each
+  restarted the full `time_limit`, so one subproblem could run several times
+  past it. Each stage now gets what is left, and the seed does not start its
+  PSD-check factorization on an empty budget.
+- **An `OptimalInaccurate` interior-point seed is used, not discarded**
+  (gh#1219). A seed that stopped within `1e3·tol` sent the step QP back to the
+  cold or elastic start; it now supplies the starting working set, and the
+  active-set solve from it must still reach `Optimal`.
+- **The active-set QP judges feasibility at each row's scale** (gh#1219). The
+  post-solve audit and the warm-start hint repair compared residuals with an
+  absolute `feas_tol`, so a row with large coefficients failed on round-off: a
+  correct optimum was sent to repair, and the hint repair gave up on an active
+  row. They now use the row-scaled test the rest of the solver already did.
+- **FERAL no longer reports a stale inertia count after a singular factor**
+  (gh#1219). `number_of_neg_evals()` returned the previous matrix's count; it
+  now returns −1.
+- **The line search keeps upstream's `alpha_min`** (gh#1217). A 2 000-variable
+  maximum-entropy model (`1 - p·exp(h/p) >= 0` rows) ended
+  `Error_In_Step_Computation` from two starts that Ipopt solves. Compared
+  with Ipopt 3.14, pounce matched it line for line through iteration 19 of
+  the solve started at the optimum. At iteration 20 the step has
+  `‖d‖ = 3.7e17`: Ipopt backtracks 75 times and accepts `alpha = 5.2e-23`.
+  pounce stopped at `1.8e-12` and went to restoration, which it never left
+  for good. Two pounce-only limits caused this. The filter acceptor's
+  `CalculateAlphaMin` was clamped from below to `1e-12`, and a sweep was
+  capped at 50 trials. The acceptor's value is now used as is, with `1e-12`
+  only when the acceptor's value is `0`. That includes the filter acceptor
+  at an *exactly* feasible iterate with descent (`θ = 0` zeroes
+  `CalculateAlphaMin`), so that common path keeps the old floor. A *nearly*
+  feasible iterate now gets the much deeper upstream floor. At `θ = 1e-200`
+  that is about `5e-226`, i.e. up to 750 trials from `alpha = 1`, where
+  `θ = 0` stops after about 40. The trial budget is now whatever it takes to
+  reach `alpha_min`. Both reported runs now succeed on
+  the first solve: 64 iterations from the optimum, as Ipopt does, and 124
+  cold at mean 450. Fixture sweep: `dallass` (lbfgs) goes from
+  `Error_In_Step_Computation` to solved. Three infeasibility fixtures keep
+  their verdict at a higher cost: `issue_508_infeasible_gap_1em2` (lbfgs)
+  takes 65 → 419 iterations, `issue_508_infeasible_gap_1em4` (exact)
+  441 → 569, and `circle_parabola_t1p5` (lbfgs) 707 → 815 in total.
+  `cc:design_cent_3` (lbfgs) moves 10967 → 11031 inner iterations. Each of
+  these accepts a step below the old clamp that previously went to
+  restoration.
+- **A square problem's restoration certificate counts at `constr_viol_tol`**
+  (gh#1217). The gh#1000 counter honours a locally-infeasible certificate
+  on a square problem after 20 repeats at the same point. It compared the
+  violation with `constr_viol_tol` strictly, so a violation exactly at the
+  user's tolerance never counted. gh#508 reads such a violation as a
+  violation. `issue_508_infeasible_gap_1em4` (least violation exactly the
+  default `1e-4`) depended on that counter once the line search above
+  stopped sending it to restoration from the old clamp. Without the change
+  it ran to `max_iter`; with it, it is `Infeasible_Problem_Detected` again.
+  New `pounce_common::tolerance::reaches_tolerance`, the inclusive
+  counterpart of `is_significant`.
 - **Crossover step 4 no longer re-solves step 3's QP from scratch** (gh#1206
   B1). When the step-3 point missed the stopping tolerances, the active-set
   SQP started from the interior iterate with the step-2 *estimate* — but its
