@@ -529,6 +529,12 @@ impl RestorationPhase for MinC1NormRestoration {
                 .as_any()
                 .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
                 .is_some_and(|x| self.note_square_certificate(&x.expanded_values()));
+        if square_certificate_honoured {
+            tracing::debug!(target: "pounce::restoration",
+                "[PN_SQUARE_CERTIFICATE] honoured after {} repeats of the same point (gh#1000)",
+                SQUARE_CERTIFICATE_REPEATS,
+            );
+        }
         if result.locally_infeasible || square_certificate_honoured {
             promote_if_no_more_infeasible(data, cq, result.trial_x.clone(), result.trial_s.clone());
             return RestorationOutcome::LocallyInfeasible;

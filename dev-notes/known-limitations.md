@@ -199,6 +199,66 @@ engaged more widely.
 
 ---
 
+## NLP: infeasibility fixtures slower after the line search kept upstream's `alpha_min` (gh#1217)
+
+*Measured on `claude/eloquent-faraday-e3oeac` against `main` at `22ae155`,
+`scripts/sweep-fixtures.sh`, both legs; Ipopt 3.14.19 + MUMPS (the CasADi
+3.8.2 wheel) as the upstream reference. Recorded 2026-11-21.*
+
+**The change.** The backtracking line search used to clamp the filter
+acceptor's `alpha_min` (upstream's `CalculateAlphaMin`) from below at
+`1e-12` and cap a sweep at 50 trials. Upstream has neither. Both are gone.
+The acceptor's value is used as is, and a sweep gets the trials it needs to
+reach it. That fixed gh#1217: pounce now matches Ipopt's 64 iterations line
+for line on the maximum-entropy model, where the clamp had sent iteration 20
+to restoration instead of taking Ipopt's `alpha = 5.2e-23` after 75 trials.
+
+### What is worse
+
+The sweep moves 5 of 302 lines. `dallass` (lbfgs) goes from
+`Error_In_Step_Computation` to solved. The other four keep their verdict at
+a higher cost:
+
+| fixture | leg | `main` | branch |
+|---|---|---|---|
+| `issue_508_infeasible_gap_1em2` | lbfgs | infeasible, it=65, tot=300 | infeasible, it=419, tot=1131 |
+| `issue_508_infeasible_gap_1em4` | exact | infeasible, it=441, tot=1828 | infeasible, it=569, tot=2502 |
+| `circle_parabola_t1p5` | lbfgs | infeasible, it=154, tot=707 | infeasible, it=154, tot=815 |
+| `cc:design_cent_3` | lbfgs | solved, inner tot=10967 | solved, inner tot=11031 |
+
+Each line moves where a step below the old clamp is now accepted. On
+`issue_508_infeasible_gap_1em2` (lbfgs) the first is iteration 66,
+`7.63e-16f` after 18 trials, where `main` went to restoration. These are
+infeasible models orbiting their least-violation point. The accepted
+steps lengthen the orbit before the verdict.
+
+`issue_508_infeasible_gap_1em4` also needed the second gh#1217 change.
+Without it, that line reads `MaximumIterationsExceeded` at 3000. The gh#1000
+square-certificate counter compared the violation with `constr_viol_tol`
+strictly, and this model's least violation is exactly the default `1e-4`.
+
+### Why it is accepted
+
+These trajectories are already off upstream's before the line search
+matters. On `issue_508_infeasible_gap_1em4`, pounce and Ipopt agree to
+eight digits through iteration 33 and part at iteration 46 on rounding
+(`inf_pr` 11.2 against 9.65 at a dual infeasibility near `1e16`). Ipopt
+then reaches the verdict at its first converged restoration, after 78
+iterations. On `1em2` Ipopt takes 83 (exact) and 84 (lbfgs). The old clamp
+reached the same verdicts sooner only by happening to send these orbits to
+restoration. Restoring the clamp would bring back gh#1217's failure.
+
+### How to tell whether a fix works
+
+A fix shortens these lines with all four statuses unchanged and leaves
+`crates/pounce-cli/tests/issue_1217_max_entropy.rs` green. That file pins
+the step below `1e-12` taken after more than 50 trials. Restoring the clamp
+for infeasible-looking iterates alone is the obvious candidate. It needs a
+signal that separates these orbits from gh#1217's iteration 20, whose
+`theta` is `4.0e3` and far from any floor.
+
+---
+
 ## Handover: two declared-pair fixtures end acceptable after crossover step 4 seeds from step 3 (gh#1206 B1)
 
 *Measured on `claude/optimistic-lamport-8vweis` against `main` at `e0b4442`,
