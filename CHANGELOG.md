@@ -318,6 +318,35 @@ changes.
   now runs past the 28-iteration point where it used to decline and
   certifies, so the gh#1183 convex-wins test moves to `tol=3e-13`, and the
   `relative_gap_tol` fallback test moves to NETLIB ETAMACRO.
+- **The convex LP IPM gives up a defaulted static-pivoting choice when
+  refinement cannot recover the residual.** Since gh#1193 the convex IPM's
+  FERAL backend factors with static pivoting when `tol >= 1e-8` and at most
+  1% of columns are free. On MIPLIB ns1116954 that choice failed late. At
+  μ ≈ 1.7e-7, `res_p` jumped from 1e-13 to 2.9e-6 and no δ bump cured it.
+  From the next iteration the factor showed 30–50 negative pivots too many,
+  each iteration paid four factorizations, and the solve ended
+  `Solved_To_Acceptable_Level` (error 1.0e-6, 12 iterations, 368 s, where
+  e176b8fa had `Solve_Succeeded` in 16 iterations, 277 s). Now, the first time
+  a refined solve stays above the residual gate, the HSDE loop asks the
+  backend to switch to delayed pivoting and refactors once at the same δ.
+  This happens once per solve, and only when the static choice was the
+  rule's default, never an explicit setting. ns1116954 now reaches
+  `Solve_Succeeded` at 9.1e-13 in 16 iterations, the same digits as before
+  gh#1193. That takes 308 s, one ~25 s static factorization more than the
+  277 s baseline, so it can still miss a 300 s `max_wall_time`. The models
+  static pivoting exists for (rmatr200-p5, waihi, turia) never reach this
+  gate, and their output is unchanged to every printed digit.
+- **`feral_static_pivoting` now reaches the convex IPM.** Before, the
+  CLI's convex LP/QP path read only the `POUNCE_FERAL_STATIC_PIVOTING`
+  environment variable, so `feral_static_pivoting=no` left the solve
+  unchanged to every digit. An explicit option now wins over the
+  environment variable and the convex rule. (Python's `pounce.qp` still
+  reads only the environment variable.)
+- **The convex HSDE loop checks the deadline between refactorization
+  retries.** One iteration's δ/regularization retries could run several
+  large factorizations after `max_wall_time` had passed (about 100 s on
+  ns1116954). The loop now stops with `TimeLimit` before a retry once the
+  deadline has expired.
 - **Crossover step 4 no longer re-solves step 3's QP from scratch** (gh#1206
   B1). When the step-3 point missed the stopping tolerances, the active-set
   SQP started from the interior iterate with the step-2 *estimate* — but its

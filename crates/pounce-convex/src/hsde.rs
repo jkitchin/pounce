@@ -1182,7 +1182,18 @@ where
         let expected_neg = (m_eq + m_ineq) as Index;
         let mut tries = 0usize;
         let mut factored = false;
+        let mut out_of_time = false;
         loop {
+            // Each retry below is a full refactorization, and the loop is not
+            // otherwise interruptible: on ns1116954 one iteration ran four
+            // ~22 s factorizations past a deadline crossed after the first.
+            // The iterate has not moved yet, so stopping here returns exactly
+            // the point the top-of-loop deadline check would have returned
+            // one iteration later.
+            if tries > 0 && crate::deadline::expired() {
+                out_of_time = true;
+                break;
+            }
             kkt.update_blocks(cone, &s, &z, reg_eff, &mut kkt_vals);
             kkt.update_eq_reg(delta_c, &mut kkt_vals);
             kkt.update_primal_reg(delta_w, &mut kkt_vals);
@@ -1270,12 +1281,38 @@ where
             // it never recovered, ending `OptimalInaccurate` instead of
             // `Optimal`. Inertia was correct at every single try throughout, so
             // nothing here was a rank defect.
+            //
+            // First, though, a refinement failure under a *defaulted* static
+            // pivoting choice (`FeralSolverInterface::for_convex_ipm`) is
+            // answered by giving that choice up and refactoring at the same δ
+            // — once per solve; `relax_static_pivoting` is `false` thereafter
+            // and on every other backend. Force-accepted pivots are the
+            // likelier cause than the scaling, and no δ cures them: on MIPLIB
+            // ns1116954 (no free column, so static is on at `tol = 1e-8`)
+            // `res_p` jumps from 1e-13 to 2.9e-6 at μ = 1.7e-7, stays above
+            // `DYN_REG_RES_TOL` through all four δ bumps, and from the next
+            // iteration on the factor reports 30–50 negative pivots *too
+            // many* (sign flips a quasi-definite KKT cannot have) with `res_p`
+            // up to 6e2. Each such iteration paid four ~22 s factorizations
+            // and the solve ended `Solved_To_Acceptable_Level` at 1.0e-6
+            // after 368 s; delayed pivoting factors it in the same time per
+            // factorization (no cascade there) and reaches 9e-13 in 16
+            // iterations. Models whose cascade static pivoting exists for
+            // (rmatr200-p5, waihi) trip only the singular/inertia ladder
+            // above, never this gate, so they keep it.
+            if res_p > DYN_REG_RES_TOL && fact.relax_static_pivoting() {
+                continue;
+            }
             if res_p > DYN_REG_RES_TOL && tries < INERTIA_MAX_TRIES && reg_eff < DYN_REG_MAX {
                 reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
                 tries += 1;
                 continue;
             }
             factored = true;
+            break;
+        }
+        if out_of_time {
+            status = QpStatus::TimeLimit;
             break;
         }
         if !factored {

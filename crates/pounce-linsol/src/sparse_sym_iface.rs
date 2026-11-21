@@ -144,6 +144,21 @@ pub trait SparseSymLinearSolverInterface {
     /// cache has nothing to re-check.
     fn set_reused_scaling_zero_pivot_recheck(&mut self, _on: bool) {}
 
+    /// Give up a static-pivoting choice the backend made on the caller's
+    /// behalf, so the next factorization delays pivots instead of
+    /// force-accepting them. Returns `true` only when it changed something.
+    ///
+    /// Static pivoting trades accuracy for a bounded factor: a pivot that
+    /// fails the threshold test is accepted in place, and iterative
+    /// refinement is relied on to recover the residual. When refinement
+    /// cannot (the residual stalls far above what the caller needs), the
+    /// trade has failed and the caller can take the delayed-pivoting factor
+    /// instead. Only a *defaulted* choice is given up: an explicit request
+    /// for static pivoting stays. Defaults to `false` (nothing to relax).
+    fn relax_static_pivoting(&mut self) -> bool {
+        false
+    }
+
     /// Whether a blocked `multi_solve` of `nrhs` columns returns
     /// **bit-identical** results to `nrhs` separate `nrhs = 1` calls
     /// against the same factor.
