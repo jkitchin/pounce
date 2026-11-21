@@ -138,6 +138,22 @@ pub struct SchurState {
     /// each such update scanned all of `A` for one row — 1.44 M triplets per
     /// working-set change on the gh#1206 collocation model (P5).
     a_rows: Option<(Vec<usize>, Vec<usize>)>,
+
+    /// The last right-hand side [`Self::solve`] started from and its
+    /// back-solve `K_0⁻¹b`, both in K_max order (gh#1214).
+    ///
+    /// `K_0⁻¹b` depends on `b` and the base factor only, not on the updates
+    /// layered on it since, so a solve whose `b` matches the last one to the
+    /// bit reuses it instead of paying the back-solve again — same bits, no
+    /// approximation. That is every step after a drop and after an add at
+    /// `α = 0`: `x` does not move, so neither does `b = [−(Hx + g); pins]`.
+    /// Cleared by [`Self::reset`], the only thing that changes `K_0`.
+    first_solve: Option<(Vec<Number>, Vec<Number>)>,
+
+    /// [`QpOptions::schur_lean_backsolves`]: the one-back-solve drop of a
+    /// base-active slot and the round-off stop in refinement. Set with
+    /// [`Self::with_lean_backsolves`].
+    lean: bool,
 }
 
 /// One rank-2 update `e_p vᵀ + v e_pᵀ`, stored sparse: `u = e_p` by its
@@ -280,7 +296,15 @@ impl SchurState {
             shift: 0.0,
             base_neg: 0,
             a_rows: None,
+            first_solve: None,
+            lean: false,
         }
+    }
+
+    /// Turn [`QpOptions::schur_lean_backsolves`]'s two economies on or off.
+    pub fn with_lean_backsolves(mut self, on: bool) -> Self {
+        self.lean = on;
+        self
     }
 
     /// The §4.5 inertia shift δ in the currently cached factor.
@@ -494,6 +518,9 @@ impl SchurState {
         expected_neg: i32,
         opts: &QpOptions,
     ) -> Result<(), QpError> {
+        // Whatever this reset ends in, the factor `first_solve` was taken
+        // against is gone.
+        self.first_solve = None;
         for cs in 0..self.m_total {
             self.base_active[cs] = Self::slot_active(working, self.full_slot(cs));
         }
@@ -587,20 +614,46 @@ impl SchurState {
         // `K_0⁻¹ u = u` exactly — no back-solve needed (gh#1206 P4: 0.4 s
         // each at `dim = 448 117`). The base factor is what `resolve` uses,
         // so flips since the reset do not change this.
-        let kinv_u = if self.base_active[cs] {
+        //
+        // A slot *active* at the last reset is the mirror case (gh#1214;
+        // under `lean` only — see `QpOptions::schur_lean_backsolves`).
+        // Column `p` of `K_0` is then the slot's constraint normal and nothing
+        // else — `[a_p; 0]` for a row, `e_j` for the bound on `x_j`, with no
+        // `(p, p)` entry — and that is exactly the `x`-part of `v`, up to its
+        // sign: `v = sign·K_0 e_p + v_p e_p`. So
+        //
+        //     K_0⁻¹ v = sign·e_p + v_p·K_0⁻¹ e_p,
+        //
+        // and the one back-solve for `K_0⁻¹ e_p` serves both columns. A drop
+        // pays two otherwise; on a step-3 crossover QP of a synthetic
+        // 15 k-variable collocation model, 197 of 406 updates were such drops.
+        // It is exact where the second back-solve is not, and still moves a
+        // degenerate QP's pivots at round-off level, hence the gate.
+        let (kinv_u, kinv_v) = if self.base_active[cs] && self.lean {
             let mut kinv_u = vec![0.0; self.dim];
             kinv_u[p] = 1.0;
             linsol.resolve(&mut kinv_u)?;
-            KinvCol::Dense(kinv_u)
+            let sign = if going_active { 1.0 } else { -1.0 };
+            let v_p = if going_active { -0.5 } else { 0.5 };
+            let mut kinv_v: Vec<Number> = kinv_u.iter().map(|&k| v_p * k).collect();
+            kinv_v[p] += sign;
+            (KinvCol::Dense(kinv_u), KinvCol::Dense(kinv_v))
         } else {
-            KinvCol::Unit(p)
+            let kinv_u = if self.base_active[cs] {
+                let mut kinv_u = vec![0.0; self.dim];
+                kinv_u[p] = 1.0;
+                linsol.resolve(&mut kinv_u)?;
+                KinvCol::Dense(kinv_u)
+            } else {
+                KinvCol::Unit(p)
+            };
+            let mut kinv_v = vec![0.0; self.dim];
+            for &(i, x) in &change.v {
+                kinv_v[i] = x;
+            }
+            linsol.resolve(&mut kinv_v)?;
+            (kinv_u, KinvCol::Dense(kinv_v))
         };
-        let mut kinv_v = vec![0.0; self.dim];
-        for &(i, x) in &change.v {
-            kinv_v[i] = x;
-        }
-        linsol.resolve(&mut kinv_v)?;
-        let kinv_v = KinvCol::Dense(kinv_v);
 
         let old_dim = self.s_dim;
         let new_dim = old_dim + 2;
@@ -687,6 +740,126 @@ impl SchurState {
         Some(y)
     }
 
+    /// `r = b − (K_0 + UVᵀ)x`, computed as [`Self::kw_matvec`] computes the
+    /// product, and whether `r` is **at the round-off floor**: every
+    /// component inside the standard bound on the error of computing it,
+    ///
+    /// ```text
+    ///     |r_i| ≤ γ_{k_i+1} · (|b_i| + (|K_0||x| + |U|(|V|ᵀ|x|))_i),
+    ///     γ_k = k·u / (1 − k·u),   u = ε/2,
+    /// ```
+    ///
+    /// where `k_i` counts the products summed into row `i` (Higham,
+    /// *Accuracy and Stability of Numerical Algorithms*, 2nd ed., §3.1 and
+    /// eq. (12.2)'s residual term). A residual within it carries no
+    /// information about the error in `x`: the same `x` could have produced
+    /// any vector of that size. Componentwise on purpose, so a row of `O(1)`
+    /// operands is held to `O(1)·ε` however large other rows make `‖b‖`.
+    ///
+    /// **Rows with vanishing operands** take the Arioli–Demmel–Duff scale
+    /// instead (*SIAM J. Matrix Anal. Appl.* 10 (1989), 165–190): where
+    /// `|b_i| + (|K||x|)_i` falls below `1000·dim·u·(|b_i| + ‖K_i‖∞‖x‖∞)`,
+    /// the row's scale is `(|K||x|)_i + ‖K_i‖∞‖x‖∞`. Without it the test
+    /// almost never passed on the collocation QP: rows of K_max with
+    /// `b_i = 0` and operands of ~1e-32 left `r_i = 3.7e-34` against
+    /// `(|K||x|)_i = 4e-32` — a 1% componentwise error in a row that
+    /// contributes nothing at a scale of `‖b‖∞ = 90` — and kept every
+    /// solve refining.
+    ///
+    /// `None` when no base matrix is recorded, as for `kw_matvec`. Without
+    /// `lean` the floor is never consulted, so this is `kw_matvec`'s residual
+    /// and `false`.
+    fn residual(&self, b: &[Number], x: &[Number]) -> Option<(Vec<Number>, bool)> {
+        if !self.lean {
+            // The floor is consulted only under `lean`; skip its bookkeeping.
+            let kx = self.kw_matvec(x)?;
+            let r = b.iter().zip(kx.iter()).map(|(&bi, &ki)| bi - ki).collect();
+            return Some((r, false));
+        }
+        let kkt = self.base_kkt.as_ref()?;
+        let mut y = vec![0.0; self.dim];
+        let mut ay = vec![0.0; self.dim];
+        let mut terms = vec![0u32; self.dim];
+        // ‖K_i‖∞, for the Arioli–Demmel–Duff scale.
+        let mut row_max = vec![0.0_f64; self.dim];
+        for k in 0..kkt.irn.len() {
+            let i = (kkt.irn[k] - 1) as usize;
+            let j = (kkt.jcn[k] - 1) as usize;
+            let v = kkt.vals[k];
+            y[i] += v * x[j];
+            ay[i] += (v * x[j]).abs();
+            terms[i] += 1;
+            row_max[i] = row_max[i].max(v.abs());
+            if i != j {
+                y[j] += v * x[i];
+                ay[j] += (v * x[i]).abs();
+                terms[j] += 1;
+                row_max[j] = row_max[j].max(v.abs());
+            }
+        }
+        // + U (Vᵀ x): `c = v_jᵀx` is itself a sum, so a row it lands in
+        // carries that sum's terms as well as its own product.
+        for j in 0..self.s_dim {
+            let vj = self.v_col(j);
+            let c = vj.dot_dense(x);
+            let (ac, nc, vmax) = match vj {
+                SparseCol::Unit(p) => (x[p].abs(), 1, 1.0),
+                SparseCol::Entries(e) => (
+                    e.iter().map(|&(i, v)| (v * x[i]).abs()).sum::<Number>(),
+                    e.len() as u32,
+                    e.iter().fold(0.0_f64, |a, &(_, v)| a.max(v.abs())),
+                ),
+            };
+            let uj = self.u_col(j);
+            if c != 0.0 {
+                uj.add_scaled_to(c, &mut y);
+            }
+            match uj {
+                SparseCol::Unit(p) => {
+                    ay[p] += ac;
+                    terms[p] += nc + 1;
+                    row_max[p] = row_max[p].max(vmax);
+                }
+                SparseCol::Entries(e) => {
+                    for &(i, v) in e {
+                        ay[i] += v.abs() * ac;
+                        terms[i] += nc + 1;
+                        row_max[i] = row_max[i].max(v.abs() * vmax);
+                    }
+                }
+            }
+        }
+        let u = 0.5 * Number::EPSILON;
+        let x_inf = x.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        let switch = 1000.0 * self.dim as Number * u;
+        let mut at_floor = true;
+        let r: Vec<Number> = (0..self.dim)
+            .map(|i| {
+                let ri = b[i] - y[i];
+                // `+ 1` for the subtraction from `b_i`.
+                let ku = Number::from(terms[i] + 1) * u;
+                let gamma = ku / (1.0 - ku);
+                let natural = b[i].abs() + ay[i];
+                let wide = row_max[i] * x_inf;
+                let scale = if natural > switch * (b[i].abs() + wide) {
+                    natural
+                } else {
+                    ay[i] + wide
+                };
+                // A NaN residual or scale is never at the floor.
+                let within = matches!(
+                    ri.abs().partial_cmp(&(gamma * scale)),
+                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                );
+                if !within {
+                    at_floor = false;
+                }
+                ri
+            })
+            .collect();
+        Some((r, at_floor))
+    }
+
     /// Solve `(K_0 + UVᵀ) x = rhs` in place, **with iterative refinement**.
     ///
     /// Refinement is not a nicety here; it is what makes this path a
@@ -716,7 +889,7 @@ impl SchurState {
     /// K_max leaves free variables' slots out (P7) it is gathered into K_max
     /// order, solved, and scattered back; a left-out slot's row is the
     /// decoupled `(p, p) = 1` sentinel, whose solution is its right-hand side.
-    pub fn solve(&self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
+    pub fn solve(&mut self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
         if self.has_every_bound_slot() {
             return self.solve_compact(linsol, rhs);
         }
@@ -741,7 +914,11 @@ impl SchurState {
     }
 
     /// [`Self::solve`] on a right-hand side already in K_max order.
-    fn solve_compact(&self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
+    fn solve_compact(
+        &mut self,
+        linsol: &mut LinearSolver,
+        rhs: &mut [Number],
+    ) -> Result<(), QpError> {
         /// Refinement passes.
         ///
         /// Two used to be the cap, on the reasoning quoted above — "the drift
@@ -780,7 +957,7 @@ impl SchurState {
         const IR_MIN_GAIN: Number = 0.5;
 
         let b = rhs.to_vec();
-        self.solve_once(linsol, rhs)?;
+        self.first_solve_once(linsol, rhs)?;
 
         // Deliberately NOT gated on `‖b‖`. The phase-1 elastic system carries
         // the penalty `γ = 1e6` in its RHS, so a `‖b‖`-relative test treats an
@@ -801,12 +978,30 @@ impl SchurState {
         //
         // One buffer, filled by `copy_from_slice`, so this is one allocation
         // per solve — the same order as `b` above — rather than one per pass.
+        //
+        // **Round-off floor** (gh#1214). The gain test alone cannot see that a
+        // residual is nothing but the rounding error of computing it, and at
+        // that level one ulp of noise reads as a halving: on a step-3 QP of
+        // the synthetic collocation model the first SMW solve already left
+        // `‖r‖∞ = 1.4e-14` against `‖b‖∞ = 90`, the next pass measured
+        // `7.1e-15` — one ulp of `b` — and paid a second correction for it.
+        // 434 of that QP's 621 step solves took two corrections and 179 one,
+        // 1 692 back-solves where the answer needed about 900. So, under
+        // `QpOptions::schur_lean_backsolves`, a pass also stops once every
+        // component of `r` lies inside the bound on its own rounding error
+        // (see [`Self::residual`]): a correction computed from such an `r` is
+        // a solve of noise. The test is componentwise, never `‖b‖`-relative,
+        // for the reason above — a row whose operands are `O(1)` is held to
+        // `O(1)·ε` however large `γ` makes `‖b‖`. It is gated because the
+        // corrections it skips, noise or not, round differently, and some
+        // degenerate QPs' pivots follow the last bit (see that option).
         let mut best_x: Vec<Number> = rhs.to_vec();
         let mut best_norm = Number::INFINITY;
         let mut prev = Number::INFINITY;
         for _ in 0..IR_MAX_PASSES {
-            let Some(kx) = self.kw_matvec(rhs) else { break };
-            let mut r: Vec<Number> = b.iter().zip(kx.iter()).map(|(&bi, &ki)| bi - ki).collect();
+            let Some((mut r, at_floor)) = self.residual(&b, rhs) else {
+                break;
+            };
             let r_norm = r.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
             if !r_norm.is_finite() {
                 break;
@@ -815,7 +1010,7 @@ impl SchurState {
                 best_norm = r_norm;
                 best_x.copy_from_slice(rhs);
             }
-            if r_norm == 0.0 {
+            if r_norm == 0.0 || (self.lean && at_floor) {
                 break;
             }
             // No meaningful progress ⇒ further passes are noise.
@@ -854,8 +1049,34 @@ impl SchurState {
         Ok(())
     }
 
-    /// One unrefined SMW solve: `x = K_0⁻¹b − K_0⁻¹U · S⁻¹ · VᵀK_0⁻¹b`.
-    fn solve_once(&self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
+    /// [`Self::solve_once`] for the right-hand side a solve starts from,
+    /// reusing `K_0⁻¹b` when `b` is the last one's to the bit (see
+    /// `first_solve`). Bitwise, not `==`, so `-0.0` and `0.0` are different
+    /// right-hand sides and a hit returns exactly what a back-solve would.
+    fn first_solve_once(
+        &mut self,
+        linsol: &mut LinearSolver,
+        rhs: &mut [Number],
+    ) -> Result<(), QpError> {
+        self.check_dim(rhs)?;
+        let cached = self.first_solve.as_ref().and_then(|(b, z)| {
+            let same = b.len() == rhs.len()
+                && b.iter()
+                    .zip(rhs.iter())
+                    .all(|(x, y)| x.to_bits() == y.to_bits());
+            same.then_some(z)
+        });
+        if let Some(z) = cached {
+            rhs.copy_from_slice(z);
+        } else {
+            let b = rhs.to_vec();
+            linsol.resolve(rhs)?;
+            self.first_solve = Some((b, rhs.to_vec()));
+        }
+        self.apply_smw(rhs)
+    }
+
+    fn check_dim(&self, rhs: &[Number]) -> Result<(), QpError> {
         if rhs.len() != self.dim {
             return Err(QpError::DimensionMismatch(format!(
                 "Schur solve RHS length {} but K_max dim is {}",
@@ -863,8 +1084,20 @@ impl SchurState {
                 self.dim
             )));
         }
+        Ok(())
+    }
+
+    /// One unrefined SMW solve: `x = K_0⁻¹b − K_0⁻¹U · S⁻¹ · VᵀK_0⁻¹b`.
+    fn solve_once(&self, linsol: &mut LinearSolver, rhs: &mut [Number]) -> Result<(), QpError> {
+        self.check_dim(rhs)?;
         // z = K_0⁻¹ rhs
         linsol.resolve(rhs)?;
+        self.apply_smw(rhs)
+    }
+
+    /// The SMW correction on `z = K_0⁻¹b`, in place:
+    /// `z ← z − K_0⁻¹U · S⁻¹ · Vᵀz`.
+    fn apply_smw(&self, rhs: &mut [Number]) -> Result<(), QpError> {
         if self.s_dim == 0 {
             return Ok(());
         }

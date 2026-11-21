@@ -826,10 +826,15 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          from a feasible point satisfying the estimate exactly. A stabilized QP \
          that does not solve falls back to the standard one, and its point is \
          put through the same never-regress test as any crossover point. Costs \
-         m extra QP variables. The full active-set SQP of step 4 is not \
-         stabilized: its line search and stopping tests judge the primal step \
-         alone, and a stabilized method's progress near a solution is largely \
-         in the multipliers. Default 0 (off); gh#1206 used 1e-4.",
+         m extra QP variables. When step 3 was stabilized, so are the step \
+         QPs of the active-set SQP in step 4, with the same rule for sigma at \
+         each iterate: step 4 starts from step 3's working set, which only a \
+         stabilized QP can pin, and a stabilized step QP that does not solve \
+         falls back to the standard one. A standalone \
+         algorithm=active-set-sqp solve is never stabilized: its line search \
+         and stopping tests judge the primal step alone, and a stabilized \
+         method's progress near a solution is largely in the multipliers. \
+         Default 0 (off); gh#1206 used 1e-4.",
     )?;
     r.add_lower_bounded_number_option(
         "crossover_primal_tol",

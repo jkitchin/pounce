@@ -228,10 +228,14 @@ impl SqpAlgorithm {
             self.qp_opts.max_iter,
             self.qp_opts.use_schur_updates,
             self.qp_opts.max_stall_iters,
+            self.qp_opts.schur_lean_backsolves,
         );
         self.qp_opts.max_iter = step_qp_iter_budget(saved.0, nlp.n(), nlp.m());
         if self.qp_opts.max_stall_iters.is_none() {
             self.qp_opts.max_stall_iters = self.opts.step_qp_max_stall_iters;
+        }
+        if self.opts.step_qp_lean_schur {
+            self.qp_opts.schur_lean_backsolves = true;
         }
         if let Some(on) = self.opts.step_qp_schur_updates(nlp.n() + nlp.m(), None) {
             self.qp_opts.use_schur_updates = on;
@@ -246,6 +250,7 @@ impl SqpAlgorithm {
             self.qp_opts.max_iter,
             self.qp_opts.use_schur_updates,
             self.qp_opts.max_stall_iters,
+            self.qp_opts.schur_lean_backsolves,
         ) = saved;
         res
     }
