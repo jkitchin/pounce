@@ -403,12 +403,6 @@ impl TSymLinearSolver {
     }
 
     /// Pass-through to
-    /// [`SparseSymLinearSolverInterface::relax_static_pivoting`].
-    pub fn relax_static_pivoting(&mut self) -> bool {
-        self.backend.relax_static_pivoting()
-    }
-
-    /// Pass-through to
     /// [`SparseSymLinearSolverInterface::multi_solve_matches_single_solve`],
     /// which see. Scaling does not affect the answer: it is applied per
     /// column, identically on both paths.

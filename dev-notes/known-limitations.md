@@ -12,6 +12,73 @@ merges.
 
 ---
 
+## Convex IPM: default static pivoting ends ns1116954 acceptable, and switching to delayed pivoting on demand costs other models
+
+*Measured on `integrate-0.18-fixes` (parent `22ae155e`), MIPLIB ns1116954's
+LP relaxation and the cpo3 benchmark set (`research/cpo3-benchmarks`) at
+`tol=1e-8`, `max_wall_time=300`, `RAYON_NUM_THREADS=1`. Recorded 2026-11-21.*
+
+### What is wrong
+
+Since gh#1193 the convex IPM's FERAL backend factors with static pivoting
+when `tol >= 1e-8` and at most 1% of columns are free
+(`convex_ipm_static_pivoting`, `crates/pounce-feral/src/lib.rs`). On
+ns1116954, at μ ≈ 1.7e-7, `res_p` jumps from 1e-13 to 2.9e-6, and no δ bump of
+the HSDE regularization ladder (`hsde.rs`) brings it back below
+`DYN_REG_RES_TOL`. From the next iteration on, the factor reports 30–50 more
+negative pivots than a quasi-definite KKT can have, and each iteration pays
+four ~22 s factorizations. The solve ends `Solved_To_Acceptable_Level` at
+1.0e-6 after 12 iterations and 368 s. Before gh#1193 (e176b8fa) it was
+`Solve_Succeeded` in 16 iterations and 277 s. `feral_static_pivoting=no`
+reproduces that, digit for digit. Since 0.18.0 the deadline is checked
+between refactorization retries, so `max_wall_time=300` is honoured: the
+default now stops `Solved_To_Acceptable_Level` after 12 iterations at 305 s,
+and `feral_static_pivoting=no` reaches `Solve_Succeeded` in 16 iterations
+and 261 s.
+
+### What was tried
+
+The fix tried was to give up the *defaulted* static choice the first time a
+refined solve stayed above `DYN_REG_RES_TOL`: switch to delayed pivoting once
+and refactor at the same δ. It rescued ns1116954, but it also fired late in
+the solve on other models, where the δ ladder recovers without it:
+
+| model | μ at first trip | default | switched |
+|---|---|---|---|
+| neos-933966 | 4.9e-10 | 17 it, 41.8 s | 17 it, 73.9 s |
+| netdiversion | 4.0e-11 | 30 it, 105 s | 31 it, 261 s |
+| QPLIB_8602 | 4.0e-13 | 27 it, 125 s | 27 it, 204 s |
+| atlanta-ip | 6.4e-10 | 124 it Optimal, 39 s | 200 it Acceptable, 300 s |
+
+Requiring μ > 1e-8 before switching kept those four at their old numbers
+and still rescued ns1116954, which trips at μ = 1.7e-7. A re-run of the
+66 cpo3 models whose results had moved then showed slowdowns that are
+from the switch, because `feral_static_pivoting=yes` restores the old
+numbers:
+
+| model | default | with the μ-gated switch |
+|---|---|---|
+| CRE-D | 49 it, 8.1 s | 54 it, 16.0 s |
+| momentum1 | 83 it, 10.2 s | 82 it, 18.6 s |
+| leo2 | 98 it, 43.0 s (34.9 s forced static) | 98 it, 57.4 s |
+
+Each threshold was fitted to the handful of models measured at the time, so
+the switch was dropped before 0.18.0.
+
+### How to tell whether a fix works
+
+- ns1116954 at `tol=1e-8` reports `Solve_Succeeded` within `max_wall_time=300`
+  at default options.
+- Every model in the two tables above keeps its default numbers. The
+  switched/gated columns are the regression to rule out.
+- The full cpo3 non-Mittelmann set does not lose a verified model or gain a
+  >1.3× wall-time slowdown against the parent, run on an otherwise idle
+  machine.
+- The rmatr200-p5, waihi and turia cascades that static pivoting exists for
+  stay unchanged.
+
+---
+
 ## Convex IPM: the KKT verdict's rounding floor ignores row length, so long rows read as reduced accuracy
 
 *Measured on `fix-boyd2-fallback-skip` (parent `22ae155e`), Maros–Mészáros

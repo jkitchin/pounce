@@ -140,35 +140,6 @@ pub(crate) const DELTA_C_FACTOR: f64 = 10.0;
 pub(crate) const DELTA_C_MAX: f64 = 1e-1;
 const INERTIA_MAX_TRIES: usize = 20;
 
-/// Below this `μ`, a refinement failure under static pivoting is left to the
-/// regularization ladder instead of giving static pivoting up (see
-/// [`static_relax_warranted`]).
-const STATIC_RELAX_MU_MIN: f64 = 1e-8;
-
-/// Whether a refined solve that failed `DYN_REG_RES_TOL` should make the
-/// loop give up a defaulted static-pivoting choice.
-///
-/// Only away from the endgame. Near `μ → 0` the NT scaling makes the KKT
-/// ill-conditioned by design. Refinement then fails on healthy solves, and
-/// the δ ladder recovers it without delayed pivoting. Measured at
-/// `tol = 1e-8` (`μ` when the first `res_p` trip happened; wall times from
-/// runs two at a time, so read them as ratios):
-///
-/// | model | μ | `res_p` | delayed pivoting from there |
-/// |---|---|---|---|
-/// | ns1116954 | 1.7e-7 | 2.9e-6 | needed: no δ cures it; 16 it Optimal vs Acceptable |
-/// | neos-933966 | 4.9e-10 | 5.4e-6 | 17 it either way, 43.8 s → 77.6 s |
-/// | atlanta-ip | 6.4e-10 | 4.4e-8 | 124 it Optimal → 200 it Acceptable |
-/// | netdiversion | 4.0e-11 | 3.9e-7 | 30 it 115 s → 31 it 260 s |
-/// | QPLIB_8602 | 4.0e-13 | 3.4e-8 | 27 it either way, 132 s → 216 s |
-///
-/// `res_p` does not separate them (neos-933966's is the largest), nor does
-/// the inertia (exact on all but neos-933966). `μ` does, with a factor of
-/// about 16 on either side of the threshold.
-fn static_relax_warranted(res_p: f64, mu: f64) -> bool {
-    res_p > DYN_REG_RES_TOL && mu > STATIC_RELAX_MU_MIN
-}
-
 /// Centering fallback for a collapsing step (gh #218).
 ///
 /// Mehrotra's centering parameter `σ = (μ_aff/μ)³` is inferred from how far the
@@ -1310,29 +1281,6 @@ where
             // it never recovered, ending `OptimalInaccurate` instead of
             // `Optimal`. Inertia was correct at every single try throughout, so
             // nothing here was a rank defect.
-            //
-            // First, though, a refinement failure under a *defaulted* static
-            // pivoting choice (`FeralSolverInterface::for_convex_ipm`) is
-            // answered by giving that choice up and refactoring at the same δ
-            // — once per solve; `relax_static_pivoting` is `false` thereafter
-            // and on every other backend. Force-accepted pivots are the
-            // likelier cause than the scaling, and no δ cures them: on MIPLIB
-            // ns1116954 (no free column, so static is on at `tol = 1e-8`)
-            // `res_p` jumps from 1e-13 to 2.9e-6 at μ = 1.7e-7, stays above
-            // `DYN_REG_RES_TOL` through all four δ bumps, and from the next
-            // iteration on the factor reports 30–50 negative pivots *too
-            // many* (sign flips a quasi-definite KKT cannot have) with `res_p`
-            // up to 6e2. Each such iteration paid four ~22 s factorizations
-            // and the solve ended `Solved_To_Acceptable_Level` at 1.0e-6
-            // after 368 s; delayed pivoting factors it in the same time per
-            // factorization (no cascade there) and reaches 9e-13 in 16
-            // iterations. Models whose cascade static pivoting exists for
-            // (rmatr200-p5, waihi) trip only the singular/inertia ladder
-            // above, never this gate, so they keep it. A failure in the
-            // endgame does *not* qualify: see `static_relax_warranted`.
-            if static_relax_warranted(res_p, mu) && fact.relax_static_pivoting() {
-                continue;
-            }
             if res_p > DYN_REG_RES_TOL && tries < INERTIA_MAX_TRIES && reg_eff < DYN_REG_MAX {
                 reg_eff = (reg_eff * DYN_REG_FACTOR).min(DYN_REG_MAX);
                 tries += 1;
@@ -1846,28 +1794,6 @@ mod tests {
     use crate::qp::{QpProblem, Triplet};
     use pounce_feral::FeralSolverInterface;
     use pounce_linsol::SparseSymLinearSolverInterface;
-
-    /// Both branches of the static-pivoting relax gate, at the measured
-    /// points (see `static_relax_warranted`): ns1116954's mid-solve failure
-    /// relaxes; the endgame failures of neos-933966, atlanta-ip,
-    /// netdiversion and QPLIB_8602 do not; a passing residual never does.
-    #[test]
-    fn static_relax_only_away_from_the_endgame() {
-        assert!(static_relax_warranted(2.9e-6, 1.7e-7)); // ns1116954
-        for (res_p, mu) in [
-            (5.4e-6, 4.9e-10),
-            (4.4e-8, 6.4e-10),
-            (3.9e-7, 4.0e-11),
-            (3.4e-8, 4.0e-13),
-        ] {
-            assert!(
-                !static_relax_warranted(res_p, mu),
-                "res_p {res_p:e} mu {mu:e}"
-            );
-        }
-        assert!(!static_relax_warranted(1e-9, 1e-3));
-        assert!(!static_relax_warranted(1e-6, STATIC_RELAX_MU_MIN));
-    }
 
     /// gh#689 regression: the gap's noise-floor excuse must read the true row
     /// slack, not the internal one. The numbers are the stopping iterate's on
