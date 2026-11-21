@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting recipes
+    url: https://kitchingroup.cheme.cmu.edu/pounce/troubleshooting.html
+    about: Common failed solves (restoration failures, infeasibility, slow convergence) and the options that fix them.
+  - name: Documentation
+    url: https://kitchingroup.cheme.cmu.edu/pounce/
+    about: The POUNCE book, including the docs assistant (the Ask button).
