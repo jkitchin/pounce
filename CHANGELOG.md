@@ -301,6 +301,12 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **A JSON report with a non-finite per-iteration value can be read back.**
+  `serde_json` writes NaN as `null`, and the `iterations` rows (`d_norm`,
+  `alpha_primal`, the residuals, ...) were plain floats, so a report whose
+  trajectory reached a NaN step norm failed to load with "invalid type: null,
+  expected f64" — in pounce's own reader and in pounce-studio's. Those slots
+  now read back as NaN.
 - **The line search keeps upstream's `alpha_min`** (gh#1217). A 2 000-variable
   maximum-entropy model (`1 - p·exp(h/p) >= 0` rows) ended
   `Error_In_Step_Computation` from two starts that Ipopt solves. Compared

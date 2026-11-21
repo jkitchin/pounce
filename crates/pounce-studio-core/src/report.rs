@@ -382,18 +382,26 @@ pub struct LinearSolverSummaryInfo {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct IterRecord {
     pub iter: i32,
+    #[serde(deserialize_with = "null_as_nan")]
     pub objective: f64,
     /// `inf_pr` as the console table prints it.
+    #[serde(deserialize_with = "null_as_nan")]
     pub inf_pr: f64,
     /// The internal slack-form primal residual (gh#979). Absent from
     /// reports written before it existed.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_nan")]
     pub inf_pr_internal: f64,
+    #[serde(deserialize_with = "null_as_nan")]
     pub inf_du: f64,
+    #[serde(deserialize_with = "null_as_nan")]
     pub mu: f64,
+    #[serde(deserialize_with = "null_as_nan")]
     pub d_norm: f64,
+    #[serde(deserialize_with = "null_as_nan")]
     pub regularization: f64,
+    #[serde(deserialize_with = "null_as_nan")]
     pub alpha_dual: f64,
+    #[serde(deserialize_with = "null_as_nan")]
     pub alpha_primal: f64,
     /// Single-character tag (`f`, `h`, `R`, ...) describing the
     /// alpha-primal column. `'R'` marks the main-phase row that entered
@@ -415,5 +423,22 @@ impl IterRecord {
     /// Whether this row is an inner restoration-phase iteration.
     pub fn is_restoration(&self) -> bool {
         self.phase == "restoration"
+    }
+}
+
+#[cfg(test)]
+mod iter_record_tests {
+    use super::IterRecord;
+
+    /// A row whose `d_norm` was written as `null` (a NaN step norm) loads.
+    #[test]
+    fn null_float_in_an_iteration_row_reads_as_nan() {
+        let text = r#"{"iter":3,"objective":1.0,"inf_pr":0.0,"inf_du":0.0,
+            "mu":0.1,"d_norm":null,"regularization":0.0,"alpha_dual":1.0,
+            "alpha_primal":null,"alpha_primal_char":"f","ls_trials":1}"#;
+        let r: IterRecord = serde_json::from_str(text).expect("deserialize");
+        assert!(r.d_norm.is_nan());
+        assert!(r.alpha_primal.is_nan());
+        assert_eq!(r.phase, "main");
     }
 }

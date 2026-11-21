@@ -28,7 +28,8 @@
 //! backtracking`), and reproduces Ipopt's 64 iterations.
 //!
 //! The tests run with every second-opinion rung off: the claim is that the
-//! *first* solve succeeds, as it does in Ipopt.
+//! *first* solve succeeds, as it does in Ipopt. The exception is failure 2,
+//! whose first-solve outcome depends on platform rounding; see its test.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -188,8 +189,18 @@ const NO_LADDER: &[&str] = &[
     "square_system_recovery=no",
 ];
 
-/// Solve with the full per-iteration history in the report.
+/// Solve with the full per-iteration history in the report, every
+/// second-opinion rung off.
 fn solve(nl: &PathBuf, extra: &[&str]) -> SolveReport {
+    solve_with(nl, NO_LADDER, extra)
+}
+
+/// Solve under the default options — the second-opinion ladder on.
+fn solve_default(nl: &PathBuf) -> SolveReport {
+    solve_with(nl, &[], &[])
+}
+
+fn solve_with(nl: &PathBuf, base: &[&str], extra: &[&str]) -> SolveReport {
     let json_path = tmp_path("report.json");
     let sol_path = tmp_path("out.sol");
     let mut cmd = Command::new(pounce_exe());
@@ -200,7 +211,7 @@ fn solve(nl: &PathBuf, extra: &[&str]) -> SolveReport {
         .arg("--json-detail")
         .arg("full")
         .arg("max_wall_time=300");
-    for o in NO_LADDER.iter().chain(extra) {
+    for o in base.iter().chain(extra) {
         cmd.arg(o);
     }
     let _ = cmd.output().expect("spawn pounce");
@@ -218,7 +229,7 @@ fn assert_solved(r: &SolveReport, want: f64, label: &str) {
             ApplicationReturnStatus::SolveSucceeded
                 | ApplicationReturnStatus::SolvedToAcceptableLevel
         ),
-        "{label}: first solve ended {:?}",
+        "{label}: solve ended {:?}",
         r.solution.status
     );
     let obj = r.solution.objective;
@@ -234,9 +245,39 @@ fn control_cold_start_at_mean_300_solves() {
     assert_solved(&r, 6.65357129, "control");
 }
 
+/// Failure 2 no longer stops on `Error_In_Step_Computation`, and the
+/// default solve reaches the optimum.
+///
+/// What the *first* solve then reports is not pinned, because it depends on
+/// last-bit rounding. From cold, iteration 12 accepts a full step that
+/// takes `inf_pr` from 1e-13 to 362; two restoration phases and steps with
+/// `‖d‖` up to 1e45 follow. Built from the same source, aarch64 Linux and
+/// aarch64 macOS print identical rows through iteration 61, differing
+/// only in the last digits of the `inf_pr` round-off, and part at 62:
+///
+/// | platform        | first solve                           |
+/// |-----------------|---------------------------------------|
+/// | x86-64 Linux    | `Solve_Succeeded`, 99 (from gh#1218) |
+/// | aarch64 Linux   | `Solve_Succeeded`, 124 iterations     |
+/// | aarch64 macOS   | `Infeasible_Problem_Detected`, 346    |
+///
+/// So asserting the first solve's status made this test pass or fail by
+/// platform. What holds everywhere: the first solve ends with a verdict the
+/// ladder can act on (before gh#1217's fix it ended
+/// `Error_In_Step_Computation` on every platform, which nothing re-solves),
+/// and the default solve ends at the optimum — on macOS through the
+/// `mu_strategy=adaptive` rung, in 61 iterations.
 #[test]
-fn failure2_cold_start_at_mean_450_solves_on_the_first_solve() {
-    let r = solve(&write_nl(450.0, &cold()), &[]);
+fn failure2_cold_start_at_mean_450_reaches_the_optimum() {
+    let first = solve(&write_nl(450.0, &cold()), &[]);
+    assert!(
+        !matches!(
+            first.solution.status,
+            ApplicationReturnStatus::ErrorInStepComputation
+        ),
+        "failure 2: first solve ended ErrorInStepComputation again"
+    );
+    let r = solve_default(&write_nl(450.0, &cold()));
     // Ipopt + MA57 reports 6.89240414; the exact optimum is 6.89240663.
     assert_solved(&r, 6.8924054, "failure 2");
 }
