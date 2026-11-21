@@ -128,6 +128,66 @@ def _discrete_vars(model, max_list=5):
     return names, total
 
 
+# The `solve()` keywords the in-process route reads, plus
+# `symbolic_solver_labels`, which it always applies. Everything else the ASL
+# route accepts (`load_solutions`, `timelimit`, `keepfiles`, `logfile`, ...)
+# has no effect there.
+_IN_PROCESS_KWDS = frozenset({"model", "tee", "options", "symbolic_solver_labels"})
+
+# Values of ASL-route keywords that ask for nothing beyond what the in-process
+# route does anyway, so passing them is not worth a warning.
+_IN_PROCESS_NOOPS = {"load_solutions": True, "keepfiles": False,
+                     "report_timing": False}
+
+
+def _in_process_reason(explicit, intermediate, in_browser):
+    if in_browser:
+        return ("Pyodide cannot start the `pounce` executable, so every solve "
+                "runs in-process")
+    if intermediate:
+        return "intermediate= needs the in-process route"
+    if explicit:
+        return f"{', '.join(sorted(explicit))}= needs the in-process route"
+    return "the model declares sensitivity parameters"
+
+
+def _check_in_process(model, kwds, *, explicit, intermediate, in_browser):
+    """Refuse what the in-process route cannot solve and warn about what it
+    ignores, before `sens_solve` runs.
+
+    That route writes the model with Pyomo's NL writer and solves it through
+    `pounce.Problem`, which has no complementarity rows; the ASL route's
+    `mpec.nl` transformation and `pyomo_pounce.mpec` lowering never run. The
+    writer then fails with a message about components it does not know, which
+    names neither the cause nor the way out, so the refusal is made here.
+    """
+    from pyomo.mpec import Complementarity
+
+    reason = _in_process_reason(explicit, intermediate, in_browser)
+    pairs = next(model.component_data_objects(
+        Complementarity, active=True, descend_into=True), None)
+    if pairs is not None:
+        way_out = ("" if in_browser else
+                   " Solve it without intermediate= and sensitivity "
+                   "declarations to take the `pounce` executable's route, "
+                   "which handles complementarity.")
+        raise ValueError(
+            f"pounce solve: the model has active Complementarity components "
+            f"(e.g. {pairs.name}), which the in-process route cannot solve "
+            f"({reason}).{way_out}")
+    ignored = sorted(
+        k for k, v in kwds.items()
+        if k not in _IN_PROCESS_KWDS and v is not None
+        and not (k in _IN_PROCESS_NOOPS and v == _IN_PROCESS_NOOPS[k]))
+    if ignored:
+        warnings.warn(
+            f"pounce solve: {', '.join(k + '=' for k in ignored)} "
+            f"{'has' if len(ignored) == 1 else 'have'} no effect on the "
+            f"in-process route ({reason}) and "
+            f"{'is' if len(ignored) == 1 else 'are'} ignored",
+            stacklevel=3)
+
+
 def reject_discrete_vars(model):
     """Raise if `model` has a live (active, non-fixed) Binary/Integer
     variable, which POUNCE cannot honor.
@@ -321,6 +381,8 @@ class POUNCE(ASL):
         in_browser = sys.platform == "emscripten"
         if model is not None and (has_declarations(model) or explicit
                                   or in_browser or intermediate):
+            _check_in_process(model, kwds, explicit=explicit,
+                              intermediate=intermediate, in_browser=in_browser)
             return sens_solve(model, tee=kwds.get("tee", False),
                               options=opts, intermediate=intermediate,
                               **explicit)

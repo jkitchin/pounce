@@ -32,7 +32,7 @@
 
 use numpy::{PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 use pounce_common::types::{Index, Number};
-use pounce_nlp::live_iterate::with_current_user_iterate;
+use pounce_nlp::live_iterate::unscaled_objective;
 use pounce_nlp::return_codes::AlgorithmMode;
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, NlpInfo, ScalingRequest, Solution,
@@ -474,9 +474,7 @@ impl TNLP for PyTnlp {
         let obj_value = if matches!(stats.mode, AlgorithmMode::RestorationPhaseMode) {
             Number::NAN
         } else {
-            with_current_user_iterate(|it| it.scaling.as_ref().map_or(1.0, |s| s.obj))
-                .filter(|&scale| scale != 0.0)
-                .map_or(stats.obj_value, |scale| stats.obj_value / scale)
+            unscaled_objective(stats.obj_value).unwrap_or(stats.obj_value)
         };
         //
         // Optional. If the user object has no `intermediate` method we

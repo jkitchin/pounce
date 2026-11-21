@@ -20,7 +20,11 @@ changes.
   iteration with a `pyomo_pounce.Iteration`: the statistics, the objective
   in the model's units and sense, and the value of every variable. Returning
   False stops the solve. Passing it runs the solve in-process, which in
-  Pyodide every solve already does.
+  Pyodide every solve already does. That route refuses a model with
+  active `Complementarity` components with a `ValueError` naming the
+  cause (Pyomo's NL writer used to fail there with a message about
+  unknown components, for declared models too), and warns about `solve()`
+  arguments it ignores, such as `load_solutions=False` or `timelimit`.
 - **pyomo-pounce in Pyodide, and an `import pyomo_pounce` route on the
   Python page.** pyomo-pounce's solves and its declared-parameter
   sensitivity (`sens_jacobian`, `sens_solution`, `sens_covariance` and the
@@ -31,7 +35,10 @@ changes.
   Pyomo and pyomo-pounce for a script that imports `pyomo_pounce`, and not
   scipy or pandas, which this path never uses. `build.sh` builds the
   pyomo-pounce wheel beside the pounce-solver one, and
-  `tests/pyomo_pounce_pyodide.mjs` runs it under Pyodide in CI.
+  `tests/pyomo_pounce_pyodide.mjs` runs it under Pyodide in CI. The
+  wheel's file name is recorded in `wheels/pyomo-pounce-wheel.json`, since
+  pyomo-pounce is versioned apart from the committed pounce-solver wheel,
+  and both Pyomo routes and the test install a pinned Pyomo (6.11.0).
 - **A per-iteration host call in the WebAssembly module.** With
   `wasm_iterate_callback yes`, `pounce_solve` calls the host function the
   module imports as `iterate` from module `pounce` once per iteration,
@@ -338,7 +345,10 @@ changes.
   not the problem's objective. `pounce.minimize`'s `callback` reported it as
   `fun`. It is now the objective in the problem's own units, as cyipopt
   passes it, and NaN during restoration, where the previous value was the
-  restoration problem's objective.
+  restoration problem's objective. The C interface's intermediate
+  callback had the same defect and now receives the unscaled objective
+  too, as upstream's `unscaled_curr_f()` (restoration iterations
+  unchanged).
 - **`pounce.read_nl` and `pounce.parse_nl_text` in Pyodide.** Both read the
   file on a worker thread with a large stack, and Pyodide cannot start a
   thread, so both raised `PanicException` in the emscripten wheel. That

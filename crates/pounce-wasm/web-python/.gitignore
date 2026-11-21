@@ -2,6 +2,7 @@
 pounce.wasm
 wasi.js
 wheels/pyomo_pounce-*.whl
+wheels/pyomo-pounce-wheel.json
 
 # wheels/ is NOT ignored, on purpose. The emscripten pounce-solver build is a
 # release artifact pinned to one Pyodide version, not a per-commit product:

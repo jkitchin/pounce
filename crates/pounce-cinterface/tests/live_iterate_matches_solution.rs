@@ -24,6 +24,8 @@ const NNZ: usize = 7;
 #[derive(Clone, Debug, Default)]
 struct It {
     ok: bool,
+    /// The `obj_value` the intermediate callback received at this fire.
+    obj: Number,
     x: [Number; N],
     z_l: [Number; N],
     z_u: [Number; N],
@@ -213,7 +215,7 @@ unsafe extern "C" fn ev_h(
 unsafe extern "C" fn on_iter(
     _alg_mod: Index,
     _iter: Index,
-    _obj: Number,
+    obj: Number,
     _inf_pr: Number,
     _inf_du: Number,
     _mu: Number,
@@ -227,6 +229,7 @@ unsafe extern "C" fn on_iter(
     unsafe {
         let mut it = iterate(user_data as IpoptProblem, 0);
         it.scaled = Some(Box::new(iterate(user_data as IpoptProblem, 1)));
+        it.obj = obj;
         if READ_VIOLATIONS.with(|r| r.get()) {
             it.viol = violations(user_data as IpoptProblem, 0);
             it.viol_scaled = violations(user_data as IpoptProblem, 1);
@@ -332,6 +335,14 @@ fn solve(algorithm: &str, cfg: Cfg) -> (It, Vec<It>) {
     }
 }
 
+/// The objective `ev_f` evaluates, at `x`.
+fn objective(x: &[Number; N]) -> Number {
+    k() * ((x[0] - 3.0).powi(2)
+        + (x[1] - 3.0).powi(2)
+        + (x[2] - 1.0).powi(2)
+        + (x[3] - 4.0).powi(2))
+}
+
 fn close(what: &str, got: &[Number], want: &[Number]) {
     for (i, (g, w)) in got.iter().zip(want).enumerate() {
         assert!(
@@ -356,6 +367,18 @@ fn check(algorithm: &str, cfg: Cfg) {
     // so z_U), and x1's upper bound binds.
     assert!(out.z_u[3] > 1e-3, "{algorithm} {cfg:?}: {out:?}");
     assert!(out.z_u[1] > 1e-3, "{algorithm} {cfg:?}: {out:?}");
+    // `obj_value` is the user's objective at the iterate, as upstream passes
+    // `unscaled_curr_f()`: not the algorithm's `curr_f()`, which carries the
+    // objective factor (3) and, under gradient-based scaling, the gradient
+    // factor too.
+    for (i, f) in fires.iter().enumerate() {
+        let want = objective(&f.x);
+        assert!(
+            (f.obj - want).abs() <= 1e-9 * want.abs().max(1.0),
+            "{algorithm} {cfg:?}: fire {i} obj_value {:e}, f(x) {want:e}",
+            f.obj
+        );
+    }
     let last = fires.last().unwrap();
     close("x", &last.x, &out.x);
     close("z_l", &last.z_l, &out.z_l);

@@ -71,14 +71,18 @@ sensitivity calls (`declare_sens_param`, `sens_jacobian`, `sens_solution`,
 `pounce.read_nl` and answer from a `pounce.Solver` session in the same wasm
 instance, as on a desktop. A plain `SolverFactory("pounce").solve(m)` takes
 that in-process path too, because Pyodide cannot start the `pounce`
-executable.
+executable. That path cannot solve `Complementarity` components, so a model
+with them is refused with a `ValueError` here; use the `import pounce_browser`
+route for it.
 
 The route installs numpy, the pounce-solver wheel and pyomo-pounce without
-their dependencies, and Pyomo from PyPI. pyomo-pounce uses none of
+their dependencies, and Pyomo from PyPI at the version `PYOMO_VERSION` in
+`worker.js` pins. pyomo-pounce uses none of
 pounce-solver's scipy paths (`minimize`, `curve_fit`, the QP helpers) and
 needs pandas only for `Jacobian.to_dataframe()`, so neither is loaded.
-`build.sh` builds the pyomo-pounce wheel from the checkout into `wheels/`,
-at the pounce-solver wheel's version.
+`build.sh` builds the pyomo-pounce wheel from the checkout into `wheels/`
+and names it in `wheels/pyomo-pounce-wheel.json` (both gitignored), since
+pyomo-pounce is released on its own version, not the pounce-solver wheel's.
 
 `crates/pounce-wasm/tests/pyomo_pounce_pyodide.mjs` runs a declared-parameter
 solve, `sens_jacobian`, `sens_solution` and a plain solve under Pyodide in

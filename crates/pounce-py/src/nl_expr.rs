@@ -227,7 +227,8 @@ where
         > emscripten_stack_free().saturating_sub(CALL_MARGIN)
     {
         panic!(
-            "pounce: this expression is nested {depth} levels deep, more than the              browser's {} KiB of free stack can walk",
+            "pounce: this expression is nested {depth} levels deep, more than the \
+             browser's {} KiB of free stack can walk",
             emscripten_stack_free() >> 10
         );
     }

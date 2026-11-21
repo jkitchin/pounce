@@ -208,7 +208,11 @@ None and `objective` is NaN. Returning False ends the solve with
 
 The callback needs the solve to run in-process, so passing it sends the
 solve down the same path a model with declared sensitivity parameters
-takes. The answer is the same as the `.nl` route's.
+takes. That path reads only `tee` and `options`: other `solve()` arguments
+of the executable route (`load_solutions`, `timelimit`, `keepfiles`, ...)
+have no effect there, and passing one warns. It cannot solve a model with
+active `Complementarity` components, so `intermediate=` on such a model is
+refused with a `ValueError`; solve it without the callback.
 
 ## Complementarity constraints (`pyomo.mpec`)
 

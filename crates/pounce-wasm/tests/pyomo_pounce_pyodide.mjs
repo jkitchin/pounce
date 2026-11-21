@@ -21,8 +21,15 @@ const { loadPyodide } = await import(
   pathToFileURL(join(pyodideDir, 'node_modules/pyodide/pyodide.mjs')).href
 );
 
+// Pinned, as the page pins it: keep in step with PYOMO_VERSION in
+// web-python/worker.js.
+const PYOMO_VERSION = '6.11.0';
+
 const wheels = join(here, '../web-python/wheels');
 const manifest = JSON.parse(readFileSync(join(wheels, 'pounce-wheel.json'), 'utf8'));
+// build.sh names the pyomo-pounce wheel here: its version is pyomo-pounce's
+// own, not the pounce-solver wheel's.
+const pyomoPounce = JSON.parse(readFileSync(join(wheels, 'pyomo-pounce-wheel.json'), 'utf8'));
 
 const py = await loadPyodide();
 py.mountNodeFS('/wheels', wheels);
@@ -31,8 +38,8 @@ await py.loadPackage(['micropip', 'numpy']);
 await py.runPythonAsync(`
 import micropip
 await micropip.install('emfs:/wheels/${manifest.wheel}', deps=False)
-await micropip.install('pyomo')
-await micropip.install('emfs:/wheels/pyomo_pounce-${manifest.version}-py3-none-any.whl', deps=False)
+await micropip.install('pyomo==${PYOMO_VERSION}')
+await micropip.install('emfs:/wheels/${pyomoPounce.wheel}', deps=False)
 `);
 
 const out = await py.runPythonAsync(`

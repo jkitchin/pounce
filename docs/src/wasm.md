@@ -144,7 +144,9 @@ print(sens_jacobian(m.x[1], wrt=m.demand))   # 1/3
 
 The solve and every sensitivity call run in Pyodide's own wasm instance, as
 on a desktop. A solve without declarations takes the same in-process path,
-since Pyodide cannot start the `pounce` executable. The route installs numpy,
+since Pyodide cannot start the `pounce` executable; a model with
+`Complementarity` components is refused there, and the `import
+pounce_browser` route solves it instead. The route installs numpy,
 the wheel and pyomo-pounce without their dependencies, and Pyomo. scipy and
 pandas are not loaded, because pyomo-pounce uses neither on this path.
 

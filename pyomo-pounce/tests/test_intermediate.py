@@ -88,3 +88,50 @@ def test_returning_false_stops_the_solve():
 def test_intermediate_without_a_model_is_refused():
     with pytest.raises(ValueError, match="intermediate= given but no model"):
         pyo.SolverFactory("pounce").solve(intermediate=lambda it: None)
+
+
+def _with_complementarity(m):
+    from pyomo.mpec import Complementarity, complements
+
+    m.y = pyo.Var(initialize=1.0)
+    m.cc = Complementarity(expr=complements(m.x[1] >= 0, m.y >= 0))
+    return m
+
+
+def test_intermediate_refuses_complementarity_with_the_cause():
+    # The in-process route has no complementarity rows; Pyomo's NL writer
+    # used to fail there naming only an unknown component.
+    m = _with_complementarity(plants(declare=False))
+    with pytest.raises(ValueError, match="Complementarity.*intermediate= needs"):
+        pyo.SolverFactory("pounce").solve(m, intermediate=lambda it: None)
+
+
+def test_declared_model_refuses_complementarity_with_the_cause():
+    m = _with_complementarity(plants())
+    with pytest.raises(ValueError, match="Complementarity.*declares sensitivity"):
+        pyo.SolverFactory("pounce").solve(m)
+
+
+def test_pyodide_refuses_complementarity_and_points_to_pounce_browser(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "emscripten")
+    m = _with_complementarity(plants(declare=False))
+    with pytest.raises(ValueError, match="Pyodide cannot start") as e:
+        pyo.SolverFactory("pounce").solve(m)
+    assert "without intermediate=" not in str(e.value)
+
+
+def test_arguments_the_in_process_route_ignores_warn():
+    m = plants(declare=False)
+    with pytest.warns(UserWarning, match=r"load_solutions=, timelimit= have no effect"):
+        pyo.SolverFactory("pounce").solve(
+            m, intermediate=lambda it: None, load_solutions=False, timelimit=5)
+
+
+def test_no_op_arguments_do_not_warn(recwarn):
+    m = plants(declare=False)
+    pyo.SolverFactory("pounce").solve(
+        m, intermediate=lambda it: None, tee=False, load_solutions=True,
+        symbolic_solver_labels=True, keepfiles=False)
+    assert not [w for w in recwarn if "in-process route" in str(w.message)]

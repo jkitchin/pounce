@@ -27,6 +27,12 @@
 const PYODIDE_VERSION = '0.28.3';
 const params = new URLSearchParams(self.location.search);
 const PYODIDE_URL = params.get('pyodide') || `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
+// Pinned for the same reason: micropip takes Pyomo from PyPI, and an unpinned
+// install would let a Pyomo release change (or break) both Pyomo routes and
+// the CI test that runs this one. Keep it in step with PYOMO_VERSION in
+// crates/pounce-wasm/tests/pyomo_pounce_pyodide.mjs. `?pyomo=<url>[,<url>…]`
+// still overrides it.
+const PYOMO_VERSION = '6.11.0';
 
 // The emscripten build of `pounce-solver` is named by a manifest that
 // `crates/pounce-wasm/build-wheel.sh` writes beside it, rather than by a
@@ -257,17 +263,16 @@ async function installPyomoPounce() {
   await pyodide.loadPackage('numpy');
   await micropip.install.callKwargs(await pounceWheelUrl(), { deps: false });
   const wheels = params.get('pyomo');
-  await micropip.install(wheels ? wheels.split(',') : 'pyomo');
-  // `build.sh` builds pyomo-pounce beside the pounce-solver wheel, at the
-  // same version.
-  const manifest = await (await fetch('./wheels/pounce-wheel.json')).json();
-  const wheel = new URL(
-    `./wheels/pyomo_pounce-${manifest.version}-py3-none-any.whl`,
-    self.location.href,
-  ).href;
-  if (!(await fetch(wheel, { method: 'HEAD' })).ok) {
+  await micropip.install(wheels ? wheels.split(',') : `pyomo==${PYOMO_VERSION}`);
+  // `build.sh` builds pyomo-pounce beside the pounce-solver wheel and names
+  // it in its own manifest: pyomo-pounce is released on its own version, so
+  // its file name cannot be derived from `pounce-wheel.json`.
+  const res = await fetch('./wheels/pyomo-pounce-wheel.json');
+  if (!res.ok) {
     throw new Error('no pyomo-pounce wheel is deployed here. Run crates/pounce-wasm/build.sh.');
   }
+  const manifest = await res.json();
+  const wheel = new URL(`./wheels/${manifest.wheel}`, self.location.href).href;
   await micropip.install.callKwargs(wheel, { deps: false });
   say('ready');
 }
@@ -282,7 +287,7 @@ async function installPyomoRoute() {
   // be built for wasm. `?pyomo=<url>[,<url>…]` points at self-hosted wheels
   // (offline, or where PyPI is unreachable); the default resolves from PyPI.
   const wheels = params.get('pyomo');
-  await micropip.install(wheels ? wheels.split(',') : 'pyomo');
+  await micropip.install(wheels ? wheels.split(',') : `pyomo==${PYOMO_VERSION}`);
 
   say('wiring POUNCE into Python…');
   const shim = await (await fetch('./pounce_browser.py')).text();
