@@ -133,6 +133,78 @@ use std::rc::Rc;
 /// one more number with no population behind it.
 const ALPHA_INTERP_MIN_TRIALS: i32 = 6;
 
+/// The smallest step the backtracking loop tries before it gives up on
+/// the direction (gh#1217).
+///
+/// Upstream's loop is `while (alpha_primal >= alpha_min || n_steps == 0)`
+/// with `alpha_min` from the acceptor's `CalculateAlphaMin` and nothing
+/// else (`IpBacktrackingLineSearch.cpp:740`). The filter acceptor's value
+/// is `alpha_min_frac · min(γ_θ, γ_φ·θ/(−∇φᵀd), δ·θ^{s_θ}/(−∇φᵀd)^{s_φ})`,
+/// which falls far below `1e-12` whenever the directional derivative is
+/// large. pounce used to clamp it to `driver_floor` (the `alpha_min` field,
+/// `1e-12`) from below, so on such a step it went to restoration where
+/// upstream keeps halving. gh#1217's maximum-entropy model is the case:
+/// at iteration 20 of the solve started at the optimum, the step has
+/// `‖d‖ = 3.7e17` and upstream accepts it after 75 halvings at
+/// `α = 5.2e-23`; pounce stopped at `1.8e-12`, entered restoration, and
+/// never came back (`Error_In_Step_Computation` where Ipopt converges in
+/// 64 iterations — pounce now reproduces those 64 line for line).
+///
+/// `driver_floor` remains the answer whenever the acceptor's value is `0`,
+/// which a zero `alpha_min` would otherwise let the loop halve to
+/// underflow. That happens in two places, and the second is the common
+/// one:
+///
+/// * an acceptor with no floor of its own (the trait default returns `0`);
+/// * the filter acceptor at an **exactly feasible** iterate with descent:
+///   `θ = 0` zeroes both descent terms, so `CalculateAlphaMin` is `0` and
+///   the old `1e-12` floor still applies.
+///
+/// A *nearly* feasible iterate is the sharp edge of that: its floor is
+/// `≈ θ^{s_θ}/(−∇φᵀd)^{s_φ}`, far below `1e-12` (`5e-226` at
+/// `θ = 1e-200`, `−∇φᵀd = 1`), so a sweep there may run hundreds of
+/// trials (750 from `alpha = 1` at the default `0.5` factor) — see
+/// [`trials_to_reach`] — where `θ = 0` stops after ~40. Upstream has the
+/// same edge, except that at `θ = 0` it halves on until `alpha` underflows.
+fn effective_alpha_min(acceptor_alpha_min: Number, driver_floor: Number) -> Number {
+    if acceptor_alpha_min > 0.0 && acceptor_alpha_min.is_finite() {
+        acceptor_alpha_min
+    } else {
+        driver_floor
+    }
+}
+
+/// The trial budget for one backtracking sweep: at least `configured`
+/// (the `max_trials` field), and never fewer than it takes to contract
+/// from `alpha_start` past `alpha_min` (gh#1217).
+///
+/// Every trial after the first shrinks `alpha` by at least
+/// `alpha_red_factor` (`next_alpha` is capped at the fixed factor), so
+/// `ceil(ln(alpha_min/alpha_start) / ln(alpha_red_factor)) + 1` trials
+/// always reach the `alpha < alpha_min` exit, which is the loop's only
+/// exit upstream. With the fixed cap of 50 the cap could end the sweep
+/// first: gh#1217's step needed 75. The configured value still bounds a
+/// sweep whose floor is unreachable (a non-finite ratio, or a reduction
+/// factor outside `(0, 1)`).
+fn trials_to_reach(
+    alpha_start: Number,
+    alpha_min: Number,
+    alpha_red_factor: Number,
+    configured: i32,
+) -> i32 {
+    if !(alpha_start > 0.0 && alpha_min > 0.0 && alpha_red_factor > 0.0 && alpha_red_factor < 1.0) {
+        return configured;
+    }
+    let needed = ((alpha_min / alpha_start).ln() / alpha_red_factor.ln()).ceil() + 1.0;
+    if needed.is_finite() && needed > configured as Number {
+        // A floor at the smallest positive double over a factor of 0.5
+        // needs 1075 trials; clamp only against overflow.
+        needed.min(i32::MAX as Number) as i32
+    } else {
+        configured
+    }
+}
+
 /// gh#1016 — the approximate-Wolfe test of Hager & Zhang (*SIAM J. Optim.*
 /// 16(1), 2005, eq. 4.1), used only once a solve has shown that the
 /// objective cannot resolve its own decrease (see
@@ -247,8 +319,10 @@ pub struct BacktrackingLineSearch {
     /// non-decreasing trial points before reverting to the snapshot.
     /// Mirrors upstream's `watchdog_trial_iter_max` (default 3).
     pub watchdog_trial_iter_max: i32,
-    /// Lower bound on α; below this we declare a tiny step (mirrors
-    /// `alpha_min_frac` flow, `IpBacktrackingLineSearch.cpp:CalculateAlphaMin`).
+    /// Smallest α tried when the acceptor reports no floor of its own
+    /// (its `calc_alpha_min` returns `0`). When it does report one — the
+    /// filter acceptor always does, upstream's `CalculateAlphaMin` — that
+    /// value is used as is, however small; see [`effective_alpha_min`].
     pub alpha_min: Number,
     /// `filter_theta_roundoff_retry` (gh#945) — whether a line search that
     /// has run out of `alpha` at an iterate that is *already feasible to
@@ -261,7 +335,9 @@ pub struct BacktrackingLineSearch {
     /// can be entered at all. `true` is the default; `false` restores the
     /// plain Armijo/filter test.
     pub objective_noise_wolfe: bool,
-    /// Maximum trial-iteration cap before declaring failure.
+    /// Minimum trial budget of one backtracking sweep. A sweep whose
+    /// `alpha_min` needs more contractions gets them, so this never ends a
+    /// sweep before `alpha < alpha_min` does; see [`trials_to_reach`].
     pub max_trials: i32,
 
     // ---- Watchdog state (port of `IpBacktrackingLineSearch.{hpp,cpp}`'s
@@ -1355,10 +1431,12 @@ impl BacktrackingLineSearch {
             alpha_init
         } else {
             let acceptor_alpha_min = self.acceptor.calc_alpha_min(d_phi, theta);
-            self.alpha_min.max(acceptor_alpha_min)
+            effective_alpha_min(acceptor_alpha_min, self.alpha_min)
         };
+        let max_trials =
+            trials_to_reach(alpha, alpha_min_eff, self.alpha_red_factor, self.max_trials);
 
-        for trial in 0..self.max_trials {
+        for trial in 0..max_trials {
             // Fine-grained time-budget gate (pounce#242): each trial
             // evaluates the constraints / barrier objective, which on a
             // large problem is not cheap, so honor the deadline at
@@ -2408,6 +2486,62 @@ mod tests {
         bls.alpha_red_factor = red;
         bls.alpha_red_factor_min = red_min;
         bls
+    }
+
+    /// gh#1217: the filter acceptor's `alpha_min` is upstream's floor and
+    /// is not raised to the driver's `1e-12`.
+    #[test]
+    fn acceptor_alpha_min_below_the_driver_floor_is_kept() {
+        assert_eq!(effective_alpha_min(5e-24, 1e-12), 5e-24);
+        assert_eq!(effective_alpha_min(1e-3, 1e-12), 1e-3);
+    }
+
+    /// The common path into the driver floor (gh#1217 review): at an
+    /// exactly feasible iterate with descent the filter's own `alpha_min`
+    /// is `alpha_min_frac · min(γ_θ, γ_φ·0/(−∇φᵀd), δ·0^{s_θ}/…) = 0`, so
+    /// `θ = 0` keeps the old `1e-12` floor while a nearly feasible iterate
+    /// gets the acceptor's far deeper one.
+    #[test]
+    fn an_exactly_feasible_iterate_keeps_the_driver_floor() {
+        let mut acc = FilterLsAcceptor::new();
+        let at_zero = acc.calc_alpha_min(-1.0, 0.0);
+        assert_eq!(at_zero, 0.0);
+        assert_eq!(effective_alpha_min(at_zero, 1e-12), 1e-12);
+        let near_zero = acc.calc_alpha_min(-1.0, 1e-200);
+        assert!(near_zero > 0.0 && near_zero < 1e-200, "got {near_zero}");
+        assert_eq!(effective_alpha_min(near_zero, 1e-12), near_zero);
+    }
+
+    /// The other branch: an acceptor with no floor (the trait default `0`,
+    /// or a non-finite value) gets the driver's.
+    #[test]
+    fn acceptor_without_a_floor_gets_the_driver_floor() {
+        assert_eq!(effective_alpha_min(0.0, 1e-12), 1e-12);
+        assert_eq!(effective_alpha_min(Number::NAN, 1e-12), 1e-12);
+        assert_eq!(effective_alpha_min(Number::INFINITY, 1e-12), 1e-12);
+    }
+
+    /// gh#1217's sweep: 75 halvings from `α ≈ 1` to `5.2e-23` must fit in
+    /// the budget the configured 50 would have cut short.
+    #[test]
+    fn trial_budget_reaches_a_small_alpha_min() {
+        let n = trials_to_reach(1.0, 5e-24, 0.5, 50);
+        assert!(n >= 78, "budget {n}");
+        // Halving `n - 1` times from 1 does cross the floor.
+        assert!(0.5_f64.powi(n - 1) < 5e-24);
+        // A floor reachable within the configured cap keeps the cap.
+        assert_eq!(trials_to_reach(1.0, 1e-12, 0.5, 50), 50);
+    }
+
+    /// Degenerate inputs fall back to the configured cap rather than to
+    /// an unbounded or negative budget.
+    #[test]
+    fn trial_budget_falls_back_to_the_configured_cap() {
+        assert_eq!(trials_to_reach(1.0, 0.0, 0.5, 50), 50);
+        assert_eq!(trials_to_reach(0.0, 1e-12, 0.5, 50), 50);
+        assert_eq!(trials_to_reach(1.0, 1e-12, 1.0, 50), 50);
+        assert_eq!(trials_to_reach(1.0, Number::NAN, 0.5, 50), 50);
+        assert_eq!(trials_to_reach(1.0, 5e-324, 0.5, 50), 1075);
     }
 
     /// The interpolated step is what the model says, when the model is
