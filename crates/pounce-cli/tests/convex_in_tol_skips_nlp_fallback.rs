@@ -18,13 +18,14 @@
 //! | fixture | convex relative error | branch |
 //! |---|---|---|
 //! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable (`σ`-demoted) | fallback, NLP wins |
-//! | `lp_tuff.nl` at `tol=1e-12`, `relative_gap_tol=0` | `1.4e-12`, acceptable | fallback |
+//! | `issue745_netlib_problem.nl` at `tol=1e-12`, `relative_gap_tol=0` | `3.5e-8` (`1.2e-8` L-BFGS), acceptable | fallback |
+//! | `lp_tuff.nl` at `tol=3e-13`, `relative_gap_tol=0` | `1.2e-14`, acceptable; stopping error `2.8e-13` | skip |
 //!
-//! No fixture here reaches the skip itself. The one corpus fixture known to
-//! (`convex_qp_qpilotno.nl` at `tol=1e-12`: relative `1.34e-14`, stopping
-//! error `5.9e-12`, skipped in 49.9 s against 50.6-58.2 s with the fallback)
-//! spends ~50 s in the convex arm, as BOYD2 spends 44 s; both are too slow for
-//! the suite. The skip, the absolute band, the status arm and the `σ` arm are
+//! TUFF reaches the skip because the HSDE stop holds the complementarity sum
+//! to the gap tolerance (the `traininstance6` fix): it declines only in a
+//! narrow window (`1.5e-13`–`6e-13`), and every point there is far inside
+//! `tol` on the relative ruler. Re-measure the window if the convex
+//! trajectory moves. The absolute band, the status arm and the `σ` arm are
 //! pinned by the unit tests in `main.rs` (`convex_in_tol_tests`).
 
 use std::path::{Path, PathBuf};
@@ -114,7 +115,10 @@ fn a_sigma_uncertified_convex_answer_still_falls_back() {
 /// error is above `tol` still goes to the NLP arm, and the comparison decides.
 #[test]
 fn an_out_of_tol_convex_answer_still_falls_back() {
-    let cases: [(&str, &[&str]); 1] = [("lp_tuff.nl", &["tol=1e-12", "relative_gap_tol=0"])];
+    let cases: [(&str, &[&str]); 1] = [(
+        "issue745_netlib_problem.nl",
+        &["tol=1e-12", "relative_gap_tol=0"],
+    )];
     for (fixture, opts) in cases {
         for leg in [&[][..], &[LBFGS][..]] {
             let mut args = opts.to_vec();
@@ -137,6 +141,36 @@ fn an_out_of_tol_convex_answer_still_falls_back() {
             assert!(!r.stderr.contains(SKIP_NOTE), "{fixture} {leg:?}");
             assert!(r.stderr.contains(FALLBACK_NOTE), "{fixture} {leg:?}");
         }
+    }
+}
+
+/// The skip itself: a convex answer that stops `OptimalInaccurate` but
+/// already meets `tol` on the relative ruler reports without an NLP re-solve.
+#[test]
+fn an_in_tol_convex_answer_skips_the_fallback() {
+    for leg in [&[][..], &[LBFGS][..]] {
+        let mut args = vec!["tol=3e-13", "relative_gap_tol=0"];
+        args.extend_from_slice(leg);
+        let r = run("lp_tuff.nl", &args);
+        assert!(
+            r.stderr.contains(SKIP_NOTE),
+            "{leg:?}: stderr=\n{}",
+            r.stderr
+        );
+        assert!(!r.stderr.contains(FALLBACK_NOTE), "{leg:?}");
+        assert!(r.report.convex_fallback.is_none(), "{leg:?}");
+        assert_eq!(r.report.solution.engine, "cvx-qp", "{leg:?}");
+        assert_eq!(
+            r.report.solution.status,
+            ApplicationReturnStatus::SolvedToAcceptableLevel,
+            "{leg:?}"
+        );
+        // NETLIB TUFF's published optimum.
+        let obj = r.report.solution.objective;
+        assert!(
+            ((obj - 0.29214776509) / 0.29214776509).abs() < 1e-6,
+            "{leg:?}: objective {obj}"
+        );
     }
 }
 
