@@ -157,6 +157,12 @@ pub(crate) struct IpmSeed {
     /// The configured backend (gh#1219 §3.6); `None` is a default FERAL,
     /// for an `SqpAlgorithm` built without one (the crate's own tests).
     pub(crate) backend: std::cell::RefCell<Option<SeedBackendFactory>>,
+    /// Status the most recent interior-point seed ended with, `None` when
+    /// it did not run (declined before, or no seed yet).
+    pub(crate) last_status: std::cell::Cell<Option<pounce_convex::QpStatus>>,
+    /// Iteration cap for the seed; `None` is [`IPM_SEED_MAX_ITER`]. Set only
+    /// by tests, to stop the interior point short of its `tol`.
+    pub(crate) max_iter: Option<usize>,
 }
 
 impl IpmSeed {
@@ -2821,15 +2827,28 @@ fn ipm_seeded_step_qp(
     };
     let ipm_opts = pounce_convex::QpOptions {
         time_limit: left(),
-        max_iter: IPM_SEED_MAX_ITER,
+        max_iter: seed.max_iter.unwrap_or(IPM_SEED_MAX_ITER),
         ..pounce_convex::QpOptions::default()
     };
+    seed.last_status.set(None);
     let ipm = pounce_convex::solve_qp_ipm(&prob, &ipm_opts, feral);
     let ipm_time = started.elapsed();
+    seed.last_status.set(Some(ipm.status));
+    // The iteration count sets the next warm start's budget, so only a clean
+    // solve's is a measurement of what a seed costs.
     if ipm.status == pounce_convex::QpStatus::Optimal {
         seed.last_iters.set(Some(ipm.iters));
     }
-    if ipm.status != pounce_convex::QpStatus::Optimal {
+    // gh#1219 §4.3: an `OptimalInaccurate` point (KKT error within `1e3·tol`)
+    // is still a working-set estimate, which is all the seed is used for:
+    // the active-set solve below starts from it and must itself reach
+    // `Optimal`, so the step, multipliers and working set stay the active-set
+    // method's own. Discarding it sent the step QP back to the cold or
+    // elastic start the seed exists to avoid.
+    if !matches!(
+        ipm.status,
+        pounce_convex::QpStatus::Optimal | pounce_convex::QpStatus::OptimalInaccurate
+    ) {
         tracing::debug!(target: "pounce::sqp::qp",
             "IPM cold start (n={n}, m={m}): {:?} after {} iterations in {ipm_time:.3?}; \
              solving from cold instead", ipm.status, ipm.iters);
@@ -2871,9 +2890,9 @@ fn ipm_seeded_step_qp(
         .solve_with_working_set(qp, &working, &warm_opts)
         .ok()?;
     tracing::debug!(target: "pounce::sqp::qp",
-        "IPM cold start (n={n}, m={m}): optimal after {} iterations in {ipm_time:.3?}, \
+        "IPM cold start (n={n}, m={m}): {:?} after {} iterations in {ipm_time:.3?}, \
          {} rows and bounds active; warm active-set solve {} in {:.3?} with {} \
-         working-set changes", ipm.iters, working.active_count(), sol.status,
+         working-set changes", ipm.status, ipm.iters, working.active_count(), sol.status,
         sol.stats.time, sol.stats.n_working_set_changes);
     (sol.status == QpStatus::Optimal).then_some(sol)
 }

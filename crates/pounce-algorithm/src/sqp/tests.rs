@@ -3033,6 +3033,92 @@ fn a_step_qp_fallback_chain_shares_one_time_budget() {
     assert!(started.elapsed() < Duration::from_millis(1000));
 }
 
+/// gh#1219 §4.3: an interior-point seed that ends `OptimalInaccurate` is
+/// still used as the active-set solve's starting working set, rather than
+/// thrown away for a cold start.
+///
+/// `min ½‖x‖² − cᵀx  s.t.  0 ≤ x ≤ 1` with half of `c` above 1: the cold
+/// active-set solve has to add every one of those upper bounds, one change
+/// each, while a seed close to the optimum names them all. The seed is
+/// stopped short of its `tol` by capping its iterations; the test scans caps
+/// for one that ends `OptimalInaccurate`, and fails if none does (the fixture
+/// would then no longer reach this branch).
+#[test]
+fn an_inaccurate_ipm_seed_still_seeds_the_step_qp() {
+    use crate::sqp::sqp_alg::{IpmSeed, solve_subproblem_qp};
+    let n = 20;
+    let c: Vec<Number> = (0..n).map(|i| if i % 2 == 0 { 2.0 } else { 0.5 }).collect();
+    let grad: Vec<Number> = c.iter().map(|v| -v).collect();
+    let idx: Vec<Index> = (1..=n as Index).collect();
+    let data = SqpQpData::build(
+        &vec![0.0; n],
+        &grad,
+        &[],
+        &[],
+        &[],
+        &vec![0.0; n],
+        &vec![1.0; n],
+        Triplet {
+            n_rows: 0,
+            n_cols: n,
+            irow: vec![],
+            jcol: vec![],
+            vals: vec![],
+        },
+        Triplet {
+            n_rows: n,
+            n_cols: n,
+            irow: idx.clone(),
+            jcol: idx,
+            vals: vec![1.0; n],
+        },
+        HessianInertia::Psd,
+    );
+    let opts = QpOptions::sqp_subproblem();
+    let solve = |cap: Option<usize>| {
+        let mut solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let seed = IpmSeed {
+            max_iter: cap,
+            ..IpmSeed::default()
+        };
+        let sol = solve_subproblem_qp(
+            &mut solver,
+            &data,
+            data.as_qp(),
+            None,
+            &opts,
+            Some(&seed),
+            "step QP",
+        )
+        .unwrap();
+        assert_eq!(sol.status, QpStatus::Optimal);
+        for (xi, ci) in sol.x.iter().zip(&c) {
+            assert!((xi - ci.min(1.0)).abs() < 1e-8, "{:?}", sol.x);
+        }
+        (sol.stats.n_working_set_changes, seed.last_status.get())
+    };
+    let (cold_changes, _) = {
+        let mut solver =
+            ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+        let sol = solver.solve(&data.as_qp(), None, &opts).unwrap();
+        (sol.stats.n_working_set_changes, ())
+    };
+    assert!(cold_changes >= (n / 2) as u32, "cold: {cold_changes}");
+    let (clean, status) = solve(None);
+    assert_eq!(status, Some(pounce_convex::QpStatus::Optimal));
+    assert!(clean < cold_changes);
+    let inaccurate = (1..30)
+        .map(|k| solve(Some(k)))
+        .find(|(_, s)| *s == Some(pounce_convex::QpStatus::OptimalInaccurate))
+        .expect("no iteration cap left the seed OptimalInaccurate");
+    assert!(
+        inaccurate.0 < cold_changes,
+        "an inaccurate seed was discarded: {} changes, as many as cold ({cold_changes})",
+        inaccurate.0
+    );
+}
+
 /// gh#1091: the lifted L-BFGS subproblem reaches the warm Schur rule as
 /// `Indefinite` and so leaves updates off at size, as an exact Hessian's
 /// does, while a dense PSD one keeps them. Built through `build_low_rank`,
