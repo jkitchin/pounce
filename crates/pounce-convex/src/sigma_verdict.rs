@@ -110,3 +110,37 @@ pub(crate) fn clear() {
         }
     });
 }
+
+thread_local! {
+    /// Whether the last `σ`-demotion site to run on this thread relabelled
+    /// its answer `Optimal` -> `OptimalInaccurate`. Written by every call of
+    /// `ipm::demote_uncertified_sigma_optimum`. A nested entry's call runs
+    /// before its outer frame's, so once an entry point returns the slot
+    /// describes the answer it returned. Read and cleared by
+    /// [`take_last_sigma_demotion`].
+    static LAST_DEMOTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Record whether a `σ`-demotion site relabelled its answer.
+pub(crate) fn note_demotion(demoted: bool) {
+    LAST_DEMOTED.with(|c| c.set(demoted));
+}
+
+/// Did the last convex IPM solve on this thread return `OptimalInaccurate`
+/// because the `σ` cascade (gh #880; the gh #414 cost-normalization path)
+/// declined to certify it, rather than for another reason? Clears the slot,
+/// so call it once before a solve to drop a stale value, and once after.
+///
+/// For a caller that must tell the two kinds of reduced-accuracy answer
+/// apart without a field on [`crate::QpSolution`]; this module's doc says why
+/// it has none. The CLI's LP / convex-QP → NLP fallback reads it. It reports
+/// an in-tol reduced-accuracy answer without the NLP re-solve, but not a
+/// `σ`-uncertified one: that demotion is about forward error, which the
+/// relative KKT reading the skip relies on does not see.
+///
+/// It describes the answer the entry point *returned*. A caller that runs
+/// further solves (a postsolve retry, a certificate re-solve) must read it
+/// right after the solve whose answer it keeps.
+pub fn take_last_sigma_demotion() -> bool {
+    LAST_DEMOTED.with(|c| c.replace(false))
+}
