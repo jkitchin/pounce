@@ -15,7 +15,7 @@
 //!
 //! | fixture | convex | NLP | reports | decided by |
 //! |---|---|---|---|---|
-//! | `lp_etamacro.nl` (NETLIB ETAMACRO) at `tol=1e-12`, `relative_gap_tol=0` | `1.6e-12`, acceptable | `4.2e-11`, succeeded (`1.0e-10`, acceptable, under L-BFGS) | convex | accuracy |
+//! | `lp_etamacro.nl` (NETLIB ETAMACRO) at `tol=5e-13`, `relative_gap_tol=0` | `1.5e-12`, acceptable | `4.2e-11`, succeeded (`8.6e-11`–`1.0e-10`, acceptable, under L-BFGS) | convex | accuracy |
 //! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable | `1.5e-16`, succeeded | NLP | accuracy |
 //! | `lp_israel.nl` at `tol=1e-16` | `2.0e-16`, iteration limit | `5.2e-14`, acceptable | NLP | the status guard |
 //! | `lp_afiro.nl` at `tol=1e-20` | `2.4e-16`, iteration limit | `5.5e-13`, search direction too small | convex, its own failing status | accuracy |
@@ -40,8 +40,14 @@
 //! fallback is now skipped when the convex answer already meets `tol` on this
 //! ruler (BOYD2), which every point in that window does (`1.2e-14` at
 //! `3e-13`). The convex-wins branch therefore needs a convex answer *outside*
-//! `tol` that still beats the NLP one, which ETAMACRO at `tol=1e-12` gives on
-//! both legs by 26x and 62x. Re-measure it if the convex trajectory moves.
+//! `tol` that still beats the NLP one, which ETAMACRO at `tol=5e-13` gives on
+//! both legs by 27x and 55x (67x on macOS). The `tol` is chosen for margin on every
+//! platform, not just one: at `tol=1e-12` the convex arm stopped at
+//! `1.56e-12` on aarch64 macOS (declined, 1.6x over) but certified on x86-64
+//! and aarch64 Linux, so the precondition held on one machine only. At
+//! `5e-13` it stops at `1.55e-12` (3x over) on all three, and every number
+//! in this row is bit-identical across them (measured in Docker). Re-measure
+//! it if the convex trajectory moves.
 //! `lp_tuff.nl` and `lp_etamacro.nl` were produced by
 //! `benchmarks/lp/generate_nl.py`
 //! from the NETLIB MPS file. Every case takes well under a second.
@@ -108,11 +114,11 @@ fn status_lines(stdout: &str) -> Vec<&str> {
 fn a_more_accurate_convex_answer_is_kept() {
     for leg in [&[][..], &[LBFGS][..]] {
         // `relative_gap_tol=0`: the fallback otherwise holds the NLP arm to the
-        // convex arm's duality gap, which lifts it to 4.7e-13 here and makes it
+        // convex arm's duality gap, which lifts it to 2.4e-13 here and makes it
         // the winner — that branch is pinned in
         // `relative_gap_tol_closes_the_nlp_gap.rs`. This test is about the
         // comparison, so it keeps the NLP arm on Ipopt's own test.
-        let mut args = vec!["tol=1e-12", "relative_gap_tol=0"];
+        let mut args = vec!["tol=5e-13", "relative_gap_tol=0"];
         args.extend_from_slice(leg);
         let r = run("lp_etamacro.nl", &args);
         assert!(
@@ -308,7 +314,7 @@ fn when_both_fail_the_verdict_stays_honest() {
 /// which answer it kept — the console counterpart of `convex_fallback`.
 #[test]
 fn the_comparison_is_announced() {
-    let r = run("lp_etamacro.nl", &["tol=1e-12", "relative_gap_tol=0"]);
+    let r = run("lp_etamacro.nl", &["tol=5e-13", "relative_gap_tol=0"]);
     let line = r
         .stderr
         .lines()
