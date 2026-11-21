@@ -178,6 +178,12 @@ pub struct FeralSolverInterface {
     /// [`Self::with_summary_sink`] and reads it after
     /// `optimize_tnlp` returns.
     sink: Option<Arc<Mutex<LinearSolverSummary>>>,
+
+    /// Static pivoting is on because [`Self::for_convex_ipm`] chose it,
+    /// not because anyone asked: [`SparseSymLinearSolverInterface::relax_static_pivoting`]
+    /// may then turn it off. `false` everywhere else, including an explicit
+    /// `feral_static_pivoting` / `POUNCE_FERAL_STATIC_PIVOTING` setting.
+    static_pivoting_relaxable: bool,
 }
 
 /// Construction-time configuration for [`FeralSolverInterface`].
@@ -1218,10 +1224,38 @@ impl FeralSolverInterface {
     /// error 1.4e9). Delayed pivoting does not cascade on them (nnz(L) within
     /// 1.09× of the first factorization through SyntheticUSA's solve, against
     /// 11–69× on rmatr200-p5 and waihi, which have no free column).
+    ///
+    /// The static choice made here (not an explicit one) can be withdrawn
+    /// mid-solve through
+    /// [`SparseSymLinearSolverInterface::relax_static_pivoting`]: the HSDE
+    /// loop does so when refinement cannot bring a solve through the
+    /// static-pivoted factor below its residual gate (MIPLIB ns1116954).
     pub fn for_convex_ipm(tol: f64, free_fraction: f64) -> Self {
+        Self::for_convex_ipm_with(None, tol, free_fraction)
+    }
+
+    /// [`Self::for_convex_ipm`] with the caller's explicit
+    /// `feral_static_pivoting` setting, which wins over the
+    /// `POUNCE_FERAL_STATIC_PIVOTING` environment variable and over the
+    /// convex rule. `None` is exactly [`Self::for_convex_ipm`].
+    pub fn for_convex_ipm_with(
+        static_pivoting: Option<bool>,
+        tol: f64,
+        free_fraction: f64,
+    ) -> Self {
         let mut cfg = FeralConfig::from_env();
-        cfg.static_pivoting = convex_ipm_static_pivoting(cfg.static_pivoting, tol, free_fraction);
-        Self::with_config(cfg)
+        let explicit = static_pivoting.or(cfg.static_pivoting);
+        cfg.static_pivoting = convex_ipm_static_pivoting(explicit, tol, free_fraction);
+        let relaxable = explicit.is_none() && cfg.static_pivoting == Some(true);
+        let mut me = Self::with_config(cfg);
+        me.static_pivoting_relaxable = relaxable;
+        me
+    }
+
+    /// Whether this backend still factors with a static-pivoting choice it
+    /// may give up (see [`Self::for_convex_ipm`]).
+    pub fn static_pivoting_relaxable(&self) -> bool {
+        self.static_pivoting_relaxable
     }
 
     /// Construct with explicit configuration. Cascade-break
@@ -1269,6 +1303,7 @@ impl FeralSolverInterface {
                 ..Default::default()
             },
             sink: None,
+            static_pivoting_relaxable: false,
         }
     }
 
@@ -2131,6 +2166,18 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
 
     fn set_reused_scaling_zero_pivot_recheck(&mut self, on: bool) {
         self.reused_scaling_zero_pivot_recheck = on;
+    }
+
+    fn relax_static_pivoting(&mut self) -> bool {
+        if !self.static_pivoting_relaxable {
+            return false;
+        }
+        self.static_pivoting_relaxable = false;
+        // `allow_delayed_pivots` is read per front on every numeric
+        // factorization, so flipping it keeps the symbolic analysis and the
+        // scaling caches; the next factor simply delays.
+        self.solver = std::mem::take(&mut self.solver).with_static_pivoting(false);
+        true
     }
 
     fn singularity_certified(&self) -> bool {
@@ -3014,6 +3061,69 @@ mod tests {
         // Explicit setting wins in both directions.
         assert_eq!(f(Some(false), 1e-8, 0.0), Some(false));
         assert_eq!(f(Some(true), 1e-12, 0.9), Some(true));
+    }
+
+    /// `relax_static_pivoting` gives up only a static choice the convex rule
+    /// *defaulted* to, and only once: the explicit settings (either way), a
+    /// rule that chose delayed pivoting, and the plain constructor have
+    /// nothing to relax. Each arm of `relaxable` is a separate case here.
+    #[test]
+    fn relax_static_pivoting_only_a_defaulted_choice_once() {
+        if std::env::var_os("POUNCE_FERAL_STATIC_PIVOTING").is_some() {
+            return; // the env var is itself an explicit setting
+        }
+        // Rule defaults to static: relaxable exactly once.
+        let mut s = FeralSolverInterface::for_convex_ipm(1e-8, 0.0);
+        assert!(s.static_pivoting_relaxable());
+        assert!(s.relax_static_pivoting());
+        assert!(!s.static_pivoting_relaxable());
+        assert!(!s.relax_static_pivoting());
+        // Rule chose delayed (tight tol, or many free columns).
+        assert!(!FeralSolverInterface::for_convex_ipm(1e-9, 0.0).relax_static_pivoting());
+        assert!(!FeralSolverInterface::for_convex_ipm(1e-8, 0.5).relax_static_pivoting());
+        // Explicit `feral_static_pivoting`, either way.
+        assert!(
+            !FeralSolverInterface::for_convex_ipm_with(Some(true), 1e-8, 0.0)
+                .relax_static_pivoting()
+        );
+        assert!(
+            !FeralSolverInterface::for_convex_ipm_with(Some(false), 1e-8, 0.0)
+                .relax_static_pivoting()
+        );
+        // `None` is exactly `for_convex_ipm`.
+        assert!(
+            FeralSolverInterface::for_convex_ipm_with(None, 1e-8, 0.0).static_pivoting_relaxable()
+        );
+        // Every other constructor.
+        assert!(!FeralSolverInterface::new().relax_static_pivoting());
+    }
+
+    /// Relaxing between factorizations keeps the symbolic analysis usable:
+    /// the same pattern refactors and solves exactly with pivots delayed.
+    #[test]
+    fn relax_static_pivoting_then_refactor_solves() {
+        if std::env::var_os("POUNCE_FERAL_STATIC_PIVOTING").is_some() {
+            return;
+        }
+        let mut s = FeralSolverInterface::for_convex_ipm(1e-8, 0.0);
+        let irn: [Index; 3] = [1, 2, 2];
+        let jcn: [Index; 3] = [1, 1, 2];
+        assert_eq!(
+            s.initialize_structure(2, 3, &irn, &jcn),
+            ESymSolverStatus::Success
+        );
+        for pass in 0..2 {
+            let vals = s.values_array_mut();
+            vals.copy_from_slice(&[4.0, 1.0, 3.0]);
+            // [[4,1],[1,3]] x = [5,4]  =>  x = [1,1]
+            let mut rhs = [5.0, 4.0];
+            let st = s.multi_solve(true, &irn, &jcn, 1, &mut rhs, false, 0);
+            assert_eq!(st, ESymSolverStatus::Success, "pass {pass}");
+            assert!((rhs[0] - 1.0).abs() < 1e-12 && (rhs[1] - 1.0).abs() < 1e-12);
+            if pass == 0 {
+                assert!(s.relax_static_pivoting());
+            }
+        }
     }
 
     /// The pounce default leaves static pivoting unset (`None`), so the

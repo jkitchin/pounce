@@ -194,6 +194,14 @@ impl Factorization {
         }
     }
 
+    /// Ask the backend to give up a defaulted static-pivoting choice; the
+    /// next [`Self::refactor`] then delays pivots. `true` only when that
+    /// changed the backend's configuration. See
+    /// [`SparseSymLinearSolverInterface::relax_static_pivoting`].
+    pub fn relax_static_pivoting(&mut self) -> bool {
+        self.inner.relax_static_pivoting()
+    }
+
     /// Dimension `n` of the factored `n × n` matrix.
     pub fn dim(&self) -> Index {
         self.dim

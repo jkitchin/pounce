@@ -3664,6 +3664,11 @@ struct ConvexConsole {
     print_timing: bool,
     /// `qp_certificate` (gh#1181).
     certificate: CertificateMode,
+    /// `feral_static_pivoting`, when set explicitly: it then decides the IPM
+    /// backend's pivoting outright (`FeralSolverInterface::for_convex_ipm_with`).
+    /// Unset, the `POUNCE_FERAL_STATIC_PIVOTING` environment variable and
+    /// then the convex rule decide, as before.
+    static_pivoting: Option<bool>,
 }
 
 /// What `qp_certificate` asks for on an infeasible or unbounded verdict.
@@ -3712,6 +3717,10 @@ fn convex_console(app: &IpoptApplication, json_dbg: bool) -> ConvexConsole {
             Ok("check") => CertificateMode::Check,
             _ => CertificateMode::Resolve,
         },
+        static_pivoting: opt
+            .get_bool_value("feral_static_pivoting", "")
+            .ok()
+            .and_then(|(v, found)| found.then_some(v)),
     }
 }
 
@@ -4059,11 +4068,17 @@ fn run_convex_qp(
     // The IPM's backend is built per problem: whether static pivoting is on
     // depends on the solve's `tol` and on the free-column fraction of the
     // (presolved) problem actually factored. See `for_convex_ipm`.
+    // An explicit `feral_static_pivoting` reaches it too (it used to be read
+    // only by the NLP path, so `feral_static_pivoting=no` changed nothing
+    // here).
+    let static_pivoting = console.static_pivoting;
     let ipm_backend = |p: &pounce_convex::QpProblem, tol: f64| {
         let free = p.free_column_fraction();
         move || -> Box<dyn SparseSymLinearSolverInterface> {
-            Box::new(pounce_feral::FeralSolverInterface::for_convex_ipm(
-                tol, free,
+            Box::new(pounce_feral::FeralSolverInterface::for_convex_ipm_with(
+                static_pivoting,
+                tol,
+                free,
             ))
         }
     };
