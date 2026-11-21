@@ -1,7 +1,9 @@
 //! The LP / convex-QP → NLP fallback (gh #535) is not spent on a convex
 //! answer that already meets `tol` on the ruler the fallback compares answers
-//! by (gh #1183) -- and when it is spent, the NLP arm runs on what is left of
-//! `max_wall_time`, not a fresh one.
+//! by (gh #1183) -- unless the convex arm demoted it for an uncertified cost
+//! normalization (`σ`, gh #880 / gh #414), which the KKT ruler cannot see --
+//! and when it is spent, the NLP arm runs on what is left of `max_wall_time`,
+//! not a fresh one.
 //!
 //! Maros-Meszaros BOYD2 at `tol=1e-8`, `max_wall_time=300`, single thread:
 //! the convex arm stopped `OptimalInaccurate` after 44.5 s at a relative KKT
@@ -11,19 +13,19 @@
 //! ran the NLP arm to `Maximum_WallTime_Exceeded` at `5.9e-6`, the convex
 //! answer reported anyway, and the solve took 312-324 s. With the skip it
 //! takes 49.7 s and reports the same point (`kkt 1.1e-10` on the benchmark's
-//! verifier). BOYD2 is 93 263 variables, too large for the test suite; the
-//! fixtures here reach the same two branches of `convex_answer_meets_tol`.
+//! verifier).
 //!
 //! | fixture | convex relative error | branch |
 //! |---|---|---|
-//! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable, `tol=1e-8` | skip |
-//! | `issue880_sigma_uncertified.nl` at `tol=1e-15` | `5.7e-13`, acceptable | fallback |
+//! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable (`σ`-demoted) | fallback, NLP wins |
 //! | `lp_tuff.nl` at `tol=1e-12`, `relative_gap_tol=0` | `1.4e-12`, acceptable | fallback |
 //!
-//! The rule's absolute-band arm (`abs <= 1e3·tol`) and its status arm are
-//! pinned by the unit tests in `main.rs` (`convex_in_tol_tests`): no small
-//! fixture is known that ends `OptimalInaccurate` in tol relatively with an
-//! absolute error outside the band.
+//! No fixture here reaches the skip itself. The one corpus fixture known to
+//! (`convex_qp_qpilotno.nl` at `tol=1e-12`: relative `1.34e-14`, stopping
+//! error `5.9e-12`, skipped in 49.9 s against 50.6-58.2 s with the fallback)
+//! spends ~50 s in the convex arm, as BOYD2 spends 44 s; both are too slow for
+//! the suite. The skip, the absolute band, the status arm and the `σ` arm are
+//! pinned by the unit tests in `main.rs` (`convex_in_tol_tests`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -71,47 +73,48 @@ fn run(fixture: &str, opts: &[&str]) -> Run {
 const SKIP_NOTE: &str = "already meets tol, so it is reported without an NLP re-solve";
 const FALLBACK_NOTE: &str = "LP/QP fallback (gh #1183)";
 
-/// The skip: a reduced-accuracy convex answer at `1.6e-15` against
-/// `tol=1e-8` reports from the convex arm, and the NLP arm never runs. Before
-/// the skip this ran the fallback and reported the NLP arm's
-/// `Solve_Succeeded` at `1.5e-16` -- the status this gives up.
+/// The `σ` exclusion: `issue880_sigma_uncertified` ends `OptimalInaccurate`
+/// at a relative KKT error of `1.6e-15` against `tol=1e-8` -- in tol on every
+/// KKT reading -- but its demotion is the uncertified cost normalization, so
+/// it still goes to the NLP arm, which wins with `Solve_Succeeded`.
 #[test]
-fn an_in_tol_acceptable_convex_answer_skips_the_fallback() {
+fn a_sigma_uncertified_convex_answer_still_falls_back() {
     for leg in [&[][..], &[LBFGS][..]] {
         let r = run("issue880_sigma_uncertified.nl", leg);
+        let fb = r
+            .report
+            .convex_fallback
+            .as_ref()
+            .unwrap_or_else(|| panic!("{leg:?}: no fallback; stderr=\n{}", r.stderr));
+        assert_eq!(fb.convex_status, "Solved_To_Acceptable_Level", "{leg:?}");
+        // The precondition that puts this on the σ arm rather than the
+        // relative-error one: the KKT ruler reads it in tol.
         assert!(
-            r.report.convex_fallback.is_none(),
-            "{leg:?}: the fallback ran; {:?}",
-            r.report.convex_fallback
+            fb.convex_kkt_error <= 1e-8,
+            "{leg:?}: precondition -- convex relative error in tol; {fb:?}"
         );
-        assert_eq!(r.report.solution.engine, "cvx-qp", "{leg:?}");
+        assert_eq!(fb.winner, "nlp", "{leg:?}: {fb:?}");
+        assert_eq!(r.report.solution.engine, "nlp", "{leg:?}");
         assert_eq!(
             r.report.solution.status,
-            ApplicationReturnStatus::SolvedToAcceptableLevel,
+            ApplicationReturnStatus::SolveSucceeded,
             "{leg:?}"
         );
+        assert!(!r.stderr.contains(SKIP_NOTE), "{leg:?}");
+        assert!(r.stderr.contains(FALLBACK_NOTE), "{leg:?}");
         assert!(
-            r.stderr.contains(SKIP_NOTE),
-            "{leg:?}: the skip is not announced; stderr=\n{}",
-            r.stderr
-        );
-        assert!(!r.stderr.contains(FALLBACK_NOTE), "{leg:?}");
-        assert!(
-            r.stdout.contains("Status: Solved_To_Acceptable_Level"),
+            r.stdout.contains("Status: Solve_Succeeded"),
             "{leg:?}: stdout=\n{}",
             r.stdout
         );
     }
 }
 
-/// The other branch, twice: a convex answer whose relative error is above
-/// `tol` still goes to the NLP arm, and the comparison decides.
+/// The relative-error arm: a convex answer (not `σ`-demoted) whose relative
+/// error is above `tol` still goes to the NLP arm, and the comparison decides.
 #[test]
-fn an_out_of_tol_acceptable_convex_answer_still_falls_back() {
-    let cases: [(&str, &[&str]); 2] = [
-        ("issue880_sigma_uncertified.nl", &["tol=1e-15"]),
-        ("lp_tuff.nl", &["tol=1e-12", "relative_gap_tol=0"]),
-    ];
+fn an_out_of_tol_convex_answer_still_falls_back() {
+    let cases: [(&str, &[&str]); 1] = [("lp_tuff.nl", &["tol=1e-12", "relative_gap_tol=0"])];
     for (fixture, opts) in cases {
         for leg in [&[][..], &[LBFGS][..]] {
             let mut args = opts.to_vec();
@@ -145,7 +148,7 @@ fn the_fallback_runs_on_the_remaining_wall_budget() {
     const LIMIT: f64 = 50.0;
     let r = run(
         "issue880_sigma_uncertified.nl",
-        &["tol=1e-15", "max_wall_time=50", "print_user_options=yes"],
+        &["max_wall_time=50", "print_user_options=yes"],
     );
     let fb = r.report.convex_fallback.as_ref().expect("fallback taken");
     let given: f64 = r

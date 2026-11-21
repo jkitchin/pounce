@@ -311,10 +311,19 @@ changes.
   convex answer reported anyway at 312 s. It now reports at 50 s. The skip
   takes only a `Solved_To_Acceptable_Level` convex answer whose relative error
   is within `tol` and whose absolute stopping-rule error is within the convex
-  arm's reduced-accuracy band (`1e3·tol`). Iteration-limit and numerical
-  failures still fall back. The cost: a model where the NLP arm would have
-  certified the same accuracy now reports `Solved_To_Acceptable_Level` from
-  the convex arm instead of `Solve_Succeeded` from the NLP arm.
+  arm's reduced-accuracy band (`1e3·tol`), and never one the convex arm
+  demoted for an uncertified cost normalization (`σ`, gh #880 / gh #414) —
+  that demotion is about forward error the KKT residuals cannot see, so
+  `issue880_sigma_uncertified` still falls back and still reports the NLP
+  arm's `Solve_Succeeded`. Iteration-limit and numerical failures still fall
+  back. The fixture sweep is empty against the parent. The cost: a model
+  where the NLP arm would have certified the same accuracy now reports
+  `Solved_To_Acceptable_Level` from the convex arm instead of
+  `Solve_Succeeded` from the NLP arm (`convex_qp_qpilotno` at `tol=1e-12`,
+  which the NLP arm also only took to acceptable). The two defects BOYD2
+  exposed — a KKT rounding floor that ignores row length, and an NLP
+  factorization that overruns `max_wall_time` — are recorded in
+  `dev-notes/known-limitations.md`.
 - **Crossover step 4 no longer re-solves step 3's QP from scratch** (gh#1206
   B1). When the step-3 point missed the stopping tolerances, the active-set
   SQP started from the interior iterate with the step-2 *estimate* — but its

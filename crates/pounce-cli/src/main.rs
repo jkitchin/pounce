@@ -3512,17 +3512,27 @@ fn convex_qp_next_step(
 /// `demote_optimum_above_tol` relabels a relative-arm stop at any error.
 /// A non-finite error never qualifies.
 ///
+/// And never when `sigma_demoted`: the `OptimalInaccurate` is the `σ`
+/// cascade's (gh #880; the gh #414 cost-normalization path,
+/// `normalized_optimum_is_genuine` / `hsde_cost_scale`), which declined to
+/// certify a point on its *forward* error. The KKT residuals this rule reads
+/// cannot see that; `issue880_sigma_uncertified` passes both of them at
+/// `1.6e-15` relative and `0` absolute. Such an answer keeps the fallback,
+/// where the NLP arm certifies it (`Solve_Succeeded` at `1.5e-16`).
+///
 /// What this gives up: on a model where the convex arm ends
-/// `OptimalInaccurate` in tol and the NLP arm would have *certified* it, the
-/// answer now reports `Solved_To_Acceptable_Level` from the convex arm rather
-/// than `Solve_Succeeded` from the NLP arm.
+/// `OptimalInaccurate` in tol for any other reason and the NLP arm would
+/// have *certified* it, the answer reports `Solved_To_Acceptable_Level` from
+/// the convex arm rather than `Solve_Succeeded` from the NLP arm.
 fn convex_answer_meets_tol(
     status: pounce_convex::QpStatus,
+    sigma_demoted: bool,
     relative_kkt_error: f64,
     abs_kkt_error: f64,
     tol: f64,
 ) -> bool {
     status == pounce_convex::QpStatus::OptimalInaccurate
+        && !sigma_demoted
         && relative_kkt_error <= tol
         && abs_kkt_error <= CONVEX_REDUCED_ACCURACY_BAND * tol
 }
@@ -4212,6 +4222,12 @@ fn run_convex_qp(
     // Never set on a gh #1183 replay, which solves nothing, so the retry
     // cannot fire there either.
     let mut reduced_was_optimal = false;
+    // Whether the primary IPM solve's `OptimalInaccurate` is the `σ`
+    // cascade's (gh #880), read right after that solve: the gh #1180 retry
+    // below replaces its answer only with a clean `Optimal`, so the bit
+    // describes the point the reroute gate judges. See
+    // `convex_answer_meets_tol`.
+    let mut sigma_demoted = false;
     let sol = if let Some(r) = replay {
         presolve_log = r.presolve_log;
         replayed = Some((r.elapsed, r.crossover, r.second_order_refused));
@@ -4308,7 +4324,10 @@ fn run_convex_qp(
                             &mut mk,
                         )
                     } else {
-                        ipm_solve(&ps.reduced, &solve_opts_offset(ps.obj_offset()))
+                        let _ = pounce_convex::take_last_sigma_demotion();
+                        let red = ipm_solve(&ps.reduced, &solve_opts_offset(ps.obj_offset()));
+                        sigma_demoted = pounce_convex::take_last_sigma_demotion();
+                        red
                     }
                 };
                 reduced_was_optimal = !use_active_set && red.status == QpStatus::Optimal;
@@ -4349,7 +4368,10 @@ fn run_convex_qp(
         solve_qp_active_set_inertia(&qp, &solve_opts(), &engine_overrides, inertia, &mut mk)
     } else {
         let _t = timing.solve.guard();
-        ipm_solve(&qp, &solve_opts())
+        let _ = pounce_convex::take_last_sigma_demotion();
+        let sol = ipm_solve(&qp, &solve_opts());
+        sigma_demoted = pounce_convex::take_last_sigma_demotion();
+        sol
     };
     // gh#984 review: the `Optimal` -> `OptimalInaccurate` rule
     // (`kkt_residuals_above_floor` against `tol`) was applied inside the
@@ -4494,7 +4516,7 @@ fn run_convex_qp(
             .relative_kkt_residuals(declared_qp.as_ref().unwrap_or(&qp))
             .max();
         let res = sol.kkt_residuals_above_floor(&qp);
-        if convex_answer_meets_tol(sol.status, rel, res.kkt_error(), qp_opts.tol) {
+        if convex_answer_meets_tol(sol.status, sigma_demoted, rel, res.kkt_error(), qp_opts.tol) {
             eprintln!(
                 "pounce: note: the convex ({}) solve ended at reduced accuracy after {} \
                  iterations (KKT error {:.2e} against tol {:.1e}), but its relative KKT \
@@ -6498,7 +6520,10 @@ struct ConvergedCaptures {
 
 /// The in-tol skip of the LP / convex-QP → NLP fallback
 /// (`convex_answer_meets_tol`): one test per way the rule can answer. The CLI
-/// test `convex_in_tol_skips_nlp_fallback.rs` drives both outcomes end to end.
+/// test `convex_in_tol_skips_nlp_fallback.rs` drives the relative-error arm
+/// and the `σ` arm end to end; the skip itself is reached only by models too
+/// slow for the suite (BOYD2, `convex_qp_qpilotno` at `tol=1e-12`), so these
+/// tests are its only pin.
 #[cfg(test)]
 mod convex_in_tol_tests {
     use super::convex_answer_meets_tol;
@@ -6506,21 +6531,30 @@ mod convex_in_tol_tests {
 
     const TOL: f64 = 1e-8;
 
+    /// The rule with no `σ` demotion, the case every arm but one tests.
+    fn meets(status: QpStatus, rel: f64, abs: f64) -> bool {
+        convex_answer_meets_tol(status, false, rel, abs, TOL)
+    }
+
     /// BOYD2's measured numbers: relative `1.12e-10`, stopping-rule error
     /// `1.96e-7`, `tol = 1e-8`. The answer reports without the re-solve.
     #[test]
     fn an_in_tol_reduced_accuracy_answer_skips_the_fallback() {
-        assert!(convex_answer_meets_tol(
-            QpStatus::OptimalInaccurate,
-            1.12e-10,
-            1.96e-7,
-            TOL
-        ));
+        assert!(meets(QpStatus::OptimalInaccurate, 1.12e-10, 1.96e-7));
         // At the boundary: `<=`, as the fallback's own "meets tol" reads.
-        assert!(convex_answer_meets_tol(
+        assert!(meets(QpStatus::OptimalInaccurate, TOL, 1e3 * TOL));
+    }
+
+    /// A `σ`-uncertified answer keeps the fallback however small its KKT
+    /// residuals read: `issue880_sigma_uncertified`'s `1.6e-15` relative and
+    /// `0` absolute. The demotion is about forward error, which they miss.
+    #[test]
+    fn a_sigma_uncertified_answer_still_falls_back() {
+        assert!(!convex_answer_meets_tol(
             QpStatus::OptimalInaccurate,
-            TOL,
-            1e3 * TOL,
+            true,
+            1.6e-15,
+            0.0,
             TOL
         ));
     }
@@ -6529,24 +6563,14 @@ mod convex_in_tol_tests {
     /// gh #1183 comparison's case, and the NLP answer may be the better one.
     #[test]
     fn a_relative_error_above_tol_still_falls_back() {
-        assert!(!convex_answer_meets_tol(
-            QpStatus::OptimalInaccurate,
-            1.4e-8,
-            1e-9,
-            TOL
-        ));
+        assert!(!meets(QpStatus::OptimalInaccurate, 1.4e-8, 1e-9));
     }
 
     /// In tol relatively but outside the convex arm's own reduced-accuracy
     /// band absolutely: the relative reading alone could be an inflated scale.
     #[test]
     fn an_absolute_error_outside_the_band_still_falls_back() {
-        assert!(!convex_answer_meets_tol(
-            QpStatus::OptimalInaccurate,
-            1e-12,
-            2e3 * TOL,
-            TOL
-        ));
+        assert!(!meets(QpStatus::OptimalInaccurate, 1e-12, 2e3 * TOL));
     }
 
     /// Only the reduced-accuracy success qualifies: the failures are what the
@@ -6554,27 +6578,14 @@ mod convex_in_tol_tests {
     #[test]
     fn a_failed_convex_status_still_falls_back() {
         for status in [QpStatus::IterationLimit, QpStatus::NumericalFailure] {
-            assert!(
-                !convex_answer_meets_tol(status, 1e-14, 1e-14, TOL),
-                "{status:?}"
-            );
+            assert!(!meets(status, 1e-14, 1e-14), "{status:?}");
         }
     }
 
     /// A broken measurement never reads as in tol.
     #[test]
     fn a_nan_error_never_qualifies() {
-        assert!(!convex_answer_meets_tol(
-            QpStatus::OptimalInaccurate,
-            f64::NAN,
-            1e-9,
-            TOL
-        ));
-        assert!(!convex_answer_meets_tol(
-            QpStatus::OptimalInaccurate,
-            1e-12,
-            f64::NAN,
-            TOL
-        ));
+        assert!(!meets(QpStatus::OptimalInaccurate, f64::NAN, 1e-9));
+        assert!(!meets(QpStatus::OptimalInaccurate, 1e-12, f64::NAN));
     }
 }
