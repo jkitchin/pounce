@@ -10,6 +10,20 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **A per-iteration host call in the WebAssembly module.** With
+  `wasm_iterate_callback yes`, `pounce_solve` calls the host function the
+  module imports as `iterate` from module `pounce` once per iteration,
+  iteration 0 included. It passes the iteration number, a restoration flag,
+  the objective in model units and sense, `inf_pr`, `inf_du`, `mu`,
+  `alpha_pr`, `alpha_du`, and the current x in the `.nl` variable order and
+  units, the coordinates of the `.sol` primal block. A nonzero return stops
+  the solve with `UserRequestedStop`. `wasm_iterate_callback_every k` calls
+  only at multiples of `k`. Both options default to off, and every other
+  entry point refuses them. `wasi.js` provides the import to every host
+  (a function that returns 0 unless `createWasi` gets an `onIterate` hook),
+  and the `.nl` page uses it to plot the objective while the solve runs.
+  Hosts that build their own import object must now add
+  `pounce: { iterate: () => 0 }` to it. See `docs/src/wasm.md`.
 - **`crossover_stabilization`: a stabilized crossover QP** (gh#1206). At a
   degenerate solution, where the active constraint gradients are linearly
   dependent or many bounds are weakly active, the crossover's step-3 QP

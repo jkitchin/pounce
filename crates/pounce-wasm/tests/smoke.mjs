@@ -22,7 +22,8 @@ const wasmPath =
 const wasi = new WASI({ version: 'preview1', args: [], env: {} });
 const instance = await WebAssembly.instantiate(
   await WebAssembly.compile(readFileSync(wasmPath)),
-  wasi.getImportObject(),
+  // The module's per-iteration call, unused here (iterate_callback.mjs).
+  { ...wasi.getImportObject(), pounce: { iterate: () => 0 } },
 );
 wasi.initialize(instance);
 const wasm = instance.exports;
