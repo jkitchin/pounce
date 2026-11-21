@@ -679,6 +679,10 @@ impl BacktrackingLsAcceptor for FilterLsAcceptor {
         self.filter.set_theta_roundoff_floor(floor);
     }
 
+    fn in_switching_region(&self, theta: Number) -> bool {
+        self.theta_min.is_some_and(|theta_min| theta <= theta_min)
+    }
+
     /// Port of `IpFilterLSAcceptor.cpp:CalculateAlphaMin` (lines
     /// 450-469). Returns `alpha_min_frac * alpha_min` where
     /// `alpha_min` is `gamma_theta` by default, tightened to

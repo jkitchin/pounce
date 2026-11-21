@@ -25,7 +25,10 @@
 //! capped a sweep at 50 trials, so it went to restoration instead and never
 //! recovered. The line search now keeps the acceptor's `alpha_min` and a
 //! trial budget that reaches it (`pounce_algorithm::line_search::
-//! backtracking`), and reproduces Ipopt's 64 iterations.
+//! backtracking`), and reproduces Ipopt's 64 iterations. The `1e-12`
+//! clamp still holds in the filter's switching region `θ ≤ θ_min` (gh#1226,
+//! `pounce-algorithm/tests/issue_1226_nonsmooth_null_steps.rs`). Iteration 20
+//! is at `θ = 4e3`, outside that region, so this file pins the other branch.
 //!
 //! The tests run with every second-opinion rung off: the claim is that the
 //! *first* solve succeeds, as it does in Ipopt. The exception is failure 2,
