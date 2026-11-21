@@ -1611,6 +1611,25 @@ impl BacktrackingLineSearch {
                     // duals here left the accepted iterate with a primal from
                     // `delta_soc` but duals from `delta`, diverging `inf_du`
                     // from Ipopt on any `H`-flagged iteration (e.g. CRESC4).
+                    // gh#1217: a correction the fraction-to-the-boundary
+                    // rule cuts below the smallest step this line search
+                    // would itself try is not a step. Upstream accepts it
+                    // anyway — it is judged with `alpha_test`, the original
+                    // trial's step — and the accepted point then carries
+                    // the dual update of a direction scaled by that tiny
+                    // `alpha`. On gh#1217's maximum-entropy model the first
+                    // trial point overflows `exp(h/p)` to ~1e154, the SOC
+                    // right-hand side inherits it, `delta_soc` is ~1e154,
+                    // and `alpha_soc = 5e-157` passed the filter on a
+                    // `1e-5` relative decrease in `theta` — leaving the
+                    // primal where it was and the bound multipliers moved
+                    // by O(1e4) (`inf_du` 1 → 5e4), from which the solve
+                    // never recovered. Ending the correction loop instead
+                    // hands the step back to ordinary backtracking, which
+                    // is what upstream does whenever the SOC is rejected.
+                    if alpha_primal_soc < alpha_min_eff {
+                        break;
+                    }
                     let alpha_dual_soc = cq.borrow().aff_step_alpha_dual_max(&delta_soc, tau);
                     let mut trial_iv = curr.deep_copy();
                     trial_iv.x.axpy(alpha_primal_soc, &*delta_soc.x);

@@ -798,6 +798,10 @@ impl PdFullSpaceSolver {
         let mut resolve_with_better_quality = false;
         let mut pretend_singular = false;
         let mut pretend_singular_last_time = false;
+        // gh#1217: how many times a non-finite solution of a finite system
+        // has been sent back through the singular-perturbation path.
+        let mut nonfinite_retries: usize = 0;
+        let rhs_finite = iterate_is_finite(rhs);
         let mut improve = improve_solution;
         // A solver that owns its refinement (a KKT oracle) is solved once and
         // trusted: refining its step against the unmodified system would undo
@@ -840,6 +844,11 @@ impl PdFullSpaceSolver {
 
             if !solve_ok {
                 return false;
+            }
+
+            if self.reject_nonfinite_solution(res, rhs_finite, &mut nonfinite_retries) {
+                pretend_singular = true;
+                continue;
             }
 
             if allow_inexact || owns_refinement {
@@ -924,6 +933,15 @@ impl PdFullSpaceSolver {
                 residual_ratio_old = residual_ratio;
             }
 
+            // A refinement step can carry a finite first solve to a
+            // non-finite one; the loop above cannot see it, since every
+            // comparison against a NaN residual ratio is false.
+            if self.reject_nonfinite_solution(res, rhs_finite, &mut nonfinite_retries) {
+                pretend_singular = true;
+                resolve_with_better_quality = false;
+                continue;
+            }
+
             done = !resolve_with_better_quality && !pretend_singular;
         }
 
@@ -936,6 +954,56 @@ impl PdFullSpaceSolver {
         }
 
         self.last_status = Some(ESymSolverStatus::Success);
+        true
+    }
+
+    /// gh#1217: decide whether `res`, just produced by a back-solve of a
+    /// finite system, must be thrown away and the system re-solved as
+    /// singular. Returns `true` (and zeroes `res`) when it must; returns
+    /// `false` when `res` is finite, when the right-hand side was not
+    /// finite to begin with (a non-finite solution is then the honest
+    /// answer, and the caller's own finiteness checks own it), or when
+    /// the retry budget is spent.
+    ///
+    /// A factorization can be accepted — correct inertia, every pivot
+    /// above the singularity floor *after scaling* — and still return
+    /// `inf`/`NaN` from a finite right-hand side, when the matrix holds a
+    /// column whose entries are all at the edge of the floating-point
+    /// range. The maximum-entropy model of gh#1217 does: after a
+    /// restoration exit resets `y_d = 0`, the Hessian of `p·exp(h/p)` is
+    /// zero, the free variable `h` has no `Σ`, and its only KKT entry is
+    /// the Jacobian's `exp(h/p) ≈ 5e-186`. The exact Newton step along it
+    /// overflows. Nothing downstream rejected it: every comparison
+    /// against a NaN residual ratio is false, so iterative refinement
+    /// stopped as though converged, the NaN step reached the line search,
+    /// and the solve cycled through restoration to
+    /// `Error_In_Step_Computation`. Upstream routes a pivot it cannot
+    /// trust through `PerturbForSingularity`; this does the same through
+    /// the existing `pretend_singular` path, whose `δ_x` gives the
+    /// curvature-free column the diagonal it lacks.
+    fn reject_nonfinite_solution(
+        &self,
+        res: &mut IteratesVectorMut,
+        rhs_finite: bool,
+        retries: &mut usize,
+    ) -> bool {
+        if !rhs_finite || iterate_mut_is_finite(res) || *retries >= NONFINITE_SOLVE_MAX_RETRIES {
+            return false;
+        }
+        *retries += 1;
+        tracing::debug!(
+            target: "pounce::linsol",
+            retry = *retries,
+            "non-finite KKT solution from a finite right-hand side; re-solving as singular"
+        );
+        res.x.set(0.0);
+        res.s.set(0.0);
+        res.y_c.set(0.0);
+        res.y_d.set(0.0);
+        res.z_l.set(0.0);
+        res.z_u.set(0.0);
+        res.v_l.set(0.0);
+        res.v_u.set(0.0);
         true
     }
 
@@ -1584,6 +1652,10 @@ impl PdFullSpaceSolver {
             return false;
         };
 
+        let aug_rhs_finite = aug_rhs_x.asum().is_finite()
+            && aug_rhs_s.asum().is_finite()
+            && rhs.y_c.asum().is_finite()
+            && rhs.y_d.asum().is_finite();
         let mut count = 0_i32;
         let mut retval;
         loop {
@@ -1724,6 +1796,32 @@ impl PdFullSpaceSolver {
                     .perturb_for_wrong_inertia(curr_mu, Some(&IpoptDataSink(data)));
                 let Some(nd) = next else { return false };
                 d = nd;
+            } else if retval == ESymSolverStatus::Success
+                && aug_rhs_finite
+                && !aug_sol_is_finite(&sol)
+            {
+                // gh#1217: the factorization was accepted but its solution
+                // of a finite system is not finite — a column at the edge
+                // of the floating-point range (see
+                // `reject_nonfinite_solution`). Escalate `δ_x` exactly as a
+                // wrong inertia would and refactor: the primal
+                // regularization is what gives a curvature-free column a
+                // diagonal, and climbing the ladder here (rather than
+                // re-entering `consider_new_system`) lets it go past the
+                // first rung.
+                tracing::debug!(
+                    target: "pounce::linsol",
+                    delta_x = d.delta_x,
+                    "non-finite KKT solution from a finite system; raising delta_x"
+                );
+                let curr_mu = data.borrow().curr_mu;
+                let next = self
+                    .perturb
+                    .borrow_mut()
+                    .perturb_for_wrong_inertia(curr_mu, Some(&IpoptDataSink(data)));
+                let Some(nd) = next else { return false };
+                d = nd;
+                retval = ESymSolverStatus::WrongInertia;
             } else if retval == ESymSolverStatus::Success
                 && self.neg_curv_test_tol > 0.0
                 && self.aug_solver.provides_inertia()
@@ -2144,6 +2242,41 @@ struct SolveBlocks<'a> {
     slack_s_u: &'a dyn Vector,
     sigma_x: &'a dyn Vector,
     sigma_s: &'a dyn Vector,
+}
+
+/// gh#1217: how many times one `solve` call re-solves a non-finite
+/// solution as singular before giving up. Each retry escalates the
+/// perturbation handler's `δ_x`, which also returns `None` (and so ends
+/// the solve) once it passes `max_hessian_perturbation`; this cap only
+/// bounds the case where a perturbation cannot make the solution finite.
+const NONFINITE_SOLVE_MAX_RETRIES: usize = 10;
+
+/// `true` when every component of `iv` is finite. `asum` is used rather
+/// than `amax` because a NaN entry propagates through a sum but is
+/// dropped by `f64::max`.
+fn iterate_is_finite(iv: &IteratesVector) -> bool {
+    [
+        &iv.x, &iv.s, &iv.y_c, &iv.y_d, &iv.z_l, &iv.z_u, &iv.v_l, &iv.v_u,
+    ]
+    .iter()
+    .all(|v| v.asum().is_finite())
+}
+
+/// `true` when the augmented-system part of a solution (`x`, `s`, `y_c`,
+/// `y_d` — the components the factorization writes) is finite.
+fn aug_sol_is_finite(sol: &IteratesVectorMut) -> bool {
+    [&sol.x, &sol.s, &sol.y_c, &sol.y_d]
+        .iter()
+        .all(|v| v.asum().is_finite())
+}
+
+/// [`iterate_is_finite`] for the mutable form.
+fn iterate_mut_is_finite(iv: &IteratesVectorMut) -> bool {
+    [
+        &iv.x, &iv.s, &iv.y_c, &iv.y_d, &iv.z_l, &iv.z_u, &iv.v_l, &iv.v_u,
+    ]
+    .iter()
+    .all(|v| v.asum().is_finite())
 }
 
 /// Helper trait extension on `IteratesVectorMut` for fresh zeroed

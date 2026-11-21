@@ -301,6 +301,23 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **`Error_In_Step_Computation` on a maximum-entropy NLP** (gh#1217). Two
+  defects, both reached by the issue's 2 000-variable model
+  (`1 - p·exp(h/p) >= 0` rows), where Ipopt + MA57 solves. (1) A
+  second-order correction cut by the fraction-to-the-boundary rule below the
+  line search's own `alpha_min` was accepted: started at the solution, the
+  first trial overflowed `exp(h/p)` to ~1e154, its SOC was taken at
+  `alpha = 5e-157`, and the dual update that came with it took `inf_du` from
+  1 to 5e4. Such a correction now ends the SOC loop and the step backtracks
+  as usual. (2) A KKT solve that returned inf/NaN from a finite system was
+  accepted as a step: iterative refinement could not reject it, since every
+  comparison with a NaN residual ratio is false. After restoration resets
+  `y_d = 0`, `h` has no curvature and its only KKT entry is
+  `exp(h/p) ≈ 1e-186`, so the back-solve overflows. Such a solution now
+  raises `δ_x` and refactors, as a wrong inertia does. Both reported runs
+  now solve (6.65357129 started at the solution at mean 300, 6.89240414
+  cold at mean 450), through the second-opinion ladder: the base solve
+  still fails on both. The fixture sweep is unchanged on all 302 lines.
 - **Crossover step 4 no longer re-solves step 3's QP from scratch** (gh#1206
   B1). When the step-3 point missed the stopping tolerances, the active-set
   SQP started from the interior iterate with the step-2 *estimate* — but its
