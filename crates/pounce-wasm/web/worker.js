@@ -15,7 +15,14 @@ let exports = null;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const wasi = createWasi((text) => self.postMessage({ type: 'log', text }));
+// With `wasm_iterate_callback yes` in the options, the module calls back once
+// per iteration. Only the statistics are forwarded: the page plots the
+// objective and never needs x, which can be large.
+const wasi = createWasi((text) => self.postMessage({ type: 'log', text }), {
+  onIterate: ({ iter, restoration, objective }) => {
+    self.postMessage({ type: 'iterate', iter, restoration, objective });
+  },
+});
 
 const ready = (async () => {
   let instance;

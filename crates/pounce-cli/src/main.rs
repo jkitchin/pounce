@@ -440,6 +440,11 @@ fn real_main() -> ExitCode {
     if let Some(msg) = app
         .unimplemented_option_refusal()
         .or_else(|| app.unimplemented_option_value_refusal())
+        // `wasm_iterate_callback*` asks for a call only the WebAssembly
+        // module makes. `optimize_tnlp` refuses it too, but a model routed
+        // to `pounce-convex` never gets there and solved with the option
+        // silently doing nothing (PR #1215 review).
+        .or_else(|| app.unhonored_wasm_option())
     {
         eprintln!("{msg}");
         return ExitCode::from(2);

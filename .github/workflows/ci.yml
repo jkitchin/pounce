@@ -190,6 +190,9 @@ jobs:
         run: crates/pounce-wasm/build.sh
       - name: Solve a model in wasm
         run: node crates/pounce-wasm/tests/smoke.mjs
+      # The per-iteration host call (`pounce.iterate`), through web/wasi.js.
+      - name: Per-iteration host call in wasm
+        run: node crates/pounce-wasm/tests/iterate_callback.mjs
 
       # The emscripten `pounce-solver` wheel the Python page installs for
       # `import pounce` is committed, not built here: it needs a pinned

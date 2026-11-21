@@ -1087,6 +1087,13 @@ pub struct IpoptApplication {
     /// [`Self::unhonored_convex_option`] reads this, on the same
     /// contract as `option_file_resolved` above (gh#604).
     convex_routing_available: bool,
+    /// Whether this caller makes the WebAssembly module's per-iteration
+    /// host call, so `wasm_iterate_callback` configures something here. Only
+    /// `pounce-wasm` does, and it says so via
+    /// [`Self::set_wasm_iterate_callback_available`]. The guard in
+    /// [`Self::unhonored_wasm_option`] reads this, on the same contract as
+    /// `convex_routing_available` above.
+    wasm_iterate_callback_available: bool,
     /// Whether the backend-knob warnings (gh#551) have already been
     /// printed for this application. The CLI emits them before routing —
     /// a convex model never reaches `optimize_tnlp` — and `optimize_tnlp`
@@ -1426,6 +1433,7 @@ impl IpoptApplication {
             record_iter_history: false,
             option_file_resolved: false,
             convex_routing_available: false,
+            wasm_iterate_callback_available: false,
             backend_warnings_emitted: false,
             linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
             resto_linsol_summary_sink: Arc::new(Mutex::new(LinearSolverSummary::default())),
@@ -2493,6 +2501,7 @@ impl IpoptApplication {
             .or_else(|| self.unimplemented_option_value_refusal())
             .or_else(|| self.unhonored_option_file_name())
             .or_else(|| self.unhonored_convex_option())
+            .or_else(|| self.unhonored_wasm_option())
         {
             use pounce_common::journalist::JournalCategory;
             eprintln!("{msg}");
@@ -3351,6 +3360,43 @@ impl IpoptApplication {
              (or `algorithm=active-set-sqp`) is the nearest thing, tuned by the \
              `sqp_qp_*` options. Tracking issue: \
              https://github.com/jkitchin/pounce/issues/604"
+        ))
+    }
+
+    /// Declare that this caller makes the WebAssembly module's
+    /// per-iteration host call, so the `wasm_iterate_callback*` options
+    /// configure something. `pounce-wasm` calls this. Every other entry
+    /// point leaves it `false`, and [`Self::unhonored_wasm_option`] refuses
+    /// the options there.
+    pub fn set_wasm_iterate_callback_available(&mut self, available: bool) {
+        self.wasm_iterate_callback_available = available;
+    }
+
+    /// The `wasm_iterate_callback*` options are registered core-side so the
+    /// WebAssembly module reads them like any other option, but only that
+    /// module can make the call they ask for. Anywhere else a non-default
+    /// value configures nothing, so it is refused with this message, on the
+    /// same contract as [`Self::unhonored_convex_option`]: an explicitly-set
+    /// default asks for nothing and keeps working.
+    pub fn unhonored_wasm_option(&self) -> Option<String> {
+        if self.wasm_iterate_callback_available {
+            return None;
+        }
+        let name = ["wasm_iterate_callback", "wasm_iterate_callback_every"]
+            .into_iter()
+            .find(|name| {
+                crate::unimplemented_options::set_to_a_non_default(
+                    &self.options,
+                    &self.reg_options,
+                    name,
+                )
+            })?;
+        Some(format!(
+            "pounce: `{name}` configures the per-iteration host call of the \
+             WebAssembly module (crates/pounce-wasm), and this entry point makes \
+             no such call, so the option would do nothing. From Python, give the \
+             problem object an `intermediate` method. From C, register a callback \
+             with `SetIntermediateCallback`."
         ))
     }
 
