@@ -1626,10 +1626,31 @@ impl AlgorithmBuilder {
             Some(custom) => custom.without_metadata().make_backend(),
             None => factory(self.linear_solver),
         };
+        // The cold step QP's interior-point seed factors with the same
+        // configured backend (gh#1219 §3.6). The seed and its PSD certificate
+        // need inertia, so a custom solver that cannot report it keeps the
+        // seed on FERAL — configured from the same options — rather than
+        // silently switching the seed off.
+        let choice = self.linear_solver;
+        let seed_backend: crate::sqp::SeedBackendFactory = match &self.custom_linear_solver {
+            Some(custom) => {
+                let custom = custom.without_metadata();
+                Box::new(move || {
+                    let b = custom.make_backend();
+                    if b.provides_inertia() {
+                        b
+                    } else {
+                        factory(LinearSolverChoice::Feral)
+                    }
+                })
+            }
+            None => Box::new(move || factory(choice)),
+        };
         let qp_solver = pounce_qp::ParametricActiveSetSolver::new(backend);
         Some(
             crate::sqp::SqpAlgorithm::new(qp_solver, self.sqp.clone())
-                .with_qp_options(self.sqp_qp.clone()),
+                .with_qp_options(self.sqp_qp.clone())
+                .with_seed_backend(seed_backend),
         )
     }
 

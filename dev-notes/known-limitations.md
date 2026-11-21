@@ -1678,3 +1678,50 @@ small-curvature test as "must not be an LP". A fix must also keep
 `test_small_curvature_at_large_offset_is_not_read_as_an_lp` and every
 "not routed" test green, and report how accurate the routed `P` is, not only
 that it routed.
+
+---
+
+## Convex HSDE: no early exit when it stalls at `DYN_REG_MAX` (gh#1219 §4.2)
+
+*Measured on `claude/inspiring-edison-i30ua2` (`main` at `22ae155e`), by
+instrumenting `crates/pounce-convex/src/hsde.rs` and running every
+`pounce-convex` test binary in release. Recorded 2026-11-21.*
+
+**The proposal.** gh#1219 §4.2 asked HSDE to bail out early, returning its
+best iterate, when the primal residual stays above `DYN_REG_RES_TOL` with the
+dynamic regularization already at `DYN_REG_MAX` and `μ` stops falling
+(`μ_k ≥ 0.85 μ_{k−1}`) for several consecutive iterations, instead of running
+corrupted, high-retry Newton steps to `max_iter`.
+
+### Why it was not done
+
+The signature is not specific to a hopeless solve. Counting, per solve, the
+longest run of iterations that met all three conditions:
+
+| test binary | longest run | iterations | final status | n |
+|---|---|---|---|---|
+| lib (`sos::tests::motzkin_uncertified_fallback_is_not_disguised_as_optimal`) | 16 | 600 | `IterationLimit` | 121 |
+| `conic_hsde_vs_direct` | 5 | 25 | `Optimal` | 8 |
+| `issue1034_unbounded_singular_qp_status` | 4 | 23 | `DualInfeasible` | 5 |
+| `convex_cone_sensitivity` | 4 | 200 | `IterationLimit` | 4 |
+| `convex_cone_sensitivity` | 3 | 101 | `Optimal` | 7 |
+| `convex_cone_sensitivity` | 3 | 33 | `Optimal` | 7 |
+| lib | 3 | 25 | `Optimal` | 383 |
+
+A bail-out after 3–5 such iterations would have cut short four solves that go
+on to `Optimal` and one verified unboundedness certificate. The single solve
+it would shorten (the Motzkin SOS program, which is uncertifiable by design)
+is a test that the uncertified fallback is *not* reported as optimal, and an
+early exit would hand its iterate to the end-of-solve stash and
+re-classification that test guards. In stock POUNCE the SQP seed that gh#1219
+hit this from is also already capped at `IPM_SEED_MAX_ITER = 50`; the
+reporter's long stalls came from their own full-space convexification.
+
+### How to tell whether a fix works
+
+A stall rule must stay silent on every row above that does not end
+`IterationLimit` — rerun the instrumented count, not just the suite, since a
+truncated solve that still lands within the loose tolerance band passes the
+tests — and it must leave the Motzkin test's status alone. Then the convex
+arm needs the fixture sweep and `benchmarks/qp` (CLAUDE.md), since every row
+here is small.
