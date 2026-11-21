@@ -16,12 +16,20 @@
 //! reaches it. On, it certifies `4.7e-9` from the optimum, one iteration later.
 //!
 //! The fallback's own wiring (`main.rs`, which sets the option to `tol` on the
-//! LP → NLP re-solve unless the caller set it) is reached by NETLIB TUFF at
-//! `tol=1e-12`: the convex arm declines at `1.4e-12`, and the NLP arm, which
-//! certified at `3.9e-9` before, now reaches `4.8e-13` and wins the gh#1183
-//! comparison. With `relative_gap_tol=0` the old answer comes back, and
-//! `issue_1183_fallback_keeps_the_better_answer.rs` uses that to keep its
-//! convex-wins branch.
+//! LP → NLP re-solve unless the caller set it) is reached by NETLIB ETAMACRO
+//! (`lp_etamacro.nl`) at `tol=5e-13`: the convex arm declines at `1.55e-12`,
+//! and the NLP arm, which certifies at `4.24e-11` ungated, reaches `2.37e-13`
+//! held to the gap and wins the gh#1183 comparison; with `relative_gap_tol=0`
+//! the convex answer reports. Those numbers are bit-identical on aarch64
+//! macOS and on x86-64 and aarch64 Linux. At `tol=1e-12` they were not: the
+//! convex arm declined at `1.56e-12` on macOS only and certified on Linux,
+//! so the fixture reached the fallback on one platform. This used to be TUFF, until the HSDE stop began
+//! holding `ŝᵀẑ` to the gap tolerance (the `traininstance6` fix): TUFF's
+//! convex arm now declines at `1.2e-14` or certifies outright, so no gated
+//! NLP answer beats it at any `tol`. ETAMACRO's convex arm is unmoved by that
+//! fix. `lp_etamacro.nl` is the NETLIB MPS file converted to `.nl` (688
+//! columns, 400 rows); `issue_1183_fallback_keeps_the_better_answer.rs` uses
+//! it at the same `tol` with `relative_gap_tol=0` for its convex-wins branch.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -103,25 +111,26 @@ fn the_gate_holds_the_certificate_to_tol() {
     );
 }
 
-/// The LP → NLP fallback sets the gate itself. TUFF at `tol=1e-12`: the
+/// The LP → NLP fallback sets the gate itself. ETAMACRO at `tol=5e-13`: the
 /// convex arm declines, and the NLP arm, held to the gap, beats it.
 #[test]
 fn the_fallback_holds_the_nlp_arm_to_the_gap() {
-    let gated = run("lp_tuff.nl", &["tol=1e-12"]);
+    let gated = run("lp_etamacro.nl", &["tol=5e-13"]);
     let fb = gated
         .convex_fallback
         .as_ref()
-        .expect("TUFF reaches the fallback");
+        .expect("ETAMACRO reaches the fallback");
     assert_eq!(fb.winner, "nlp", "{fb:?}");
     let nlp = fb.nlp_kkt_error.expect("NLP error measured");
     assert!(nlp < fb.convex_kkt_error, "{fb:?}");
 
     // The caller's explicit 0 wins over the fallback's default.
-    let off = run("lp_tuff.nl", &["tol=1e-12", "relative_gap_tol=0"]);
+    let off = run("lp_etamacro.nl", &["tol=5e-13", "relative_gap_tol=0"]);
     let fb_off = off.convex_fallback.as_ref().expect("fallback");
     assert_eq!(fb_off.winner, "cvx-qp", "{fb_off:?}");
+    // Measured 4.24e-11 off against 2.37e-13 on (179x).
     assert!(
-        fb_off.nlp_kkt_error.expect("NLP error measured") > 100.0 * nlp,
+        fb_off.nlp_kkt_error.expect("NLP error measured") > 20.0 * nlp,
         "the gate is what moved the NLP answer: {fb_off:?} vs {fb:?}"
     );
 }

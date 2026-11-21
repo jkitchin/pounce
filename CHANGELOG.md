@@ -357,6 +357,61 @@ changes.
   stack holds is refused as it is on a native worker whose stack came up
   short. A walk over a deeper `NlExpr` built in Python raises instead of
   overflowing.
+- **The convex IPM no longer stops on a duality gap that cancellation made
+  small.** The HSDE stop tested the *signed* gap `x̂ᵀPx̂ + cᵀx̂ + bᵀŷ + hᵀẑ`,
+  which differs from the complementarity sum `ŝᵀẑ` by the residual couplings
+  (`x̂ᵀρ̂_x`, …); those shrink with `μ`, so on models with large `‖x‖` they
+  cancel most of the gap. MIPLIB `traininstance6` (LP) stopped at a signed gap
+  of `9.8e-9` with `ŝᵀẑ = 3.3e-6`, reported `Solve_Succeeded` at `tol=1e-8`,
+  and its `(x, λ)` failed an independent duality-gap check at `2.5e-6`; it
+  now stops 2 iterations later at `6.2e-9`. The stop now also requires
+  `ŝᵀẑ ≤ max(tol_gap, tol·|objective|)`. LOTFI (`2.7e-8` → `2.6e-9`),
+  TUFF (`1.4e-8` → `1.4e-10`) and `sp150x300d` (`2.4e-8` → `8.2e-10`) were
+  also returning multipliers that missed `tol`. Fixture sweep: 4 convex
+  fixtures move by 1–2 iterations on both legs, none changes status. The
+  defect predates FERAL static pivoting (gh#1193); that change only moved
+  `traininstance6`'s trajectory onto it. At `tol=1e-12` TUFF's convex arm
+  now runs past the 28-iteration point where it used to decline and
+  certifies, so the gh#1183 convex-wins test moves to `tol=3e-13`, and the
+  `relative_gap_tol` fallback test moves to NETLIB ETAMACRO.
+- **`feral_static_pivoting` now reaches the convex IPM.** Before, the
+  CLI's convex LP/QP path read only the `POUNCE_FERAL_STATIC_PIVOTING`
+  environment variable, so `feral_static_pivoting=no` left the solve
+  unchanged to every digit. An explicit option now wins over the
+  environment variable and the convex rule. (Python's `pounce.qp` still
+  reads only the environment variable.) On MIPLIB ns1116954 at `tol=1e-8`,
+  `feral_static_pivoting=no` turns a `Solved_To_Acceptable_Level` stopped
+  by `max_wall_time=300` (12 iterations, 305 s) into a `Solve_Succeeded` in
+  16 iterations and 261 s; the default stays static (see
+  `dev-notes/known-limitations.md`).
+- **The convex HSDE loop checks the deadline between refactorization
+  retries.** One iteration's δ/regularization retries could run several
+  large factorizations after `max_wall_time` had passed (about 100 s on
+  ns1116954). The loop now stops with `TimeLimit` before a retry once the
+  deadline has expired.
+- **The LP / convex-QP → NLP fallback is not spent on a convex answer already
+  within `tol`.** When the convex arm stopped `Solved_To_Acceptable_Level`,
+  `auto` re-solved on the NLP arm even if the convex point's relative KKT
+  error, the measure the fallback compares the two answers by (gh #1183), was
+  already within `tol`. On Maros–Mészáros BOYD2 (`tol=1e-8`,
+  `max_wall_time=300`) that meant a convex point at `1.1e-10` after 44.5 s,
+  then 270 s of NLP iterations to `Maximum_WallTime_Exceeded`, and the
+  convex answer reported anyway at 312 s. It now reports at 50 s. The skip
+  takes only a `Solved_To_Acceptable_Level` convex answer whose relative error
+  is within `tol` and whose absolute stopping-rule error is within the convex
+  arm's reduced-accuracy band (`1e3·tol`), and never one the convex arm
+  demoted for an uncertified cost normalization (`σ`, gh #880 / gh #414) —
+  that demotion is about forward error the KKT residuals cannot see, so
+  `issue880_sigma_uncertified` still falls back and still reports the NLP
+  arm's `Solve_Succeeded`. Iteration-limit and numerical failures still fall
+  back. The fixture sweep is empty against the parent. The cost: a model
+  where the NLP arm would have certified the same accuracy now reports
+  `Solved_To_Acceptable_Level` from the convex arm instead of
+  `Solve_Succeeded` from the NLP arm (`convex_qp_qpilotno` at `tol=1e-12`,
+  which the NLP arm also only took to acceptable). The two defects BOYD2
+  exposed — a KKT rounding floor that ignores row length, and an NLP
+  factorization that overruns `max_wall_time` — are recorded in
+  `dev-notes/known-limitations.md`.
 - **Active-set SQP's interior-point seed honours the linear-solver options**
   (gh#1219). The convex interior point that seeds a large cold step QP, and
   its PSD check, used a default FERAL, ignoring `linear_solver` and every
