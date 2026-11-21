@@ -327,15 +327,20 @@ changes.
   each iteration paid four factorizations, and the solve ended
   `Solved_To_Acceptable_Level` (error 1.0e-6, 12 iterations, 368 s, where
   e176b8fa had `Solve_Succeeded` in 16 iterations, 277 s). Now, the first time
-  a refined solve stays above the residual gate, the HSDE loop asks the
-  backend to switch to delayed pivoting and refactors once at the same δ.
-  This happens once per solve, and only when the static choice was the
-  rule's default, never an explicit setting. ns1116954 now reaches
-  `Solve_Succeeded` at 9.1e-13 in 16 iterations, the same digits as before
-  gh#1193. That takes 308 s, one ~25 s static factorization more than the
-  277 s baseline, so it can still miss a 300 s `max_wall_time`. The models
-  static pivoting exists for (rmatr200-p5, waihi, turia) never reach this
-  gate, and their output is unchanged to every printed digit.
+  a refined solve stays above the residual gate while μ > 1e-8, the HSDE
+  loop asks the backend to switch to delayed pivoting and refactors once at
+  the same δ. This happens once per solve, and only when the static choice
+  was the rule's default, never an explicit setting. ns1116954 now reaches
+  `Solve_Succeeded` at 9.1e-13 in 16 iterations and 277 s, the same digits
+  as before gh#1193. The μ condition keeps endgame refinement failures,
+  which the δ ladder recovers, on static pivoting. Without it, the relax
+  fired at μ between 4e-13 and 6e-10 on neos-933966, netdiversion,
+  QPLIB_8602 and atlanta-ip, and delayed pivoting then cost 1.6–2.5× wall
+  time. On atlanta-ip it went from 124 iterations to 200 and ended
+  `Solved_To_Acceptable_Level` at the time limit. Those four now match
+  22ae155e to every printed digit. The models static pivoting exists for
+  (rmatr200-p5, waihi, turia) never reach this gate, and their output is
+  unchanged to every printed digit.
 - **`feral_static_pivoting` now reaches the convex IPM.** Before, the
   CLI's convex LP/QP path read only the `POUNCE_FERAL_STATIC_PIVOTING`
   environment variable, so `feral_static_pivoting=no` left the solve
