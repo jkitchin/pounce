@@ -10,7 +10,7 @@
 //! read `None` there; the C API's lazy reader left those multipliers at `0`.
 //!
 //! Model: `min K·[(x0-3)² + (x1-3)² + (x2-1)² + (x3-4)²]`
-//! s.t. `g0 = x0 + x1 + x3 ≤ 3.5`, `g1 = x0 − x2 = 0`,
+//! s.t. `g0 = x0 + x1 + x3 ≤ 3.5`, `g1 = x0 − x2 = 0.5`,
 //! `x0` free, `x1 ∈ [-10, 1]` (upper bound active), `x2 ≥ 0`,
 //! `x3 = 1` fixed (`x_L = x_U`), so `make_parameter` removes it and its
 //! stationarity row `2K(1-4) + λ0` is carried by a bound multiplier.
@@ -102,8 +102,12 @@ impl TNLP for Model {
     fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
         b.x_l.copy_from_slice(&[-1e19, -10.0, 0.0, 1.0]);
         b.x_u.copy_from_slice(&[1e19, 1.0, 1e19, 1.0]);
-        b.g_l.copy_from_slice(&[-1e19, 0.0, -1e19]);
-        b.g_u.copy_from_slice(&[3.5, 0.0, 10.0]);
+        // `g1`'s right-hand side is nonzero so the live iterate's `g` is
+        // checked as `g`: the algorithm holds an equality row as the
+        // residual `g − rhs`, and a zero right-hand side hides a `g` that
+        // forgot to add it back.
+        b.g_l.copy_from_slice(&[-1e19, 0.5, -1e19]);
+        b.g_u.copy_from_slice(&[3.5, 0.5, 10.0]);
         true
     }
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {

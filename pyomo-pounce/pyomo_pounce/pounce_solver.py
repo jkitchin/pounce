@@ -41,6 +41,7 @@ Diagnose which binary will run:
 import re
 import shutil
 import subprocess
+import sys
 import warnings
 
 from pyomo.opt import SolverFactory
@@ -125,6 +126,66 @@ def _discrete_vars(model, max_list=5):
             if len(names) < max_list:
                 names.append(v.name)
     return names, total
+
+
+# The `solve()` keywords the in-process route reads, plus
+# `symbolic_solver_labels`, which it always applies. Everything else the ASL
+# route accepts (`load_solutions`, `timelimit`, `keepfiles`, `logfile`, ...)
+# has no effect there.
+_IN_PROCESS_KWDS = frozenset({"model", "tee", "options", "symbolic_solver_labels"})
+
+# Values of ASL-route keywords that ask for nothing beyond what the in-process
+# route does anyway, so passing them is not worth a warning.
+_IN_PROCESS_NOOPS = {"load_solutions": True, "keepfiles": False,
+                     "report_timing": False}
+
+
+def _in_process_reason(explicit, intermediate, in_browser):
+    if in_browser:
+        return ("Pyodide cannot start the `pounce` executable, so every solve "
+                "runs in-process")
+    if intermediate:
+        return "intermediate= needs the in-process route"
+    if explicit:
+        return f"{', '.join(sorted(explicit))}= needs the in-process route"
+    return "the model declares sensitivity parameters"
+
+
+def _check_in_process(model, kwds, *, explicit, intermediate, in_browser):
+    """Refuse what the in-process route cannot solve and warn about what it
+    ignores, before `sens_solve` runs.
+
+    That route writes the model with Pyomo's NL writer and solves it through
+    `pounce.Problem`, which has no complementarity rows; the ASL route's
+    `mpec.nl` transformation and `pyomo_pounce.mpec` lowering never run. The
+    writer then fails with a message about components it does not know, which
+    names neither the cause nor the way out, so the refusal is made here.
+    """
+    from pyomo.mpec import Complementarity
+
+    reason = _in_process_reason(explicit, intermediate, in_browser)
+    pairs = next(model.component_data_objects(
+        Complementarity, active=True, descend_into=True), None)
+    if pairs is not None:
+        way_out = ("" if in_browser else
+                   " Solve it without intermediate= and sensitivity "
+                   "declarations to take the `pounce` executable's route, "
+                   "which handles complementarity.")
+        raise ValueError(
+            f"pounce solve: the model has active Complementarity components "
+            f"(e.g. {pairs.name}), which the in-process route cannot solve "
+            f"({reason}).{way_out}")
+    ignored = sorted(
+        k for k, v in kwds.items()
+        if k not in _IN_PROCESS_KWDS and v is not None
+        and not (k in _IN_PROCESS_NOOPS and v == _IN_PROCESS_NOOPS[k]))
+    if ignored:
+        warnings.warn(
+            f"pounce solve: {', '.join(k + '=' for k in ignored)} "
+            f"{'has' if len(ignored) == 1 else 'have'} no effect on the "
+            f"in-process route ({reason}) and "
+            f"{'is' if len(ignored) == 1 else 'are'} ignored",
+            stacklevel=3)
 
 
 def reject_discrete_vars(model):
@@ -283,13 +344,16 @@ class POUNCE(ASL):
         model = args[0] if args else kwds.get("model")
         explicit = {k: kwds.pop(k) for k in
                     ("sens_params", "fitted", "residuals") if k in kwds}
-        if explicit and model is None:
+        # A per-iteration callback, which only the in-process path can call.
+        intermediate = kwds.pop("intermediate", None)
+        given = sorted(explicit) + (["intermediate"] if intermediate else [])
+        if given and model is None:
             # The sensitivity declarations were given with no model to solve;
             # surface the mistake rather than silently dropping them (they
             # have already been popped and would otherwise vanish).
             raise ValueError(
                 "pounce solve: "
-                f"{', '.join(sorted(explicit))}= given but no model was "
+                f"{', '.join(given)}= given but no model was "
                 "passed; call solve(model, ...) with the model positionally "
                 "or as the `model` keyword")
         reject_discrete_vars(model)
@@ -312,9 +376,16 @@ class POUNCE(ASL):
             # (gh #486 stage 2). A request with nothing to apply still
             # says so.
             warn_if_no_suffix(model)
-        if model is not None and (has_declarations(model) or explicit):
+        # Pyodide (emscripten) cannot run the `pounce` executable, so every
+        # solve there takes the in-process route a declared model takes.
+        in_browser = sys.platform == "emscripten"
+        if model is not None and (has_declarations(model) or explicit
+                                  or in_browser or intermediate):
+            _check_in_process(model, kwds, explicit=explicit,
+                              intermediate=intermediate, in_browser=in_browser)
             return sens_solve(model, tee=kwds.get("tee", False),
-                              options=opts, **explicit)
+                              options=opts, intermediate=intermediate,
+                              **explicit)
         from pyomo.common.errors import ApplicationError
         from pyomo_pounce.mpec import lower_complementarity
 
