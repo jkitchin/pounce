@@ -15,7 +15,7 @@
 //!
 //! | fixture | convex | NLP | reports | decided by |
 //! |---|---|---|---|---|
-//! | `lp_tuff.nl` (NETLIB TUFF) at `tol=1e-12`, `relative_gap_tol=0` | `1.4e-12`, acceptable | `3.9e-9`, succeeded | convex | accuracy |
+//! | `lp_tuff.nl` (NETLIB TUFF) at `tol=3e-13`, `relative_gap_tol=0` | `1.2e-14`, acceptable | `3.9e-9`, succeeded | convex | accuracy |
 //! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable | `1.5e-16`, succeeded | NLP | accuracy |
 //! | `lp_israel.nl` at `tol=1e-16` | `2.0e-16`, iteration limit | `5.2e-14`, acceptable | NLP | the status guard |
 //! | `lp_afiro.nl` at `tol=1e-20` | `2.4e-16`, iteration limit | `5.5e-13`, search direction too small | convex, its own failing status | accuracy |
@@ -33,7 +33,13 @@
 //! unreduced retry the convex arm certifies most of the NETLIB models that
 //! used to reach the fallback at the default `tol` (ETAMACRO, SHARE2B, and
 //! the issue's WOOD1P / WOODW among them), so the convex-wins fixture runs at
-//! `tol=1e-12`. `lp_tuff.nl` was produced by `benchmarks/lp/generate_nl.py`
+//! a tightened `tol`. It was `1e-12` until the HSDE stop began holding the
+//! complementarity sum `ŝᵀẑ` to the gap tolerance (the `traininstance6`
+//! fix): the convex arm then runs on past the 28-iteration point it used to
+//! decline at and certifies TUFF there in 30. At `tol=3e-13` it declines
+//! again, at `1.2e-14`, on both legs; the window is narrow (`2e-13`–`5e-13`
+//! decline, `1e-13` and below certify), so re-measure it if the convex
+//! trajectory moves. `lp_tuff.nl` was produced by `benchmarks/lp/generate_nl.py`
 //! from the NETLIB MPS file. Every case takes well under a second.
 
 use std::path::{Path, PathBuf};
@@ -102,7 +108,7 @@ fn a_more_accurate_convex_answer_is_kept() {
         // the winner — that branch is pinned in
         // `relative_gap_tol_closes_the_nlp_gap.rs`. This test is about the
         // comparison, so it keeps the NLP arm on Ipopt's own test.
-        let mut args = vec!["tol=1e-12", "relative_gap_tol=0"];
+        let mut args = vec!["tol=3e-13", "relative_gap_tol=0"];
         args.extend_from_slice(leg);
         let r = run("lp_tuff.nl", &args);
         assert!(
@@ -298,7 +304,7 @@ fn when_both_fail_the_verdict_stays_honest() {
 /// which answer it kept — the console counterpart of `convex_fallback`.
 #[test]
 fn the_comparison_is_announced() {
-    let r = run("lp_tuff.nl", &["tol=1e-12", "relative_gap_tol=0"]);
+    let r = run("lp_tuff.nl", &["tol=3e-13", "relative_gap_tol=0"]);
     let line = r
         .stderr
         .lines()

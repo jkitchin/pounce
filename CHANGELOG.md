@@ -301,6 +301,23 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **The convex IPM no longer stops on a duality gap that cancellation made
+  small.** The HSDE stop tested the *signed* gap `x̂ᵀPx̂ + cᵀx̂ + bᵀŷ + hᵀẑ`,
+  which differs from the complementarity sum `ŝᵀẑ` by the residual couplings
+  (`x̂ᵀρ̂_x`, …); those shrink with `μ`, so on models with large `‖x‖` they
+  cancel most of the gap. MIPLIB `traininstance6` (LP) stopped at a signed gap
+  of `9.8e-9` with `ŝᵀẑ = 3.3e-6`, reported `Solve_Succeeded` at `tol=1e-8`,
+  and its `(x, λ)` failed an independent duality-gap check at `2.5e-6`; it
+  now stops 2 iterations later at `6.2e-9`. The stop now also requires
+  `ŝᵀẑ ≤ max(tol_gap, tol·|objective|)`. LOTFI (`2.7e-8` → `2.6e-9`),
+  TUFF (`1.4e-8` → `1.4e-10`) and `sp150x300d` (`2.4e-8` → `8.2e-10`) were
+  also returning multipliers that missed `tol`. Fixture sweep: 4 convex
+  fixtures move by 1–2 iterations on both legs, none changes status. The
+  defect predates FERAL static pivoting (gh#1193); that change only moved
+  `traininstance6`'s trajectory onto it. At `tol=1e-12` TUFF's convex arm
+  now runs past the 28-iteration point where it used to decline and
+  certifies, so the gh#1183 convex-wins test moves to `tol=3e-13`, and the
+  `relative_gap_tol` fallback test moves to NETLIB ETAMACRO.
 - **Crossover step 4 no longer re-solves step 3's QP from scratch** (gh#1206
   B1). When the step-3 point missed the stopping tolerances, the active-set
   SQP started from the interior iterate with the step-2 *estimate* — but its
