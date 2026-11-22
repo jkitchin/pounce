@@ -131,15 +131,33 @@ def _jac_values(Ffun, t, Y, n, M, order, jac, auto=None):
     return np.concatenate(vals)
 
 
+def collocation_lin_solve(Ffun, t, Y, v, *, order=2, jac=None, transpose=False):
+    """Solve ``R_Y w = v`` (or ``R_Y^T w = v`` with ``transpose=True``) at the
+    converged nodes ``Y`` (full ``(n, m)``).
+
+    ``v`` is ``(n*(m-1),)`` (the unknown block ``y_1..y_{m-1}``) or a batch
+    ``(B, n*(m-1))``, which shares one factorization (multi-RHS solve).
+    """
+    n = Y.shape[0]
+    M = Y.shape[1] - 1
+    N = n * M
+    rows, cols = _coo_pattern(n, M, order)
+    lu = SparseLU(N, rows, cols)
+    auto = make_dae_jac(Ffun) if jac is None else None
+    lu.factor(_jac_values(Ffun, t, Y, n, M, order, jac, auto))
+    v = np.asarray(v, float)
+    if v.ndim == 2:
+        B = v.shape[0]
+        many = lu.solve_transpose_many if transpose else lu.solve_many
+        return np.asarray(many(v.reshape(-1), B)).reshape(B, N)
+    one = lu.solve_transpose if transpose else lu.solve
+    return np.asarray(one(v.reshape(-1)))
+
+
 def collocation_transpose_solve(Ffun, t, Y, v, *, order=2, jac=None):
     """Solve ``R_Y^T u = v`` at the converged nodes ``Y`` (full ``(n, m)``).
 
     Returns ``u`` of shape ``(n*(m-1),)`` (the unknown block ``y_1..y_{m-1}``).
     """
-    n = Y.shape[0]
-    M = Y.shape[1] - 1
-    rows, cols = _coo_pattern(n, M, order)
-    lu = SparseLU(n * M, rows, cols)
-    auto = make_dae_jac(Ffun) if jac is None else None
-    lu.factor(_jac_values(Ffun, t, Y, n, M, order, jac, auto))
-    return np.asarray(lu.solve_transpose(np.asarray(v, float).reshape(-1)))
+    return collocation_lin_solve(Ffun, t, Y, v, order=order, jac=jac,
+                                 transpose=True)
