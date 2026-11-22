@@ -21,6 +21,7 @@ from typing import Any, Callable
 import numpy as np
 
 from . import _radau
+from . import _sparse as _sp
 from .._result import ResultMixin
 
 
@@ -159,8 +160,8 @@ def solve_ivp(
         either) attributes.
     args : tuple or None
         Extra arguments passed to ``fun`` / ``jac`` / ``events``.
-    mass : array (n, n), callable, or None
-        Mass matrix ``M`` in ``M y' = f`` — either a constant array or a
+    mass : array (n, n), sparse matrix, callable, or None
+        Mass matrix ``M`` in ``M y' = f`` — either a constant (dense or sparse) array or a
         callable ``M(t, y)`` (``M(t, y, *args)`` with ``args``) for a
         state/time-dependent mass. A singular ``M`` makes this an index-1 DAE
         solve (a pounce extension beyond SciPy); a callable ``M`` is routed
@@ -188,9 +189,12 @@ def solve_ivp(
         the trajectory, step sequence, or error control — only what you read.
     rtol, atol : float
         Relative / absolute error tolerances.
-    jac : callable or None
-        ``jac(t, y)`` returning ``df/dy``. Estimated by finite differences
-        if omitted.
+    jac : array_like, sparse matrix, callable, or None
+        ``df/dy``, as SciPy accepts it: a constant ``(n, n)`` dense or sparse
+        matrix, or ``jac(t, y)`` returning one. Estimated (JAX autodiff, else
+        central differences) if omitted. A sparse Jacobian — or a sparse
+        ``mass`` — keeps the stage and error systems sparse, factored with
+        SuperLU (``scipy.sparse.linalg.splu``) rather than densified.
     first_step, max_step : float
         Initial / maximum step size.
 
@@ -225,7 +229,7 @@ def solve_ivp(
     if args is not None:
         _fun = fun
         fun = lambda t, y: _fun(t, y, *args)
-        if jac is not None:
+        if callable(jac):            # a constant (dense/sparse) jac takes no args
             _jac = jac
             jac = lambda t, y: _jac(t, y, *args)
         if callable(mass):
@@ -243,7 +247,8 @@ def solve_ivp(
         from . import _dae
 
         def _F(t, y, yp):
-            return np.asarray(mass(t, y), dtype=float) @ yp - np.asarray(fun(t, y), dtype=float)
+            # ``M @ yp`` rather than ``asarray(M)``: M(t, y) may be sparse.
+            return mass(t, y) @ yp - np.asarray(fun(t, y), dtype=float)
 
         prob = _dae._DaeProblem(_F, y0.size)
         if consistent == "project":
@@ -251,7 +256,7 @@ def solve_ivp(
         else:
             # 'assume': trust y0; derive y'0 with y0 held fixed (min-norm solve
             # of M(t0, y0) y'0 = f(t0, y0)). Correct when y0 is consistent.
-            M0 = np.asarray(mass(t0, y0), dtype=float)
+            M0 = _sp.to_dense(mass(t0, y0))
             f0 = np.asarray(fun(t0, y0), dtype=float)
             yp0 = np.linalg.lstsq(M0, f0, rcond=None)[0]
         res = _dae.integrate_dae(
@@ -270,10 +275,13 @@ def solve_ivp(
             # and reuse it for both.
             from . import _dae
 
-            M = np.asarray(mass, dtype=float)
+            M = _sp.to_csc(mass) if _sp.issparse(mass) else np.asarray(mass, dtype=float)
             if M.ndim == 2 and _dae._algebraic_mask(M).any():
-                dae_jac = None if jac is None else (
-                    lambda t, y, yp: (-np.asarray(jac(t, y), dtype=float), M))
+                if jac is None:
+                    dae_jac = None
+                else:
+                    _ode_jac = jac if callable(jac) else (lambda t, y, J=jac: J)
+                    dae_jac = lambda t, y, yp: (-_ode_jac(t, y), M)
                 _F = lambda t, y, yp: M @ yp - np.asarray(fun(t, y), dtype=float)
                 dae_prob = _dae._DaeProblem(_F, y0.size, jac=dae_jac)
                 if consistent == "project":
@@ -343,9 +351,10 @@ def solve_dae(
         so an approximate guess (or ``None`` → zeros) is fine. With
         ``consistent="assume"`` it is used as given and must already satisfy
         ``F(t0, y0, yp0) == 0``.
-    jac : callable or None
-        ``jac(t, y, yp)`` returning ``(dF/dy, dF/dy')``; finite-differenced
-        (``2n`` evals) if omitted.
+    jac : callable, pair, or None
+        ``jac(t, y, yp)`` returning ``(dF/dy, dF/dy')``, or a constant pair;
+        either block may be dense or sparse (a sparse block keeps the stage
+        systems on a sparse LU). Finite-differenced (``2n`` evals) if omitted.
     project_output : bool
         When ``True``, Newton-polish the algebraic components of every
         requested output point (``res.sol(t)`` and ``res.y`` at ``t_eval``)
@@ -368,7 +377,7 @@ def solve_dae(
     if args is not None:
         _F = F
         F = lambda t, y, yp: _F(t, y, yp, *args)
-        if jac is not None:
+        if callable(jac):
             _jac = jac
             jac = lambda t, y, yp: _jac(t, y, yp, *args)
         if events is not None:

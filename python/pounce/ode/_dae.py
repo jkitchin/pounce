@@ -34,6 +34,7 @@ import numpy as np
 
 from . import _radau as R
 from ._jacobian import make_dae_jac
+from . import _sparse as _sp
 _ALG_TOL = 1e-9            # column of F_y' below this (relative) => algebraic
 
 
@@ -43,7 +44,14 @@ class _DaeProblem:
     def __init__(self, Ffun, n, jac=None):
         self.Ffun = Ffun
         self.n = n
+        if jac is not None and not callable(jac):
+            jac_const = tuple(jac)    # constant (F_y, F_y'), dense or sparse
+            jac = lambda t, y, yp: jac_const
         self._user_jac = jac          # optional (t,y,yp) -> (F_y, F_y')
+        # Sparse mode (gh #1228): fixed by the first Jacobian evaluation — if
+        # either block comes back sparse, both are held as CSC from then on.
+        self.sparse = False
+        self._mode_fixed = False
         self._auto_jac = None         # lazily built JAX-or-central-diff strategy
         self.nfev = 0
         self.njev = 0
@@ -57,18 +65,23 @@ class _DaeProblem:
         self.njev += 1
         if self._user_jac is not None:
             Fy, Fyp = self._user_jac(t, y, yp)
-            return np.asarray(Fy, float), np.asarray(Fyp, float)
-        # No analytic Jacobians: exact JAX autodiff when the residual is
-        # traceable, else accurate central differences (see _jacobian.py).
-        if self._auto_jac is None:
-            self._auto_jac = make_dae_jac(self.Ffun, self.F)
-        return self._auto_jac(t, y, yp, F0)
+        else:
+            # No analytic Jacobians: exact JAX autodiff when the residual is
+            # traceable, else accurate central differences (_jacobian.py).
+            if self._auto_jac is None:
+                self._auto_jac = make_dae_jac(self.Ffun, self.F)
+            Fy, Fyp = self._auto_jac(t, y, yp, F0)
+        if not self._mode_fixed:
+            self._mode_fixed = True
+            self.sparse = _sp.issparse(Fy) or _sp.issparse(Fyp)
+        conv = _sp.to_csc if self.sparse else _sp.to_dense
+        return conv(Fy), conv(Fyp)
 
 
 def _algebraic_mask(Fyp):
     """Boolean ``(n,)``: variable ``j`` is algebraic iff ``F`` is independent of
     ``y'_j`` (column ``j`` of ``F_y'`` is ~0)."""
-    col = np.max(np.abs(Fyp), axis=0)
+    col = _sp.abs_max(Fyp, axis=0)
     return col <= _ALG_TOL * max(1.0, float(col.max()))
 
 
@@ -78,7 +91,7 @@ def _algebraic_equation_mask(Fyp):
     ``0 = F_i(t, y)``. For a mass form ``F = M y' - f`` this is the zero rows of
     ``M``; for a semi-explicit index-1 DAE it indexes the same slots as
     :func:`_algebraic_mask`."""
-    row = np.max(np.abs(Fyp), axis=1)
+    row = _sp.abs_max(Fyp, axis=1)
     return row <= _ALG_TOL * max(1.0, float(row.max()))
 
 
@@ -93,13 +106,13 @@ def _algebraic_rows_affine(prob, t, y, alg_eq, *, rtol=1e-6):
     deterministic perturbations of ``y``."""
     zp = np.zeros_like(y)
     Fy0, _ = prob.jacs(t, y, zp, prob.F(t, y, zp))
-    J0 = Fy0[alg_eq]
+    J0 = _sp.to_dense(Fy0[alg_eq])
     scale = 1.0 + float(np.linalg.norm(y))
     ar = np.arange(y.size)
     for k in (1, 2):
         dy = scale * 0.1 * k * np.cos(ar + k)
         Fyk, _ = prob.jacs(t, y + dy, zp, prob.F(t, y + dy, zp))
-        if np.linalg.norm(Fyk[alg_eq] - J0) > rtol * (1.0 + np.linalg.norm(J0)):
+        if np.linalg.norm(_sp.to_dense(Fyk[alg_eq]) - J0) > rtol * (1.0 + np.linalg.norm(J0)):
             return False
     return True
 
@@ -126,11 +139,14 @@ def project_output(sol, prob, alg_eq, alg_var, *, tol=1e-10, max_iter=10):
                 if np.linalg.norm(r) <= tol * (1.0 + np.linalg.norm(y)):
                     break
                 Fy, _ = prob.jacs(tq[q], y, zp, prob.F(tq[q], y, zp))
-                J = Fy[np.ix_(alg_eq, alg_var)]
+                if _sp.issparse(Fy):
+                    J = Fy.tocsr()[alg_eq][:, alg_var]
+                else:
+                    J = Fy[np.ix_(alg_eq, alg_var)]
                 try:
-                    dy = np.linalg.solve(J, -r)
+                    dy = _sp.solve(J, -r)
                 except np.linalg.LinAlgError:
-                    dy = np.linalg.lstsq(J, -r, rcond=None)[0]
+                    dy = np.linalg.lstsq(_sp.to_dense(J), -r, rcond=None)[0]
                 y[alg_var] = y[alg_var] + dy
             Y[:, q] = y
         return Y
@@ -162,9 +178,13 @@ def consistent_initial_conditions(prob, t0, y0, yp0=None, *, tol=1e-10,
             return y, yp
         Fy, Fyp = prob.jacs(t0, y, yp, F0)
         # Unknown j is y'_j (differential) or y_j (algebraic): pick that column.
-        Ju = np.where(diff[None, :], Fyp, Fy)
+        if _sp.issparse(Fy) or _sp.issparse(Fyp):
+            Ju = (_sp.to_csc(Fyp) @ _sp.sp.diags(diff.astype(float))
+                  + _sp.to_csc(Fy) @ _sp.sp.diags(alg.astype(float)))
+        else:
+            Ju = np.where(diff[None, :], Fyp, Fy)
         try:
-            du = np.linalg.solve(Ju, -F0)
+            du = _sp.solve(Ju, -F0)
         except np.linalg.LinAlgError as e:
             raise RuntimeError(
                 "consistent_initial_conditions: singular Jacobian — the DAE may "
@@ -255,8 +275,14 @@ def integrate_dae(Ffun, t0, t1, y0, yp0, *, rtol=1e-3, atol=1e-6,
     jac_current = True
     rejected = False
 
-    lu3 = R._dense_lu_pattern(3 * n)
-    lu_real = R._dense_lu_pattern(n)
+    if prob.sparse:                 # sparse Jacobian (gh #1228): SuperLU
+        lu3 = _sp.SparseLU()
+        lu_real = _sp.SparseLU()
+        eye3 = _sp.sp.identity(3, format="csc")
+        A3 = _sp.sp.csc_matrix(R.RADAU_A)
+    else:
+        lu3 = R._dense_lu_pattern(3 * n)
+        lu_real = R._dense_lu_pattern(n)
     h_lu = None
     need_factor = True
     K_prev = None
@@ -274,9 +300,14 @@ def integrate_dae(Ffun, t0, t1, y0, yp0, *, rtol=1e-3, atol=1e-6,
         h = min(h, abs(t1 - t))
         hs = s * h
         if need_factor or h != h_lu:
-            big = np.kron(np.eye(3), Fyp) + hs * np.kron(R.RADAU_A, Fy)
-            R._refactor(lu3, big)
-            R._refactor(lu_real, R.MU_REAL / hs * Fyp + Fy)
+            if prob.sparse:
+                lu3.factor(_sp.sp.kron(eye3, Fyp, format="csc")
+                           + hs * _sp.sp.kron(A3, Fy, format="csc"))
+                lu_real.factor(R.MU_REAL / hs * Fyp + Fy)
+            else:
+                big = np.kron(np.eye(3), Fyp) + hs * np.kron(R.RADAU_A, Fy)
+                R._refactor(lu3, big)
+                R._refactor(lu_real, R.MU_REAL / hs * Fyp + Fy)
             prob.nlu += 2
             h_lu = h
             need_factor = False

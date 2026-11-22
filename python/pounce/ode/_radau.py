@@ -25,6 +25,7 @@ import numpy as np
 
 from .._pounce import DenseLU
 from ._jacobian import make_ode_jac
+from . import _sparse as _sp
 
 # --- Radau IIA (5) tableau (Hairer-Wanner) --------------------------------
 _S6 = 6 ** 0.5
@@ -169,7 +170,21 @@ class _RadauProblem:
     def __init__(self, fun, n, mass=None, jac=None):
         self.fun = fun
         self.n = n
-        self.M = np.eye(n) if mass is None else np.asarray(mass, dtype=float)
+        # Sparse mode (gh #1228): a sparse mass, or a Jacobian that comes back
+        # sparse on its first evaluation, keeps J and M as CSC matrices and the
+        # stage operators on a sparse LU (see _sparse.py). The mode is fixed by
+        # the first Jacobian evaluation; later ones are coerced to match.
+        self.sparse = _sp.issparse(mass)
+        if mass is None:
+            self.M = np.eye(n)
+        elif self.sparse:
+            self.M = _sp.to_csc(mass)
+        else:
+            self.M = np.asarray(mass, dtype=float)
+        self._mode_fixed = False
+        if jac is not None and not callable(jac):
+            J_const = jac          # constant Jacobian, dense or sparse (SciPy)
+            jac = lambda t, y: J_const
         self._user_jac = jac
         self._auto_jac = None      # lazily built JAX-or-central-diff strategy
         self.nfev = 0
@@ -183,12 +198,19 @@ class _RadauProblem:
     def jac(self, t, y, f0):
         self.njev += 1
         if self._user_jac is not None:
-            return np.asarray(self._user_jac(t, y), dtype=float)
-        # No analytic Jacobian: use exact JAX autodiff when the RHS is
-        # traceable, else an accurate central difference (see _jacobian.py).
-        if self._auto_jac is None:
-            self._auto_jac = make_ode_jac(self.fun, self.f)
-        return self._auto_jac(t, y, f0)
+            J = self._user_jac(t, y)
+        else:
+            # No analytic Jacobian: use exact JAX autodiff when the RHS is
+            # traceable, else an accurate central difference (_jacobian.py).
+            if self._auto_jac is None:
+                self._auto_jac = make_ode_jac(self.fun, self.f)
+            J = self._auto_jac(t, y, f0)
+        if not self._mode_fixed:
+            self._mode_fixed = True
+            if _sp.issparse(J) and not self.sparse:
+                self.sparse = True
+                self.M = _sp.to_csc(self.M)
+        return _sp.to_csc(J) if self.sparse else _sp.to_dense(J)
 
 
 def _predict_stages(K_prev, ratio):
@@ -347,8 +369,14 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
     # error-estimate operator) and the complex ``μ_cplx/h·M − J``, held as its
     # real (2n×2n) embedding — both far better conditioned than the full
     # (3n×3n) ``I₃⊗M − h(A⊗J)`` and cheaper to factor.
-    lu_real = _dense_lu_pattern(prob.n)
-    lu_cplx = _dense_lu_pattern(2 * prob.n)
+    # A sparse J or M (gh #1228) factors on SuperLU instead: the complex
+    # operator directly (not its 2n real embedding), behind the same interface.
+    if prob.sparse:
+        lu_real = _sp.SparseLU()
+        lu_cplx = _sp.SparseComplexLU(prob.n)
+    else:
+        lu_real = _dense_lu_pattern(prob.n)
+        lu_cplx = _dense_lu_pattern(2 * prob.n)
     h_lu = None
     need_factor = True
 
@@ -376,11 +404,16 @@ def integrate(fun, t0, t1, y0, *, rtol=1e-3, atol=1e-6, first_step=None,
             # real ``μ_real/h·M − J`` and the complex ``μ_cplx/h·M − J``, the
             # latter held as its real 2n×2n embedding ``[[Re,−Im],[Im,Re]]``.
             mc = MU_COMPLEX / hs
-            c_re = mc.real * prob.M - J
-            c_im = mc.imag * prob.M
             try:
-                _refactor(lu_real, MU_REAL / hs * prob.M - J)
-                _refactor(lu_cplx, np.block([[c_re, -c_im], [c_im, c_re]]))
+                if prob.sparse:
+                    lu_real.factor(MU_REAL / hs * prob.M - J)
+                    lu_cplx.factor(mc * prob.M - J)
+                else:
+                    c_re = mc.real * prob.M - J
+                    c_im = mc.imag * prob.M
+                    _refactor(lu_real, MU_REAL / hs * prob.M - J)
+                    _refactor(lu_cplx,
+                              np.block([[c_re, -c_im], [c_im, c_re]]))
             except RuntimeError:
                 # A stage-operator factorization failure is treated like a
                 # rejected step (shrink h, refresh a stale J, retry) rather than
