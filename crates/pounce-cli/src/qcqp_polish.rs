@@ -1002,6 +1002,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         }
     }
 

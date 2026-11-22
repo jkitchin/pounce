@@ -1453,6 +1453,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let (qp, con_map, obj_const, cones) =
             extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
@@ -1525,6 +1526,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let (qp, _con_map, obj_const, cones) =
             extract_socp_with_map(&prob, BoundRelax::NONE).expect("extract");
@@ -1576,6 +1578,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         }
     }
 
@@ -2028,6 +2031,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let (qp, con_map, obj_const) =
             extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
@@ -2096,6 +2100,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(qp.c.len(), 1);
@@ -2161,6 +2166,7 @@ mod tests {
                 n_discrete: None,
                 var_names: Vec::new(),
                 con_names: Vec::new(),
+                frontend_dag: false,
             };
             let (qp, con_map, _) = extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
             let sol = solve_qp_ipm(&qp, &QpOptions::default(), backend);
@@ -2247,6 +2253,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let (qp, con_map, obj_const) =
             extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
@@ -2309,6 +2316,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let (qp, con_map, _obj_const) =
             extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
@@ -2369,6 +2377,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let (qp, _con_map, obj_const) =
             extract_qp_with_map(&prob, BoundRelax::NONE).expect("extract");
@@ -2415,6 +2424,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         // The bounds are the box, not `G` rows.
@@ -2454,6 +2464,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert!(qp.p_lower.is_empty(), "LP has no Hessian");
@@ -2496,6 +2507,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         // minimize −x0.
@@ -2542,6 +2554,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(
@@ -2595,6 +2608,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(
@@ -2650,6 +2664,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let qp = extract_qp(&prob, BoundRelax::NONE).expect("extract");
         assert_eq!(qp.m_ineq(), 0, "bounds are the box, not `G` rows");
@@ -2693,6 +2708,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         let sol = QpSolution {
             status: pounce_convex::QpStatus::Optimal,
@@ -2762,6 +2778,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         }
     }
 

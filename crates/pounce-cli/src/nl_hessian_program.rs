@@ -407,67 +407,40 @@ impl HessianProgram {
                     dst,
                     c_idx: intern_const(c, &mut consts),
                 },
-                TapeOp::Var(x_idx) => HOp::FwdLoadVar {
-                    dst,
-                    x_idx: x_idx as u32,
-                },
+                TapeOp::Var(x_idx) => HOp::FwdLoadVar { dst, x_idx: x_idx },
                 TapeOp::Add(a, b) => HOp::FwdAdd {
                     dst,
-                    a: v_slot(a as u32),
-                    b: v_slot(b as u32),
+                    a: v_slot(a),
+                    b: v_slot(b),
                 },
                 TapeOp::Sub(a, b) => HOp::FwdSub {
                     dst,
-                    a: v_slot(a as u32),
-                    b: v_slot(b as u32),
+                    a: v_slot(a),
+                    b: v_slot(b),
                 },
                 TapeOp::Mul(a, b) => HOp::FwdMul {
                     dst,
-                    a: v_slot(a as u32),
-                    b: v_slot(b as u32),
+                    a: v_slot(a),
+                    b: v_slot(b),
                 },
                 TapeOp::Div(a, b) => HOp::FwdDiv {
                     dst,
-                    a: v_slot(a as u32),
-                    b: v_slot(b as u32),
+                    a: v_slot(a),
+                    b: v_slot(b),
                 },
                 TapeOp::Pow(a, b) => HOp::FwdPow {
                     dst,
-                    a: v_slot(a as u32),
-                    b: v_slot(b as u32),
+                    a: v_slot(a),
+                    b: v_slot(b),
                 },
-                TapeOp::Neg(a) => HOp::FwdNeg {
-                    dst,
-                    a: v_slot(a as u32),
-                },
-                TapeOp::Abs(a) => HOp::FwdAbs {
-                    dst,
-                    a: v_slot(a as u32),
-                },
-                TapeOp::Sqrt(a) => HOp::FwdSqrt {
-                    dst,
-                    a: v_slot(a as u32),
-                },
-                TapeOp::Exp(a) => HOp::FwdExp {
-                    dst,
-                    a: v_slot(a as u32),
-                },
-                TapeOp::Log(a) => HOp::FwdLog {
-                    dst,
-                    a: v_slot(a as u32),
-                },
-                TapeOp::Log10(a) => HOp::FwdLog10 {
-                    dst,
-                    a: v_slot(a as u32),
-                },
-                TapeOp::Sin(a) => HOp::FwdSin {
-                    dst,
-                    a: v_slot(a as u32),
-                },
-                TapeOp::Cos(a) => HOp::FwdCos {
-                    dst,
-                    a: v_slot(a as u32),
-                },
+                TapeOp::Neg(a) => HOp::FwdNeg { dst, a: v_slot(a) },
+                TapeOp::Abs(a) => HOp::FwdAbs { dst, a: v_slot(a) },
+                TapeOp::Sqrt(a) => HOp::FwdSqrt { dst, a: v_slot(a) },
+                TapeOp::Exp(a) => HOp::FwdExp { dst, a: v_slot(a) },
+                TapeOp::Log(a) => HOp::FwdLog { dst, a: v_slot(a) },
+                TapeOp::Log10(a) => HOp::FwdLog10 { dst, a: v_slot(a) },
+                TapeOp::Sin(a) => HOp::FwdSin { dst, a: v_slot(a) },
+                TapeOp::Cos(a) => HOp::FwdCos { dst, a: v_slot(a) },
                 TapeOp::Funcall(_) => unreachable!(
                     "HessianProgram path does not support AMPL external functions; \
                      use the Tape (build_with_externals) path instead."
@@ -540,74 +513,74 @@ impl HessianProgram {
                     TapeOp::Var(_) => HOp::SetOne { dst },
                     TapeOp::Add(a, b) => HOp::DotAdd {
                         dst,
-                        a: dot_slot(a as u32),
-                        b: dot_slot(b as u32),
+                        a: dot_slot(a),
+                        b: dot_slot(b),
                     },
                     TapeOp::Sub(a, b) => HOp::DotSub {
                         dst,
-                        a: dot_slot(a as u32),
-                        b: dot_slot(b as u32),
+                        a: dot_slot(a),
+                        b: dot_slot(b),
                     },
                     TapeOp::Mul(a, b) => HOp::DotMul {
                         dst,
-                        dot_a: dot_slot(a as u32),
-                        vb: v_slot(b as u32),
-                        va: v_slot(a as u32),
-                        dot_b: dot_slot(b as u32),
+                        dot_a: dot_slot(a),
+                        vb: v_slot(b),
+                        va: v_slot(a),
+                        dot_b: dot_slot(b),
                     },
                     TapeOp::Div(a, b) => HOp::DotDiv {
                         dst,
-                        dot_a: dot_slot(a as u32),
-                        vb: v_slot(b as u32),
-                        va: v_slot(a as u32),
-                        dot_b: dot_slot(b as u32),
+                        dot_a: dot_slot(a),
+                        vb: v_slot(b),
+                        va: v_slot(a),
+                        dot_b: dot_slot(b),
                     },
                     TapeOp::Pow(a, b) => HOp::DotPow {
                         dst,
-                        va: v_slot(a as u32),
-                        vb: v_slot(b as u32),
+                        va: v_slot(a),
+                        vb: v_slot(b),
                         vd: v_slot(i_u),
-                        dot_a: dot_slot(a as u32),
-                        dot_b: dot_slot(b as u32),
+                        dot_a: dot_slot(a),
+                        dot_b: dot_slot(b),
                     },
                     TapeOp::Neg(a) => HOp::DotNeg {
                         dst,
-                        dot_a: dot_slot(a as u32),
+                        dot_a: dot_slot(a),
                     },
                     TapeOp::Abs(a) => HOp::DotAbs {
                         dst,
-                        dot_a: dot_slot(a as u32),
-                        va: v_slot(a as u32),
+                        dot_a: dot_slot(a),
+                        va: v_slot(a),
                     },
                     TapeOp::Sqrt(a) => HOp::DotSqrt {
                         dst,
-                        dot_a: dot_slot(a as u32),
+                        dot_a: dot_slot(a),
                         vd: v_slot(i_u),
                     },
                     TapeOp::Exp(a) => HOp::DotExp {
                         dst,
-                        dot_a: dot_slot(a as u32),
+                        dot_a: dot_slot(a),
                         vd: v_slot(i_u),
                     },
                     TapeOp::Log(a) => HOp::DotLog {
                         dst,
-                        dot_a: dot_slot(a as u32),
-                        va: v_slot(a as u32),
+                        dot_a: dot_slot(a),
+                        va: v_slot(a),
                     },
                     TapeOp::Log10(a) => HOp::DotLog10 {
                         dst,
-                        dot_a: dot_slot(a as u32),
-                        va: v_slot(a as u32),
+                        dot_a: dot_slot(a),
+                        va: v_slot(a),
                     },
                     TapeOp::Sin(a) => HOp::DotSin {
                         dst,
-                        dot_a: dot_slot(a as u32),
-                        va: v_slot(a as u32),
+                        dot_a: dot_slot(a),
+                        va: v_slot(a),
                     },
                     TapeOp::Cos(a) => HOp::DotCos {
                         dst,
-                        dot_a: dot_slot(a as u32),
-                        va: v_slot(a as u32),
+                        dot_a: dot_slot(a),
+                        va: v_slot(a),
                     },
                     TapeOp::Funcall(_) => unreachable!(
                         "HessianProgram path does not support AMPL external functions; \
@@ -659,8 +632,8 @@ impl HessianProgram {
                         // At a Var slot: if k >= j and hess_map has
                         // an entry for (k, j), emit a HessEmit op.
                         // No adj/adj_dot propagation (no operands).
-                        if k >= j {
-                            if let Some(&ptr) = hess_map.get(&(k, j)) {
+                        if k as usize >= j {
+                            if let Some(&ptr) = hess_map.get(&(k as usize, j)) {
                                 ops.push(HOp::HessEmit {
                                     hess_ptr: ptr as u32,
                                     adj_dot_slot: wd,
@@ -670,119 +643,119 @@ impl HessianProgram {
                         continue;
                     }
                     TapeOp::Add(a, b) => HOp::RevAdd {
-                        adj_a: adj_slot(a as u32),
-                        adj_b: adj_slot(b as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
-                        adj_dot_b: adj_dot_slot(b as u32),
+                        adj_a: adj_slot(a),
+                        adj_b: adj_slot(b),
+                        adj_dot_a: adj_dot_slot(a),
+                        adj_dot_b: adj_dot_slot(b),
                         w,
                         wd,
                     },
                     TapeOp::Sub(a, b) => HOp::RevSub {
-                        adj_a: adj_slot(a as u32),
-                        adj_b: adj_slot(b as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
-                        adj_dot_b: adj_dot_slot(b as u32),
+                        adj_a: adj_slot(a),
+                        adj_b: adj_slot(b),
+                        adj_dot_a: adj_dot_slot(a),
+                        adj_dot_b: adj_dot_slot(b),
                         w,
                         wd,
                     },
                     TapeOp::Mul(a, b) => HOp::RevMul {
-                        adj_a: adj_slot(a as u32),
-                        adj_b: adj_slot(b as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
-                        adj_dot_b: adj_dot_slot(b as u32),
+                        adj_a: adj_slot(a),
+                        adj_b: adj_slot(b),
+                        adj_dot_a: adj_dot_slot(a),
+                        adj_dot_b: adj_dot_slot(b),
                         w,
                         wd,
-                        va: v_slot(a as u32),
-                        vb: v_slot(b as u32),
-                        dot_a: dot_slot(a as u32),
-                        dot_b: dot_slot(b as u32),
+                        va: v_slot(a),
+                        vb: v_slot(b),
+                        dot_a: dot_slot(a),
+                        dot_b: dot_slot(b),
                     },
                     TapeOp::Div(a, b) => HOp::RevDiv {
-                        adj_a: adj_slot(a as u32),
-                        adj_b: adj_slot(b as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
-                        adj_dot_b: adj_dot_slot(b as u32),
+                        adj_a: adj_slot(a),
+                        adj_b: adj_slot(b),
+                        adj_dot_a: adj_dot_slot(a),
+                        adj_dot_b: adj_dot_slot(b),
                         w,
                         wd,
-                        va: v_slot(a as u32),
-                        vb: v_slot(b as u32),
-                        dot_a: dot_slot(a as u32),
-                        dot_b: dot_slot(b as u32),
+                        va: v_slot(a),
+                        vb: v_slot(b),
+                        dot_a: dot_slot(a),
+                        dot_b: dot_slot(b),
                     },
                     TapeOp::Pow(a, b) => HOp::RevPow {
-                        adj_a: adj_slot(a as u32),
-                        adj_b: adj_slot(b as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
-                        adj_dot_b: adj_dot_slot(b as u32),
+                        adj_a: adj_slot(a),
+                        adj_b: adj_slot(b),
+                        adj_dot_a: adj_dot_slot(a),
+                        adj_dot_b: adj_dot_slot(b),
                         w,
                         wd,
-                        va: v_slot(a as u32),
-                        vb: v_slot(b as u32),
+                        va: v_slot(a),
+                        vb: v_slot(b),
                         vd: v_slot(i_u),
-                        dot_a: dot_slot(a as u32),
-                        dot_b: dot_slot(b as u32),
+                        dot_a: dot_slot(a),
+                        dot_b: dot_slot(b),
                     },
                     TapeOp::Neg(a) => HOp::RevNeg {
-                        adj_a: adj_slot(a as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
+                        adj_a: adj_slot(a),
+                        adj_dot_a: adj_dot_slot(a),
                         w,
                         wd,
                     },
                     TapeOp::Abs(a) => HOp::RevAbs {
-                        adj_a: adj_slot(a as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
+                        adj_a: adj_slot(a),
+                        adj_dot_a: adj_dot_slot(a),
                         w,
                         wd,
-                        va: v_slot(a as u32),
+                        va: v_slot(a),
                     },
                     TapeOp::Sqrt(a) => HOp::RevSqrt {
-                        adj_a: adj_slot(a as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
+                        adj_a: adj_slot(a),
+                        adj_dot_a: adj_dot_slot(a),
                         w,
                         wd,
-                        va: v_slot(a as u32),
+                        va: v_slot(a),
                         vd: v_slot(i_u),
-                        dot_a: dot_slot(a as u32),
+                        dot_a: dot_slot(a),
                     },
                     TapeOp::Exp(a) => HOp::RevExp {
-                        adj_a: adj_slot(a as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
+                        adj_a: adj_slot(a),
+                        adj_dot_a: adj_dot_slot(a),
                         w,
                         wd,
                         vd: v_slot(i_u),
-                        dot_a: dot_slot(a as u32),
+                        dot_a: dot_slot(a),
                     },
                     TapeOp::Log(a) => HOp::RevLog {
-                        adj_a: adj_slot(a as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
+                        adj_a: adj_slot(a),
+                        adj_dot_a: adj_dot_slot(a),
                         w,
                         wd,
-                        va: v_slot(a as u32),
-                        dot_a: dot_slot(a as u32),
+                        va: v_slot(a),
+                        dot_a: dot_slot(a),
                     },
                     TapeOp::Log10(a) => HOp::RevLog10 {
-                        adj_a: adj_slot(a as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
+                        adj_a: adj_slot(a),
+                        adj_dot_a: adj_dot_slot(a),
                         w,
                         wd,
-                        va: v_slot(a as u32),
-                        dot_a: dot_slot(a as u32),
+                        va: v_slot(a),
+                        dot_a: dot_slot(a),
                     },
                     TapeOp::Sin(a) => HOp::RevSin {
-                        adj_a: adj_slot(a as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
+                        adj_a: adj_slot(a),
+                        adj_dot_a: adj_dot_slot(a),
                         w,
                         wd,
-                        va: v_slot(a as u32),
-                        dot_a: dot_slot(a as u32),
+                        va: v_slot(a),
+                        dot_a: dot_slot(a),
                     },
                     TapeOp::Cos(a) => HOp::RevCos {
-                        adj_a: adj_slot(a as u32),
-                        adj_dot_a: adj_dot_slot(a as u32),
+                        adj_a: adj_slot(a),
+                        adj_dot_a: adj_dot_slot(a),
                         w,
                         wd,
-                        va: v_slot(a as u32),
-                        dot_a: dot_slot(a as u32),
+                        va: v_slot(a),
+                        dot_a: dot_slot(a),
                     },
                     TapeOp::Funcall(_) => unreachable!(
                         "HessianProgram path does not support AMPL external functions; \
@@ -1316,8 +1289,8 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Pow(a, b)
             | TapeOp::Atan2(a, b)
             | TapeOp::CEntropy(a, b) => {
-                r[a] = true;
-                r[b] = true;
+                r[a as usize] = true;
+                r[b as usize] = true;
             }
             TapeOp::Neg(a)
             | TapeOp::Abs(a)
@@ -1339,7 +1312,7 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Erf(a)
             | TapeOp::XLogX(a)
             | TapeOp::Atanh(a) => {
-                r[a] = true;
+                r[a as usize] = true;
             }
             TapeOp::Funcall(_) => unreachable!(
                 "HessianProgram path does not support AMPL external functions; \
@@ -1370,14 +1343,14 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
     for (i, op) in tape.ops.iter().enumerate() {
         d[i] = match *op {
             TapeOp::Const(_) => false,
-            TapeOp::Var(k) => k == j,
+            TapeOp::Var(k) => k as usize == j,
             TapeOp::Add(a, b)
             | TapeOp::Sub(a, b)
             | TapeOp::Mul(a, b)
             | TapeOp::Div(a, b)
             | TapeOp::Pow(a, b)
             | TapeOp::CEntropy(a, b)
-            | TapeOp::Atan2(a, b) => d[a] || d[b],
+            | TapeOp::Atan2(a, b) => d[a as usize] || d[b as usize],
             TapeOp::Neg(a)
             | TapeOp::Abs(a)
             | TapeOp::Sqrt(a)
@@ -1397,7 +1370,7 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Asinh(a)
             | TapeOp::XLogX(a)
             | TapeOp::Erf(a)
-            | TapeOp::Atanh(a) => d[a],
+            | TapeOp::Atanh(a) => d[a as usize],
             TapeOp::Funcall(_) => unreachable!(
                 "HessianProgram path does not support AMPL external functions; \
                  use the Tape (build_with_externals) path instead."
