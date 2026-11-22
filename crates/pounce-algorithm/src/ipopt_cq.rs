@@ -907,32 +907,40 @@ impl IpoptCalculatedQuantities {
     /// RHS. `IpIpoptCalculatedQuantities.cpp:2406-2430`.
     pub fn curr_relaxed_compl_x_l(&self) -> Rc<dyn Vector> {
         let mu = self.data.borrow().curr_mu;
-        let mut r = self.curr_compl_x_l().make_new();
-        r.copy(&*self.curr_compl_x_l());
+        // One computation, not two: `curr_compl_*` is uncached (gh#1238).
+        let c = self.curr_compl_x_l();
+        let mut r = c.make_new();
+        r.copy(&*c);
         r.add_scalar(-mu);
         rc_from(r)
     }
 
     pub fn curr_relaxed_compl_x_u(&self) -> Rc<dyn Vector> {
         let mu = self.data.borrow().curr_mu;
-        let mut r = self.curr_compl_x_u().make_new();
-        r.copy(&*self.curr_compl_x_u());
+        // One computation, not two: `curr_compl_*` is uncached (gh#1238).
+        let c = self.curr_compl_x_u();
+        let mut r = c.make_new();
+        r.copy(&*c);
         r.add_scalar(-mu);
         rc_from(r)
     }
 
     pub fn curr_relaxed_compl_s_l(&self) -> Rc<dyn Vector> {
         let mu = self.data.borrow().curr_mu;
-        let mut r = self.curr_compl_s_l().make_new();
-        r.copy(&*self.curr_compl_s_l());
+        // One computation, not two: `curr_compl_*` is uncached (gh#1238).
+        let c = self.curr_compl_s_l();
+        let mut r = c.make_new();
+        r.copy(&*c);
         r.add_scalar(-mu);
         rc_from(r)
     }
 
     pub fn curr_relaxed_compl_s_u(&self) -> Rc<dyn Vector> {
         let mu = self.data.borrow().curr_mu;
-        let mut r = self.curr_compl_s_u().make_new();
-        r.copy(&*self.curr_compl_s_u());
+        // One computation, not two: `curr_compl_*` is uncached (gh#1238).
+        let c = self.curr_compl_s_u();
+        let mut r = c.make_new();
+        r.copy(&*c);
         r.add_scalar(-mu);
         rc_from(r)
     }

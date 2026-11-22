@@ -535,7 +535,12 @@ impl AugSystemSolver for StdAugSystemSolver {
         let mut packed = vec![0.0; self.dim as usize];
         self.pack_rhs(rhs, &mut packed);
 
-        let dump_rhs = packed.clone();
+        // The solve overwrites `packed` with the solution, so a dump needs
+        // its own copy of the RHS — but only a dump does. Copying it
+        // unconditionally cost one `dim`-length allocation per KKT solve
+        // (gh#1238). Both dump branches below are gated on the same
+        // conditions `kkt_dump_active` reads, so they always find `Some`.
+        let dump_rhs: Option<Vec<Number>> = self.kkt_dump_active().then(|| packed.clone());
 
         // Attributes the whole factor+back-solve to
         // `linear_system_factorization` (mirrors upstream
@@ -627,7 +632,7 @@ impl AugSystemSolver for StdAugSystemSolver {
                         &self.irn,
                         &self.jcn,
                         &self.vals,
-                        &dump_rhs,
+                        dump_rhs.as_deref().unwrap_or_default(),
                         &packed,
                         check_neg_evals,
                         num_neg_evals,
@@ -652,7 +657,7 @@ impl AugSystemSolver for StdAugSystemSolver {
                 &self.irn,
                 &self.jcn,
                 &self.vals,
-                &dump_rhs,
+                dump_rhs.as_deref().unwrap_or_default(),
                 &packed,
                 check_neg_evals,
                 num_neg_evals,

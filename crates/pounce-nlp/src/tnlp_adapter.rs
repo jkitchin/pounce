@@ -126,7 +126,10 @@ impl BoundClassification {
 pub struct TNLPAdapter {
     tnlp: Rc<RefCell<dyn TNLP>>,
     info: NlpInfo,
-    classification: BoundClassification,
+    /// Shared so per-iteration callers can hold it across a
+    /// `RefCell` borrow without deep-cloning ~10 index vectors of
+    /// length `n`/`m` (gh#1238).
+    classification: Rc<BoundClassification>,
     nlp_lower_bound_inf: Number,
     nlp_upper_bound_inf: Number,
 }
@@ -289,7 +292,7 @@ impl TNLPAdapter {
         Ok(Self {
             tnlp,
             info,
-            classification,
+            classification: Rc::new(classification),
             nlp_lower_bound_inf,
             nlp_upper_bound_inf,
         })
@@ -301,6 +304,13 @@ impl TNLPAdapter {
 
     pub fn classification(&self) -> &BoundClassification {
         &self.classification
+    }
+
+    /// Shared handle to the classification. Cheap (a refcount bump);
+    /// prefer it over `classification().clone()`, which deep-copies
+    /// every map (gh#1238).
+    pub fn classification_rc(&self) -> Rc<BoundClassification> {
+        Rc::clone(&self.classification)
     }
 
     pub fn nlp_lower_bound_inf(&self) -> Number {

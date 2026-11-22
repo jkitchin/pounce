@@ -1025,7 +1025,10 @@ impl ConvCheck for OptErrorConvCheck {
         let compl_inf = cq_ref.curr_unscaled_complementarity_max();
         let rel_viol = cq_ref.curr_relative_primal_infeasibility_max();
         let curr_f = cq_ref.curr_f();
-        let unscaled_err = cq_ref.curr_unscaled_nlp_error();
+        // `curr_unscaled_nlp_error()` is exactly this max of the three
+        // values just computed; calling it would recompute all three
+        // uncached (gh#1238).
+        let unscaled_err = dual_inf.max(constr_viol).max(compl_inf);
         // gh #528 — see `strict_overall`. Only the strict gate below reads
         // this; `nlp_err` itself carries on to the acceptable-level band, the
         // rapid-infeasibility pre-filter and everything downstream unchanged.
