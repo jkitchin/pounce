@@ -101,6 +101,58 @@ def test_daeint_python_branch_on_t_falls_back_to_eager():
                                np.exp(-np.asarray(th)), rtol=5e-3)
 
 
+def _count_central(monkeypatch):
+    import pounce.ode._jacobian as J
+    hits = {"n": 0}
+    real = J._central
+
+    def spy(*a, **kw):
+        hits["n"] += 1
+        return real(*a, **kw)
+    monkeypatch.setattr(J, "_central", spy)
+    return hits
+
+
+def test_daeint_node_jacobian_is_autodiff(monkeypatch):
+    # The collocation core's jacfwd probe could not trace through the numpy
+    # wrapper around F, so every node Jacobian was a central difference.
+    # Forward solve and the jacfwd / grad linear solves must use autodiff.
+    hits = _count_central(monkeypatch)
+
+    def F(t, y, yp, th):
+        return yp + th * y * y
+
+    t = jnp.linspace(0.0, 1.0, 21)
+    th = jnp.array([1.0, 2.0])
+    Y = pj.daeint(F, jnp.ones(2), t, th)
+    # y' = -th y^2, y(0) = 1  ->  y = 1 / (1 + th t)
+    np.testing.assert_allclose(np.asarray(Y[:, -1]),
+                               1.0 / (1.0 + np.asarray(th)), rtol=5e-3)
+    J = jax.jacfwd(lambda p: pj.daeint(F, jnp.ones(2), t, p)[:, -1])(th)
+    g = jax.grad(lambda p: pj.daeint(F, jnp.ones(2), t, p)[:, -1].sum())(th)
+    assert np.all(np.isfinite(np.asarray(J))) and np.all(np.isfinite(np.asarray(g)))
+    assert hits["n"] == 0, hits["n"]
+
+
+def test_daeint_python_branch_jacobian_is_still_autodiff(monkeypatch):
+    # The other branch of host_jit: an F that jit cannot trace (Python
+    # control flow on t and on y) still gets an exact autodiff Jacobian from
+    # un-jitted jacfwd, never central differences.
+    hits = _count_central(monkeypatch)
+
+    def F(t, y, yp, th):
+        if t > 0.5 and y[0] > 0:
+            return yp + th * y * y
+        return yp + th * y * y
+
+    t = jnp.linspace(0.0, 1.0, 21)
+    th = jnp.array([1.0, 2.0])
+    Y = pj.daeint(F, jnp.ones(2), t, th)
+    np.testing.assert_allclose(np.asarray(Y[:, -1]),
+                               1.0 / (1.0 + np.asarray(th)), rtol=5e-3)
+    assert hits["n"] == 0, hits["n"]
+
+
 def test_bvp_newton_fun_is_compiled_on_host():
     # Three decoupled Bratu problems, u'' = -th_i exp(u), u(0) = u(1) = 0:
     # nonlinear, so Newton takes several iterations, each with a residual and
