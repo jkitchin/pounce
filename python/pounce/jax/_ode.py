@@ -11,7 +11,10 @@ implicit-function-theorem differentiation verbatim (see
 :mod:`pounce.bvp._core`). The converged node states solve the *square*
 collocation root-find ``R(z, p) = 0`` with ``p = [theta; y0]``; gradients
 fall out of ``dz*/dp = -(dR/dz)^{-1}(dR/dp)`` with the same FERAL sparse-LU
-back-solve used by the BVP layer — no per-step adjoint, no unrolled tape.
+solve used by the BVP layer — no per-step adjoint, no unrolled tape. The
+rule is a ``jax.custom_jvp`` (gh#1229), so forward mode (``jvp`` /
+``jacfwd``) and reverse mode (``grad`` / ``jacrev``, by transposition) both
+work.
 
 This is the *differentiable* counterpart to the adaptive, stiff/DAE
 :func:`pounce.ode.solve_ivp`: the result here is the collocation solution on
@@ -29,8 +32,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..bvp import _core
-from ..bvp._solve import _make_spline, ift_solve_transpose_lanes
+from ..bvp._solve import _make_spline, ift_solve_lanes
 from ..ode._solve import mesh_initial_guess
+from ._ift import make_ift_root
 
 
 @dataclass
@@ -38,8 +42,10 @@ class JaxODESolution:
     """Differentiable IVP solution on the mesh ``t``.
 
     ``t`` ``(m,)`` and ``y`` ``(n, m)`` (SciPy ``solve_ivp`` layout). ``y``
-    carries the custom-VJP back to ``theta`` and ``y0``; differentiate
-    through it with ``jax.grad`` / ``jax.jacobian``. ``yp`` (``dy/dt`` at the
+    is differentiable w.r.t. ``theta``, ``y0`` and ``t`` in both modes:
+    ``jax.jvp`` / ``jax.jacfwd`` (one tangent solve per parameter — the
+    cheap direction for fitting a few parameters to many residuals) as well
+    as ``jax.grad`` / ``jax.jacrev``, and under ``jax.vmap`` (gh#1229). ``yp`` (``dy/dt`` at the
     nodes) and ``sol`` (a cubic-Hermite interpolant) are **non-differentiable**
     diagnostics — both are detached, so only ``y`` should appear in a loss.
     """
@@ -159,12 +165,12 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
             )
         return np.asarray(z_star, dtype=np.float64)
 
-    def _host_btran(z_star_np, p_np, t_np, v_np):
+    def _host_lin(z_star_np, p_np, t_np, v_np, transpose):
         # broadcast_all lanes may carry distinct primals (an outer vmap over
-        # parameters or meshes), not just distinct cotangents; see gh#1049.
-        return ift_solve_transpose_lanes(
+        # parameters or meshes), not just distinct (co)tangents; see gh#1049.
+        return ift_solve_lanes(
             lambda pl: _np_callables(np.asarray(pl, np.float64))[:2],
-            t_np, n, m, 0, z_star_np, p_np, v_np, 1,
+            t_np, n, m, 0, z_star_np, p_np, v_np, 1, transpose=transpose,
         )
 
     N = n * m
@@ -175,26 +181,18 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
             vmap_method="sequential",
         )
 
-    @jax.custom_vjp
-    def solve_fn(p, t_):
-        return _forward(p, t_)
-
-    def fwd(p, t_):
-        z_star = _forward(p, t_)
-        return z_star, (z_star, p, t_)
-
-    def bwd(res, v):
-        z_star, p, t_ = res
-        u = jax.pure_callback(
-            _host_btran, jax.ShapeDtypeStruct((N,), jnp.float64),
-            z_star, p, t_, v, vmap_method="broadcast_all",
+    def _lin_solve(z_star, args, b, transpose):
+        p, t_ = args
+        return jax.pure_callback(
+            lambda zz, pp, tt, bb: _host_lin(zz, pp, tt, bb, transpose),
+            jax.ShapeDtypeStruct((N,), jnp.float64),
+            z_star, p, t_, b, vmap_method="broadcast_all",
         )
-        # The collocation solution at fixed nodes depends on where the
-        # nodes are, so t gets its implicit-function cotangent too.
-        _, vjp_res = jax.vjp(lambda pp, tt: residual_jax(z_star, pp, tt), p, t_)
-        return vjp_res(-u)
 
-    solve_fn.defvjp(fwd, bwd)
+    # A custom_jvp on the implicit-function theorem (gh#1229): jvp / jacfwd
+    # directly, grad / jacrev by transposition. The collocation solution at
+    # fixed nodes depends on where the nodes are, so t is differentiated too.
+    solve_fn = make_ift_root(_forward, residual_jax, _lin_solve)
 
     z_star = solve_fn(combined, tj)
     Y_star = z_star.reshape(n, m)

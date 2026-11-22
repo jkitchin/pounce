@@ -330,6 +330,18 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **Forward-mode autodiff through `pounce.jax.odeint`, `pounce.jax.daeint`
+  and `pounce.jax.solve_bvp` (gh#1229).** All three were `custom_vjp`
+  functions, so `jax.jvp` / `jax.jacfwd` raised *"can't apply forward-mode
+  autodiff (jvp) to a custom_vjp function"*. That left parameter fitting
+  with only `jax.jacrev`, which costs one adjoint solve per residual instead
+  of one tangent solve per parameter. They are now implicit-function
+  `custom_jvp`s (the construction gh#1010 used for `pounce.jax.solve`). The
+  linear solve goes through `lax.custom_linear_solve` against a sparse LU of
+  the collocation Jacobian at the converged solution. Forward mode works
+  directly, reverse mode by transposition, and both work under `vmap` (lanes
+  are grouped by primal, so a `jacfwd` factors once) and `jit`. `jax.hessian`
+  through `odeint` now works too. Reverse-mode values are unchanged.
 - **A JSON report with a non-finite per-iteration value can be read back.**
   `serde_json` writes NaN as `null`, and the `iterations` rows (`d_norm`,
   `alpha_primal`, the residuals, ...) were plain floats, so a report whose
