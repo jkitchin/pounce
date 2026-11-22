@@ -72,6 +72,10 @@ control.
 finite-differenced (`2n` evaluations) when omitted. Supplying them avoids the
 FD cost and improves robustness on stiff problems.
 
+Either block may be a `scipy.sparse` matrix, and `jac` may also be a constant
+`(F_y, F_y')` pair for a linear DAE. If either block is sparse, the stage
+systems are assembled sparse and factored with SuperLU rather than densified.
+
 ## Scope
 
 - **Index-1 only.** The stage matrix `I₃⊗∂F/∂y' + h(A⊗∂F/∂y)` stays nonsingular
@@ -104,7 +108,8 @@ loss = lambda th: daeint(F, y0, t, th)[0, -1] ** 2
 g = jax.grad(loss)(1.3)                  # exact for the discretisation
 ```
 
-The forward solve and the `R_yᵀ` back-solve run on the host (FERAL sparse LU);
-the parameter VJP is taken by framework autodiff of the collocation residual at
-the converged nodes. Gradients are validated against finite differences in the
+The forward solve and the `R_y` / `R_yᵀ` linear solves run on the host (FERAL
+sparse LU); the parameter terms are taken by framework autodiff of the
+collocation residual at the converged nodes. In JAX, `jax.jvp` / `jax.jacfwd`
+work as well as `jax.grad` / `jax.jacrev`. Gradients are validated against finite differences in the
 test suite (`python/tests/test_dae.py`).

@@ -332,6 +332,39 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **`solve_ivp` / `solve_dae` accept a sparse `jac` and `mass`
+  (gh#1228).** SciPy's `solve_ivp(method="Radau")` takes `jac` as a dense
+  or sparse constant, or a callable returning either; pounce raised
+  `TypeError` on a sparse constant and `ValueError` on a callable returning
+  one. All four forms now work, as do a sparse constant or callable `mass`
+  and sparse blocks in `solve_dae`'s `jac` (which also takes a constant
+  `(F_y, F_y')` pair). A sparse Jacobian or mass is not densified: the stage
+  and error systems are assembled sparse and factored with SuperLU, the
+  complex stage operator directly rather than as its `2n` real embedding.
+  On a 1500-point method-of-lines heat equation that is 0.03 s against
+  2.1 s for the same Jacobian passed dense. A constant (non-callable) `jac`
+  no longer receives `args`, matching SciPy.
+- **`res.sol(t)` from `solve_ivp` / `solve_dae` returns `(n,)` for a scalar
+  `t`**, as SciPy's `OdeSolution` does. It returned `(n, 1)`. An array `t`,
+  including a length-1 one, still gives `(n, len(t))`.
+- **`solve_dae` reports a stage-operator factorization failure as a failed
+  solve (`status=-1`) instead of raising.** It now refreshes the Jacobian or
+  shrinks the step and retries, as `solve_ivp` already did. Before the sparse
+  path was added this could not happen, since the dense LU returns NaN rather
+  than raising. SuperLU raises on an exactly singular or non-finite operator,
+  so a sparse Jacobian could otherwise end `solve_dae` with `RuntimeError`.
+- **Forward-mode autodiff through `pounce.jax.odeint`, `pounce.jax.daeint`
+  and `pounce.jax.solve_bvp` (gh#1229).** All three were `custom_vjp`
+  functions, so `jax.jvp` / `jax.jacfwd` raised *"can't apply forward-mode
+  autodiff (jvp) to a custom_vjp function"*. That left parameter fitting
+  with only `jax.jacrev`, which costs one adjoint solve per residual instead
+  of one tangent solve per parameter. They are now implicit-function
+  `custom_jvp`s (the construction gh#1010 used for `pounce.jax.solve`). The
+  linear solve goes through `lax.custom_linear_solve` against a sparse LU of
+  the collocation Jacobian at the converged solution. Forward mode works
+  directly, reverse mode by transposition, and both work under `vmap` (lanes
+  are grouped by primal, so a `jacfwd` factors once) and `jit`. `jax.hessian`
+  through `odeint` now works too. Reverse-mode values are unchanged.
 - **A JSON report with a non-finite per-iteration value can be read back.**
   `serde_json` writes NaN as `null`, and the `iterations` rows (`d_norm`,
   `alpha_primal`, the residuals, ...) were plain floats, so a report whose
