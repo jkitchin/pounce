@@ -666,22 +666,37 @@ impl Tape {
     pub fn build_scaled(s: ScaledExpr<'_>, resolver: &ExternalResolver) -> Self {
         let mut ops = Vec::new();
         let mut cache: HashMap<*const Expr, usize> = HashMap::new();
-        if s.factor == 1.0 {
-            build_recursive(s.expr, &mut ops, &mut cache, resolver);
-        } else if s.factor == -1.0 {
-            let v = build_recursive(s.expr, &mut ops, &mut cache, resolver);
-            ops.push(TapeOp::Neg(slot(v)));
-        } else {
-            ops.push(TapeOp::Const(s.factor));
-            let v = build_recursive(s.expr, &mut ops, &mut cache, resolver);
-            ops.push(TapeOp::Mul(0, slot(v)));
-        }
+        Self::build_scaled_into(s, resolver, &mut ops, &mut cache);
         // A tape is built once and kept for the whole solve, and doubling
         // growth leaves up to half its buffer unused: on a model of many
         // ~150-op summands that was 8 KiB a tape holding 4.8 KiB of ops
         // (gh#1232).
         ops.shrink_to_fit();
         Tape { ops }
+    }
+
+    /// [`Self::build_scaled`] into `ops`, which is cleared first, with
+    /// `cache` as the `Cse` memo (also cleared). For a caller building many
+    /// tapes into one [`TapeSet`]: both buffers are reused, so no tape costs
+    /// an allocation of its own.
+    pub fn build_scaled_into(
+        s: ScaledExpr<'_>,
+        resolver: &ExternalResolver,
+        ops: &mut Vec<TapeOp>,
+        cache: &mut HashMap<*const Expr, usize>,
+    ) {
+        ops.clear();
+        cache.clear();
+        if s.factor == 1.0 {
+            build_recursive(s.expr, ops, cache, resolver);
+        } else if s.factor == -1.0 {
+            let v = build_recursive(s.expr, ops, cache, resolver);
+            ops.push(TapeOp::Neg(slot(v)));
+        } else {
+            ops.push(TapeOp::Const(s.factor));
+            let v = build_recursive(s.expr, ops, cache, resolver);
+            ops.push(TapeOp::Mul(0, slot(v)));
+        }
     }
 
     /// This tape borrowed as a [`TapeRef`], which every evaluator runs on.
@@ -781,6 +796,111 @@ impl Tape {
 #[derive(Debug, Clone, Copy)]
 pub struct TapeRef<'a> {
     pub ops: &'a [TapeOp],
+}
+
+/// Many tapes in one op arena, grouped into rows: the constraint block's flat
+/// per-summand tapes (gh#1235).
+///
+/// One `Vec<TapeOp>` per summand cost a 24-byte header, an allocation of its
+/// own and its allocator overhead, and one `Vec<Tape>` per row the same
+/// again — on rows of small summands as much as the ops themselves. Here a
+/// tape is a range of one shared arena and a row a range of tapes, both
+/// `u32` offsets. Each tape's operand indices stay relative to its own first
+/// op, so a [`TapeRef`] over its range evaluates exactly as the `Tape` it
+/// replaces.
+#[derive(Debug, Clone)]
+pub struct TapeSet {
+    ops: Vec<TapeOp>,
+    /// Tape `t` is `ops[tape_off[t]..tape_off[t + 1]]`.
+    tape_off: Vec<u32>,
+    /// Row `i` is tapes `row_off[i]..row_off[i + 1]`.
+    row_off: Vec<u32>,
+}
+
+impl Default for TapeSet {
+    fn default() -> Self {
+        TapeSet {
+            ops: Vec::new(),
+            tape_off: vec![0],
+            row_off: vec![0],
+        }
+    }
+}
+
+impl TapeSet {
+    /// An empty set with room for `n_ops` ops, so a caller that knows the
+    /// total (`HybridTape::op_counts`) never grows the arena past it.
+    pub fn with_op_capacity(n_ops: usize) -> Self {
+        TapeSet {
+            ops: Vec::with_capacity(n_ops),
+            ..Default::default()
+        }
+    }
+
+    /// Append `ops` as the next tape of the current row.
+    pub fn push_tape(&mut self, ops: &[TapeOp]) {
+        self.ops.extend_from_slice(ops);
+        self.tape_off.push(slot(self.ops.len()));
+    }
+
+    /// Close the current row; the next tape starts a new one.
+    pub fn end_row(&mut self) {
+        self.row_off.push(slot(self.tape_off.len() - 1));
+    }
+
+    /// Release the arena's spare capacity; for the end of a build.
+    pub fn shrink_to_fit(&mut self) {
+        self.ops.shrink_to_fit();
+        self.tape_off.shrink_to_fit();
+        self.row_off.shrink_to_fit();
+    }
+
+    pub fn n_rows(&self) -> usize {
+        self.row_off.len() - 1
+    }
+
+    pub fn n_tapes(&self) -> usize {
+        self.tape_off.len() - 1
+    }
+
+    pub fn n_ops(&self) -> usize {
+        self.ops.len()
+    }
+
+    /// Global index of row `i`'s first tape; its tapes are
+    /// `row_tapes(i)` in this numbering.
+    #[inline]
+    pub fn row_tapes(&self, i: usize) -> std::ops::Range<usize> {
+        self.row_off[i] as usize..self.row_off[i + 1] as usize
+    }
+
+    /// Tape `t`, by global index.
+    #[inline]
+    pub fn get(&self, t: usize) -> TapeRef<'_> {
+        TapeRef {
+            ops: &self.ops[self.tape_off[t] as usize..self.tape_off[t + 1] as usize],
+        }
+    }
+
+    /// The `ti`-th tape of row `i`.
+    #[inline]
+    pub fn tape(&self, i: usize, ti: usize) -> TapeRef<'_> {
+        let t = self.row_off[i] as usize + ti;
+        debug_assert!(t < self.row_off[i + 1] as usize);
+        self.get(t)
+    }
+
+    /// Row `i`'s tapes, in order.
+    #[inline]
+    pub fn row(&self, i: usize) -> impl ExactSizeIterator<Item = TapeRef<'_>> + '_ {
+        self.row_tapes(i).map(move |t| self.get(t))
+    }
+
+    /// Whether row `i` has no tape.
+    #[inline]
+    pub fn row_is_empty(&self, i: usize) -> bool {
+        self.row_off[i] == self.row_off[i + 1]
+    }
 }
 
 impl TapeRef<'_> {

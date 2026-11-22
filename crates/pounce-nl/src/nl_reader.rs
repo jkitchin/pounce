@@ -36,7 +36,7 @@ use crate::nl_quadratic::{
     FactoredQuadratic, Quad2, QuadForm, QuadHessian, is_expanded_quadratic, is_trivially_zero,
     quad_form_readout, recognize_expr, recognize_factored_quadratic,
 };
-use crate::nl_tape::{HybridTape, ScaledExpr, Tape, hybrid_supports};
+use crate::nl_tape::{HybridTape, ScaledExpr, Tape, TapeOp, TapeRef, TapeSet, hybrid_supports};
 use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::constant_derivatives::{DerivativeProof, DerivativeProofs};
 use pounce_nlp::quadratic::{QuadraticStructure, SquareTerm};
@@ -3854,7 +3854,7 @@ pub struct NlTnlp {
     obj_tapes: Vec<Tape>,
     /// Per-constraint, per-summand tapes. Length `m`; row `i` holds
     /// one `Tape` per summand of constraint `i`.
-    con_tapes: Vec<Vec<Tape>>,
+    con_tapes: TapeSet,
     /// Whether `con_tapes` holds the constraint block's flat tapes. `false`
     /// only when `con_hybrid` serves every constraint evaluator (both of its
     /// gates on), in which case every row of `con_tapes` is empty and the
@@ -3889,7 +3889,7 @@ pub struct NlTnlp {
     h_irow: Vec<i32>,
     h_jcol: Vec<i32>,
     /// Per-row sorted variable indices for the constraint Jacobian.
-    jac_cols: Vec<Vec<usize>>,
+    jac_cols: JacCols,
     jac_nnz: usize,
     /// Per-color seed vector: `seeds[c][k] = 1.0` iff variable `k`
     /// is in color `c`, else `0.0`. Each color is a set of
@@ -3907,7 +3907,7 @@ pub struct NlTnlp {
     /// has zero overlap with the color's seed.
     obj_tape_colors: Vec<Vec<u32>>,
     /// Same as `obj_tape_colors` but per constraint × summand.
-    con_tape_colors: Vec<Vec<Vec<u32>>>,
+    con_tape_colors: TapeColors,
     /// The same work, color-major, for the parallel flat Hessian path.
     hess_color_index: HessColorIndex,
     /// Offset of each row's run in the Jacobian `values` array, length
@@ -4731,7 +4731,7 @@ fn build_color_tables(
     tape_mask: &[bool],
     peel_veto: &[bool],
     obj_tapes: &[Tape],
-    con_tapes: &[Vec<Tape>],
+    con_tapes: &TapeSet,
     con_hybrid: Option<&mut ConHybrid>,
 ) -> ColorTables {
     // Hessian column coloring. The chromatic number of the
@@ -4808,7 +4808,7 @@ fn build_color_tables(
     // Per-tape distinct color set: for each tape, the colors
     // its variables fall into. `eval_h` loops over only these
     // (tape, color) pairs instead of n_tapes × n_colors.
-    let tape_colors = |t: &Tape| -> Vec<u32> {
+    let tape_colors = |t: TapeRef<'_>| -> Vec<u32> {
         let mut s: Vec<u32> = t
             .variables()
             .into_iter()
@@ -4819,11 +4819,13 @@ fn build_color_tables(
         s.dedup();
         s
     };
-    let obj_tape_colors: Vec<Vec<u32>> = obj_tapes.iter().map(tape_colors).collect();
-    let con_tape_colors: Vec<Vec<Vec<u32>>> = con_tapes
-        .iter()
-        .map(|row| row.iter().map(tape_colors).collect())
-        .collect();
+    let obj_tape_colors: Vec<Vec<u32>> =
+        obj_tapes.iter().map(|t| tape_colors(t.as_ref())).collect();
+    let mut con_tape_colors = TapeColors::default();
+    for t in 0..con_tapes.n_tapes() {
+        con_tape_colors.push(&tape_colors(con_tapes.get(t)));
+    }
+    con_tape_colors.shrink_to_fit();
 
     // Shared-CSE Hessian tables (issue #557): the per-color summand
     // lists, row lookup, and packed forward-value arena `eval_h`'s
@@ -4917,9 +4919,87 @@ fn build_color_tables(
             .collect(),
         seeds,
         decoding,
-        hess_color_index: HessColorIndex::build(n_colors, &con_tape_colors),
+        hess_color_index: HessColorIndex::build(n_colors, con_tapes, &con_tape_colors),
         obj_tape_colors,
         con_tape_colors,
+    }
+}
+
+/// Each constraint row's Jacobian columns, ascending, CSR-packed (gh#1235):
+/// one `u32` offset a row and a `u32` a column, where a `Vec<usize>` per row
+/// cost a header, an allocation and eight bytes a column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JacCols {
+    off: Vec<u32>,
+    cols: Vec<u32>,
+}
+
+impl Default for JacCols {
+    fn default() -> Self {
+        JacCols {
+            off: vec![0],
+            cols: Vec::new(),
+        }
+    }
+}
+
+impl JacCols {
+    fn push_row(&mut self, cols: &[usize]) {
+        self.cols
+            .extend(cols.iter().map(|&j| crate::nl_tape::slot(j)));
+        self.off.push(crate::nl_tape::slot(self.cols.len()));
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.off.shrink_to_fit();
+        self.cols.shrink_to_fit();
+    }
+
+    /// Row `i`'s columns, ascending.
+    #[inline]
+    fn row(&self, i: usize) -> &[u32] {
+        &self.cols[self.off[i] as usize..self.off[i + 1] as usize]
+    }
+}
+
+/// The distinct Hessian colors each constraint tape's variables fall into,
+/// by the tape's index in its [`TapeSet`], CSR-packed (gh#1235): one `u32`
+/// offset a tape rather than a `Vec` of its own.
+#[derive(Debug, Clone)]
+struct TapeColors {
+    off: Vec<u32>,
+    colors: Vec<u32>,
+}
+
+impl Default for TapeColors {
+    fn default() -> Self {
+        TapeColors {
+            off: vec![0],
+            colors: Vec::new(),
+        }
+    }
+}
+
+impl TapeColors {
+    fn push(&mut self, colors: &[u32]) {
+        self.colors.extend_from_slice(colors);
+        self.off.push(crate::nl_tape::slot(self.colors.len()));
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.off.shrink_to_fit();
+        self.colors.shrink_to_fit();
+    }
+
+    /// Number of tapes.
+    fn len(&self) -> usize {
+        self.off.len() - 1
+    }
+
+    /// The colors of tape `t`, ascending.
+    #[inline]
+    fn of(&self, t: usize) -> &[u32] {
+        &self.colors[self.off[t] as usize..self.off[t + 1] as usize]
     }
 }
 
@@ -4934,7 +5014,7 @@ struct ColorTables {
     seeds: Vec<Vec<f64>>,
     decoding: Vec<Vec<ColorWrite>>,
     obj_tape_colors: Vec<Vec<u32>>,
-    con_tape_colors: Vec<Vec<Vec<u32>>>,
+    con_tape_colors: TapeColors,
     /// `con_tape_colors` inverted to color-major, CSR-packed: the (row, tape)
     /// pairs whose tape touches each color, and the objective tapes likewise.
     ///
@@ -4968,12 +5048,12 @@ pub(crate) struct HessColorIndex {
 }
 
 impl HessColorIndex {
-    fn build(n_colors: usize, con_tape_colors: &[Vec<Vec<u32>>]) -> Self {
+    fn build(n_colors: usize, con_tapes: &TapeSet, con_tape_colors: &TapeColors) -> Self {
         // Rows ascending, then tapes ascending: the tape-major loop's order.
         let mut con: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_colors];
-        for (k, row) in con_tape_colors.iter().enumerate() {
-            for (ti, colors) in row.iter().enumerate() {
-                for &c in colors {
+        for k in 0..con_tapes.n_rows() {
+            for (ti, t) in con_tapes.row_tapes(k).enumerate() {
+                for &c in con_tape_colors.of(t) {
                     con[c as usize].push((k as u32, ti as u32));
                 }
             }
@@ -5293,28 +5373,57 @@ impl NlTnlp {
         // One flat tape per summand, built in row order. Each tape's
         // structural pairs, variables and length are taken as it is built;
         // the tape itself is kept only when `con_flat` says the flat tapes
-        // are read at all.
-        let mut con_tapes: Vec<Vec<Tape>> = Vec::with_capacity(prob.m);
-        let mut con_tape_vars: Vec<Vec<usize>> = Vec::with_capacity(prob.m);
+        // are read at all, and then in one arena with every other
+        // (`TapeSet`, gh#1235). Every tape is built into the same scratch
+        // buffer, so none costs an allocation of its own; when the op count
+        // is known up front the arena is sized to it exactly.
+        let mut con_tapes = match hybrid_counts {
+            Some(c) if con_flat => TapeSet::with_op_capacity(c.flat),
+            _ => TapeSet::default(),
+        };
+        // Per-row Jacobian sparsity = union of tape vars plus linear-segment
+        // vars. The tape vars are taken as each flat tape is built, so this
+        // holds whether or not those tapes are kept; the row is packed as
+        // soon as it is complete rather than held as a `Vec` per row.
+        let mut jac_cols = JacCols::default();
+        let mut jac_nnz = 0;
+        let mut cols: Vec<usize> = Vec::new();
         let mut flat_ops = 0usize;
         let mut n_con_summands = 0usize;
+        let mut scratch_ops: Vec<TapeOp> = Vec::new();
+        let mut scratch_cache: std::collections::HashMap<*const Expr, usize> =
+            std::collections::HashMap::new();
         for k in 0..prob.m {
-            let mut row: Vec<Tape> = Vec::new();
-            let mut vars: Vec<usize> = Vec::new();
+            cols.clear();
             for e in &con_roots[row_start[k]..row_start[k + 1]] {
-                let t = Tape::build_scaled(*e, &resolver);
+                Tape::build_scaled_into(*e, &resolver, &mut scratch_ops, &mut scratch_cache);
+                let t = TapeRef { ops: &scratch_ops };
                 flat_ops += t.ops.len();
                 n_con_summands += 1;
                 max_tape_n = max_tape_n.max(t.ops.len());
                 push_pairs(&mut tape_pairs, &mut pairs_deduped, t.hessian_sparsity());
-                vars.extend(t.variables());
+                cols.extend(t.variables());
                 if con_flat {
-                    row.push(t);
+                    con_tapes.push_tape(t.ops);
                 }
             }
-            con_tapes.push(row);
-            con_tape_vars.push(vars);
+            con_tapes.end_row();
+            // A quadratic row has no tape, so its Jacobian support comes
+            // from the form: `Hx + a` is nonzero exactly on the union of the
+            // Hessian's rows and the folded linear part.
+            if let Some(f) = quad.row_form(k) {
+                cols.extend(quad.gradient_support(f).iter().map(|&v| v as usize));
+            }
+            cols.extend(prob.con_linear[k].iter().map(|(v, _)| *v));
+            cols.sort_unstable();
+            cols.dedup();
+            jac_nnz += cols.len();
+            jac_cols.push_row(&cols);
         }
+        jac_cols.shrink_to_fit();
+        drop(cols);
+        con_tapes.shrink_to_fit();
+        drop((scratch_ops, scratch_cache));
         if let Some(counts) = hybrid_counts {
             debug_assert_eq!(
                 counts.flat, flat_ops,
@@ -5443,28 +5552,6 @@ impl NlTnlp {
             con_hybrid.as_mut(),
         );
 
-        // Per-row Jacobian sparsity = union of tape vars plus
-        // linear-segment vars.
-        // The tape vars were collected as each flat tape was built, so this
-        // holds whether or not those tapes were kept.
-        let mut jac_cols: Vec<Vec<usize>> = Vec::with_capacity(prob.m);
-        let mut jac_nnz = 0;
-        for (i, mut cols) in con_tape_vars.into_iter().enumerate() {
-            cols.reserve(prob.con_linear[i].len());
-            // A quadratic row has no tape, so its Jacobian support comes
-            // from the form: `Hx + a` is nonzero exactly on the union of the
-            // Hessian's rows and the folded linear part.
-            if let Some(f) = quad.row_form(i) {
-                cols.extend(quad.gradient_support(f).iter().map(|&v| v as usize));
-            }
-            cols.extend(prob.con_linear[i].iter().map(|(v, _)| *v));
-            cols.sort_unstable();
-            cols.dedup();
-            cols.shrink_to_fit();
-            jac_nnz += cols.len();
-            jac_cols.push(cols);
-        }
-
         if std::env::var("POUNCE_DBG_TAPE_STATS").is_ok() {
             // Mean number of Hessian colors a single constraint tape touches.
             // It is the cost multiplier of visiting the work color-major
@@ -5472,12 +5559,11 @@ impl NlTnlp {
             // tape's forward values, so a color-major walk forwards each tape
             // this many times instead of once.
             let (mut tape_color_pairs, mut n_live_tapes) = (0usize, 0usize);
-            for row in &con_tape_colors {
-                for cols in row {
-                    if !cols.is_empty() {
-                        tape_color_pairs += cols.len();
-                        n_live_tapes += 1;
-                    }
+            for t in 0..con_tape_colors.len() {
+                let cols = con_tape_colors.of(t);
+                if !cols.is_empty() {
+                    tape_color_pairs += cols.len();
+                    n_live_tapes += 1;
                 }
             }
             let colors_per_tape = tape_color_pairs as f64 / n_live_tapes.max(1) as f64;
@@ -6182,7 +6268,7 @@ impl NlTnlp {
                 if w == 0.0 {
                     continue;
                 }
-                for t in &self.con_tapes[i] {
+                for t in self.con_tapes.row(i) {
                     if t.ops.is_empty() {
                         continue;
                     }
@@ -6485,9 +6571,9 @@ impl NlTnlp {
         if self.jac_row_off.len() != m + 1 {
             self.jac_row_off = Vec::with_capacity(m + 1);
             let mut acc = 0u32;
-            for cols in &self.jac_cols {
+            for i in 0..m {
                 self.jac_row_off.push(acc);
-                acc += cols.len() as u32;
+                acc += self.jac_cols.row(i).len() as u32;
             }
             self.jac_row_off.push(acc);
         }
@@ -6537,10 +6623,10 @@ impl NlTnlp {
                 } = sc;
                 let mut k = 0usize;
                 for i in lo..hi {
-                    for &j in &jac_cols[i] {
-                        row_grad[j] = 0.0;
+                    for &j in jac_cols.row(i) {
+                        row_grad[j as usize] = 0.0;
                     }
-                    for t in &con_tapes[i] {
+                    for t in con_tapes.row(i) {
                         t.gradient_seed_into(xs, 1.0, row_grad, vals, adj);
                     }
                     if let Some(f) = quad.row_form(i) {
@@ -6549,8 +6635,8 @@ impl NlTnlp {
                     for &(v, c) in &prob.con_linear[i] {
                         row_grad[v] += c;
                     }
-                    for &j in &jac_cols[i] {
-                        out[k] = row_grad[j];
+                    for &j in jac_cols.row(i) {
+                        out[k] = row_grad[j as usize];
                         k += 1;
                     }
                 }
@@ -6601,7 +6687,7 @@ impl NlTnlp {
                     if w == 0.0 {
                         continue;
                     }
-                    let t = &con_tapes[k as usize][ti as usize];
+                    let t = con_tapes.tape(k as usize, ti as usize);
                     if t.ops.is_empty() {
                         continue;
                     }
@@ -6904,7 +6990,7 @@ impl TNLP for NlTnlp {
                 || vec![0.0; max_tape_n],
                 |vals, (i, gi)| {
                     let mut nl: Number = 0.0;
-                    for t in &con_tapes[i] {
+                    for t in con_tapes.row(i) {
                         nl += t.eval_into(x, vals);
                     }
                     if let Some(f) = quad.row_form(i) {
@@ -6919,7 +7005,7 @@ impl TNLP for NlTnlp {
         let (con_tapes, vals) = (&self.con_tapes, &mut self.vals_scratch);
         for i in 0..m {
             let mut nl: Number = 0.0;
-            for t in &con_tapes[i] {
+            for t in con_tapes.row(i) {
                 nl += t.eval_into(x, vals);
             }
             // A quadratic row's summand range is empty above, so this is its
@@ -6944,7 +7030,7 @@ impl TNLP for NlTnlp {
             SparsityRequest::Structure { irow, jcol } => {
                 let mut k = 0;
                 for i in 0..self.prob.m {
-                    for &j in &self.jac_cols[i] {
+                    for &j in self.jac_cols.row(i) {
                         irow[k] = i as Index;
                         jcol[k] = j as Index;
                         k += 1;
@@ -7000,8 +7086,8 @@ impl TNLP for NlTnlp {
                     } = h;
                     tape.forward_prelude(xs, prelude_vals);
                     for i in 0..prob.m {
-                        for &j in &jac_cols[i] {
-                            scratch_row_grad[j] = 0.0;
+                        for &j in jac_cols.row(i) {
+                            scratch_row_grad[j as usize] = 0.0;
                         }
                         for s in &tape.summands[row_start[i]..row_start[i + 1]] {
                             tape.forward_summand(s, xs, prelude_vals, local_vals);
@@ -7021,8 +7107,8 @@ impl TNLP for NlTnlp {
                         for &(v, c) in &prob.con_linear[i] {
                             scratch_row_grad[v] += c;
                         }
-                        for &j in &jac_cols[i] {
-                            values[k] = scratch_row_grad[j];
+                        for &j in jac_cols.row(i) {
+                            values[k] = scratch_row_grad[j as usize];
                             k += 1;
                         }
                     }
@@ -7030,10 +7116,10 @@ impl TNLP for NlTnlp {
                 }
                 debug_assert!(*con_flat, "flat Jacobian arm without flat tapes");
                 for i in 0..prob.m {
-                    for &j in &jac_cols[i] {
-                        scratch_row_grad[j] = 0.0;
+                    for &j in jac_cols.row(i) {
+                        scratch_row_grad[j as usize] = 0.0;
                     }
-                    for t in &con_tapes[i] {
+                    for t in con_tapes.row(i) {
                         // Allocation-free reverse-AD per summand tape (M18):
                         // reuse the shared forward/adjoint scratch arenas.
                         t.gradient_seed_into(xs, 1.0, scratch_row_grad, vals_scratch, adj_scratch);
@@ -7049,8 +7135,8 @@ impl TNLP for NlTnlp {
                     for &(v, c) in &prob.con_linear[i] {
                         scratch_row_grad[v] += c;
                     }
-                    for &j in &jac_cols[i] {
-                        values[k] = scratch_row_grad[j];
+                    for &j in jac_cols.row(i) {
+                        values[k] = scratch_row_grad[j as usize];
                         k += 1;
                     }
                 }
@@ -7250,12 +7336,13 @@ impl TNLP for NlTnlp {
                             if w == 0.0 {
                                 continue;
                             }
-                            for (ti, t) in self.con_tapes[k].iter().enumerate() {
+                            for gt in self.con_tapes.row_tapes(k) {
+                                let t = self.con_tapes.get(gt);
                                 if t.ops.is_empty() {
                                     continue;
                                 }
                                 t.forward_into(x, &mut self.vals_scratch);
-                                for &c in &self.con_tape_colors[k][ti] {
+                                for &c in self.con_tape_colors.of(gt) {
                                     t.hessian_directional(
                                         &self.vals_scratch,
                                         &self.seeds[c as usize],
@@ -10438,12 +10525,13 @@ G0 3
             !hybrid.con_flat,
             "flat tapes kept although the hybrid serves everything"
         );
-        assert!(hybrid.con_tapes.iter().all(|r| r.is_empty()));
+        assert_eq!(hybrid.con_tapes.n_tapes(), 0);
+        assert_eq!(hybrid.con_tapes.n_rows(), m);
 
         let mut flat = NlTnlp::flat_reference(p);
         flat.get_nlp_info().unwrap();
         assert!(flat.con_flat && flat.con_hybrid.is_none());
-        assert!(flat.con_tapes.iter().any(|r| !r.is_empty()));
+        assert!((0..m).all(|i| !flat.con_tapes.row_is_empty(i)));
 
         // Same structure either way: it is collected from each flat tape as
         // it is built, whether or not the tape is then kept.
@@ -10570,11 +10658,7 @@ G0 3
 
     /// The ops of every flat constraint tape `t` holds.
     fn flat_con_ops(t: &NlTnlp) -> usize {
-        t.con_tapes
-            .iter()
-            .flatten()
-            .map(|tape| tape.ops.len())
-            .sum()
+        t.con_tapes.n_ops()
     }
 
     /// Below both derivative gates a hybrid tape would serve `eval_g` alone
@@ -10598,7 +10682,7 @@ G0 3
             t.con_hybrid.is_none(),
             "an eval_g-only hybrid tape was kept"
         );
-        assert!(t.con_flat && t.con_tapes.iter().all(|r| !r.is_empty()));
+        assert!(t.con_flat && (0..t.prob.m).all(|i| !t.con_tapes.row_is_empty(i)));
         // The flat tapes the decision was predicted for are the ones built.
         assert_eq!(h.tape.flat_op_count(), flat_con_ops(&t));
 
@@ -10619,7 +10703,7 @@ G0 3
             h.use_for_hess && !h.use_for_jac,
             "fixture must sit between the gates"
         );
-        assert!(t.con_flat && t.con_tapes.iter().all(|r| !r.is_empty()));
+        assert!(t.con_flat && (0..t.prob.m).all(|i| !t.con_tapes.row_is_empty(i)));
         assert_eq!(h.tape.flat_op_count(), flat_con_ops(&t));
 
         let mut flat = NlTnlp::flat_reference(p);
