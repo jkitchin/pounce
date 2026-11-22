@@ -6554,9 +6554,41 @@ impl RowElim {
                 _ => rcol[t.row] = MANY,
             }
         }
+        // A column boxed from both sides with (next to) no width — `x_j ≤ u`
+        // and `x_j ≥ l` with `u − l` at or below `NARROW_BOX` of the bounds'
+        // scale: a fixed column the caller left in, or one boxed tighter than
+        // any solve's tolerance — keeps its rows in the matrix. Both slacks
+        // are driven to zero together (`s_u + s_l = u − l ≈ 0` at
+        // feasibility), so the two folded terms `z/s` blow up in lockstep and
+        // each `dz` is then recovered as a quotient of two vanishing numbers.
+        // Measured on `lp_crossover_bridge_rescue`'s seed 311 (one fixed
+        // column): folding it left the HSDE's final dual residual at 4.5e-8,
+        // against 8.4e-11 with the rows in the matrix — where the LDLᵀ pivots
+        // on them directly — and 3.1e-11 with every *other* bound folded. A
+        // crossed box (`u < l`, infeasible) is kept for the same reason.
+        const NARROW_BOX: f64 = 1e-8;
+        let mut upper = vec![f64::INFINITY; prob.n];
+        let mut lower = vec![f64::NEG_INFINITY; prob.n];
+        for i in 0..m_ineq {
+            if in_orthant[i] && rcol[i] < MANY && rcoef[i] != 0.0 {
+                let bound = prob.h[i] / rcoef[i];
+                if rcoef[i] > 0.0 {
+                    upper[rcol[i]] = upper[rcol[i]].min(bound);
+                } else {
+                    lower[rcol[i]] = lower[rcol[i]].max(bound);
+                }
+            }
+        }
         let mut e = RowElim::default();
         for i in 0..m_ineq {
-            if in_orthant[i] && rcol[i] < MANY {
+            let narrow = |j: usize| {
+                let (u, l) = (upper[j], lower[j]);
+                // Both sides finite: with one side infinite the scale is
+                // infinite too, and `∞ ≤ ∞` would call every one-sided
+                // bound narrow.
+                u.is_finite() && l.is_finite() && u - l <= NARROW_BOX * (1.0 + u.abs().max(l.abs()))
+            };
+            if in_orthant[i] && rcol[i] < MANY && !narrow(rcol[i]) {
                 e.zrow.push(i);
                 e.col.push(rcol[i]);
                 e.coef.push(rcoef[i]);
@@ -9324,7 +9356,9 @@ mod kkt_row_elim_tests {
     //! entry), a lone bound, a user singleton row with a non-unit
     //! coefficient, a singleton written as two duplicate triplets, a row with
     //! two columns (kept), a single-column row inside a second-order cone
-    //! (kept: not orthant), and a PSD `P`.
+    //! (kept: not orthant), a fixed column and one boxed narrower than
+    //! `NARROW_BOX` (both kept: their two slacks vanish together), a wide box
+    //! written with a non-unit coefficient (eliminated), and a PSD `P`.
     use super::{KktStructure, triplet_matvec};
     use crate::cones::{CompositeCone, ConeSpec};
     use crate::qp::{QpProblem, Triplet};
@@ -9341,7 +9375,7 @@ mod kkt_row_elim_tests {
 
     /// `(problem, cone, rows the rule must eliminate)`.
     fn fixture() -> (QpProblem, CompositeCone, Vec<usize>) {
-        let n = 7;
+        let n = 10;
         let t = Triplet::new;
         // Orthant block A: rows 0..6.
         //   0: x0 + x1 ≤ ·        (two columns: kept)
@@ -9370,32 +9404,44 @@ mod kkt_row_elim_tests {
             t(8, 2, 0.3),
             t(9, 6, -1.0),
             t(10, 0, 1.0),
+            // Orthant block C: rows 11..17 — three boxed columns.
+            //   11, 12: x7 ∈ [0.5, 0.5]           (fixed: kept)
+            //   13, 14: x8 ∈ [1, 1 + 1e-12]       (narrower than NARROW_BOX: kept)
+            //   15, 16: x9 ∈ [−1, 2], as 2·x9 ≤ 4 (wide, scaled row: eliminated)
+            t(11, 7, 1.0),
+            t(12, 7, -1.0),
+            t(13, 8, 1.0),
+            t(14, 8, -1.0),
+            t(15, 9, 2.0),
+            t(16, 9, -1.0),
         ];
+        let mut h = vec![1.0; 17];
+        h[11..17].copy_from_slice(&[0.5, -0.5, 1.0 + 1e-12, -1.0, 4.0, 1.0]);
         let prob = QpProblem {
             n,
             p_lower: vec![t(0, 0, 2.0), t(1, 0, 0.5), t(1, 1, 1.0), t(4, 4, 3.0)],
-            c: vec![1.0, -1.0, 0.5, 0.0, 2.0, -0.5, 1.5],
+            c: vec![1.0, -1.0, 0.5, 0.0, 2.0, -0.5, 1.5, 0.3, -0.2, 0.7],
             a: vec![t(0, 0, 1.0), t(0, 3, 1.0), t(1, 5, 1.0), t(1, 6, -2.0)],
             b: vec![1.0, 0.5],
             g,
-            h: vec![1.0; 11],
+            h,
             lb: Vec::new(),
             ub: Vec::new(),
         };
         let cone = CompositeCone::from_specs(&[
             ConeSpec::Nonneg(6),
             ConeSpec::SecondOrder(3),
-            ConeSpec::Nonneg(2),
+            ConeSpec::Nonneg(8),
         ]);
-        (prob, cone, vec![1, 2, 4, 5, 9, 10])
+        (prob, cone, vec![1, 2, 4, 5, 9, 10, 15, 16])
     }
 
     /// A strictly interior `(s, z)`: positive on the orthant rows, inside the
     /// Lorentz cone on the SOC rows.
     fn interior(seed: u64) -> (Vec<f64>, Vec<f64>) {
         let mut st = seed;
-        let mut s: Vec<f64> = (0..11).map(|_| 0.05 + 3.0 * lcg(&mut st)).collect();
-        let mut z: Vec<f64> = (0..11).map(|_| 0.05 + 3.0 * lcg(&mut st)).collect();
+        let mut s: Vec<f64> = (0..17).map(|_| 0.05 + 3.0 * lcg(&mut st)).collect();
+        let mut z: Vec<f64> = (0..17).map(|_| 0.05 + 3.0 * lcg(&mut st)).collect();
         s[6..9].copy_from_slice(&[2.0, 0.3, -0.4]);
         z[6..9].copy_from_slice(&[1.5, -0.2, 0.5]);
         (s, z)
@@ -9434,12 +9480,12 @@ mod kkt_row_elim_tests {
         let (prob, cone, want) = fixture();
         let red = KktStructure::build(&prob, &cone, 1e-8, true);
         assert_eq!(red.elim.zrow, want);
-        assert_eq!(red.elim.col, vec![2, 3, 1, 1, 6, 0]);
+        assert_eq!(red.elim.col, vec![2, 3, 1, 1, 6, 0, 9, 9]);
         // Duplicate triplets summed in input order, from 0.0, as the
         // in-matrix entry would have been.
         assert_eq!(
             red.elim.coef,
-            vec![2.5, 0.0 + 0.75 + 0.25, 1.0, -1.0, -1.0, 1.0]
+            vec![2.5, 0.0 + 0.75 + 0.25, 1.0, -1.0, -1.0, 1.0, 2.0, -1.0]
         );
         let full = KktStructure::build(&prob, &cone, 1e-8, false);
         assert_eq!(full.n_eliminated(), 0);

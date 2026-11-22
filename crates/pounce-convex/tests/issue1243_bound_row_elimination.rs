@@ -154,6 +154,19 @@ fn assert_agree(what: &str, prob: &QpProblem, on: &QpSolution, off: &QpSolution)
         assert!(dx <= 1e-5, "{what}: ‖Δx‖∞ = {dx:e}");
         let kkt = on.kkt_residuals_above_floor(prob).kkt_error();
         assert!(kkt <= 1e-6, "{what}: eliminated solve's KKT error {kkt:e}");
+        // Not merely within tolerance: no worse than the full system's, by
+        // more than an order of magnitude, on the absolute residuals. This is
+        // the check that caught a fixed column's two bound rows being folded
+        // (4.5e-8 against 8.4e-11 on `lp_crossover_bridge_rescue`'s seed
+        // 311), which agreed on verdict, objective and point.
+        let (e_on, e_off) = (
+            on.kkt_residuals(prob).kkt_error(),
+            off.kkt_residuals(prob).kkt_error(),
+        );
+        assert!(
+            e_on <= 10.0 * e_off + 1e-10,
+            "{what}: absolute KKT error {e_on:e} with elimination, {e_off:e} without"
+        );
         // Bound multipliers are split back out of the same rows either way.
         assert!(
             max_abs_diff(&on.z_lb, &off.z_lb) <= 1e-4,
