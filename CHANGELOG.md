@@ -330,6 +330,31 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
+- **`build_nl_problem` memory follows the `NlExpr` DAG, not the expanded
+  tree (gh#1232).** A subexpression several constraint rows reference was
+  copied into every row, so a model of 50 shared subexpressions used by
+  20 000 rows built as large as one with 20 000 private copies: 605 MiB on
+  the issue's reproducer. It is now one shared body, and that model builds
+  in 50 MiB. Three changes do this. Rows are assembled together, so sharing
+  between them survives — when it pays: sharing is kept only where the
+  shared-body tape will replace the per-row tapes, since below that it is
+  built next to them and its bookkeeping outweighs the copies it saves. A
+  model whose shared bodies are small (`exp(p_j)` reused by thousands of
+  rows) is assembled row by row, as before. When the shared-body constraint tape serves the
+  constraint values, the Jacobian and the Hessian, the per-summand flat tapes
+  (one copy of each shared body per row) are no longer kept;
+  `hessian_vector_product` goes through the shared tape too. Each summand's
+  list of the shared slots it reaches is shared between summands that reach
+  the same bodies. Objective, gradient, constraint and Jacobian values, and
+  both sparsity patterns, are bit-identical to building each row separately.
+  The Hessian and Hessian-vector products of such a model now come from the
+  shared tape, which sums the multiplier-weighted contributions before
+  propagating them through the body, so they agree with the per-row build to
+  rounding (about 1e-15 relative), not bit for bit. Rows whose per-row tree
+  the quadratic recognizer admits keep that tree, so no row changes between
+  the quadratic fast path and the AD tape. `.nl` models whose defined
+  variables are shared across rows also stop keeping the flat tapes once the
+  shared tape serves all three evaluators.
 - **`solve_ivp` / `solve_dae` accept a sparse `jac` and `mass`
   (gh#1228).** SciPy's `solve_ivp(method="Radau")` takes `jac` as a dense
   or sparse constant, or a callable returning either; pounce raised
