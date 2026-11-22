@@ -659,8 +659,8 @@ impl HessianProgram {
                         // At a Var slot: if k >= j and hess_map has
                         // an entry for (k, j), emit a HessEmit op.
                         // No adj/adj_dot propagation (no operands).
-                        if k >= j {
-                            if let Some(&ptr) = hess_map.get(&(k, j)) {
+                        if k as usize >= j {
+                            if let Some(&ptr) = hess_map.get(&(k as usize, j)) {
                                 ops.push(HOp::HessEmit {
                                     hess_ptr: ptr as u32,
                                     adj_dot_slot: wd,
@@ -1316,8 +1316,8 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Pow(a, b)
             | TapeOp::Atan2(a, b)
             | TapeOp::CEntropy(a, b) => {
-                r[a] = true;
-                r[b] = true;
+                r[a as usize] = true;
+                r[b as usize] = true;
             }
             TapeOp::Neg(a)
             | TapeOp::Abs(a)
@@ -1339,7 +1339,7 @@ fn reachable_to_output(tape: &Tape) -> Vec<bool> {
             | TapeOp::Erf(a)
             | TapeOp::XLogX(a)
             | TapeOp::Atanh(a) => {
-                r[a] = true;
+                r[a as usize] = true;
             }
             TapeOp::Funcall(_) => unreachable!(
                 "HessianProgram path does not support AMPL external functions; \
@@ -1370,14 +1370,14 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
     for (i, op) in tape.ops.iter().enumerate() {
         d[i] = match *op {
             TapeOp::Const(_) => false,
-            TapeOp::Var(k) => k == j,
+            TapeOp::Var(k) => k as usize == j,
             TapeOp::Add(a, b)
             | TapeOp::Sub(a, b)
             | TapeOp::Mul(a, b)
             | TapeOp::Div(a, b)
             | TapeOp::Pow(a, b)
             | TapeOp::CEntropy(a, b)
-            | TapeOp::Atan2(a, b) => d[a] || d[b],
+            | TapeOp::Atan2(a, b) => d[a as usize] || d[b as usize],
             TapeOp::Neg(a)
             | TapeOp::Abs(a)
             | TapeOp::Sqrt(a)
@@ -1397,7 +1397,7 @@ fn depends_on_var(tape: &Tape, j: usize) -> Vec<bool> {
             | TapeOp::Asinh(a)
             | TapeOp::XLogX(a)
             | TapeOp::Erf(a)
-            | TapeOp::Atanh(a) => d[a],
+            | TapeOp::Atanh(a) => d[a as usize],
             TapeOp::Funcall(_) => unreachable!(
                 "HessianProgram path does not support AMPL external functions; \
                  use the Tape (build_with_externals) path instead."

@@ -34,30 +34,30 @@ use super::nl_reader::{BinOp, CmpOp, Expr, FuncallArg, UnaryOp};
 #[derive(Debug, Clone)]
 pub enum TapeOp {
     Const(f64),
-    Var(usize),
-    Add(usize, usize),
-    Sub(usize, usize),
-    Mul(usize, usize),
-    Div(usize, usize),
-    Pow(usize, usize),
-    Neg(usize),
-    Abs(usize),
-    Sqrt(usize),
-    Exp(usize),
-    Log(usize),
-    Log10(usize),
-    Sin(usize),
-    Cos(usize),
-    Tan(usize),
-    Atan(usize),
-    Acos(usize),
-    Sinh(usize),
-    Cosh(usize),
-    Tanh(usize),
-    Asin(usize),
-    Acosh(usize),
-    Asinh(usize),
-    Atanh(usize),
+    Var(u32),
+    Add(u32, u32),
+    Sub(u32, u32),
+    Mul(u32, u32),
+    Div(u32, u32),
+    Pow(u32, u32),
+    Neg(u32),
+    Abs(u32),
+    Sqrt(u32),
+    Exp(u32),
+    Log(u32),
+    Log10(u32),
+    Sin(u32),
+    Cos(u32),
+    Tan(u32),
+    Atan(u32),
+    Acos(u32),
+    Sinh(u32),
+    Cosh(u32),
+    Tanh(u32),
+    Asin(u32),
+    Acosh(u32),
+    Asinh(u32),
+    Atanh(u32),
     /// Gauss error function `erf(vals[a])` (issue #469). Unlike the other
     /// transcendentals here it has no AMPL `.nl` opcode — AMPL has no `erf`
     /// — so it is reachable only through the in-memory `Expr` path
@@ -65,7 +65,7 @@ pub enum TapeOp {
     /// modeling frontends that build a tape directly instead of round-
     /// tripping through `.nl`. Smooth everywhere, with closed-form
     /// derivatives `erf'(u) = 2/√π·exp(-u²)` and `erf''(u) = -2u·erf'(u)`.
-    Erf(usize),
+    Erf(u32),
     /// `a·ln(a)` with the `a = 0` limit `0` (GAMS `entropy` up to sign).
     ///
     /// Like [`TapeOp::Erf`] it has no AMPL `.nl` opcode and is reachable only
@@ -77,7 +77,7 @@ pub enum TapeOp {
     /// composed Hessian is `inf`/`nan` while the answer it is computing,
     /// `1e299`, is an ordinary number. No amount of care in the `Mul`/`Log`
     /// rules reaches it; only an op that never forms `1/a²` does.
-    XLogX(usize),
+    XLogX(u32),
     /// `a·ln(a/b)` with the `a = 0` limit `0` — GAMS `centropy`. Operands
     /// `(a, b)`; `b > 0` is the caller's responsibility, as for `Log`.
     ///
@@ -86,34 +86,34 @@ pub enum TapeOp {
     /// denominator, which overflows for `|b| > 1.3e154` even when `a/b²` is
     /// itself in range. The fused rule computes `q = a/b` once and expresses
     /// every second-order term as a division by `b`, never by `b²`.
-    CEntropy(usize, usize),
+    CEntropy(u32, u32),
     /// Two-argument arctangent `atan2(vals[a], vals[b])` (operands are
     /// `(y, x)`, matching AMPL's `atan2(y, x)` / `.nl` opcode o48).
-    Atan2(usize, usize),
+    Atan2(u32, u32),
     /// Pairwise minimum `min(vals[a], vals[b])`. Piecewise linear: the
     /// value/tangent/adjoint route through whichever operand is smaller
     /// (ties pick the first), and the second derivative is identically
     /// zero. n-ary AMPL `min` (opcode o11) folds to a chain of these.
-    Min(usize, usize),
+    Min(u32, u32),
     /// Pairwise maximum `max(vals[a], vals[b])` — the `Min` mirror;
     /// n-ary AMPL `max` (opcode o12) folds to a chain of these.
-    Max(usize, usize),
+    Max(u32, u32),
     /// Relational comparison `vals[a] OP vals[b]` → `1.0`/`0.0`.
     /// Piecewise constant, so its derivative is identically zero — the
     /// AD passes treat it as a constant w.r.t. its operands.
-    Cmp(CmpOp, usize, usize),
+    Cmp(CmpOp, u32, u32),
     /// Logical AND: `1.0` iff both operands are nonzero. Zero derivative.
-    And(usize, usize),
+    And(u32, u32),
     /// Logical OR: `1.0` iff either operand is nonzero. Zero derivative.
-    Or(usize, usize),
+    Or(u32, u32),
     /// Logical NOT: `1.0` iff the operand is zero. Zero derivative.
-    Not(usize),
+    Not(u32),
     /// `if-then-else`: operands `(cond, then, else)`. The value is
     /// `vals[then]` when `vals[cond] != 0` else `vals[else]`, and the
     /// value/tangent/adjoint all route through the active branch only.
     /// The condition contributes no derivative (the branch switch is a
     /// non-smooth event the AD ignores).
-    Select(usize, usize, usize),
+    Select(u32, u32, u32),
     /// AMPL imported (external) function call. The payload (library
     /// handle, name, and argument list) is boxed so this rare variant
     /// does not inflate `size_of::<TapeOp>()`: without the box the
@@ -128,6 +128,27 @@ pub enum TapeOp {
 /// the `Arc`; `name` is the registered function name; `args` carries
 /// positional arguments where real-valued args reference earlier tape
 /// slots and string args are inline literals.
+// The point of `u32` operands (see [`slot`]): checked at compile time so a
+// variant added later cannot silently put every tape back at 32 bytes an op.
+// `SummandOp` packs its tag into `TapeOp`'s spare discriminants.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<TapeOp>() == 16);
+    assert!(std::mem::size_of::<SummandOp>() == 16);
+};
+
+/// `i` as a [`TapeOp`] operand or variable index.
+///
+/// Operands are `u32`, which makes a `TapeOp` 16 bytes instead of 32: every
+/// tape POUNCE keeps is a `Vec<TapeOp>`, so that halves the bulk of a built
+/// problem (gh#1235). A tape, or a hybrid prelude, would need four billion
+/// ops to overflow it, and so would a variable index; both are refused here
+/// rather than wrapped.
+#[inline]
+pub(crate) fn slot(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or_else(|_| panic!("tape slot or variable index {i} exceeds u32"))
+}
+
 #[derive(Debug, Clone)]
 pub struct FuncallData {
     pub lib: Arc<ExternalLibrary>,
@@ -649,11 +670,11 @@ impl Tape {
             build_recursive(s.expr, &mut ops, &mut cache, resolver);
         } else if s.factor == -1.0 {
             let v = build_recursive(s.expr, &mut ops, &mut cache, resolver);
-            ops.push(TapeOp::Neg(v));
+            ops.push(TapeOp::Neg(slot(v)));
         } else {
             ops.push(TapeOp::Const(s.factor));
             let v = build_recursive(s.expr, &mut ops, &mut cache, resolver);
-            ops.push(TapeOp::Mul(0, v));
+            ops.push(TapeOp::Mul(0, slot(v)));
         }
         // A tape is built once and kept for the whole solve, and doubling
         // growth leaves up to half its buffer unused: on a model of many
@@ -663,52 +684,156 @@ impl Tape {
         Tape { ops }
     }
 
+    /// This tape borrowed as a [`TapeRef`], which every evaluator runs on.
+    #[inline]
+    pub fn as_ref(&self) -> TapeRef<'_> {
+        TapeRef { ops: &self.ops }
+    }
+
+    /// [`TapeRef::forward`] on this tape.
+    #[inline]
+    pub fn forward(&self, x: &[f64]) -> Vec<f64> {
+        self.as_ref().forward(x)
+    }
+
+    /// [`TapeRef::eval`] on this tape.
+    #[inline]
+    pub fn eval(&self, x: &[f64]) -> f64 {
+        self.as_ref().eval(x)
+    }
+
+    /// [`TapeRef::gradient_seed`] on this tape.
+    #[inline]
+    pub fn gradient_seed(&self, x: &[f64], seed: f64, grad: &mut [f64]) {
+        self.as_ref().gradient_seed(x, seed, grad)
+    }
+
+    /// [`TapeRef::gradient_seed_into`] on this tape.
+    #[inline]
+    pub fn gradient_seed_into(
+        &self,
+        x: &[f64],
+        seed: f64,
+        grad: &mut [f64],
+        vals: &mut [f64],
+        adj: &mut [f64],
+    ) {
+        self.as_ref().gradient_seed_into(x, seed, grad, vals, adj)
+    }
+
+    /// [`TapeRef::variables`] on this tape.
+    #[inline]
+    pub fn variables(&self) -> Vec<usize> {
+        self.as_ref().variables()
+    }
+
+    /// [`TapeRef::forward_into`] on this tape.
+    #[inline]
+    pub fn forward_into(&self, x: &[f64], vals: &mut [f64]) {
+        self.as_ref().forward_into(x, vals)
+    }
+
+    /// [`TapeRef::eval_into`] on this tape.
+    #[inline]
+    pub fn eval_into(&self, x: &[f64], vals: &mut [f64]) -> f64 {
+        self.as_ref().eval_into(x, vals)
+    }
+
+    /// [`TapeRef::hessian_directional`] on this tape.
+    #[inline]
+    pub fn hessian_directional(
+        &self,
+        vals: &[f64],
+        seed: &[f64],
+        weight: f64,
+        out: &mut [f64],
+        dot: &mut [f64],
+        adj: &mut [f64],
+        adj_dot: &mut [f64],
+    ) {
+        self.as_ref()
+            .hessian_directional(vals, seed, weight, out, dot, adj, adj_dot)
+    }
+
+    /// [`TapeRef::hessian_accumulate`] on this tape.
+    #[inline]
+    pub fn hessian_accumulate(
+        &self,
+        x: &[f64],
+        weight: f64,
+        hess_map: &HashMap<(usize, usize), usize>,
+        values: &mut [f64],
+    ) {
+        self.as_ref()
+            .hessian_accumulate(x, weight, hess_map, values)
+    }
+
+    /// [`TapeRef::hessian_sparsity`] on this tape.
+    #[inline]
+    pub fn hessian_sparsity(&self) -> BTreeSet<(usize, usize)> {
+        self.as_ref().hessian_sparsity()
+    }
+}
+
+/// A tape's ops, borrowed: what the evaluators run on, whether the ops sit in
+/// a [`Tape`] of their own or in a [`TapeSet`] arena shared with many others
+/// (gh#1235).
+#[derive(Debug, Clone, Copy)]
+pub struct TapeRef<'a> {
+    pub ops: &'a [TapeOp],
+}
+
+impl TapeRef<'_> {
     /// Forward sweep: returns `vals[i] = value of tape slot i`. The
     /// scalar tape result is `vals[ops.len() - 1]`.
     pub fn forward(&self, x: &[f64]) -> Vec<f64> {
         let mut vals: Vec<f64> = Vec::with_capacity(self.ops.len());
-        for op in &self.ops {
+        for op in self.ops {
             let v = match op {
                 TapeOp::Const(c) => *c,
-                TapeOp::Var(i) => x[*i],
-                TapeOp::Add(a, b) => vals[*a] + vals[*b],
-                TapeOp::Sub(a, b) => vals[*a] - vals[*b],
-                TapeOp::Mul(a, b) => vals[*a] * vals[*b],
-                TapeOp::Div(a, b) => vals[*a] / vals[*b],
-                TapeOp::Pow(a, b) => vals[*a].powf(vals[*b]),
-                TapeOp::Neg(a) => -vals[*a],
-                TapeOp::Abs(a) => vals[*a].abs(),
-                TapeOp::Sqrt(a) => vals[*a].sqrt(),
-                TapeOp::Exp(a) => vals[*a].exp(),
-                TapeOp::Log(a) => vals[*a].ln(),
-                TapeOp::Log10(a) => vals[*a].log10(),
-                TapeOp::Sin(a) => vals[*a].sin(),
-                TapeOp::Cos(a) => vals[*a].cos(),
-                TapeOp::Tan(a) => vals[*a].tan(),
-                TapeOp::Atan(a) => vals[*a].atan(),
-                TapeOp::Acos(a) => vals[*a].acos(),
-                TapeOp::Sinh(a) => vals[*a].sinh(),
-                TapeOp::Cosh(a) => vals[*a].cosh(),
-                TapeOp::Tanh(a) => vals[*a].tanh(),
-                TapeOp::Asin(a) => vals[*a].asin(),
-                TapeOp::Acosh(a) => vals[*a].acosh(),
-                TapeOp::Asinh(a) => vals[*a].asinh(),
-                TapeOp::Atanh(a) => atanh(vals[*a]),
-                TapeOp::Erf(a) => erf(vals[*a]),
-                TapeOp::XLogX(a) => xlogx(vals[*a]),
-                TapeOp::CEntropy(a, b) => centropy(vals[*a], vals[*b]),
-                TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
-                TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
-                TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
-                TapeOp::Cmp(op, a, b) => f64::from(cmp_holds(*op, vals[*a], vals[*b])),
-                TapeOp::And(a, b) => f64::from(vals[*a] != 0.0 && vals[*b] != 0.0),
-                TapeOp::Or(a, b) => f64::from(vals[*a] != 0.0 || vals[*b] != 0.0),
-                TapeOp::Not(a) => f64::from(vals[*a] == 0.0),
+                TapeOp::Var(i) => x[*i as usize],
+                TapeOp::Add(a, b) => vals[*a as usize] + vals[*b as usize],
+                TapeOp::Sub(a, b) => vals[*a as usize] - vals[*b as usize],
+                TapeOp::Mul(a, b) => vals[*a as usize] * vals[*b as usize],
+                TapeOp::Div(a, b) => vals[*a as usize] / vals[*b as usize],
+                TapeOp::Pow(a, b) => vals[*a as usize].powf(vals[*b as usize]),
+                TapeOp::Neg(a) => -vals[*a as usize],
+                TapeOp::Abs(a) => vals[*a as usize].abs(),
+                TapeOp::Sqrt(a) => vals[*a as usize].sqrt(),
+                TapeOp::Exp(a) => vals[*a as usize].exp(),
+                TapeOp::Log(a) => vals[*a as usize].ln(),
+                TapeOp::Log10(a) => vals[*a as usize].log10(),
+                TapeOp::Sin(a) => vals[*a as usize].sin(),
+                TapeOp::Cos(a) => vals[*a as usize].cos(),
+                TapeOp::Tan(a) => vals[*a as usize].tan(),
+                TapeOp::Atan(a) => vals[*a as usize].atan(),
+                TapeOp::Acos(a) => vals[*a as usize].acos(),
+                TapeOp::Sinh(a) => vals[*a as usize].sinh(),
+                TapeOp::Cosh(a) => vals[*a as usize].cosh(),
+                TapeOp::Tanh(a) => vals[*a as usize].tanh(),
+                TapeOp::Asin(a) => vals[*a as usize].asin(),
+                TapeOp::Acosh(a) => vals[*a as usize].acosh(),
+                TapeOp::Asinh(a) => vals[*a as usize].asinh(),
+                TapeOp::Atanh(a) => atanh(vals[*a as usize]),
+                TapeOp::Erf(a) => erf(vals[*a as usize]),
+                TapeOp::XLogX(a) => xlogx(vals[*a as usize]),
+                TapeOp::CEntropy(a, b) => centropy(vals[*a as usize], vals[*b as usize]),
+                TapeOp::Atan2(a, b) => vals[*a as usize].atan2(vals[*b as usize]),
+                TapeOp::Min(a, b) => vals[*a as usize].min(vals[*b as usize]),
+                TapeOp::Max(a, b) => vals[*a as usize].max(vals[*b as usize]),
+                TapeOp::Cmp(op, a, b) => {
+                    f64::from(cmp_holds(*op, vals[*a as usize], vals[*b as usize]))
+                }
+                TapeOp::And(a, b) => {
+                    f64::from(vals[*a as usize] != 0.0 && vals[*b as usize] != 0.0)
+                }
+                TapeOp::Or(a, b) => f64::from(vals[*a as usize] != 0.0 || vals[*b as usize] != 0.0),
+                TapeOp::Not(a) => f64::from(vals[*a as usize] == 0.0),
                 TapeOp::Select(c, t, e) => {
-                    if vals[*c] != 0.0 {
-                        vals[*t]
+                    if vals[*c as usize] != 0.0 {
+                        vals[*t as usize]
                     } else {
-                        vals[*e]
+                        vals[*e as usize]
                     }
                 }
                 TapeOp::Funcall(fc) => {
@@ -791,132 +916,132 @@ impl Tape {
             match &self.ops[i] {
                 TapeOp::Const(_) => {}
                 TapeOp::Var(j) => {
-                    grad[*j] += a;
+                    grad[*j as usize] += a;
                 }
                 TapeOp::Add(l, r) => {
-                    adj[*l] += a;
-                    adj[*r] += a;
+                    adj[*l as usize] += a;
+                    adj[*r as usize] += a;
                 }
                 TapeOp::Sub(l, r) => {
-                    adj[*l] += a;
-                    adj[*r] -= a;
+                    adj[*l as usize] += a;
+                    adj[*r as usize] -= a;
                 }
                 TapeOp::Mul(l, r) => {
-                    adj[*l] += a * vals[*r];
-                    adj[*r] += a * vals[*l];
+                    adj[*l as usize] += a * vals[*r as usize];
+                    adj[*r as usize] += a * vals[*l as usize];
                 }
                 TapeOp::Div(l, r) => {
                     // ∂(l/r)/∂r = -q/r, NOT -l/r²: r*r overflows for |r| > 1.3e154
                     // and underflows for |r| < 1.5e-154, zeroing an adjoint that is
                     // itself representable. `vals[i]` is q = l/r, already computed.
-                    let rv = vals[*r];
-                    adj[*l] += a / rv;
-                    adj[*r] -= a * vals[i] / rv;
+                    let rv = vals[*r as usize];
+                    adj[*l as usize] += a / rv;
+                    adj[*r as usize] -= a * vals[i] / rv;
                 }
                 TapeOp::Pow(l, r) => {
-                    let lv = vals[*l];
-                    let rv = vals[*r];
+                    let lv = vals[*l as usize];
+                    let rv = vals[*r as usize];
                     if rv != 0.0 {
-                        adj[*l] += a * rv * lv.powf(rv - 1.0);
+                        adj[*l as usize] += a * rv * lv.powf(rv - 1.0);
                     }
                     if lv > 0.0 {
-                        adj[*r] += a * vals[i] * lv.ln();
+                        adj[*r as usize] += a * vals[i] * lv.ln();
                     }
                 }
                 TapeOp::Neg(j) => {
-                    adj[*j] -= a;
+                    adj[*j as usize] -= a;
                 }
                 TapeOp::Abs(j) => {
-                    if vals[*j] >= 0.0 {
-                        adj[*j] += a;
+                    if vals[*j as usize] >= 0.0 {
+                        adj[*j as usize] += a;
                     } else {
-                        adj[*j] -= a;
+                        adj[*j as usize] -= a;
                     }
                 }
                 TapeOp::Sqrt(j) => {
                     let sv = vals[i];
                     if sv > 0.0 {
-                        adj[*j] += a * 0.5 / sv;
+                        adj[*j as usize] += a * 0.5 / sv;
                     }
                 }
                 TapeOp::Exp(j) => {
-                    adj[*j] += a * vals[i];
+                    adj[*j as usize] += a * vals[i];
                 }
                 TapeOp::Log(j) => {
-                    adj[*j] += a / vals[*j];
+                    adj[*j as usize] += a / vals[*j as usize];
                 }
                 TapeOp::Log10(j) => {
-                    adj[*j] += div_u_ln10(a, vals[*j]);
+                    adj[*j as usize] += div_u_ln10(a, vals[*j as usize]);
                 }
                 TapeOp::Sin(j) => {
-                    adj[*j] += a * vals[*j].cos();
+                    adj[*j as usize] += a * vals[*j as usize].cos();
                 }
                 TapeOp::Cos(j) => {
-                    adj[*j] -= a * vals[*j].sin();
+                    adj[*j as usize] -= a * vals[*j as usize].sin();
                 }
                 TapeOp::Tan(j) => {
                     let t = vals[i];
-                    adj[*j] += a * (1.0 + t * t);
+                    adj[*j as usize] += a * (1.0 + t * t);
                 }
                 TapeOp::Atan(j) => {
-                    adj[*j] += a * atan_d1(vals[*j]);
+                    adj[*j as usize] += a * atan_d1(vals[*j as usize]);
                 }
                 TapeOp::Acos(j) => {
-                    adj[*j] += a * acos_d1(vals[*j]);
+                    adj[*j as usize] += a * acos_d1(vals[*j as usize]);
                 }
                 TapeOp::Sinh(j) => {
-                    adj[*j] += a * vals[*j].cosh();
+                    adj[*j as usize] += a * vals[*j as usize].cosh();
                 }
                 TapeOp::Cosh(j) => {
-                    adj[*j] += a * vals[*j].sinh();
+                    adj[*j as usize] += a * vals[*j as usize].sinh();
                 }
                 TapeOp::Tanh(j) => {
-                    adj[*j] += a * tanh_d1(vals[*j]);
+                    adj[*j as usize] += a * tanh_d1(vals[*j as usize]);
                 }
                 TapeOp::Asin(j) => {
-                    adj[*j] += a * asin_d1(vals[*j]);
+                    adj[*j as usize] += a * asin_d1(vals[*j as usize]);
                 }
                 TapeOp::Acosh(j) => {
-                    adj[*j] += a * acosh_d1(vals[*j]);
+                    adj[*j as usize] += a * acosh_d1(vals[*j as usize]);
                 }
                 TapeOp::Asinh(j) => {
-                    adj[*j] += a * asinh_d1(vals[*j]);
+                    adj[*j as usize] += a * asinh_d1(vals[*j as usize]);
                 }
                 TapeOp::Atanh(j) => {
-                    adj[*j] += a * atanh_d1(vals[*j]);
+                    adj[*j as usize] += a * atanh_d1(vals[*j as usize]);
                 }
                 TapeOp::Erf(j) => {
-                    adj[*j] += a * erf_d1(vals[*j]);
+                    adj[*j as usize] += a * erf_d1(vals[*j as usize]);
                 }
                 TapeOp::XLogX(j) => {
-                    adj[*j] += a * xlogx_d1(vals[*j]);
+                    adj[*j as usize] += a * xlogx_d1(vals[*j as usize]);
                 }
                 TapeOp::CEntropy(l, r) => {
-                    adj[*l] += a * centropy_da(vals[*l], vals[*r]);
-                    adj[*r] += a * centropy_db(vals[*l], vals[*r]);
+                    adj[*l as usize] += a * centropy_da(vals[*l as usize], vals[*r as usize]);
+                    adj[*r as usize] += a * centropy_db(vals[*l as usize], vals[*r as usize]);
                 }
                 TapeOp::Atan2(l, r) => {
-                    let y = vals[*l];
-                    let x = vals[*r];
+                    let y = vals[*l as usize];
+                    let x = vals[*r as usize];
                     let (fa, fb) = atan2_d1(y, x);
-                    adj[*l] += a * fa;
-                    adj[*r] += a * fb;
+                    adj[*l as usize] += a * fa;
+                    adj[*r as usize] += a * fb;
                 }
                 // min/max are piecewise linear: the adjoint flows to the
                 // selected operand only (ties pick the first, a valid
                 // subgradient choice).
                 TapeOp::Min(l, r) => {
-                    if vals[*l] <= vals[*r] {
-                        adj[*l] += a;
+                    if vals[*l as usize] <= vals[*r as usize] {
+                        adj[*l as usize] += a;
                     } else {
-                        adj[*r] += a;
+                        adj[*r as usize] += a;
                     }
                 }
                 TapeOp::Max(l, r) => {
-                    if vals[*l] >= vals[*r] {
-                        adj[*l] += a;
+                    if vals[*l as usize] >= vals[*r as usize] {
+                        adj[*l as usize] += a;
                     } else {
-                        adj[*r] += a;
+                        adj[*r as usize] += a;
                     }
                 }
                 // Comparisons and logical connectives are piecewise
@@ -925,10 +1050,10 @@ impl Tape {
                 // if-then-else: the adjoint flows entirely into the
                 // active branch; the condition gets none.
                 TapeOp::Select(c, t, e) => {
-                    if vals[*c] != 0.0 {
-                        adj[*t] += a;
+                    if vals[*c as usize] != 0.0 {
+                        adj[*t as usize] += a;
                     } else {
-                        adj[*e] += a;
+                        adj[*e as usize] += a;
                     }
                 }
                 TapeOp::Funcall(fc) => {
@@ -951,9 +1076,9 @@ impl Tape {
     /// Sorted distinct problem-variable indices that the tape depends on.
     pub fn variables(&self) -> Vec<usize> {
         let mut s: BTreeSet<usize> = BTreeSet::new();
-        for op in &self.ops {
+        for op in self.ops {
             if let TapeOp::Var(j) = op {
-                s.insert(*j);
+                s.insert(*j as usize);
             }
         }
         s.into_iter().collect()
@@ -970,15 +1095,17 @@ impl Tape {
             dot[i] = match &self.ops[i] {
                 TapeOp::Const(_) => 0.0,
                 TapeOp::Var(k) => {
-                    if *k == seed_var {
+                    if *k as usize == seed_var {
                         1.0
                     } else {
                         0.0
                     }
                 }
-                TapeOp::Add(a, b) => dot[*a] + dot[*b],
-                TapeOp::Sub(a, b) => dot[*a] - dot[*b],
-                TapeOp::Mul(a, b) => dot[*a] * vals[*b] + vals[*a] * dot[*b],
+                TapeOp::Add(a, b) => dot[*a as usize] + dot[*b as usize],
+                TapeOp::Sub(a, b) => dot[*a as usize] - dot[*b as usize],
+                TapeOp::Mul(a, b) => {
+                    dot[*a as usize] * vals[*b as usize] + vals[*a as usize] * dot[*b as usize]
+                }
                 TapeOp::Div(a, b) => {
                     // (ȧ - q·ḃ)/b, NOT (ȧ·b - a·ḃ)/b². Squaring the denominator
                     // overflows for |b| > 1.3e154 and underflows for |b| < 1.5e-154,
@@ -987,13 +1114,13 @@ impl Tape {
                     // b*b is inf so the squared form returns -0.0. Dividing by b
                     // twice instead of by b² once is the standard Kahan form, and
                     // costs nothing -- q is this node's own value, already computed.
-                    (dot[*a] - vals[i] * dot[*b]) / vals[*b]
+                    (dot[*a as usize] - vals[i] * dot[*b as usize]) / vals[*b as usize]
                 }
                 TapeOp::Pow(a, b) => {
-                    let u = vals[*a];
-                    let r = vals[*b];
-                    let du = dot[*a];
-                    let dr = dot[*b];
+                    let u = vals[*a as usize];
+                    let r = vals[*b as usize];
+                    let du = dot[*a as usize];
+                    let dr = dot[*b as usize];
                     let mut result = 0.0;
                     // Match the reverse-mode gradient's guard (`rv != 0.0` only): at base
                     // u == 0 the slope is still well defined for r >= 1 (and a
@@ -1007,69 +1134,73 @@ impl Tape {
                     }
                     result
                 }
-                TapeOp::Neg(a) => -dot[*a],
+                TapeOp::Neg(a) => -dot[*a as usize],
                 TapeOp::Abs(a) => {
-                    if vals[*a] >= 0.0 {
-                        dot[*a]
+                    if vals[*a as usize] >= 0.0 {
+                        dot[*a as usize]
                     } else {
-                        -dot[*a]
+                        -dot[*a as usize]
                     }
                 }
                 TapeOp::Sqrt(a) => {
                     let sv = vals[i];
-                    if sv > 0.0 { dot[*a] * 0.5 / sv } else { 0.0 }
+                    if sv > 0.0 {
+                        dot[*a as usize] * 0.5 / sv
+                    } else {
+                        0.0
+                    }
                 }
-                TapeOp::Exp(a) => dot[*a] * vals[i],
-                TapeOp::Log(a) => dot[*a] / vals[*a],
-                TapeOp::Log10(a) => div_u_ln10(dot[*a], vals[*a]),
-                TapeOp::Sin(a) => dot[*a] * vals[*a].cos(),
-                TapeOp::Cos(a) => -dot[*a] * vals[*a].sin(),
+                TapeOp::Exp(a) => dot[*a as usize] * vals[i],
+                TapeOp::Log(a) => dot[*a as usize] / vals[*a as usize],
+                TapeOp::Log10(a) => div_u_ln10(dot[*a as usize], vals[*a as usize]),
+                TapeOp::Sin(a) => dot[*a as usize] * vals[*a as usize].cos(),
+                TapeOp::Cos(a) => -dot[*a as usize] * vals[*a as usize].sin(),
                 TapeOp::Tan(a) => {
                     let t = vals[i];
-                    dot[*a] * (1.0 + t * t)
+                    dot[*a as usize] * (1.0 + t * t)
                 }
-                TapeOp::Atan(a) => dot[*a] * atan_d1(vals[*a]),
-                TapeOp::Acos(a) => dot[*a] * acos_d1(vals[*a]),
-                TapeOp::Sinh(a) => dot[*a] * vals[*a].cosh(),
-                TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
-                TapeOp::Tanh(a) => dot[*a] * tanh_d1(vals[*a]),
-                TapeOp::Asin(a) => dot[*a] * asin_d1(vals[*a]),
-                TapeOp::Acosh(a) => dot[*a] * acosh_d1(vals[*a]),
-                TapeOp::Asinh(a) => dot[*a] * asinh_d1(vals[*a]),
-                TapeOp::Atanh(a) => dot[*a] * atanh_d1(vals[*a]),
-                TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
-                TapeOp::XLogX(a) => xlogx_d1(vals[*a]) * dot[*a],
+                TapeOp::Atan(a) => dot[*a as usize] * atan_d1(vals[*a as usize]),
+                TapeOp::Acos(a) => dot[*a as usize] * acos_d1(vals[*a as usize]),
+                TapeOp::Sinh(a) => dot[*a as usize] * vals[*a as usize].cosh(),
+                TapeOp::Cosh(a) => dot[*a as usize] * vals[*a as usize].sinh(),
+                TapeOp::Tanh(a) => dot[*a as usize] * tanh_d1(vals[*a as usize]),
+                TapeOp::Asin(a) => dot[*a as usize] * asin_d1(vals[*a as usize]),
+                TapeOp::Acosh(a) => dot[*a as usize] * acosh_d1(vals[*a as usize]),
+                TapeOp::Asinh(a) => dot[*a as usize] * asinh_d1(vals[*a as usize]),
+                TapeOp::Atanh(a) => dot[*a as usize] * atanh_d1(vals[*a as usize]),
+                TapeOp::Erf(a) => erf_d1(vals[*a as usize]) * dot[*a as usize],
+                TapeOp::XLogX(a) => xlogx_d1(vals[*a as usize]) * dot[*a as usize],
                 TapeOp::CEntropy(a, b) => {
-                    centropy_da(vals[*a], vals[*b]) * dot[*a]
-                        + centropy_db(vals[*a], vals[*b]) * dot[*b]
+                    centropy_da(vals[*a as usize], vals[*b as usize]) * dot[*a as usize]
+                        + centropy_db(vals[*a as usize], vals[*b as usize]) * dot[*b as usize]
                 }
                 TapeOp::Atan2(a, b) => {
-                    let y = vals[*a];
-                    let x = vals[*b];
+                    let y = vals[*a as usize];
+                    let x = vals[*b as usize];
                     let (fa, fb) = atan2_d1(y, x);
-                    fa * dot[*a] + fb * dot[*b]
+                    fa * dot[*a as usize] + fb * dot[*b as usize]
                 }
                 // min/max: the tangent follows the selected operand.
                 TapeOp::Min(a, b) => {
-                    if vals[*a] <= vals[*b] {
-                        dot[*a]
+                    if vals[*a as usize] <= vals[*b as usize] {
+                        dot[*a as usize]
                     } else {
-                        dot[*b]
+                        dot[*b as usize]
                     }
                 }
                 TapeOp::Max(a, b) => {
-                    if vals[*a] >= vals[*b] {
-                        dot[*a]
+                    if vals[*a as usize] >= vals[*b as usize] {
+                        dot[*a as usize]
                     } else {
-                        dot[*b]
+                        dot[*b as usize]
                     }
                 }
                 TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => 0.0,
                 TapeOp::Select(c, t, e) => {
-                    if vals[*c] != 0.0 {
-                        dot[*t]
+                    if vals[*c as usize] != 0.0 {
+                        dot[*t as usize]
                     } else {
-                        dot[*e]
+                        dot[*e as usize]
                     }
                 }
                 TapeOp::Funcall(fc) => {
@@ -1100,45 +1231,49 @@ impl Tape {
         for i in 0..n {
             vals[i] = match &self.ops[i] {
                 TapeOp::Const(c) => *c,
-                TapeOp::Var(j) => x[*j],
-                TapeOp::Add(a, b) => vals[*a] + vals[*b],
-                TapeOp::Sub(a, b) => vals[*a] - vals[*b],
-                TapeOp::Mul(a, b) => vals[*a] * vals[*b],
-                TapeOp::Div(a, b) => vals[*a] / vals[*b],
-                TapeOp::Pow(a, b) => vals[*a].powf(vals[*b]),
-                TapeOp::Neg(a) => -vals[*a],
-                TapeOp::Abs(a) => vals[*a].abs(),
-                TapeOp::Sqrt(a) => vals[*a].sqrt(),
-                TapeOp::Exp(a) => vals[*a].exp(),
-                TapeOp::Log(a) => vals[*a].ln(),
-                TapeOp::Log10(a) => vals[*a].log10(),
-                TapeOp::Sin(a) => vals[*a].sin(),
-                TapeOp::Cos(a) => vals[*a].cos(),
-                TapeOp::Tan(a) => vals[*a].tan(),
-                TapeOp::Atan(a) => vals[*a].atan(),
-                TapeOp::Acos(a) => vals[*a].acos(),
-                TapeOp::Sinh(a) => vals[*a].sinh(),
-                TapeOp::Cosh(a) => vals[*a].cosh(),
-                TapeOp::Tanh(a) => vals[*a].tanh(),
-                TapeOp::Asin(a) => vals[*a].asin(),
-                TapeOp::Acosh(a) => vals[*a].acosh(),
-                TapeOp::Asinh(a) => vals[*a].asinh(),
-                TapeOp::Atanh(a) => atanh(vals[*a]),
-                TapeOp::Erf(a) => erf(vals[*a]),
-                TapeOp::XLogX(a) => xlogx(vals[*a]),
-                TapeOp::CEntropy(a, b) => centropy(vals[*a], vals[*b]),
-                TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
-                TapeOp::Min(a, b) => vals[*a].min(vals[*b]),
-                TapeOp::Max(a, b) => vals[*a].max(vals[*b]),
-                TapeOp::Cmp(op, a, b) => f64::from(cmp_holds(*op, vals[*a], vals[*b])),
-                TapeOp::And(a, b) => f64::from(vals[*a] != 0.0 && vals[*b] != 0.0),
-                TapeOp::Or(a, b) => f64::from(vals[*a] != 0.0 || vals[*b] != 0.0),
-                TapeOp::Not(a) => f64::from(vals[*a] == 0.0),
+                TapeOp::Var(j) => x[*j as usize],
+                TapeOp::Add(a, b) => vals[*a as usize] + vals[*b as usize],
+                TapeOp::Sub(a, b) => vals[*a as usize] - vals[*b as usize],
+                TapeOp::Mul(a, b) => vals[*a as usize] * vals[*b as usize],
+                TapeOp::Div(a, b) => vals[*a as usize] / vals[*b as usize],
+                TapeOp::Pow(a, b) => vals[*a as usize].powf(vals[*b as usize]),
+                TapeOp::Neg(a) => -vals[*a as usize],
+                TapeOp::Abs(a) => vals[*a as usize].abs(),
+                TapeOp::Sqrt(a) => vals[*a as usize].sqrt(),
+                TapeOp::Exp(a) => vals[*a as usize].exp(),
+                TapeOp::Log(a) => vals[*a as usize].ln(),
+                TapeOp::Log10(a) => vals[*a as usize].log10(),
+                TapeOp::Sin(a) => vals[*a as usize].sin(),
+                TapeOp::Cos(a) => vals[*a as usize].cos(),
+                TapeOp::Tan(a) => vals[*a as usize].tan(),
+                TapeOp::Atan(a) => vals[*a as usize].atan(),
+                TapeOp::Acos(a) => vals[*a as usize].acos(),
+                TapeOp::Sinh(a) => vals[*a as usize].sinh(),
+                TapeOp::Cosh(a) => vals[*a as usize].cosh(),
+                TapeOp::Tanh(a) => vals[*a as usize].tanh(),
+                TapeOp::Asin(a) => vals[*a as usize].asin(),
+                TapeOp::Acosh(a) => vals[*a as usize].acosh(),
+                TapeOp::Asinh(a) => vals[*a as usize].asinh(),
+                TapeOp::Atanh(a) => atanh(vals[*a as usize]),
+                TapeOp::Erf(a) => erf(vals[*a as usize]),
+                TapeOp::XLogX(a) => xlogx(vals[*a as usize]),
+                TapeOp::CEntropy(a, b) => centropy(vals[*a as usize], vals[*b as usize]),
+                TapeOp::Atan2(a, b) => vals[*a as usize].atan2(vals[*b as usize]),
+                TapeOp::Min(a, b) => vals[*a as usize].min(vals[*b as usize]),
+                TapeOp::Max(a, b) => vals[*a as usize].max(vals[*b as usize]),
+                TapeOp::Cmp(op, a, b) => {
+                    f64::from(cmp_holds(*op, vals[*a as usize], vals[*b as usize]))
+                }
+                TapeOp::And(a, b) => {
+                    f64::from(vals[*a as usize] != 0.0 && vals[*b as usize] != 0.0)
+                }
+                TapeOp::Or(a, b) => f64::from(vals[*a as usize] != 0.0 || vals[*b as usize] != 0.0),
+                TapeOp::Not(a) => f64::from(vals[*a as usize] == 0.0),
                 TapeOp::Select(c, t, e) => {
-                    if vals[*c] != 0.0 {
-                        vals[*t]
+                    if vals[*c as usize] != 0.0 {
+                        vals[*t as usize]
                     } else {
-                        vals[*e]
+                        vals[*e as usize]
                     }
                 }
                 TapeOp::Funcall(fc) => {
@@ -1211,10 +1346,12 @@ impl Tape {
         for i in 0..n {
             dot[i] = match &self.ops[i] {
                 TapeOp::Const(_) => 0.0,
-                TapeOp::Var(k) => seed[*k],
-                TapeOp::Add(a, b) => dot[*a] + dot[*b],
-                TapeOp::Sub(a, b) => dot[*a] - dot[*b],
-                TapeOp::Mul(a, b) => dot[*a] * vals[*b] + vals[*a] * dot[*b],
+                TapeOp::Var(k) => seed[*k as usize],
+                TapeOp::Add(a, b) => dot[*a as usize] + dot[*b as usize],
+                TapeOp::Sub(a, b) => dot[*a as usize] - dot[*b as usize],
+                TapeOp::Mul(a, b) => {
+                    dot[*a as usize] * vals[*b as usize] + vals[*a as usize] * dot[*b as usize]
+                }
                 TapeOp::Div(a, b) => {
                     // (ȧ - q·ḃ)/b, NOT (ȧ·b - a·ḃ)/b². Squaring the denominator
                     // overflows for |b| > 1.3e154 and underflows for |b| < 1.5e-154,
@@ -1223,13 +1360,13 @@ impl Tape {
                     // b*b is inf so the squared form returns -0.0. Dividing by b
                     // twice instead of by b² once is the standard Kahan form, and
                     // costs nothing -- q is this node's own value, already computed.
-                    (dot[*a] - vals[i] * dot[*b]) / vals[*b]
+                    (dot[*a as usize] - vals[i] * dot[*b as usize]) / vals[*b as usize]
                 }
                 TapeOp::Pow(a, b) => {
-                    let u = vals[*a];
-                    let r = vals[*b];
-                    let du = dot[*a];
-                    let dr = dot[*b];
+                    let u = vals[*a as usize];
+                    let r = vals[*b as usize];
+                    let du = dot[*a as usize];
+                    let dr = dot[*b as usize];
                     let mut result = 0.0;
                     // Match the reverse-mode gradient's guard (`rv != 0.0` only): at base
                     // u == 0 the slope is still well defined for r >= 1 (and a
@@ -1243,69 +1380,73 @@ impl Tape {
                     }
                     result
                 }
-                TapeOp::Neg(a) => -dot[*a],
+                TapeOp::Neg(a) => -dot[*a as usize],
                 TapeOp::Abs(a) => {
-                    if vals[*a] >= 0.0 {
-                        dot[*a]
+                    if vals[*a as usize] >= 0.0 {
+                        dot[*a as usize]
                     } else {
-                        -dot[*a]
+                        -dot[*a as usize]
                     }
                 }
                 TapeOp::Sqrt(a) => {
                     let sv = vals[i];
-                    if sv > 0.0 { dot[*a] * 0.5 / sv } else { 0.0 }
+                    if sv > 0.0 {
+                        dot[*a as usize] * 0.5 / sv
+                    } else {
+                        0.0
+                    }
                 }
-                TapeOp::Exp(a) => vals[i] * dot[*a],
-                TapeOp::Log(a) => dot[*a] / vals[*a],
-                TapeOp::Log10(a) => div_u_ln10(dot[*a], vals[*a]),
-                TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
-                TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
+                TapeOp::Exp(a) => vals[i] * dot[*a as usize],
+                TapeOp::Log(a) => dot[*a as usize] / vals[*a as usize],
+                TapeOp::Log10(a) => div_u_ln10(dot[*a as usize], vals[*a as usize]),
+                TapeOp::Sin(a) => vals[*a as usize].cos() * dot[*a as usize],
+                TapeOp::Cos(a) => -vals[*a as usize].sin() * dot[*a as usize],
                 TapeOp::Tan(a) => {
                     let t = vals[i];
-                    (1.0 + t * t) * dot[*a]
+                    (1.0 + t * t) * dot[*a as usize]
                 }
-                TapeOp::Atan(a) => dot[*a] * atan_d1(vals[*a]),
-                TapeOp::Acos(a) => dot[*a] * acos_d1(vals[*a]),
-                TapeOp::Sinh(a) => dot[*a] * vals[*a].cosh(),
-                TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
-                TapeOp::Tanh(a) => dot[*a] * tanh_d1(vals[*a]),
-                TapeOp::Asin(a) => dot[*a] * asin_d1(vals[*a]),
-                TapeOp::Acosh(a) => dot[*a] * acosh_d1(vals[*a]),
-                TapeOp::Asinh(a) => dot[*a] * asinh_d1(vals[*a]),
-                TapeOp::Atanh(a) => dot[*a] * atanh_d1(vals[*a]),
-                TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
-                TapeOp::XLogX(a) => xlogx_d1(vals[*a]) * dot[*a],
+                TapeOp::Atan(a) => dot[*a as usize] * atan_d1(vals[*a as usize]),
+                TapeOp::Acos(a) => dot[*a as usize] * acos_d1(vals[*a as usize]),
+                TapeOp::Sinh(a) => dot[*a as usize] * vals[*a as usize].cosh(),
+                TapeOp::Cosh(a) => dot[*a as usize] * vals[*a as usize].sinh(),
+                TapeOp::Tanh(a) => dot[*a as usize] * tanh_d1(vals[*a as usize]),
+                TapeOp::Asin(a) => dot[*a as usize] * asin_d1(vals[*a as usize]),
+                TapeOp::Acosh(a) => dot[*a as usize] * acosh_d1(vals[*a as usize]),
+                TapeOp::Asinh(a) => dot[*a as usize] * asinh_d1(vals[*a as usize]),
+                TapeOp::Atanh(a) => dot[*a as usize] * atanh_d1(vals[*a as usize]),
+                TapeOp::Erf(a) => erf_d1(vals[*a as usize]) * dot[*a as usize],
+                TapeOp::XLogX(a) => xlogx_d1(vals[*a as usize]) * dot[*a as usize],
                 TapeOp::CEntropy(a, b) => {
-                    centropy_da(vals[*a], vals[*b]) * dot[*a]
-                        + centropy_db(vals[*a], vals[*b]) * dot[*b]
+                    centropy_da(vals[*a as usize], vals[*b as usize]) * dot[*a as usize]
+                        + centropy_db(vals[*a as usize], vals[*b as usize]) * dot[*b as usize]
                 }
                 TapeOp::Atan2(a, b) => {
-                    let y = vals[*a];
-                    let x = vals[*b];
+                    let y = vals[*a as usize];
+                    let x = vals[*b as usize];
                     let (fa, fb) = atan2_d1(y, x);
-                    fa * dot[*a] + fb * dot[*b]
+                    fa * dot[*a as usize] + fb * dot[*b as usize]
                 }
                 // min/max: the tangent follows the selected operand.
                 TapeOp::Min(a, b) => {
-                    if vals[*a] <= vals[*b] {
-                        dot[*a]
+                    if vals[*a as usize] <= vals[*b as usize] {
+                        dot[*a as usize]
                     } else {
-                        dot[*b]
+                        dot[*b as usize]
                     }
                 }
                 TapeOp::Max(a, b) => {
-                    if vals[*a] >= vals[*b] {
-                        dot[*a]
+                    if vals[*a as usize] >= vals[*b as usize] {
+                        dot[*a as usize]
                     } else {
-                        dot[*b]
+                        dot[*b as usize]
                     }
                 }
                 TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => 0.0,
                 TapeOp::Select(c, t, e) => {
-                    if vals[*c] != 0.0 {
-                        dot[*t]
+                    if vals[*c as usize] != 0.0 {
+                        dot[*t as usize]
                     } else {
-                        dot[*e]
+                        dot[*e as usize]
                     }
                 }
                 TapeOp::Funcall(fc) => {
@@ -1347,26 +1488,26 @@ impl Tape {
                 TapeOp::Const(_) => {}
                 TapeOp::Var(k) => {
                     if wd != 0.0 {
-                        out[*k] += weight * wd;
+                        out[*k as usize] += weight * wd;
                     }
                 }
                 TapeOp::Add(a, b) => {
-                    adj[*a] += w;
-                    adj[*b] += w;
-                    adj_dot[*a] += wd;
-                    adj_dot[*b] += wd;
+                    adj[*a as usize] += w;
+                    adj[*b as usize] += w;
+                    adj_dot[*a as usize] += wd;
+                    adj_dot[*b as usize] += wd;
                 }
                 TapeOp::Sub(a, b) => {
-                    adj[*a] += w;
-                    adj[*b] -= w;
-                    adj_dot[*a] += wd;
-                    adj_dot[*b] -= wd;
+                    adj[*a as usize] += w;
+                    adj[*b as usize] -= w;
+                    adj_dot[*a as usize] += wd;
+                    adj_dot[*b as usize] -= wd;
                 }
                 TapeOp::Mul(a, b) => {
-                    adj[*a] += w * vals[*b];
-                    adj[*b] += w * vals[*a];
-                    adj_dot[*a] += wd * vals[*b] + w * dot[*b];
-                    adj_dot[*b] += wd * vals[*a] + w * dot[*a];
+                    adj[*a as usize] += w * vals[*b as usize];
+                    adj[*b as usize] += w * vals[*a as usize];
+                    adj_dot[*a as usize] += wd * vals[*b as usize] + w * dot[*b as usize];
+                    adj_dot[*b as usize] += wd * vals[*a as usize] + w * dot[*a as usize];
                 }
                 TapeOp::Div(a, b) => {
                     // Kahan form, second order. `vb2`/`vb3` overflow for
@@ -1375,225 +1516,238 @@ impl Tape {
                     // Every 1/b² here is regrouped as (·/b)/b, and the
                     // 2a·ḃ/b³ term folds into q̇ = dot[i], already computed:
                     //   -ȧ/b² + 2q·ḃ/b² == (-q̇ + q·(ḃ/b)) / b.
-                    let vb = vals[*b];
+                    let vb = vals[*b as usize];
                     let q = vals[i];
                     let qd = dot[i];
-                    adj[*a] += w / vb;
-                    adj_dot[*a] += wd / vb - w * (dot[*b] / vb) / vb;
-                    adj[*b] -= w * q / vb;
-                    adj_dot[*b] += -(wd * q) / vb + (w / vb) * (-qd + q * (dot[*b] / vb));
+                    adj[*a as usize] += w / vb;
+                    adj_dot[*a as usize] += wd / vb - w * (dot[*b as usize] / vb) / vb;
+                    adj[*b as usize] -= w * q / vb;
+                    adj_dot[*b as usize] +=
+                        -(wd * q) / vb + (w / vb) * (-qd + q * (dot[*b as usize] / vb));
                 }
                 TapeOp::Pow(a, b) => {
-                    let u = vals[*a];
-                    let r = vals[*b];
-                    let du = dot[*a];
-                    let dr = dot[*b];
+                    let u = vals[*a as usize];
+                    let r = vals[*b as usize];
+                    let du = dot[*a as usize];
+                    let dr = dot[*b as usize];
                     if r != 0.0 {
                         if u != 0.0 {
                             let p_a = r * u.powf(r - 1.0);
-                            adj[*a] += w * p_a;
+                            adj[*a as usize] += w * p_a;
                             let mut dp_a = dr * u.powf(r - 1.0);
                             if u > 0.0 {
                                 dp_a += r * u.powf(r - 1.0) * ((r - 1.0) * du / u + dr * u.ln());
                             } else {
                                 dp_a += r * (r - 1.0) * u.powf(r - 2.0) * du;
                             }
-                            adj_dot[*a] += wd * p_a + w * dp_a;
+                            adj_dot[*a as usize] += wd * p_a + w * dp_a;
                         } else if r >= 2.0 {
                             let p_a = 0.0;
-                            adj[*a] += w * p_a;
+                            adj[*a as usize] += w * p_a;
                             let dp_a = if r == 2.0 {
                                 2.0 * du
                             } else {
                                 r * (r - 1.0) * (0.0_f64).powf(r - 2.0) * du
                             };
-                            adj_dot[*a] += wd * p_a + w * dp_a;
+                            adj_dot[*a as usize] += wd * p_a + w * dp_a;
                         }
                     }
                     if u > 0.0 {
                         let ln_u = u.ln();
                         let p_b = vals[i] * ln_u;
-                        adj[*b] += w * p_b;
+                        adj[*b as usize] += w * p_b;
                         let dur = vals[i] * (r * du / u + dr * ln_u);
                         let dp_b = dur * ln_u + vals[i] * du / u;
-                        adj_dot[*b] += wd * p_b + w * dp_b;
+                        adj_dot[*b as usize] += wd * p_b + w * dp_b;
                     }
                 }
                 TapeOp::Neg(a) => {
-                    adj[*a] -= w;
-                    adj_dot[*a] -= wd;
+                    adj[*a as usize] -= w;
+                    adj_dot[*a as usize] -= wd;
                 }
                 TapeOp::Abs(a) => {
-                    let s = if vals[*a] >= 0.0 { 1.0 } else { -1.0 };
-                    adj[*a] += w * s;
-                    adj_dot[*a] += wd * s;
+                    let s = if vals[*a as usize] >= 0.0 { 1.0 } else { -1.0 };
+                    adj[*a as usize] += w * s;
+                    adj_dot[*a as usize] += wd * s;
                 }
                 TapeOp::Sqrt(a) => {
                     let sv = vals[i];
                     if sv > 0.0 {
                         let fp = 0.5 / sv;
-                        let fpp = sqrt_d2(vals[*a], sv);
-                        adj[*a] += w * fp;
-                        adj_dot[*a] += wd * fp + w * fpp * dot[*a];
+                        let fpp = sqrt_d2(vals[*a as usize], sv);
+                        adj[*a as usize] += w * fp;
+                        adj_dot[*a as usize] += wd * fp + w * fpp * dot[*a as usize];
                     }
                 }
                 TapeOp::Exp(a) => {
                     let ev = vals[i];
-                    adj[*a] += w * ev;
-                    adj_dot[*a] += wd * ev + w * ev * dot[*a];
+                    adj[*a as usize] += w * ev;
+                    adj_dot[*a as usize] += wd * ev + w * ev * dot[*a as usize];
                 }
                 TapeOp::Log(a) => {
-                    let u = vals[*a];
-                    adj[*a] += w / u;
-                    adj_dot[*a] += wd / u + w * log_d2(u) * dot[*a];
+                    let u = vals[*a as usize];
+                    adj[*a as usize] += w / u;
+                    adj_dot[*a as usize] += wd / u + w * log_d2(u) * dot[*a as usize];
                 }
                 TapeOp::Log10(a) => {
-                    let u = vals[*a];
-                    adj[*a] += div_u_ln10(w, u);
-                    adj_dot[*a] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a];
+                    let u = vals[*a as usize];
+                    adj[*a as usize] += div_u_ln10(w, u);
+                    adj_dot[*a as usize] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a as usize];
                 }
                 TapeOp::Sin(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let cu = u.cos();
-                    adj[*a] += w * cu;
-                    adj_dot[*a] += wd * cu + w * (-u.sin()) * dot[*a];
+                    adj[*a as usize] += w * cu;
+                    adj_dot[*a as usize] += wd * cu + w * (-u.sin()) * dot[*a as usize];
                 }
                 TapeOp::Cos(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let su = u.sin();
-                    adj[*a] -= w * su;
-                    adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
+                    adj[*a as usize] -= w * su;
+                    adj_dot[*a as usize] += wd * (-su) + w * (-u.cos()) * dot[*a as usize];
                 }
                 TapeOp::Tan(a) => {
                     let t = vals[i];
                     let gp = 1.0 + t * t;
                     let gpp = 2.0 * t * gp;
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Atan(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = atan_d1(u);
                     let gpp = atan_d2(u);
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Acos(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = acos_d1(u);
                     let gpp = acos_d2(u);
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Sinh(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = u.cosh();
                     let gpp = u.sinh();
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Cosh(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = u.sinh();
                     let gpp = u.cosh();
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Tanh(a) => {
                     let t = vals[i];
-                    let gp = tanh_d1(vals[*a]);
+                    let gp = tanh_d1(vals[*a as usize]);
                     let gpp = -2.0 * t * gp;
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Asin(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = asin_d1(u);
                     let gpp = asin_d2(u);
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Acosh(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = acosh_d1(u);
                     let gpp = acosh_d2(u);
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Asinh(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = asinh_d1(u);
                     let gpp = asinh_d2(u);
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Atanh(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = atanh_d1(u);
                     let gpp = atanh_d2(u);
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::Erf(a) => {
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = erf_d1(u);
                     let gpp = erf_d2(u);
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::XLogX(a) => {
                     // gpp is 1/u, NOT the -1/u² any decomposition through
                     // `ln''` would produce. That is the whole point of the op.
-                    let u = vals[*a];
+                    let u = vals[*a as usize];
                     let gp = xlogx_d1(u);
                     let gpp = xlogx_d2(u);
-                    adj[*a] += w * gp;
-                    adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                    adj[*a as usize] += w * gp;
+                    adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                 }
                 TapeOp::CEntropy(a, b) => {
-                    let ua = vals[*a];
-                    let ub = vals[*b];
+                    let ua = vals[*a as usize];
+                    let ub = vals[*b as usize];
                     let fa = centropy_da(ua, ub);
                     let fb = centropy_db(ua, ub);
                     let faa = centropy_daa(ua);
                     let fab = centropy_dab(ub);
                     let fbb = centropy_dbb(ua, ub);
-                    adj[*a] += w * fa;
-                    adj[*b] += w * fb;
-                    adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
-                    adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+                    adj[*a as usize] += w * fa;
+                    adj[*b as usize] += w * fb;
+                    adj_dot[*a as usize] +=
+                        wd * fa + w * (faa * dot[*a as usize] + fab * dot[*b as usize]);
+                    adj_dot[*b as usize] +=
+                        wd * fb + w * (fab * dot[*a as usize] + fbb * dot[*b as usize]);
                 }
                 TapeOp::Atan2(a, b) => {
-                    let y = vals[*a];
-                    let x = vals[*b];
+                    let y = vals[*a as usize];
+                    let x = vals[*b as usize];
                     let (fa, fb) = atan2_d1(y, x);
                     let (faa, fab, fbb) = atan2_d2(y, x);
-                    adj[*a] += w * fa;
-                    adj[*b] += w * fb;
-                    adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
-                    adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+                    adj[*a as usize] += w * fa;
+                    adj[*b as usize] += w * fb;
+                    adj_dot[*a as usize] +=
+                        wd * fa + w * (faa * dot[*a as usize] + fab * dot[*b as usize]);
+                    adj_dot[*b as usize] +=
+                        wd * fb + w * (fab * dot[*a as usize] + fbb * dot[*b as usize]);
                 }
                 // min/max are piecewise linear (zero second derivative):
                 // route the adjoint and its tangent into the selected
                 // operand, exactly like the active branch of a Select.
                 TapeOp::Min(a, b) => {
-                    let br = if vals[*a] <= vals[*b] { *a } else { *b };
-                    adj[br] += w;
-                    adj_dot[br] += wd;
+                    let br = if vals[*a as usize] <= vals[*b as usize] {
+                        *a
+                    } else {
+                        *b
+                    };
+                    adj[br as usize] += w;
+                    adj_dot[br as usize] += wd;
                 }
                 TapeOp::Max(a, b) => {
-                    let br = if vals[*a] >= vals[*b] { *a } else { *b };
-                    adj[br] += w;
-                    adj_dot[br] += wd;
+                    let br = if vals[*a as usize] >= vals[*b as usize] {
+                        *a
+                    } else {
+                        *b
+                    };
+                    adj[br as usize] += w;
+                    adj_dot[br as usize] += wd;
                 }
                 // Zero derivative: no first- or second-order adjoint.
                 TapeOp::Cmp(_, _, _) | TapeOp::And(_, _) | TapeOp::Or(_, _) | TapeOp::Not(_) => {}
                 // Route both the adjoint and its tangent into the
                 // active branch; the condition contributes nothing.
                 TapeOp::Select(c, t, e) => {
-                    let br = if vals[*c] != 0.0 { *t } else { *e };
-                    adj[br] += w;
-                    adj_dot[br] += wd;
+                    let br = if vals[*c as usize] != 0.0 { *t } else { *e };
+                    adj[br as usize] += w;
+                    adj_dot[br as usize] += wd;
                 }
                 TapeOp::Funcall(fc) => {
                     let FuncallData { lib, name, args } = fc.as_ref();
@@ -1672,50 +1826,51 @@ impl Tape {
                     TapeOp::Var(k) => {
                         // Lower-triangle: only emit when row k >= col j
                         // so an off-diagonal pair appears once.
-                        if wd != 0.0 && *k >= j {
-                            if let Some(&pos) = hess_map.get(&(*k, j)) {
+                        if wd != 0.0 && *k as usize >= j {
+                            if let Some(&pos) = hess_map.get(&(*k as usize, j)) {
                                 values[pos] += weight * wd;
                             }
                         }
                     }
                     TapeOp::Add(a, b) => {
-                        adj[*a] += w;
-                        adj[*b] += w;
-                        adj_dot[*a] += wd;
-                        adj_dot[*b] += wd;
+                        adj[*a as usize] += w;
+                        adj[*b as usize] += w;
+                        adj_dot[*a as usize] += wd;
+                        adj_dot[*b as usize] += wd;
                     }
                     TapeOp::Sub(a, b) => {
-                        adj[*a] += w;
-                        adj[*b] -= w;
-                        adj_dot[*a] += wd;
-                        adj_dot[*b] -= wd;
+                        adj[*a as usize] += w;
+                        adj[*b as usize] -= w;
+                        adj_dot[*a as usize] += wd;
+                        adj_dot[*b as usize] -= wd;
                     }
                     TapeOp::Mul(a, b) => {
-                        adj[*a] += w * v[*b];
-                        adj[*b] += w * v[*a];
-                        adj_dot[*a] += wd * v[*b] + w * dot[*b];
-                        adj_dot[*b] += wd * v[*a] + w * dot[*a];
+                        adj[*a as usize] += w * v[*b as usize];
+                        adj[*b as usize] += w * v[*a as usize];
+                        adj_dot[*a as usize] += wd * v[*b as usize] + w * dot[*b as usize];
+                        adj_dot[*b as usize] += wd * v[*a as usize] + w * dot[*a as usize];
                     }
                     TapeOp::Div(a, b) => {
                         // Kahan form -- see the identical arm in the dense
                         // reverse-over-forward sweep for the derivation.
-                        let vb = v[*b];
+                        let vb = v[*b as usize];
                         let q = v[i];
                         let qd = dot[i];
-                        adj[*a] += w / vb;
-                        adj_dot[*a] += wd / vb - w * (dot[*b] / vb) / vb;
-                        adj[*b] -= w * q / vb;
-                        adj_dot[*b] += -(wd * q) / vb + (w / vb) * (-qd + q * (dot[*b] / vb));
+                        adj[*a as usize] += w / vb;
+                        adj_dot[*a as usize] += wd / vb - w * (dot[*b as usize] / vb) / vb;
+                        adj[*b as usize] -= w * q / vb;
+                        adj_dot[*b as usize] +=
+                            -(wd * q) / vb + (w / vb) * (-qd + q * (dot[*b as usize] / vb));
                     }
                     TapeOp::Pow(a, b) => {
-                        let u = v[*a];
-                        let r = v[*b];
-                        let du = dot[*a];
-                        let dr = dot[*b];
+                        let u = v[*a as usize];
+                        let r = v[*b as usize];
+                        let du = dot[*a as usize];
+                        let dr = dot[*b as usize];
                         if r != 0.0 {
                             if u != 0.0 {
                                 let p_a = r * u.powf(r - 1.0);
-                                adj[*a] += w * p_a;
+                                adj[*a as usize] += w * p_a;
                                 let mut dp_a = dr * u.powf(r - 1.0);
                                 if u > 0.0 {
                                     dp_a +=
@@ -1723,193 +1878,206 @@ impl Tape {
                                 } else {
                                     dp_a += r * (r - 1.0) * u.powf(r - 2.0) * du;
                                 }
-                                adj_dot[*a] += wd * p_a + w * dp_a;
+                                adj_dot[*a as usize] += wd * p_a + w * dp_a;
                             } else if r >= 2.0 {
                                 let p_a = 0.0;
-                                adj[*a] += w * p_a;
+                                adj[*a as usize] += w * p_a;
                                 let dp_a = if r == 2.0 {
                                     2.0 * du
                                 } else {
                                     r * (r - 1.0) * (0.0_f64).powf(r - 2.0) * du
                                 };
-                                adj_dot[*a] += wd * p_a + w * dp_a;
+                                adj_dot[*a as usize] += wd * p_a + w * dp_a;
                             }
                         }
                         if u > 0.0 {
                             let ln_u = u.ln();
                             let p_b = v[i] * ln_u;
-                            adj[*b] += w * p_b;
+                            adj[*b as usize] += w * p_b;
                             let dur = v[i] * (r * du / u + dr * ln_u);
                             let dp_b = dur * ln_u + v[i] * du / u;
-                            adj_dot[*b] += wd * p_b + w * dp_b;
+                            adj_dot[*b as usize] += wd * p_b + w * dp_b;
                         }
                     }
                     TapeOp::Neg(a) => {
-                        adj[*a] -= w;
-                        adj_dot[*a] -= wd;
+                        adj[*a as usize] -= w;
+                        adj_dot[*a as usize] -= wd;
                     }
                     TapeOp::Abs(a) => {
-                        let s = if v[*a] >= 0.0 { 1.0 } else { -1.0 };
-                        adj[*a] += w * s;
-                        adj_dot[*a] += wd * s;
+                        let s = if v[*a as usize] >= 0.0 { 1.0 } else { -1.0 };
+                        adj[*a as usize] += w * s;
+                        adj_dot[*a as usize] += wd * s;
                     }
                     TapeOp::Sqrt(a) => {
                         let sv = v[i];
                         if sv > 0.0 {
                             let fp = 0.5 / sv;
-                            let fpp = sqrt_d2(v[*a], sv);
-                            adj[*a] += w * fp;
-                            adj_dot[*a] += wd * fp + w * fpp * dot[*a];
+                            let fpp = sqrt_d2(v[*a as usize], sv);
+                            adj[*a as usize] += w * fp;
+                            adj_dot[*a as usize] += wd * fp + w * fpp * dot[*a as usize];
                         }
                     }
                     TapeOp::Exp(a) => {
                         let ev = v[i];
-                        adj[*a] += w * ev;
-                        adj_dot[*a] += wd * ev + w * ev * dot[*a];
+                        adj[*a as usize] += w * ev;
+                        adj_dot[*a as usize] += wd * ev + w * ev * dot[*a as usize];
                     }
                     TapeOp::Log(a) => {
-                        let u = v[*a];
-                        adj[*a] += w / u;
-                        adj_dot[*a] += wd / u + w * log_d2(u) * dot[*a];
+                        let u = v[*a as usize];
+                        adj[*a as usize] += w / u;
+                        adj_dot[*a as usize] += wd / u + w * log_d2(u) * dot[*a as usize];
                     }
                     TapeOp::Log10(a) => {
-                        let u = v[*a];
-                        adj[*a] += div_u_ln10(w, u);
-                        adj_dot[*a] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a];
+                        let u = v[*a as usize];
+                        adj[*a as usize] += div_u_ln10(w, u);
+                        adj_dot[*a as usize] +=
+                            div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a as usize];
                     }
                     TapeOp::Sin(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let cu = u.cos();
-                        adj[*a] += w * cu;
-                        adj_dot[*a] += wd * cu + w * (-u.sin()) * dot[*a];
+                        adj[*a as usize] += w * cu;
+                        adj_dot[*a as usize] += wd * cu + w * (-u.sin()) * dot[*a as usize];
                     }
                     TapeOp::Cos(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let su = u.sin();
-                        adj[*a] -= w * su;
-                        adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
+                        adj[*a as usize] -= w * su;
+                        adj_dot[*a as usize] += wd * (-su) + w * (-u.cos()) * dot[*a as usize];
                     }
                     TapeOp::Tan(a) => {
                         let t = v[i];
                         let gp = 1.0 + t * t;
                         let gpp = 2.0 * t * gp;
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Atan(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = atan_d1(u);
                         let gpp = atan_d2(u);
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Acos(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = acos_d1(u);
                         let gpp = acos_d2(u);
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Sinh(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = u.cosh();
                         let gpp = u.sinh();
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Cosh(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = u.sinh();
                         let gpp = u.cosh();
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Tanh(a) => {
                         let t = v[i];
-                        let gp = tanh_d1(v[*a]);
+                        let gp = tanh_d1(v[*a as usize]);
                         let gpp = -2.0 * t * gp;
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Asin(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = asin_d1(u);
                         let gpp = asin_d2(u);
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Acosh(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = acosh_d1(u);
                         let gpp = acosh_d2(u);
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Asinh(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = asinh_d1(u);
                         let gpp = asinh_d2(u);
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Atanh(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = atanh_d1(u);
                         let gpp = atanh_d2(u);
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::Erf(a) => {
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = erf_d1(u);
                         let gpp = erf_d2(u);
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::XLogX(a) => {
                         // See the identical arm in `hessian_accumulate`: gpp is
                         // 1/u, never the unrepresentable -1/u² of `ln''`.
-                        let u = v[*a];
+                        let u = v[*a as usize];
                         let gp = xlogx_d1(u);
                         let gpp = xlogx_d2(u);
-                        adj[*a] += w * gp;
-                        adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+                        adj[*a as usize] += w * gp;
+                        adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
                     }
                     TapeOp::CEntropy(a, b) => {
-                        let ua = v[*a];
-                        let ub = v[*b];
+                        let ua = v[*a as usize];
+                        let ub = v[*b as usize];
                         let fa = centropy_da(ua, ub);
                         let fb = centropy_db(ua, ub);
                         let faa = centropy_daa(ua);
                         let fab = centropy_dab(ub);
                         let fbb = centropy_dbb(ua, ub);
-                        adj[*a] += w * fa;
-                        adj[*b] += w * fb;
-                        adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
-                        adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+                        adj[*a as usize] += w * fa;
+                        adj[*b as usize] += w * fb;
+                        adj_dot[*a as usize] +=
+                            wd * fa + w * (faa * dot[*a as usize] + fab * dot[*b as usize]);
+                        adj_dot[*b as usize] +=
+                            wd * fb + w * (fab * dot[*a as usize] + fbb * dot[*b as usize]);
                     }
                     TapeOp::Atan2(a, b) => {
-                        let y = v[*a];
-                        let x = v[*b];
+                        let y = v[*a as usize];
+                        let x = v[*b as usize];
                         let (fa, fb) = atan2_d1(y, x);
                         let (faa, fab, fbb) = atan2_d2(y, x);
-                        adj[*a] += w * fa;
-                        adj[*b] += w * fb;
-                        adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
-                        adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+                        adj[*a as usize] += w * fa;
+                        adj[*b as usize] += w * fb;
+                        adj_dot[*a as usize] +=
+                            wd * fa + w * (faa * dot[*a as usize] + fab * dot[*b as usize]);
+                        adj_dot[*b as usize] +=
+                            wd * fb + w * (fab * dot[*a as usize] + fbb * dot[*b as usize]);
                     }
                     // min/max are piecewise linear (zero second
                     // derivative): route adjoint and its tangent into
                     // the selected operand, like an active Select branch.
                     TapeOp::Min(a, b) => {
-                        let br = if v[*a] <= v[*b] { *a } else { *b };
-                        adj[br] += w;
-                        adj_dot[br] += wd;
+                        let br = if v[*a as usize] <= v[*b as usize] {
+                            *a
+                        } else {
+                            *b
+                        };
+                        adj[br as usize] += w;
+                        adj_dot[br as usize] += wd;
                     }
                     TapeOp::Max(a, b) => {
-                        let br = if v[*a] >= v[*b] { *a } else { *b };
-                        adj[br] += w;
-                        adj_dot[br] += wd;
+                        let br = if v[*a as usize] >= v[*b as usize] {
+                            *a
+                        } else {
+                            *b
+                        };
+                        adj[br as usize] += w;
+                        adj_dot[br as usize] += wd;
                     }
                     // Zero derivative: no first- or second-order adjoint.
                     TapeOp::Cmp(_, _, _)
@@ -1919,9 +2087,9 @@ impl Tape {
                     // Route adjoint and its tangent into the active
                     // branch only; the condition contributes nothing.
                     TapeOp::Select(c, t, e) => {
-                        let br = if v[*c] != 0.0 { *t } else { *e };
-                        adj[br] += w;
-                        adj_dot[br] += wd;
+                        let br = if v[*c as usize] != 0.0 { *t } else { *e };
+                        adj[br as usize] += w;
+                        adj_dot[br as usize] += wd;
                     }
                     TapeOp::Funcall(fc) => {
                         let FuncallData { lib, name, args } = fc.as_ref();
@@ -1986,25 +2154,29 @@ impl Tape {
             ($a:expr, $b:expr, $i:expr) => {{
                 let (a, b, i) = ($a, $b, $i);
                 if a == b {
-                    if last_use[a] == i {
-                        std::mem::take(&mut var_sets[a])
+                    if last_use[a as usize] == i {
+                        std::mem::take(&mut var_sets[a as usize])
                     } else {
-                        var_sets[a].clone()
+                        var_sets[a as usize].clone()
                     }
                 } else {
                     // Prefer moving the larger of the two dead sets.
-                    let take_a = last_use[a] == i
-                        && (last_use[b] != i || var_sets[a].len() >= var_sets[b].len());
+                    let take_a = last_use[a as usize] == i
+                        && (last_use[b as usize] != i
+                            || var_sets[a as usize].len() >= var_sets[b as usize].len());
                     if take_a {
-                        let mut s = std::mem::take(&mut var_sets[a]);
-                        s.extend(var_sets[b].iter().copied());
+                        let mut s = std::mem::take(&mut var_sets[a as usize]);
+                        s.extend(var_sets[b as usize].iter().copied());
                         s
-                    } else if last_use[b] == i {
-                        let mut s = std::mem::take(&mut var_sets[b]);
-                        s.extend(var_sets[a].iter().copied());
+                    } else if last_use[b as usize] == i {
+                        let mut s = std::mem::take(&mut var_sets[b as usize]);
+                        s.extend(var_sets[a as usize].iter().copied());
                         s
                     } else {
-                        var_sets[a].union(&var_sets[b]).copied().collect()
+                        var_sets[a as usize]
+                            .union(&var_sets[b as usize])
+                            .copied()
+                            .collect()
                     }
                 }
             }};
@@ -2013,10 +2185,10 @@ impl Tape {
         macro_rules! carry {
             ($a:expr, $i:expr) => {{
                 let (a, i) = ($a, $i);
-                if last_use[a] == i {
-                    std::mem::take(&mut var_sets[a])
+                if last_use[a as usize] == i {
+                    std::mem::take(&mut var_sets[a as usize])
                 } else {
-                    var_sets[a].clone()
+                    var_sets[a as usize].clone()
                 }
             }};
         }
@@ -2045,18 +2217,18 @@ impl Tape {
                 TapeOp::Const(_) => BTreeSet::new(),
                 TapeOp::Var(j) => {
                     let mut s = BTreeSet::new();
-                    s.insert(*j);
+                    s.insert(*j as usize);
                     s
                 }
                 TapeOp::Add(a, b) | TapeOp::Sub(a, b) => merge!(*a, *b, i),
                 TapeOp::Neg(a) | TapeOp::Abs(a) => carry!(*a, i),
                 TapeOp::Mul(a, b) => {
-                    emit_cross(&var_sets[*a], &var_sets[*b], &mut pairs);
+                    emit_cross(&var_sets[*a as usize], &var_sets[*b as usize], &mut pairs);
                     merge!(*a, *b, i)
                 }
                 TapeOp::Div(a, b) => {
-                    emit_cross(&var_sets[*a], &var_sets[*b], &mut pairs);
-                    emit_self(&var_sets[*b], &mut pairs);
+                    emit_cross(&var_sets[*a as usize], &var_sets[*b as usize], &mut pairs);
+                    emit_self(&var_sets[*b as usize], &mut pairs);
                     merge!(*a, *b, i)
                 }
                 TapeOp::Pow(a, b) => {
@@ -2082,7 +2254,7 @@ impl Tape {
                 | TapeOp::Erf(a)
                 | TapeOp::XLogX(a)
                 | TapeOp::Atanh(a) => {
-                    emit_self(&var_sets[*a], &mut pairs);
+                    emit_self(&var_sets[*a as usize], &mut pairs);
                     carry!(*a, i)
                 }
                 // atan2(y, x) and centropy(a, b) are nonlinear in both
@@ -2179,7 +2351,7 @@ fn for_each_input(op: &TapeOp, mut f: impl FnMut(usize)) {
         | TapeOp::Atanh(a)
         | TapeOp::Erf(a)
         | TapeOp::XLogX(a)
-        | TapeOp::Not(a) => f(*a),
+        | TapeOp::Not(a) => f(*a as usize),
         TapeOp::Add(a, b)
         | TapeOp::Sub(a, b)
         | TapeOp::Mul(a, b)
@@ -2192,13 +2364,13 @@ fn for_each_input(op: &TapeOp, mut f: impl FnMut(usize)) {
         | TapeOp::And(a, b)
         | TapeOp::Or(a, b)
         | TapeOp::Cmp(_, a, b) => {
-            f(*a);
-            f(*b);
+            f(*a as usize);
+            f(*b as usize);
         }
         TapeOp::Select(c, t, e) => {
-            f(*c);
-            f(*t);
-            f(*e);
+            f(*c as usize);
+            f(*t as usize);
+            f(*e as usize);
         }
         TapeOp::Funcall(fc) => {
             for arg in &fc.args {
@@ -2224,7 +2396,7 @@ fn build_recursive(
         }
         Expr::Var(i) => {
             let idx = ops.len();
-            ops.push(TapeOp::Var(*i));
+            ops.push(TapeOp::Var(slot(*i)));
             idx
         }
         Expr::Binary(op, a, b) => {
@@ -2246,13 +2418,13 @@ fn build_recursive(
             let r = build_recursive(b, ops, cache, resolver);
             let idx = ops.len();
             ops.push(match op {
-                BinOp::Add => TapeOp::Add(l, r),
-                BinOp::Sub => TapeOp::Sub(l, r),
-                BinOp::Mul => TapeOp::Mul(l, r),
-                BinOp::Div => TapeOp::Div(l, r),
-                BinOp::Pow => TapeOp::Pow(l, r),
-                BinOp::Atan2 => TapeOp::Atan2(l, r),
-                BinOp::CEntropy => TapeOp::CEntropy(l, r),
+                BinOp::Add => TapeOp::Add(slot(l), slot(r)),
+                BinOp::Sub => TapeOp::Sub(slot(l), slot(r)),
+                BinOp::Mul => TapeOp::Mul(slot(l), slot(r)),
+                BinOp::Div => TapeOp::Div(slot(l), slot(r)),
+                BinOp::Pow => TapeOp::Pow(slot(l), slot(r)),
+                BinOp::Atan2 => TapeOp::Atan2(slot(l), slot(r)),
+                BinOp::CEntropy => TapeOp::CEntropy(slot(l), slot(r)),
             });
             idx
         }
@@ -2260,26 +2432,26 @@ fn build_recursive(
             let v = build_recursive(a, ops, cache, resolver);
             let idx = ops.len();
             ops.push(match op {
-                UnaryOp::Neg => TapeOp::Neg(v),
-                UnaryOp::Sqrt => TapeOp::Sqrt(v),
-                UnaryOp::Log => TapeOp::Log(v),
-                UnaryOp::Log10 => TapeOp::Log10(v),
-                UnaryOp::Exp => TapeOp::Exp(v),
-                UnaryOp::Abs => TapeOp::Abs(v),
-                UnaryOp::Sin => TapeOp::Sin(v),
-                UnaryOp::Cos => TapeOp::Cos(v),
-                UnaryOp::Tan => TapeOp::Tan(v),
-                UnaryOp::Atan => TapeOp::Atan(v),
-                UnaryOp::Acos => TapeOp::Acos(v),
-                UnaryOp::Sinh => TapeOp::Sinh(v),
-                UnaryOp::Cosh => TapeOp::Cosh(v),
-                UnaryOp::Tanh => TapeOp::Tanh(v),
-                UnaryOp::Asin => TapeOp::Asin(v),
-                UnaryOp::Acosh => TapeOp::Acosh(v),
-                UnaryOp::Asinh => TapeOp::Asinh(v),
-                UnaryOp::Atanh => TapeOp::Atanh(v),
-                UnaryOp::Erf => TapeOp::Erf(v),
-                UnaryOp::XLogX => TapeOp::XLogX(v),
+                UnaryOp::Neg => TapeOp::Neg(slot(v)),
+                UnaryOp::Sqrt => TapeOp::Sqrt(slot(v)),
+                UnaryOp::Log => TapeOp::Log(slot(v)),
+                UnaryOp::Log10 => TapeOp::Log10(slot(v)),
+                UnaryOp::Exp => TapeOp::Exp(slot(v)),
+                UnaryOp::Abs => TapeOp::Abs(slot(v)),
+                UnaryOp::Sin => TapeOp::Sin(slot(v)),
+                UnaryOp::Cos => TapeOp::Cos(slot(v)),
+                UnaryOp::Tan => TapeOp::Tan(slot(v)),
+                UnaryOp::Atan => TapeOp::Atan(slot(v)),
+                UnaryOp::Acos => TapeOp::Acos(slot(v)),
+                UnaryOp::Sinh => TapeOp::Sinh(slot(v)),
+                UnaryOp::Cosh => TapeOp::Cosh(slot(v)),
+                UnaryOp::Tanh => TapeOp::Tanh(slot(v)),
+                UnaryOp::Asin => TapeOp::Asin(slot(v)),
+                UnaryOp::Acosh => TapeOp::Acosh(slot(v)),
+                UnaryOp::Asinh => TapeOp::Asinh(slot(v)),
+                UnaryOp::Atanh => TapeOp::Atanh(slot(v)),
+                UnaryOp::Erf => TapeOp::Erf(slot(v)),
+                UnaryOp::XLogX => TapeOp::XLogX(slot(v)),
             });
             idx
         }
@@ -2293,7 +2465,7 @@ fn build_recursive(
             for a in &args[1..] {
                 let next = build_recursive(a, ops, cache, resolver);
                 let idx = ops.len();
-                ops.push(TapeOp::Add(acc, next));
+                ops.push(TapeOp::Add(slot(acc), slot(next)));
                 acc = idx;
             }
             acc
@@ -2317,9 +2489,9 @@ fn build_recursive(
                 let next = build_recursive(a, ops, cache, resolver);
                 let idx = ops.len();
                 ops.push(if is_min {
-                    TapeOp::Min(acc, next)
+                    TapeOp::Min(slot(acc), slot(next))
                 } else {
-                    TapeOp::Max(acc, next)
+                    TapeOp::Max(slot(acc), slot(next))
                 });
                 acc = idx;
             }
@@ -2345,27 +2517,27 @@ fn build_recursive(
             let l = build_recursive(a, ops, cache, resolver);
             let r = build_recursive(b, ops, cache, resolver);
             let idx = ops.len();
-            ops.push(TapeOp::Cmp(*op, l, r));
+            ops.push(TapeOp::Cmp(*op, slot(l), slot(r)));
             idx
         }
         Expr::And(a, b) => {
             let l = build_recursive(a, ops, cache, resolver);
             let r = build_recursive(b, ops, cache, resolver);
             let idx = ops.len();
-            ops.push(TapeOp::And(l, r));
+            ops.push(TapeOp::And(slot(l), slot(r)));
             idx
         }
         Expr::Or(a, b) => {
             let l = build_recursive(a, ops, cache, resolver);
             let r = build_recursive(b, ops, cache, resolver);
             let idx = ops.len();
-            ops.push(TapeOp::Or(l, r));
+            ops.push(TapeOp::Or(slot(l), slot(r)));
             idx
         }
         Expr::Not(a) => {
             let v = build_recursive(a, ops, cache, resolver);
             let idx = ops.len();
-            ops.push(TapeOp::Not(v));
+            ops.push(TapeOp::Not(slot(v)));
             idx
         }
         Expr::Cond { cond, then_, else_ } => {
@@ -2373,7 +2545,7 @@ fn build_recursive(
             let t = build_recursive(then_, ops, cache, resolver);
             let e = build_recursive(else_, ops, cache, resolver);
             let idx = ops.len();
-            ops.push(TapeOp::Select(c, t, e));
+            ops.push(TapeOp::Select(slot(c), slot(t), slot(e)));
             idx
         }
         Expr::Funcall { id, args } => {
@@ -2437,7 +2609,7 @@ fn try_emit_const_pow(
     if c == 0.5 {
         let b = build_recursive(base_expr, ops, cache, resolver);
         let idx = ops.len();
-        ops.push(TapeOp::Sqrt(b));
+        ops.push(TapeOp::Sqrt(slot(b)));
         return Some(idx);
     }
     // Integer exponents: bounded so a bad tape can't blow up the
@@ -2460,7 +2632,7 @@ fn try_emit_const_pow(
             let one_idx = ops.len();
             ops.push(TapeOp::Const(1.0));
             let idx = ops.len();
-            ops.push(TapeOp::Div(one_idx, pos));
+            ops.push(TapeOp::Div(slot(one_idx), slot(pos)));
             return Some(idx);
         }
         return Some(pos);
@@ -2478,10 +2650,10 @@ fn emit_int_pow(base: usize, n: u32, ops: &mut Vec<TapeOp>) -> usize {
     }
     let half = emit_int_pow(base, n / 2, ops);
     let squared = ops.len();
-    ops.push(TapeOp::Mul(half, half));
+    ops.push(TapeOp::Mul(slot(half), slot(half)));
     if n % 2 == 1 {
         let idx = ops.len();
-        ops.push(TapeOp::Mul(squared, base));
+        ops.push(TapeOp::Mul(slot(squared), slot(base)));
         idx
     } else {
         squared
@@ -2644,7 +2816,7 @@ impl HybridTape {
             let mut lv: BTreeSet<usize> = BTreeSet::new();
             for &i in &s.local_reach {
                 if let SummandOp::Local(TapeOp::Var(j)) = &s.ops[i] {
-                    lv.insert(*j);
+                    lv.insert(*j as usize);
                 }
             }
             s.local_vars = lv.iter().copied().collect();
@@ -3224,13 +3396,13 @@ fn build_scaled_summand(
         leaf(local)
     } else if s.factor == -1.0 {
         let v = leaf(local);
-        local.push(SummandOp::Local(TapeOp::Neg(v)));
+        local.push(SummandOp::Local(TapeOp::Neg(slot(v))));
         local.len() - 1
     } else {
         let c = local.len();
         local.push(SummandOp::Local(TapeOp::Const(s.factor)));
         let v = leaf(local);
-        local.push(SummandOp::Local(TapeOp::Mul(c, v)));
+        local.push(SummandOp::Local(TapeOp::Mul(slot(c), slot(v))));
         local.len() - 1
     }
 }
@@ -3251,7 +3423,7 @@ fn build_into_summand(
         }
         Expr::Var(j) => {
             let i = local.len();
-            local.push(SummandOp::Local(TapeOp::Var(*j)));
+            local.push(SummandOp::Local(TapeOp::Var(slot(*j))));
             i
         }
         Expr::Binary(op, a, b) => {
@@ -3274,13 +3446,13 @@ fn build_into_summand(
             let r = build_into_summand(b, local, local_cache, prelude, prelude_map, cse_count);
             let i = local.len();
             local.push(SummandOp::Local(match op {
-                BinOp::Add => TapeOp::Add(l, r),
-                BinOp::Sub => TapeOp::Sub(l, r),
-                BinOp::Mul => TapeOp::Mul(l, r),
-                BinOp::Div => TapeOp::Div(l, r),
-                BinOp::Pow => TapeOp::Pow(l, r),
-                BinOp::Atan2 => TapeOp::Atan2(l, r),
-                BinOp::CEntropy => TapeOp::CEntropy(l, r),
+                BinOp::Add => TapeOp::Add(slot(l), slot(r)),
+                BinOp::Sub => TapeOp::Sub(slot(l), slot(r)),
+                BinOp::Mul => TapeOp::Mul(slot(l), slot(r)),
+                BinOp::Div => TapeOp::Div(slot(l), slot(r)),
+                BinOp::Pow => TapeOp::Pow(slot(l), slot(r)),
+                BinOp::Atan2 => TapeOp::Atan2(slot(l), slot(r)),
+                BinOp::CEntropy => TapeOp::CEntropy(slot(l), slot(r)),
             }));
             i
         }
@@ -3288,26 +3460,26 @@ fn build_into_summand(
             let v = build_into_summand(a, local, local_cache, prelude, prelude_map, cse_count);
             let i = local.len();
             local.push(SummandOp::Local(match op {
-                UnaryOp::Neg => TapeOp::Neg(v),
-                UnaryOp::Sqrt => TapeOp::Sqrt(v),
-                UnaryOp::Log => TapeOp::Log(v),
-                UnaryOp::Log10 => TapeOp::Log10(v),
-                UnaryOp::Exp => TapeOp::Exp(v),
-                UnaryOp::Abs => TapeOp::Abs(v),
-                UnaryOp::Sin => TapeOp::Sin(v),
-                UnaryOp::Cos => TapeOp::Cos(v),
-                UnaryOp::Tan => TapeOp::Tan(v),
-                UnaryOp::Atan => TapeOp::Atan(v),
-                UnaryOp::Acos => TapeOp::Acos(v),
-                UnaryOp::Sinh => TapeOp::Sinh(v),
-                UnaryOp::Cosh => TapeOp::Cosh(v),
-                UnaryOp::Tanh => TapeOp::Tanh(v),
-                UnaryOp::Asin => TapeOp::Asin(v),
-                UnaryOp::Acosh => TapeOp::Acosh(v),
-                UnaryOp::Asinh => TapeOp::Asinh(v),
-                UnaryOp::Atanh => TapeOp::Atanh(v),
-                UnaryOp::Erf => TapeOp::Erf(v),
-                UnaryOp::XLogX => TapeOp::XLogX(v),
+                UnaryOp::Neg => TapeOp::Neg(slot(v)),
+                UnaryOp::Sqrt => TapeOp::Sqrt(slot(v)),
+                UnaryOp::Log => TapeOp::Log(slot(v)),
+                UnaryOp::Log10 => TapeOp::Log10(slot(v)),
+                UnaryOp::Exp => TapeOp::Exp(slot(v)),
+                UnaryOp::Abs => TapeOp::Abs(slot(v)),
+                UnaryOp::Sin => TapeOp::Sin(slot(v)),
+                UnaryOp::Cos => TapeOp::Cos(slot(v)),
+                UnaryOp::Tan => TapeOp::Tan(slot(v)),
+                UnaryOp::Atan => TapeOp::Atan(slot(v)),
+                UnaryOp::Acos => TapeOp::Acos(slot(v)),
+                UnaryOp::Sinh => TapeOp::Sinh(slot(v)),
+                UnaryOp::Cosh => TapeOp::Cosh(slot(v)),
+                UnaryOp::Tanh => TapeOp::Tanh(slot(v)),
+                UnaryOp::Asin => TapeOp::Asin(slot(v)),
+                UnaryOp::Acosh => TapeOp::Acosh(slot(v)),
+                UnaryOp::Asinh => TapeOp::Asinh(slot(v)),
+                UnaryOp::Atanh => TapeOp::Atanh(slot(v)),
+                UnaryOp::Erf => TapeOp::Erf(slot(v)),
+                UnaryOp::XLogX => TapeOp::XLogX(slot(v)),
             }));
             i
         }
@@ -3329,7 +3501,7 @@ fn build_into_summand(
                 let nxt =
                     build_into_summand(a, local, local_cache, prelude, prelude_map, cse_count);
                 let i = local.len();
-                local.push(SummandOp::Local(TapeOp::Add(acc, nxt)));
+                local.push(SummandOp::Local(TapeOp::Add(slot(acc), slot(nxt))));
                 acc = i;
             }
             acc
@@ -3431,7 +3603,7 @@ fn try_emit_const_pow_summand(
             cse_count,
         );
         let i = local.len();
-        local.push(SummandOp::Local(TapeOp::Sqrt(b)));
+        local.push(SummandOp::Local(TapeOp::Sqrt(slot(b))));
         return Some(i);
     }
     if c.is_finite() && c.fract() == 0.0 && c.abs() <= 8.0 {
@@ -3454,7 +3626,7 @@ fn try_emit_const_pow_summand(
             let one_idx = local.len();
             local.push(SummandOp::Local(TapeOp::Const(1.0)));
             let i = local.len();
-            local.push(SummandOp::Local(TapeOp::Div(one_idx, pos)));
+            local.push(SummandOp::Local(TapeOp::Div(slot(one_idx), slot(pos))));
             return Some(i);
         }
         return Some(pos);
@@ -3469,10 +3641,10 @@ fn emit_int_pow_summand(base: usize, n: u32, local: &mut Vec<SummandOp>) -> usiz
     }
     let half = emit_int_pow_summand(base, n / 2, local);
     let squared = local.len();
-    local.push(SummandOp::Local(TapeOp::Mul(half, half)));
+    local.push(SummandOp::Local(TapeOp::Mul(slot(half), slot(half))));
     if n % 2 == 1 {
         let i = local.len();
-        local.push(SummandOp::Local(TapeOp::Mul(squared, base)));
+        local.push(SummandOp::Local(TapeOp::Mul(slot(squared), slot(base))));
         i
     } else {
         squared
@@ -3564,7 +3736,7 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             TapeOp::Const(_) => BTreeSet::new(),
             TapeOp::Var(j) => {
                 let mut s = BTreeSet::new();
-                s.insert(*j);
+                s.insert(*j as usize);
                 s
             }
             TapeOp::Add(a, b)
@@ -3573,7 +3745,9 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::Div(a, b)
             | TapeOp::Pow(a, b)
             | TapeOp::Atan2(a, b)
-            | TapeOp::CEntropy(a, b) => out[*a].union(&out[*b]).copied().collect(),
+            | TapeOp::CEntropy(a, b) => {
+                out[*a as usize].union(&out[*b as usize]).copied().collect()
+            }
             TapeOp::Neg(a)
             | TapeOp::Abs(a)
             | TapeOp::Sqrt(a)
@@ -3593,7 +3767,7 @@ fn compute_var_sets(ops: &[TapeOp]) -> Vec<BTreeSet<usize>> {
             | TapeOp::Asinh(a)
             | TapeOp::Erf(a)
             | TapeOp::XLogX(a)
-            | TapeOp::Atanh(a) => out[*a].clone(),
+            | TapeOp::Atanh(a) => out[*a as usize].clone(),
             TapeOp::Cmp(_, _, _)
             | TapeOp::And(_, _)
             | TapeOp::Or(_, _)
@@ -3649,25 +3823,34 @@ fn summand_sparsity(
                 TapeOp::Const(_) => BTreeSet::new(),
                 TapeOp::Var(j) => {
                     let mut s = BTreeSet::new();
-                    s.insert(*j);
+                    s.insert(*j as usize);
                     s
                 }
-                TapeOp::Add(a, b) | TapeOp::Sub(a, b) => {
-                    var_sets[*a].union(&var_sets[*b]).copied().collect()
-                }
-                TapeOp::Neg(a) | TapeOp::Abs(a) => var_sets[*a].clone(),
+                TapeOp::Add(a, b) | TapeOp::Sub(a, b) => var_sets[*a as usize]
+                    .union(&var_sets[*b as usize])
+                    .copied()
+                    .collect(),
+                TapeOp::Neg(a) | TapeOp::Abs(a) => var_sets[*a as usize].clone(),
                 TapeOp::Mul(a, b) => {
-                    emit_cross(&var_sets[*a], &var_sets[*b], pairs);
-                    var_sets[*a].union(&var_sets[*b]).copied().collect()
+                    emit_cross(&var_sets[*a as usize], &var_sets[*b as usize], pairs);
+                    var_sets[*a as usize]
+                        .union(&var_sets[*b as usize])
+                        .copied()
+                        .collect()
                 }
                 TapeOp::Div(a, b) => {
-                    emit_cross(&var_sets[*a], &var_sets[*b], pairs);
-                    emit_self(&var_sets[*b], pairs);
-                    var_sets[*a].union(&var_sets[*b]).copied().collect()
+                    emit_cross(&var_sets[*a as usize], &var_sets[*b as usize], pairs);
+                    emit_self(&var_sets[*b as usize], pairs);
+                    var_sets[*a as usize]
+                        .union(&var_sets[*b as usize])
+                        .copied()
+                        .collect()
                 }
                 TapeOp::Pow(a, b) | TapeOp::Atan2(a, b) | TapeOp::CEntropy(a, b) => {
-                    let combined: BTreeSet<usize> =
-                        var_sets[*a].union(&var_sets[*b]).copied().collect();
+                    let combined: BTreeSet<usize> = var_sets[*a as usize]
+                        .union(&var_sets[*b as usize])
+                        .copied()
+                        .collect();
                     emit_self(&combined, pairs);
                     combined
                 }
@@ -3689,8 +3872,8 @@ fn summand_sparsity(
                 | TapeOp::Erf(a)
                 | TapeOp::XLogX(a)
                 | TapeOp::Atanh(a) => {
-                    emit_self(&var_sets[*a], pairs);
-                    var_sets[*a].clone()
+                    emit_self(&var_sets[*a as usize], pairs);
+                    var_sets[*a as usize].clone()
                 }
                 TapeOp::Cmp(_, _, _)
                 | TapeOp::And(_, _)
@@ -3724,7 +3907,7 @@ pub(crate) fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
         | TapeOp::Div(a, b)
         | TapeOp::Pow(a, b)
         | TapeOp::Atan2(a, b)
-        | TapeOp::CEntropy(a, b) => (Some(*a), Some(*b)),
+        | TapeOp::CEntropy(a, b) => (Some(*a as usize), Some(*b as usize)),
         TapeOp::Neg(a)
         | TapeOp::Abs(a)
         | TapeOp::Sqrt(a)
@@ -3744,14 +3927,16 @@ pub(crate) fn op_operands(op: &TapeOp) -> (Option<usize>, Option<usize>) {
         | TapeOp::Asinh(a)
         | TapeOp::Erf(a)
         | TapeOp::XLogX(a)
-        | TapeOp::Atanh(a) => (Some(*a), None),
+        | TapeOp::Atanh(a) => (Some(*a as usize), None),
         // Conditional / logical TapeOps never reach the HybridTape
         // operand-walk (build_into_summand rejects them). Cmp/And/Or
         // have two operands; Not has one; Select's three can't be
         // expressed in this two-slot shape, so it would be a bug to
         // see it here.
-        TapeOp::Cmp(_, a, b) | TapeOp::And(a, b) | TapeOp::Or(a, b) => (Some(*a), Some(*b)),
-        TapeOp::Not(a) => (Some(*a), None),
+        TapeOp::Cmp(_, a, b) | TapeOp::And(a, b) | TapeOp::Or(a, b) => {
+            (Some(*a as usize), Some(*b as usize))
+        }
+        TapeOp::Not(a) => (Some(*a as usize), None),
         TapeOp::Select(_, _, _) => unreachable!(
             "op_operands: TapeOp::Select has three operands and is unsupported on \
              the HybridTape path"
@@ -3778,7 +3963,7 @@ fn vars_in(ops: &[TapeOp], reach: &[usize]) -> Vec<usize> {
     let mut s: BTreeSet<usize> = BTreeSet::new();
     for &i in reach {
         if let TapeOp::Var(j) = &ops[i] {
-            s.insert(*j);
+            s.insert(*j as usize);
         }
     }
     s.into_iter().collect()
@@ -3790,34 +3975,34 @@ fn vars_in(ops: &[TapeOp], reach: &[usize]) -> Vec<usize> {
 fn fwd_step(op: &TapeOp, x: &[f64], vals: &[f64]) -> f64 {
     match op {
         TapeOp::Const(c) => *c,
-        TapeOp::Var(i) => x[*i],
-        TapeOp::Add(a, b) => vals[*a] + vals[*b],
-        TapeOp::Sub(a, b) => vals[*a] - vals[*b],
-        TapeOp::Mul(a, b) => vals[*a] * vals[*b],
-        TapeOp::Div(a, b) => vals[*a] / vals[*b],
-        TapeOp::Pow(a, b) => vals[*a].powf(vals[*b]),
-        TapeOp::Neg(a) => -vals[*a],
-        TapeOp::Abs(a) => vals[*a].abs(),
-        TapeOp::Sqrt(a) => vals[*a].sqrt(),
-        TapeOp::Exp(a) => vals[*a].exp(),
-        TapeOp::Log(a) => vals[*a].ln(),
-        TapeOp::Log10(a) => vals[*a].log10(),
-        TapeOp::Sin(a) => vals[*a].sin(),
-        TapeOp::Cos(a) => vals[*a].cos(),
-        TapeOp::Tan(a) => vals[*a].tan(),
-        TapeOp::Atan(a) => vals[*a].atan(),
-        TapeOp::Acos(a) => vals[*a].acos(),
-        TapeOp::Sinh(a) => vals[*a].sinh(),
-        TapeOp::Cosh(a) => vals[*a].cosh(),
-        TapeOp::Tanh(a) => vals[*a].tanh(),
-        TapeOp::Asin(a) => vals[*a].asin(),
-        TapeOp::Acosh(a) => vals[*a].acosh(),
-        TapeOp::Asinh(a) => vals[*a].asinh(),
-        TapeOp::Atanh(a) => atanh(vals[*a]),
-        TapeOp::Erf(a) => erf(vals[*a]),
-        TapeOp::XLogX(a) => xlogx(vals[*a]),
-        TapeOp::CEntropy(a, b) => centropy(vals[*a], vals[*b]),
-        TapeOp::Atan2(a, b) => vals[*a].atan2(vals[*b]),
+        TapeOp::Var(i) => x[*i as usize],
+        TapeOp::Add(a, b) => vals[*a as usize] + vals[*b as usize],
+        TapeOp::Sub(a, b) => vals[*a as usize] - vals[*b as usize],
+        TapeOp::Mul(a, b) => vals[*a as usize] * vals[*b as usize],
+        TapeOp::Div(a, b) => vals[*a as usize] / vals[*b as usize],
+        TapeOp::Pow(a, b) => vals[*a as usize].powf(vals[*b as usize]),
+        TapeOp::Neg(a) => -vals[*a as usize],
+        TapeOp::Abs(a) => vals[*a as usize].abs(),
+        TapeOp::Sqrt(a) => vals[*a as usize].sqrt(),
+        TapeOp::Exp(a) => vals[*a as usize].exp(),
+        TapeOp::Log(a) => vals[*a as usize].ln(),
+        TapeOp::Log10(a) => vals[*a as usize].log10(),
+        TapeOp::Sin(a) => vals[*a as usize].sin(),
+        TapeOp::Cos(a) => vals[*a as usize].cos(),
+        TapeOp::Tan(a) => vals[*a as usize].tan(),
+        TapeOp::Atan(a) => vals[*a as usize].atan(),
+        TapeOp::Acos(a) => vals[*a as usize].acos(),
+        TapeOp::Sinh(a) => vals[*a as usize].sinh(),
+        TapeOp::Cosh(a) => vals[*a as usize].cosh(),
+        TapeOp::Tanh(a) => vals[*a as usize].tanh(),
+        TapeOp::Asin(a) => vals[*a as usize].asin(),
+        TapeOp::Acosh(a) => vals[*a as usize].acosh(),
+        TapeOp::Asinh(a) => vals[*a as usize].asinh(),
+        TapeOp::Atanh(a) => atanh(vals[*a as usize]),
+        TapeOp::Erf(a) => erf(vals[*a as usize]),
+        TapeOp::XLogX(a) => xlogx(vals[*a as usize]),
+        TapeOp::CEntropy(a, b) => centropy(vals[*a as usize], vals[*b as usize]),
+        TapeOp::Atan2(a, b) => vals[*a as usize].atan2(vals[*b as usize]),
         TapeOp::Cmp(_, _, _)
         | TapeOp::And(_, _)
         | TapeOp::Or(_, _)
@@ -3845,114 +4030,114 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
     match op {
         TapeOp::Const(_) => {}
         TapeOp::Var(j) => {
-            grad[*j] += a;
+            grad[*j as usize] += a;
         }
         TapeOp::Add(l, r) => {
-            adj[*l] += a;
-            adj[*r] += a;
+            adj[*l as usize] += a;
+            adj[*r as usize] += a;
         }
         TapeOp::Sub(l, r) => {
-            adj[*l] += a;
-            adj[*r] -= a;
+            adj[*l as usize] += a;
+            adj[*r as usize] -= a;
         }
         TapeOp::Mul(l, r) => {
-            adj[*l] += a * vals[*r];
-            adj[*r] += a * vals[*l];
+            adj[*l as usize] += a * vals[*r as usize];
+            adj[*r as usize] += a * vals[*l as usize];
         }
         TapeOp::Div(l, r) => {
             // Kahan form -- see the identical arm in the reverse sweep above.
-            let rv = vals[*r];
-            adj[*l] += a / rv;
-            adj[*r] -= a * vals[i] / rv;
+            let rv = vals[*r as usize];
+            adj[*l as usize] += a / rv;
+            adj[*r as usize] -= a * vals[i] / rv;
         }
         TapeOp::Pow(l, r) => {
-            let lv = vals[*l];
-            let rv = vals[*r];
+            let lv = vals[*l as usize];
+            let rv = vals[*r as usize];
             if rv != 0.0 {
-                adj[*l] += a * rv * lv.powf(rv - 1.0);
+                adj[*l as usize] += a * rv * lv.powf(rv - 1.0);
             }
             if lv > 0.0 {
-                adj[*r] += a * vals[i] * lv.ln();
+                adj[*r as usize] += a * vals[i] * lv.ln();
             }
         }
         TapeOp::Neg(j) => {
-            adj[*j] -= a;
+            adj[*j as usize] -= a;
         }
         TapeOp::Abs(j) => {
-            if vals[*j] >= 0.0 {
-                adj[*j] += a;
+            if vals[*j as usize] >= 0.0 {
+                adj[*j as usize] += a;
             } else {
-                adj[*j] -= a;
+                adj[*j as usize] -= a;
             }
         }
         TapeOp::Sqrt(j) => {
             let sv = vals[i];
             if sv > 0.0 {
-                adj[*j] += a * 0.5 / sv;
+                adj[*j as usize] += a * 0.5 / sv;
             }
         }
         TapeOp::Exp(j) => {
-            adj[*j] += a * vals[i];
+            adj[*j as usize] += a * vals[i];
         }
         TapeOp::Log(j) => {
-            adj[*j] += a / vals[*j];
+            adj[*j as usize] += a / vals[*j as usize];
         }
         TapeOp::Log10(j) => {
-            adj[*j] += div_u_ln10(a, vals[*j]);
+            adj[*j as usize] += div_u_ln10(a, vals[*j as usize]);
         }
         TapeOp::Sin(j) => {
-            adj[*j] += a * vals[*j].cos();
+            adj[*j as usize] += a * vals[*j as usize].cos();
         }
         TapeOp::Cos(j) => {
-            adj[*j] -= a * vals[*j].sin();
+            adj[*j as usize] -= a * vals[*j as usize].sin();
         }
         TapeOp::Tan(j) => {
             let t = vals[i];
-            adj[*j] += a * (1.0 + t * t);
+            adj[*j as usize] += a * (1.0 + t * t);
         }
         TapeOp::Atan(j) => {
-            adj[*j] += a * atan_d1(vals[*j]);
+            adj[*j as usize] += a * atan_d1(vals[*j as usize]);
         }
         TapeOp::Acos(j) => {
-            adj[*j] += a * acos_d1(vals[*j]);
+            adj[*j as usize] += a * acos_d1(vals[*j as usize]);
         }
         TapeOp::Sinh(j) => {
-            adj[*j] += a * vals[*j].cosh();
+            adj[*j as usize] += a * vals[*j as usize].cosh();
         }
         TapeOp::Cosh(j) => {
-            adj[*j] += a * vals[*j].sinh();
+            adj[*j as usize] += a * vals[*j as usize].sinh();
         }
         TapeOp::Tanh(j) => {
-            adj[*j] += a * tanh_d1(vals[*j]);
+            adj[*j as usize] += a * tanh_d1(vals[*j as usize]);
         }
         TapeOp::Asin(j) => {
-            adj[*j] += a * asin_d1(vals[*j]);
+            adj[*j as usize] += a * asin_d1(vals[*j as usize]);
         }
         TapeOp::Acosh(j) => {
-            adj[*j] += a * acosh_d1(vals[*j]);
+            adj[*j as usize] += a * acosh_d1(vals[*j as usize]);
         }
         TapeOp::Asinh(j) => {
-            adj[*j] += a * asinh_d1(vals[*j]);
+            adj[*j as usize] += a * asinh_d1(vals[*j as usize]);
         }
         TapeOp::Atanh(j) => {
-            adj[*j] += a * atanh_d1(vals[*j]);
+            adj[*j as usize] += a * atanh_d1(vals[*j as usize]);
         }
         TapeOp::Erf(j) => {
-            adj[*j] += a * erf_d1(vals[*j]);
+            adj[*j as usize] += a * erf_d1(vals[*j as usize]);
         }
         TapeOp::XLogX(j) => {
-            adj[*j] += a * xlogx_d1(vals[*j]);
+            adj[*j as usize] += a * xlogx_d1(vals[*j as usize]);
         }
         TapeOp::CEntropy(l, r) => {
-            adj[*l] += a * centropy_da(vals[*l], vals[*r]);
-            adj[*r] += a * centropy_db(vals[*l], vals[*r]);
+            adj[*l as usize] += a * centropy_da(vals[*l as usize], vals[*r as usize]);
+            adj[*r as usize] += a * centropy_db(vals[*l as usize], vals[*r as usize]);
         }
         TapeOp::Atan2(l, r) => {
-            let y = vals[*l];
-            let x = vals[*r];
+            let y = vals[*l as usize];
+            let x = vals[*r as usize];
             let (fa, fb) = atan2_d1(y, x);
-            adj[*l] += a * fa;
-            adj[*r] += a * fb;
+            adj[*l as usize] += a * fa;
+            adj[*r as usize] += a * fb;
         }
         TapeOp::Cmp(_, _, _)
         | TapeOp::And(_, _)
@@ -3996,20 +4181,22 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
 fn fwd_dir_step(op: &TapeOp, seed: &[f64], vals: &[f64], dot: &[f64], i: usize) -> f64 {
     match op {
         TapeOp::Const(_) => 0.0,
-        TapeOp::Var(k) => seed[*k],
-        TapeOp::Add(a, b) => dot[*a] + dot[*b],
-        TapeOp::Sub(a, b) => dot[*a] - dot[*b],
-        TapeOp::Mul(a, b) => dot[*a] * vals[*b] + vals[*a] * dot[*b],
+        TapeOp::Var(k) => seed[*k as usize],
+        TapeOp::Add(a, b) => dot[*a as usize] + dot[*b as usize],
+        TapeOp::Sub(a, b) => dot[*a as usize] - dot[*b as usize],
+        TapeOp::Mul(a, b) => {
+            dot[*a as usize] * vals[*b as usize] + vals[*a as usize] * dot[*b as usize]
+        }
         TapeOp::Div(a, b) => {
             // Kahan form -- see the identical arm in `forward_tangent` for why the
             // squared denominator loses representable tangents at extreme |b|.
-            (dot[*a] - vals[i] * dot[*b]) / vals[*b]
+            (dot[*a as usize] - vals[i] * dot[*b as usize]) / vals[*b as usize]
         }
         TapeOp::Pow(a, b) => {
-            let u = vals[*a];
-            let r = vals[*b];
-            let du = dot[*a];
-            let dr = dot[*b];
+            let u = vals[*a as usize];
+            let r = vals[*b as usize];
+            let du = dot[*a as usize];
+            let dr = dot[*b as usize];
             let mut result = 0.0;
             // Match the reverse-mode gradient's guard (`rv != 0.0` only): at base
             // u == 0 the slope is still well defined for r >= 1 (and a genuine
@@ -4023,46 +4210,51 @@ fn fwd_dir_step(op: &TapeOp, seed: &[f64], vals: &[f64], dot: &[f64], i: usize) 
             }
             result
         }
-        TapeOp::Neg(a) => -dot[*a],
+        TapeOp::Neg(a) => -dot[*a as usize],
         TapeOp::Abs(a) => {
-            if vals[*a] >= 0.0 {
-                dot[*a]
+            if vals[*a as usize] >= 0.0 {
+                dot[*a as usize]
             } else {
-                -dot[*a]
+                -dot[*a as usize]
             }
         }
         TapeOp::Sqrt(a) => {
             let sv = vals[i];
-            if sv > 0.0 { dot[*a] * 0.5 / sv } else { 0.0 }
+            if sv > 0.0 {
+                dot[*a as usize] * 0.5 / sv
+            } else {
+                0.0
+            }
         }
-        TapeOp::Exp(a) => vals[i] * dot[*a],
-        TapeOp::Log(a) => dot[*a] / vals[*a],
-        TapeOp::Log10(a) => div_u_ln10(dot[*a], vals[*a]),
-        TapeOp::Sin(a) => vals[*a].cos() * dot[*a],
-        TapeOp::Cos(a) => -vals[*a].sin() * dot[*a],
+        TapeOp::Exp(a) => vals[i] * dot[*a as usize],
+        TapeOp::Log(a) => dot[*a as usize] / vals[*a as usize],
+        TapeOp::Log10(a) => div_u_ln10(dot[*a as usize], vals[*a as usize]),
+        TapeOp::Sin(a) => vals[*a as usize].cos() * dot[*a as usize],
+        TapeOp::Cos(a) => -vals[*a as usize].sin() * dot[*a as usize],
         TapeOp::Tan(a) => {
             let t = vals[i];
-            (1.0 + t * t) * dot[*a]
+            (1.0 + t * t) * dot[*a as usize]
         }
-        TapeOp::Atan(a) => dot[*a] * atan_d1(vals[*a]),
-        TapeOp::Acos(a) => dot[*a] * acos_d1(vals[*a]),
-        TapeOp::Sinh(a) => dot[*a] * vals[*a].cosh(),
-        TapeOp::Cosh(a) => dot[*a] * vals[*a].sinh(),
-        TapeOp::Tanh(a) => dot[*a] * tanh_d1(vals[*a]),
-        TapeOp::Asin(a) => dot[*a] * asin_d1(vals[*a]),
-        TapeOp::Acosh(a) => dot[*a] * acosh_d1(vals[*a]),
-        TapeOp::Asinh(a) => dot[*a] * asinh_d1(vals[*a]),
-        TapeOp::Atanh(a) => dot[*a] * atanh_d1(vals[*a]),
-        TapeOp::Erf(a) => erf_d1(vals[*a]) * dot[*a],
-        TapeOp::XLogX(a) => xlogx_d1(vals[*a]) * dot[*a],
+        TapeOp::Atan(a) => dot[*a as usize] * atan_d1(vals[*a as usize]),
+        TapeOp::Acos(a) => dot[*a as usize] * acos_d1(vals[*a as usize]),
+        TapeOp::Sinh(a) => dot[*a as usize] * vals[*a as usize].cosh(),
+        TapeOp::Cosh(a) => dot[*a as usize] * vals[*a as usize].sinh(),
+        TapeOp::Tanh(a) => dot[*a as usize] * tanh_d1(vals[*a as usize]),
+        TapeOp::Asin(a) => dot[*a as usize] * asin_d1(vals[*a as usize]),
+        TapeOp::Acosh(a) => dot[*a as usize] * acosh_d1(vals[*a as usize]),
+        TapeOp::Asinh(a) => dot[*a as usize] * asinh_d1(vals[*a as usize]),
+        TapeOp::Atanh(a) => dot[*a as usize] * atanh_d1(vals[*a as usize]),
+        TapeOp::Erf(a) => erf_d1(vals[*a as usize]) * dot[*a as usize],
+        TapeOp::XLogX(a) => xlogx_d1(vals[*a as usize]) * dot[*a as usize],
         TapeOp::CEntropy(a, b) => {
-            centropy_da(vals[*a], vals[*b]) * dot[*a] + centropy_db(vals[*a], vals[*b]) * dot[*b]
+            centropy_da(vals[*a as usize], vals[*b as usize]) * dot[*a as usize]
+                + centropy_db(vals[*a as usize], vals[*b as usize]) * dot[*b as usize]
         }
         TapeOp::Atan2(a, b) => {
-            let y = vals[*a];
-            let x = vals[*b];
+            let y = vals[*a as usize];
+            let x = vals[*b as usize];
             let (fa, fb) = atan2_d1(y, x);
-            fa * dot[*a] + fb * dot[*b]
+            fa * dot[*a as usize] + fb * dot[*b as usize]
         }
         TapeOp::Cmp(_, _, _)
         | TapeOp::And(_, _)
@@ -4122,227 +4314,227 @@ fn ror_dir_step(
         TapeOp::Const(_) => {}
         TapeOp::Var(k) => {
             if wd != 0.0 {
-                out[*k] += weight * wd;
+                out[*k as usize] += weight * wd;
             }
         }
         TapeOp::Add(a, b) => {
-            adj[*a] += w;
-            adj[*b] += w;
-            adj_dot[*a] += wd;
-            adj_dot[*b] += wd;
+            adj[*a as usize] += w;
+            adj[*b as usize] += w;
+            adj_dot[*a as usize] += wd;
+            adj_dot[*b as usize] += wd;
         }
         TapeOp::Sub(a, b) => {
-            adj[*a] += w;
-            adj[*b] -= w;
-            adj_dot[*a] += wd;
-            adj_dot[*b] -= wd;
+            adj[*a as usize] += w;
+            adj[*b as usize] -= w;
+            adj_dot[*a as usize] += wd;
+            adj_dot[*b as usize] -= wd;
         }
         TapeOp::Mul(a, b) => {
-            adj[*a] += w * vals[*b];
-            adj[*b] += w * vals[*a];
-            adj_dot[*a] += wd * vals[*b] + w * dot[*b];
-            adj_dot[*b] += wd * vals[*a] + w * dot[*a];
+            adj[*a as usize] += w * vals[*b as usize];
+            adj[*b as usize] += w * vals[*a as usize];
+            adj_dot[*a as usize] += wd * vals[*b as usize] + w * dot[*b as usize];
+            adj_dot[*b as usize] += wd * vals[*a as usize] + w * dot[*a as usize];
         }
         TapeOp::Div(a, b) => {
             // Kahan form -- see the identical arm in the dense
             // reverse-over-forward sweep for the derivation.
-            let vb = vals[*b];
+            let vb = vals[*b as usize];
             let q = vals[i];
             let qd = dot[i];
-            adj[*a] += w / vb;
-            adj_dot[*a] += wd / vb - w * (dot[*b] / vb) / vb;
-            adj[*b] -= w * q / vb;
-            adj_dot[*b] += -(wd * q) / vb + (w / vb) * (-qd + q * (dot[*b] / vb));
+            adj[*a as usize] += w / vb;
+            adj_dot[*a as usize] += wd / vb - w * (dot[*b as usize] / vb) / vb;
+            adj[*b as usize] -= w * q / vb;
+            adj_dot[*b as usize] += -(wd * q) / vb + (w / vb) * (-qd + q * (dot[*b as usize] / vb));
         }
         TapeOp::Pow(a, b) => {
-            let u = vals[*a];
-            let r = vals[*b];
-            let du = dot[*a];
-            let dr = dot[*b];
+            let u = vals[*a as usize];
+            let r = vals[*b as usize];
+            let du = dot[*a as usize];
+            let dr = dot[*b as usize];
             if r != 0.0 {
                 if u != 0.0 {
                     let p_a = r * u.powf(r - 1.0);
-                    adj[*a] += w * p_a;
+                    adj[*a as usize] += w * p_a;
                     let mut dp_a = dr * u.powf(r - 1.0);
                     if u > 0.0 {
                         dp_a += r * u.powf(r - 1.0) * ((r - 1.0) * du / u + dr * u.ln());
                     } else {
                         dp_a += r * (r - 1.0) * u.powf(r - 2.0) * du;
                     }
-                    adj_dot[*a] += wd * p_a + w * dp_a;
+                    adj_dot[*a as usize] += wd * p_a + w * dp_a;
                 } else if r >= 2.0 {
                     let p_a = 0.0;
-                    adj[*a] += w * p_a;
+                    adj[*a as usize] += w * p_a;
                     let dp_a = if r == 2.0 {
                         2.0 * du
                     } else {
                         r * (r - 1.0) * (0.0_f64).powf(r - 2.0) * du
                     };
-                    adj_dot[*a] += wd * p_a + w * dp_a;
+                    adj_dot[*a as usize] += wd * p_a + w * dp_a;
                 }
             }
             if u > 0.0 {
                 let ln_u = u.ln();
                 let p_b = vals[i] * ln_u;
-                adj[*b] += w * p_b;
+                adj[*b as usize] += w * p_b;
                 let dur = vals[i] * (r * du / u + dr * ln_u);
                 let dp_b = dur * ln_u + vals[i] * du / u;
-                adj_dot[*b] += wd * p_b + w * dp_b;
+                adj_dot[*b as usize] += wd * p_b + w * dp_b;
             }
         }
         TapeOp::Neg(a) => {
-            adj[*a] -= w;
-            adj_dot[*a] -= wd;
+            adj[*a as usize] -= w;
+            adj_dot[*a as usize] -= wd;
         }
         TapeOp::Abs(a) => {
-            let s = if vals[*a] >= 0.0 { 1.0 } else { -1.0 };
-            adj[*a] += w * s;
-            adj_dot[*a] += wd * s;
+            let s = if vals[*a as usize] >= 0.0 { 1.0 } else { -1.0 };
+            adj[*a as usize] += w * s;
+            adj_dot[*a as usize] += wd * s;
         }
         TapeOp::Sqrt(a) => {
             let sv = vals[i];
             if sv > 0.0 {
                 let fp = 0.5 / sv;
-                let fpp = sqrt_d2(vals[*a], sv);
-                adj[*a] += w * fp;
-                adj_dot[*a] += wd * fp + w * fpp * dot[*a];
+                let fpp = sqrt_d2(vals[*a as usize], sv);
+                adj[*a as usize] += w * fp;
+                adj_dot[*a as usize] += wd * fp + w * fpp * dot[*a as usize];
             }
         }
         TapeOp::Exp(a) => {
             let ev = vals[i];
-            adj[*a] += w * ev;
-            adj_dot[*a] += wd * ev + w * ev * dot[*a];
+            adj[*a as usize] += w * ev;
+            adj_dot[*a as usize] += wd * ev + w * ev * dot[*a as usize];
         }
         TapeOp::Log(a) => {
-            let u = vals[*a];
-            adj[*a] += w / u;
-            adj_dot[*a] += wd / u + w * log_d2(u) * dot[*a];
+            let u = vals[*a as usize];
+            adj[*a as usize] += w / u;
+            adj_dot[*a as usize] += wd / u + w * log_d2(u) * dot[*a as usize];
         }
         TapeOp::Log10(a) => {
-            let u = vals[*a];
-            adj[*a] += div_u_ln10(w, u);
-            adj_dot[*a] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a];
+            let u = vals[*a as usize];
+            adj[*a as usize] += div_u_ln10(w, u);
+            adj_dot[*a as usize] += div_u_ln10(wd, u) + w * log10_d2(u) * dot[*a as usize];
         }
         TapeOp::Sin(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let cu = u.cos();
-            adj[*a] += w * cu;
-            adj_dot[*a] += wd * cu + w * (-u.sin()) * dot[*a];
+            adj[*a as usize] += w * cu;
+            adj_dot[*a as usize] += wd * cu + w * (-u.sin()) * dot[*a as usize];
         }
         TapeOp::Cos(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let su = u.sin();
-            adj[*a] -= w * su;
-            adj_dot[*a] += wd * (-su) + w * (-u.cos()) * dot[*a];
+            adj[*a as usize] -= w * su;
+            adj_dot[*a as usize] += wd * (-su) + w * (-u.cos()) * dot[*a as usize];
         }
         TapeOp::Tan(a) => {
             let t = vals[i];
             let gp = 1.0 + t * t;
             let gpp = 2.0 * t * gp;
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Atan(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = atan_d1(u);
             let gpp = atan_d2(u);
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Acos(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = acos_d1(u);
             let gpp = acos_d2(u);
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Sinh(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = u.cosh();
             let gpp = vals[i]; // sinh(u)
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Cosh(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = u.sinh();
             let gpp = vals[i]; // cosh(u)
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Tanh(a) => {
             let t = vals[i];
-            let gp = tanh_d1(vals[*a]);
+            let gp = tanh_d1(vals[*a as usize]);
             let gpp = -2.0 * t * gp;
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Asin(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = asin_d1(u);
             let gpp = asin_d2(u);
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Acosh(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = acosh_d1(u);
             let gpp = acosh_d2(u);
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Asinh(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = asinh_d1(u);
             let gpp = asinh_d2(u);
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Atanh(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = atanh_d1(u);
             let gpp = atanh_d2(u);
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::Erf(a) => {
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = erf_d1(u);
             let gpp = erf_d2(u);
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::XLogX(a) => {
             // See the identical arm in `hessian_accumulate`: gpp is 1/u, never
             // the unrepresentable -1/u² of `ln''`.
-            let u = vals[*a];
+            let u = vals[*a as usize];
             let gp = xlogx_d1(u);
             let gpp = xlogx_d2(u);
-            adj[*a] += w * gp;
-            adj_dot[*a] += wd * gp + w * gpp * dot[*a];
+            adj[*a as usize] += w * gp;
+            adj_dot[*a as usize] += wd * gp + w * gpp * dot[*a as usize];
         }
         TapeOp::CEntropy(a, b) => {
-            let ua = vals[*a];
-            let ub = vals[*b];
+            let ua = vals[*a as usize];
+            let ub = vals[*b as usize];
             let fa = centropy_da(ua, ub);
             let fb = centropy_db(ua, ub);
             let faa = centropy_daa(ua);
             let fab = centropy_dab(ub);
             let fbb = centropy_dbb(ua, ub);
-            adj[*a] += w * fa;
-            adj[*b] += w * fb;
-            adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
-            adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+            adj[*a as usize] += w * fa;
+            adj[*b as usize] += w * fb;
+            adj_dot[*a as usize] += wd * fa + w * (faa * dot[*a as usize] + fab * dot[*b as usize]);
+            adj_dot[*b as usize] += wd * fb + w * (fab * dot[*a as usize] + fbb * dot[*b as usize]);
         }
         TapeOp::Atan2(a, b) => {
-            let y = vals[*a];
-            let x = vals[*b];
+            let y = vals[*a as usize];
+            let x = vals[*b as usize];
             let (fa, fb) = atan2_d1(y, x);
             let (faa, fab, fbb) = atan2_d2(y, x);
-            adj[*a] += w * fa;
-            adj[*b] += w * fb;
-            adj_dot[*a] += wd * fa + w * (faa * dot[*a] + fab * dot[*b]);
-            adj_dot[*b] += wd * fb + w * (fab * dot[*a] + fbb * dot[*b]);
+            adj[*a as usize] += w * fa;
+            adj[*b as usize] += w * fb;
+            adj_dot[*a as usize] += wd * fa + w * (faa * dot[*a as usize] + fab * dot[*b as usize]);
+            adj_dot[*b as usize] += wd * fb + w * (fab * dot[*a as usize] + fbb * dot[*b as usize]);
         }
         TapeOp::Cmp(_, _, _)
         | TapeOp::And(_, _)
@@ -4419,25 +4611,34 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
             TapeOp::Const(_) => BTreeSet::new(),
             TapeOp::Var(j) => {
                 let mut s = BTreeSet::new();
-                s.insert(*j);
+                s.insert(*j as usize);
                 s
             }
-            TapeOp::Add(a, b) | TapeOp::Sub(a, b) => {
-                var_sets[*a].union(&var_sets[*b]).copied().collect()
-            }
-            TapeOp::Neg(a) | TapeOp::Abs(a) => var_sets[*a].clone(),
+            TapeOp::Add(a, b) | TapeOp::Sub(a, b) => var_sets[*a as usize]
+                .union(&var_sets[*b as usize])
+                .copied()
+                .collect(),
+            TapeOp::Neg(a) | TapeOp::Abs(a) => var_sets[*a as usize].clone(),
             TapeOp::Mul(a, b) => {
-                emit_cross(&var_sets[*a], &var_sets[*b], &mut pairs);
-                var_sets[*a].union(&var_sets[*b]).copied().collect()
+                emit_cross(&var_sets[*a as usize], &var_sets[*b as usize], &mut pairs);
+                var_sets[*a as usize]
+                    .union(&var_sets[*b as usize])
+                    .copied()
+                    .collect()
             }
             TapeOp::Div(a, b) => {
-                emit_cross(&var_sets[*a], &var_sets[*b], &mut pairs);
-                emit_self(&var_sets[*b], &mut pairs);
-                var_sets[*a].union(&var_sets[*b]).copied().collect()
+                emit_cross(&var_sets[*a as usize], &var_sets[*b as usize], &mut pairs);
+                emit_self(&var_sets[*b as usize], &mut pairs);
+                var_sets[*a as usize]
+                    .union(&var_sets[*b as usize])
+                    .copied()
+                    .collect()
             }
             TapeOp::Pow(a, b) | TapeOp::Atan2(a, b) | TapeOp::CEntropy(a, b) => {
-                let combined: BTreeSet<usize> =
-                    var_sets[*a].union(&var_sets[*b]).copied().collect();
+                let combined: BTreeSet<usize> = var_sets[*a as usize]
+                    .union(&var_sets[*b as usize])
+                    .copied()
+                    .collect();
                 emit_self(&combined, &mut pairs);
                 combined
             }
@@ -4459,8 +4660,8 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
             | TapeOp::Erf(a)
             | TapeOp::XLogX(a)
             | TapeOp::Atanh(a) => {
-                emit_self(&var_sets[*a], &mut pairs);
-                var_sets[*a].clone()
+                emit_self(&var_sets[*a as usize], &mut pairs);
+                var_sets[*a as usize].clone()
             }
             TapeOp::Funcall(fc) => {
                 let args = &fc.args;
@@ -4483,12 +4684,18 @@ fn hessian_sparsity_impl(ops: &[TapeOp]) -> BTreeSet<(usize, usize)> {
             TapeOp::Select(_, t, e) => {
                 // Either branch may be active; the structural superset is the
                 // union of both branches' variable sets.
-                var_sets[*t].union(&var_sets[*e]).copied().collect()
+                var_sets[*t as usize]
+                    .union(&var_sets[*e as usize])
+                    .copied()
+                    .collect()
             }
             TapeOp::Min(a, b) | TapeOp::Max(a, b) => {
                 // min/max are piecewise linear: zero second derivative (no
                 // pairs); dependence set is the union of both operands.
-                var_sets[*a].union(&var_sets[*b]).copied().collect()
+                var_sets[*a as usize]
+                    .union(&var_sets[*b as usize])
+                    .copied()
+                    .collect()
             }
         };
         var_sets.push(vset);
@@ -4563,7 +4770,7 @@ mod tests {
             .iter()
             .filter(|op| {
                 matches!(op, TapeOp::Add(a, b) if {
-                    matches!(t.ops[*a], TapeOp::Var(0)) && matches!(t.ops[*b], TapeOp::Var(1))
+                    matches!(t.ops[*a as usize], TapeOp::Var(0)) && matches!(t.ops[*b as usize], TapeOp::Var(1))
                 })
             })
             .count();
@@ -5880,7 +6087,7 @@ mod tests {
         // Forward tangent seeded on x0: dot[output] = df/dx0.
         let vals = t.forward(&x);
         let mut dot = vec![0.0; n];
-        t.forward_tangent(&vals, 0, &mut dot);
+        t.as_ref().forward_tangent(&vals, 0, &mut dot);
         let fwd_dfx0 = dot[n - 1];
 
         assert!(
