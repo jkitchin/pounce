@@ -4479,14 +4479,11 @@ where
         kkt.update_primal_reg(SEED_REG_FLOOR, &mut kkt_vals);
         kkt.update_eq_reg(SEED_REG_FLOOR, &mut kkt_vals);
     }
-    let fact = Factorization::new(
-        dim as Index,
-        kkt.airn.clone(),
-        kkt.ajcn.clone(),
-        kkt_vals,
-        make_backend(),
-    )
-    .map_err(|_| ())?;
+    // Borrowed, not cloned: a clone moved into `new` lived through the first
+    // numeric factorization, the solve's memory peak (gh#1243).
+    let fact =
+        Factorization::with_pattern(dim as Index, &kkt.airn, &kkt.ajcn, kkt_vals, make_backend())
+            .map_err(|_| ())?;
     Ok((kkt, fact))
 }
 
