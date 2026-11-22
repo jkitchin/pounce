@@ -25,6 +25,24 @@ from . import _sparse as _sp
 from .._result import ResultMixin
 
 
+def _scipy_sol(sol):
+    """Give the internal dense-output callable SciPy's ``OdeSolution`` shapes.
+
+    Internally ``sol(t)`` always returns ``(n, len(t))`` (the event and
+    projection code index it as such). SciPy returns ``(n,)`` for a scalar
+    ``t`` and ``(n, len(t))`` for an array, including a length-1 one; pounce
+    returned ``(n, 1)`` for a scalar too.
+    """
+    if sol is None:
+        return None
+
+    def scipy_sol(t):
+        out = sol(t)
+        return out[:, 0] if np.ndim(t) == 0 else out
+
+    return scipy_sol
+
+
 @dataclass
 class OdeResult(ResultMixin):
     """Result of :func:`solve_ivp`, mirroring SciPy's ``Bunch``.
@@ -194,7 +212,10 @@ def solve_ivp(
         matrix, or ``jac(t, y)`` returning one. Estimated (JAX autodiff, else
         central differences) if omitted. A sparse Jacobian — or a sparse
         ``mass`` — keeps the stage and error systems sparse, factored with
-        SuperLU (``scipy.sparse.linalg.splu``) rather than densified.
+        SuperLU (``scipy.sparse.linalg.splu``) rather than densified. With a
+        sparse ``mass`` and no ``jac``, the estimated Jacobian is converted to
+        sparse too, so a problem whose Jacobian is genuinely dense pays for
+        SuperLU on a full matrix; pass a dense ``mass`` in that case.
     first_step, max_step : float
         Initial / maximum step size.
 
@@ -300,7 +321,7 @@ def solve_ivp(
     return OdeResult(
         t=res["t"],
         y=res["y"],
-        sol=res.get("sol"),
+        sol=_scipy_sol(res.get("sol")),
         nfev=res["nfev"],
         njev=res["njev"],
         nlu=res["nlu"],
@@ -400,7 +421,7 @@ def solve_dae(
     if project_output:
         _project_output_points(res, prob, t0, y0, t_eval)
     return OdeResult(
-        t=res["t"], y=res["y"], sol=res.get("sol"),
+        t=res["t"], y=res["y"], sol=_scipy_sol(res.get("sol")),
         nfev=res["nfev"], njev=res["njev"], nlu=res["nlu"],
         status=res["status"], message=res["message"], success=res["success"],
         nstep=res["nstep"], nrej=res["nrej"],

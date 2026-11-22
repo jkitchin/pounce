@@ -300,14 +300,33 @@ def integrate_dae(Ffun, t0, t1, y0, yp0, *, rtol=1e-3, atol=1e-6,
         h = min(h, abs(t1 - t))
         hs = s * h
         if need_factor or h != h_lu:
-            if prob.sparse:
-                lu3.factor(_sp.sp.kron(eye3, Fyp, format="csc")
-                           + hs * _sp.sp.kron(A3, Fy, format="csc"))
-                lu_real.factor(R.MU_REAL / hs * Fyp + Fy)
-            else:
-                big = np.kron(np.eye(3), Fyp) + hs * np.kron(R.RADAU_A, Fy)
-                R._refactor(lu3, big)
-                R._refactor(lu_real, R.MU_REAL / hs * Fyp + Fy)
+            try:
+                if prob.sparse:
+                    lu3.factor(_sp.sp.kron(eye3, Fyp, format="csc")
+                               + hs * _sp.sp.kron(A3, Fy, format="csc"))
+                    lu_real.factor(R.MU_REAL / hs * Fyp + Fy)
+                else:
+                    big = np.kron(np.eye(3), Fyp) + hs * np.kron(R.RADAU_A, Fy)
+                    R._refactor(lu3, big)
+                    R._refactor(lu_real, R.MU_REAL / hs * Fyp + Fy)
+            except RuntimeError:
+                # A stage-operator factorization failure is a rejected step:
+                # refresh a stale Jacobian, else shrink h, and retry — the same
+                # response as ``_radau.integrate``. The dense LU returns NaN
+                # rather than raising (the Newton finiteness check then rejects
+                # the step), but SuperLU raises on an exactly singular or
+                # non-finite operator, and that must not escape solve_dae.
+                if not jac_current:
+                    F0 = prob.F(t, y, yp)
+                    Fy, Fyp = prob.jacs(t, y, yp, F0); jac_current = True
+                else:
+                    h *= 0.5
+                    rejected = True
+                need_factor = True
+                if h < 1e-13 * max(1.0, abs(t)):
+                    status, message = -1, R._ODE_MESSAGES[-1].format(t=t)
+                    break
+                continue
             prob.nlu += 2
             h_lu = h
             need_factor = False

@@ -342,6 +342,15 @@ changes.
   On a 1500-point method-of-lines heat equation that is 0.03 s against
   2.1 s for the same Jacobian passed dense. A constant (non-callable) `jac`
   no longer receives `args`, matching SciPy.
+- **`res.sol(t)` from `solve_ivp` / `solve_dae` returns `(n,)` for a scalar
+  `t`**, as SciPy's `OdeSolution` does. It returned `(n, 1)`. An array `t`,
+  including a length-1 one, still gives `(n, len(t))`.
+- **`solve_dae` reports a stage-operator factorization failure as a failed
+  solve (`status=-1`) instead of raising.** It now refreshes the Jacobian or
+  shrinks the step and retries, as `solve_ivp` already did. Before the sparse
+  path was added this could not happen, since the dense LU returns NaN rather
+  than raising. SuperLU raises on an exactly singular or non-finite operator,
+  so a sparse Jacobian could otherwise end `solve_dae` with `RuntimeError`.
 - **A JSON report with a non-finite per-iteration value can be read back.**
   `serde_json` writes NaN as `null`, and the `iterations` rows (`d_norm`,
   `alpha_primal`, the residuals, ...) were plain floats, so a report whose

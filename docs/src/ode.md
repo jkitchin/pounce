@@ -81,8 +81,8 @@ y0 = np.sin(np.pi * np.linspace(dx, 1 - dx, n))
 res = po.solve_ivp(lambda t, y: L @ y, (0, 0.1), y0, jac=L)
 ```
 
-Passing `L.toarray()` instead gives the same answer about 70 times slower at
-this size.
+Passing `L.toarray()` instead gives the same answer one to two orders of
+magnitude more slowly at this size.
 
 ## Index-1 DAE via a mass matrix
 

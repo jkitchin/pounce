@@ -196,3 +196,68 @@ def test_top_level_alias():
     assert pounce.solve_ivp is solve_ivp
     r = pounce.solve_ivp(_f_diag, (0, 1), np.ones(5), method="Radau", jac=_A)
     assert r.success
+
+
+# --- review follow-ups on #1230 ----------------------------------------------
+
+@pytest.mark.parametrize("sparse_jac", [False, True])
+def test_solve_dae_factorization_failure_is_a_failed_status(sparse_jac):
+    """An unfactorable stage operator ends the solve with status -1, as in
+    ``solve_ivp``, rather than raising. SuperLU raises on a non-finite or
+    exactly singular operator (the dense LU returns NaN instead), so before
+    ``integrate_dae`` caught it the sparse case escaped as RuntimeError."""
+    F = lambda t, y, yp: np.array([yp[0] + y[0], y[1] - y[0]])
+    conv = sp.csc_matrix if sparse_jac else np.asarray
+
+    def jac(t, y, yp):
+        return conv(np.full((2, 2), np.nan)), conv(np.diag([1.0, 0.0]))
+
+    r = solve_dae(F, (0, 1), np.array([1.0, 1.0]), yp0=np.array([-1.0, -1.0]),
+                  jac=jac, consistent="assume")
+    assert not r.success and r.status == -1
+
+
+def test_solve_dae_singular_sparse_operator_is_a_failed_status():
+    F = lambda t, y, yp: np.array([yp[0] + y[0], y[1] - y[0]])
+    z = sp.csc_matrix((2, 2))
+    r = solve_dae(F, (0, 1), np.array([1.0, 1.0]), yp0=np.array([-1.0, -1.0]),
+                  jac=lambda t, y, yp: (z, z), consistent="assume")
+    assert not r.success and r.status == -1
+
+
+def _scipy_radau():
+    from scipy.integrate import solve_ivp as sivp
+    return sivp
+
+
+@pytest.mark.parametrize("engine", ["ivp", "ivp_mass", "ivp_callable_mass", "dae"])
+def test_sol_shapes_match_scipy(engine):
+    """``res.sol(t)``: ``(n,)`` for a scalar, ``(n, k)`` for an array — the
+    shapes of SciPy's ``OdeSolution``. pounce returned ``(n, 1)`` for a
+    scalar."""
+    f = lambda t, y: -y
+    y0 = np.array([1.0, 2.0])
+    if engine == "ivp":
+        r = solve_ivp(f, (0, 1), y0, dense_output=True)
+    elif engine == "ivp_mass":
+        r = solve_ivp(f, (0, 1), y0, mass=np.eye(2), dense_output=True)
+    elif engine == "ivp_callable_mass":
+        r = solve_ivp(f, (0, 1), y0, mass=lambda t, y: np.eye(2),
+                      dense_output=True)
+    else:
+        r = solve_dae(lambda t, y, yp: yp + y, (0, 1), y0, dense_output=True)
+    ref = _scipy_radau()(f, (0, 1), y0, method="Radau", dense_output=True)
+    for tq in (0.5, np.float64(0.5), np.array(0.5), [0.5], np.array([0.2, 0.5])):
+        assert r.sol(tq).shape == ref.sol(tq).shape, tq
+    np.testing.assert_allclose(r.sol(0.5), np.exp(-0.5) * y0, rtol=1e-3)
+
+
+def test_sol_scalar_shape_with_output_projection():
+    """The projected dense output (singular mass, ``project_output=True``)
+    is wrapped the same way."""
+    f = lambda t, y: np.array([-y[0], y[1] - y[0] ** 2])
+    r = solve_ivp(f, (0, 1), np.array([1.0, 1.0]), mass=np.diag([1.0, 0.0]),
+                  project_output=True, dense_output=True)
+    assert r.sol(0.5).shape == (2,)
+    assert r.sol(0.5)[1] == pytest.approx(r.sol(0.5)[0] ** 2, rel=1e-8)
+    assert r.sol([0.5]).shape == (2, 1)
