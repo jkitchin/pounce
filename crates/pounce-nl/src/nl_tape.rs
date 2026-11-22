@@ -2500,6 +2500,17 @@ pub struct Summand {
     pub all_vars: Vec<usize>,
 }
 
+/// What [`HybridTape::op_counts`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridOpCounts {
+    /// [`HybridTape::flat_op_count`]: the flat per-summand tapes' total.
+    pub flat: usize,
+    /// [`HybridTape::n_prelude_ops`].
+    pub prelude: usize,
+    /// [`HybridTape::total_local_ops`].
+    pub local: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct HybridTape {
     /// Shared CSE bodies. Slot indices in `SummandOp::Shared`
@@ -2611,6 +2622,78 @@ impl HybridTape {
         HybridTape { prelude, summands }
     }
 
+    /// The op counts of the tape [`Self::build_multi`] would build from
+    /// `exprs`, without building it (gh#1235).
+    ///
+    /// Runs the same two passes over the expressions, but holds one summand's
+    /// ops at a time and none of the per-summand reach and variable lists,
+    /// which are most of the tape. A caller that may not keep the tape asks
+    /// this first: one built and then dropped costs, as process RSS, about
+    /// what one kept does.
+    pub fn op_counts(exprs: &[Expr]) -> HybridOpCounts {
+        let mut cse_count: HashMap<*const Expr, usize> = HashMap::new();
+        for e in exprs {
+            let mut seen_in_root: HashSet<*const Expr> = HashSet::new();
+            count_cse_appearances(e, &mut seen_in_root, &mut cse_count);
+        }
+        let mut prelude: Vec<TapeOp> = Vec::new();
+        let mut prelude_map: HashMap<*const Expr, usize> = HashMap::new();
+        let mut local: Vec<SummandOp> = Vec::new();
+        let mut local_cache: HashMap<*const Expr, usize> = HashMap::new();
+        // (local ops, sorted distinct shared refs) per summand. The refs are
+        // resolved to reach sizes only once the prelude is complete.
+        let mut per_summand: Vec<(usize, usize, Vec<usize>)> = Vec::with_capacity(exprs.len());
+        for e in exprs {
+            local.clear();
+            local_cache.clear();
+            build_into_summand(
+                e,
+                &mut local,
+                &mut local_cache,
+                &mut prelude,
+                &mut prelude_map,
+                &cse_count,
+            );
+            let mut refs: Vec<usize> = Vec::new();
+            let mut n_local = 0usize;
+            for op in &local {
+                match op {
+                    SummandOp::Local(_) => n_local += 1,
+                    SummandOp::Shared(k) => refs.push(*k),
+                }
+            }
+            refs.sort_unstable();
+            refs.dedup();
+            per_summand.push((local.len(), n_local, refs));
+        }
+        let mut visited: Vec<u32> = vec![0; prelude.len()];
+        let mut epoch: u32 = 0;
+        let mut stack: Vec<usize> = Vec::new();
+        let mut reach: Vec<usize> = Vec::new();
+        let mut reach_len: HashMap<Vec<usize>, usize> = HashMap::new();
+        let (mut flat, mut local_total) = (0usize, 0usize);
+        for (n_ops, n_local, refs) in per_summand {
+            local_total += n_ops;
+            flat += n_local;
+            if refs.is_empty() {
+                continue;
+            }
+            flat += *reach_len.entry(refs).or_insert_with_key(|refs| {
+                epoch += 1;
+                reach.clear();
+                for &start in refs {
+                    bfs_prelude(&prelude, start, &mut visited, epoch, &mut stack, &mut reach);
+                }
+                reach.len()
+            });
+        }
+        HybridOpCounts {
+            flat,
+            prelude: prelude.len(),
+            local: local_total,
+        }
+    }
+
     pub fn n_prelude_ops(&self) -> usize {
         self.prelude.len()
     }
@@ -2622,6 +2705,30 @@ impl HybridTape {
     }
     pub fn total_local_ops(&self) -> usize {
         self.summands.iter().map(|s| s.ops.len()).sum()
+    }
+
+    /// Total ops the flat per-summand tapes of the same roots hold, read off
+    /// this tape before any of them is built (gh#1235).
+    ///
+    /// `Tape::build` on a root emits each node it reaches once, a `Cse`
+    /// body once per tape. That is exactly a summand's `Local` ops plus the
+    /// prelude ops its `Shared` refs reach — its `prelude_reach` — since a
+    /// promoted body is inlined, nested promoted bodies included, wherever
+    /// the flat tape meets it. The `Shared` placeholders themselves have no
+    /// flat counterpart. `NlTnlp` decides from this whether the hybrid tape
+    /// is worth keeping, and checks it against the flat tapes it then builds.
+    pub fn flat_op_count(&self) -> usize {
+        self.summands
+            .iter()
+            .map(|s| {
+                let local = s
+                    .ops
+                    .iter()
+                    .filter(|op| matches!(op, SummandOp::Local(_)))
+                    .count();
+                local + s.prelude_reach.len()
+            })
+            .sum()
     }
 
     /// Forward sweep over the shared prelude. `prelude_vals` must
@@ -5753,6 +5860,53 @@ mod tests {
         assert!(
             (hybrid - flat).abs() <= 1e-12 * flat.abs().max(1.0),
             "{hybrid} vs {flat}"
+        );
+    }
+
+    /// `HybridTape::op_counts` is what `NlTnlp` decides from before it builds
+    /// either tape (gh#1235), so it has to be the tape's own counts exactly:
+    /// the prelude and local sizes `build_multi` gives, and as the flat side
+    /// the ops of every root's flat `Tape`. Pinned on shapes that each count
+    /// differently — a body shared across roots, one nested inside it (whose
+    /// prelude ops a flat tape repeats once, not twice), a body a single root
+    /// references twice (local, emitted once), and a root sharing nothing.
+    #[test]
+    fn hybrid_op_counts_are_the_tapes_own() {
+        let inner = Expr::Cse(Arc::new(mul(var(0), var(1))));
+        let outer = Expr::Cse(Arc::new(add(
+            Expr::Unary(UnaryOp::Exp, Box::new(inner.clone())),
+            cnst(2.0),
+        )));
+        let private = Expr::Cse(Arc::new(mul(var(2), cnst(3.0))));
+        let roots = vec![
+            mul(outer.clone(), var(3)),
+            add(outer.clone(), inner.clone()),
+            add(mul(private.clone(), private.clone()), inner.clone()),
+            mul(var(4), var(5)),
+        ];
+        roots
+            .iter()
+            .for_each(|r| assert!(hybrid_supported(std::slice::from_ref(r))));
+        let tape = HybridTape::build_multi(&roots);
+        assert!(tape.n_prelude_ops() > 0);
+        let flat: usize = roots.iter().map(|r| Tape::build(r).ops.len()).sum();
+        assert_eq!(tape.flat_op_count(), flat);
+        assert_eq!(
+            HybridTape::op_counts(&roots),
+            HybridOpCounts {
+                flat,
+                prelude: tape.n_prelude_ops(),
+                local: tape.total_local_ops(),
+            }
+        );
+        // Chains, where a body nests the previous one all the way down.
+        let chain = shooting_chain_roots(24, cnst(0.5));
+        let tape = HybridTape::build_multi(&chain);
+        let c = HybridTape::op_counts(&chain);
+        assert_eq!(c.flat, chain.iter().map(|r| Tape::build(r).ops.len()).sum());
+        assert_eq!(
+            (c.prelude, c.local),
+            (tape.n_prelude_ops(), tape.total_local_ops())
         );
     }
 

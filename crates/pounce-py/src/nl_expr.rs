@@ -907,6 +907,11 @@ impl PyNlExpr {}
 /// than the copy it replaces: the body is taped once and its adjoint sums
 /// the contributions from every reference — the same value and the same
 /// derivatives, off a smaller tape.
+///
+/// `build_nl_problem` materializes the whole model at once
+/// ([`materialize_model`]); this one-row form is the per-row tree that
+/// build is held to, so since gh#1235 only the tests call it.
+#[cfg(test)]
 fn materialize(root: &Expr) -> Expr {
     let mut refs: HashMap<*const Expr, usize> = HashMap::new();
     count_refs(root, &mut refs);
@@ -1055,14 +1060,19 @@ fn rebuild(
 /// did; its Hessian sums the λ-weighted contributions before propagating
 /// them through the body, so `eval_h` can differ in the last bits.
 ///
-/// **Sharing is kept only where it pays** ([`sharing_pays`]). The prelude
-/// replaces the flat tapes only above its op-ratio gates; below them it is
-/// built *next to* them, and its per-summand bookkeeping costs more than the
-/// copies it saves. A model whose shared bodies are small — discopt hands
-/// over one `NlExpr` per distinct node, so `exp(p_j)` is one object in
-/// thousands of rows — came out 19% *larger* than with no sharing at all
-/// (gh#1232 review). Such a model is materialized row by row instead, which
-/// is exactly what `build_nl_problem` did before.
+/// **Sharing is kept for every model** (gh#1235). It used to be kept only
+/// where an estimate said the prelude would *replace* the flat tapes,
+/// because below the prelude's op-ratio gates `NlTnlp` built it *next to*
+/// them, and its per-summand bookkeeping outweighed what sharing saved: a
+/// model whose shared bodies are small — discopt hands over one `NlExpr`
+/// per distinct node, so `exp(p_j)` is one object in thousands of rows —
+/// came out 19% larger than unshared (gh#1232 review). `NlTnlp` now keeps
+/// the prelude only when a derivative evaluator reads it, so below the gates
+/// sharing costs nothing and still shrinks the stored rows: gh#1235's
+/// kinetics rows build at 5.2 KiB a row shared against 6.1 unshared — and
+/// 11.4 when the estimate declined to share and an unused prelude was built
+/// anyway. Between the gates the prelude is kept for `eval_h`, next to the
+/// flat tapes, as the measured Hessian gate says it should be.
 fn materialize_model(roots: &[&Expr]) -> Vec<Expr> {
     // Pass 1: which rows keep their per-row tree, and — over the summand
     // leaves of every other row — how often each `Cse` body is referenced
@@ -1080,9 +1090,6 @@ fn materialize_model(roots: &[&Expr]) -> Vec<Expr> {
             });
         }
         keep_tree.push(keep);
-    }
-    if !sharing_pays(roots, &keep_tree, &global) {
-        return roots.iter().map(|root| materialize(root)).collect();
     }
     // Pass 2: rebuild, one `Arc` per shared body for the whole model.
     let mut shared: HashMap<*const Expr, Arc<Expr>> = HashMap::new();
@@ -1102,184 +1109,6 @@ fn materialize_model(roots: &[&Expr]) -> Vec<Expr> {
             }
         })
         .collect()
-}
-
-/// Margin by which the estimate in [`sharing_pays`] must clear the hybrid
-/// tape's gates. The estimate counts expression nodes, not tape ops (a `Pow`
-/// by a small integer becomes multiplies, an n-ary sum `n - 1` adds, and a
-/// row's scaled summands each gain a multiply on both sides), so a model
-/// near the gates is left unshared: unshared is what `build_nl_problem` did
-/// before and costs nothing new, while shared below the gates costs more
-/// than it saves.
-const SHARE_MARGIN: f64 = 1.25;
-
-/// Whether keeping the cross-row sharing of these rows lets the constraint
-/// block's shared-CSE tape replace its flat tapes
-/// ([`pounce_nl::nl_reader::hybrid_replaces_flat_tapes`]), estimated from
-/// the expression DAG before any tape exists.
-///
-/// The flat side is each summand leaf expanded, a body counted once per leaf
-/// (as `Tape::build` emits it once per tape). The shared side is what the
-/// hybrid tape would hold: every body referenced more than once model-wide,
-/// once, plus each leaf's own nodes with one slot per such reference. Rows
-/// the quadratic recognizer takes produce no tape and are left out.
-///
-/// A leaf the hybrid tape cannot take (comparisons, logic, `if`, n-ary
-/// min/max, external calls) means no hybrid tape is built at all, so the
-/// flat tapes are what they would be either way and sharing only shrinks
-/// the stored expressions: that answers `true`.
-fn sharing_pays(roots: &[&Expr], keep_tree: &[bool], global: &HashMap<*const Expr, usize>) -> bool {
-    let mut est = OpEstimate {
-        global,
-        promoted: std::collections::HashSet::new(),
-        flat: 0,
-        shared: 0,
-        hybrid_ok: true,
-    };
-    for (root, &keep) in roots.iter().zip(keep_tree) {
-        if keep {
-            continue;
-        }
-        let mut row = HashMap::new();
-        count_refs(root, &mut row);
-        spine(root, &row, &mut |leaf: &Expr| {
-            let mut seen = std::collections::HashSet::new();
-            est.flat += est.expanded(leaf, &mut seen);
-            est.shared += est.local(leaf);
-            Expr::Const(0.0)
-        });
-    }
-    !est.hybrid_ok
-        || pounce_nl::nl_reader::hybrid_replaces_flat_tapes(
-            est.flat,
-            (est.shared as f64 * SHARE_MARGIN).ceil() as usize,
-        )
-}
-
-/// Running op counts for [`sharing_pays`].
-struct OpEstimate<'a> {
-    /// Model-wide reference counts, as `materialize_model` keeps them: a
-    /// body with two or more is shared, and would sit in the hybrid prelude.
-    global: &'a HashMap<*const Expr, usize>,
-    /// Shared bodies already counted into `shared`.
-    promoted: std::collections::HashSet<*const Expr>,
-    flat: usize,
-    shared: usize,
-    hybrid_ok: bool,
-}
-
-impl OpEstimate<'_> {
-    fn is_shared(&self, body: &Arc<Expr>) -> bool {
-        self.global.get(&Arc::as_ptr(body)).copied().unwrap_or(0) >= 2
-    }
-
-    /// Nodes of `e` other than its `Cse` wrappers, each `Cse` body once.
-    /// Notes any opcode the hybrid tape rejects.
-    fn expanded(&mut self, e: &Expr, seen: &mut std::collections::HashSet<*const Expr>) -> usize {
-        match e {
-            Expr::Const(_) | Expr::Var(_) => 1,
-            Expr::Binary(_, a, b) => 1 + self.expanded(a, seen) + self.expanded(b, seen),
-            Expr::Unary(_, a) => 1 + self.expanded(a, seen),
-            Expr::Sum(args) => {
-                args.len()
-                    .saturating_sub(1)
-                    .max(usize::from(args.is_empty()))
-                    + args.iter().map(|a| self.expanded(a, seen)).sum::<usize>()
-            }
-            Expr::Cse(body) => {
-                if seen.insert(Arc::as_ptr(body)) {
-                    self.expanded(body, seen)
-                } else {
-                    0
-                }
-            }
-            Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
-                self.hybrid_ok = false;
-                1 + self.expanded(a, seen) + self.expanded(b, seen)
-            }
-            Expr::Not(a) => {
-                self.hybrid_ok = false;
-                1 + self.expanded(a, seen)
-            }
-            Expr::Cond { cond, then_, else_ } => {
-                self.hybrid_ok = false;
-                1 + self.expanded(cond, seen)
-                    + self.expanded(then_, seen)
-                    + self.expanded(else_, seen)
-            }
-            Expr::MinList(args) | Expr::MaxList(args) => {
-                self.hybrid_ok = false;
-                args.len() + args.iter().map(|a| self.expanded(a, seen)).sum::<usize>()
-            }
-            Expr::Funcall { args, .. } => {
-                self.hybrid_ok = false;
-                1 + args
-                    .iter()
-                    .map(|a| match a {
-                        FuncallArg::Real(x) => self.expanded(x, seen),
-                        FuncallArg::Str(_) => 0,
-                    })
-                    .sum::<usize>()
-            }
-        }
-    }
-
-    /// A summand's own ops in the hybrid tape: one slot per reference to a
-    /// shared body, whose ops are counted into the prelude the first time.
-    fn local(&mut self, e: &Expr) -> usize {
-        match e {
-            Expr::Cse(body) if self.is_shared(body) => {
-                if self.promoted.insert(Arc::as_ptr(body)) {
-                    let mut seen = std::collections::HashSet::new();
-                    self.shared += self.prelude(body, &mut seen);
-                }
-                1
-            }
-            Expr::Cse(body) => self.local(body),
-            Expr::Const(_) | Expr::Var(_) => 1,
-            Expr::Binary(_, a, b) => 1 + self.local(a) + self.local(b),
-            Expr::Unary(_, a) => 1 + self.local(a),
-            Expr::Sum(args) => {
-                args.len()
-                    .saturating_sub(1)
-                    .max(usize::from(args.is_empty()))
-                    + args.iter().map(|a| self.local(a)).sum::<usize>()
-            }
-            // Only reached when `hybrid_ok` is already false, which decides
-            // the answer by itself.
-            _ => 1,
-        }
-    }
-
-    /// A shared body's ops in the prelude, nested shared bodies once.
-    fn prelude(&mut self, e: &Expr, seen: &mut std::collections::HashSet<*const Expr>) -> usize {
-        match e {
-            Expr::Cse(body) if self.is_shared(body) => {
-                if self.promoted.insert(Arc::as_ptr(body)) {
-                    self.prelude(body, seen)
-                } else {
-                    0
-                }
-            }
-            Expr::Cse(body) => {
-                if seen.insert(Arc::as_ptr(body)) {
-                    self.prelude(body, seen)
-                } else {
-                    0
-                }
-            }
-            Expr::Const(_) | Expr::Var(_) => 1,
-            Expr::Binary(_, a, b) => 1 + self.prelude(a, seen) + self.prelude(b, seen),
-            Expr::Unary(_, a) => 1 + self.prelude(a, seen),
-            Expr::Sum(args) => {
-                args.len()
-                    .saturating_sub(1)
-                    .max(usize::from(args.is_empty()))
-                    + args.iter().map(|a| self.prelude(a, seen)).sum::<usize>()
-            }
-            _ => 1,
-        }
-    }
 }
 
 /// Whether the per-row tree of `root` is one the quadratic recognizer
@@ -1811,12 +1640,15 @@ mod tests {
 
     /// The gh#1232 review's counterexample: discopt hands over one `NlExpr`
     /// per distinct node, so a two-node `exp(p_j)` is one object in thousands
-    /// of rows. Sharing it cannot let the hybrid tape replace the flat tapes —
-    /// the bodies are smaller than a summand's own ops — so keeping it would
-    /// only add the hybrid tape's per-summand bookkeeping (measured: 145.6 MiB
-    /// in 0.17.0, 173.9 MiB shared). The model is materialized row by row.
+    /// of rows. Shared, it cannot let the hybrid tape replace the flat tapes —
+    /// the bodies are smaller than a summand's own ops — and that once built
+    /// the model 19% larger than unshared (145.6 against 173.9 MiB), the
+    /// hybrid tape's per-summand bookkeeping sitting next to the flat tapes.
+    /// Since gh#1235 the sharing is kept and the hybrid tape is not: the rows
+    /// still tape op for op as their per-row trees did, and `NlTnlp` builds
+    /// no prelude for evaluators that would not read it.
     #[test]
-    fn small_bodies_shared_by_many_rows_are_inlined_per_row() {
+    fn small_bodies_shared_by_many_rows_stay_shared_but_build_no_prelude() {
         let rows_n = 400;
         let p: Vec<PyNlExpr> = (0..10)
             .map(|j| unary(UnaryOp::Exp, v(rows_n + j).operand()).unwrap())
@@ -1837,9 +1669,43 @@ mod tests {
         let refs: Vec<&Expr> = roots.iter().collect();
         let built = materialize_model(&refs);
         for (b, r) in built.iter().zip(&roots) {
-            assert_eq!(count_cse(b), 0, "a small shared body was kept as a Cse");
-            assert_eq!(format!("{b:?}"), format!("{:?}", materialize(r)));
+            assert!(count_cse(b) > 0, "row's exp(p_j) not shared");
+            assert_eq!(
+                format!("{:?}", Tape::build(b).ops),
+                format!("{:?}", Tape::build(&materialize(r)).ops),
+                "a row's tape must be op for op what it was"
+            );
         }
+
+        // Assembled both ways: identical values and derivatives, and the
+        // shared build keeps no hybrid tape, since no derivative gate is on.
+        let assemble = |rows: Vec<Expr>| {
+            let (n, m) = (rows_n + 10, rows.len());
+            let parts = NlProblemParts {
+                minimize: true,
+                objective: Expr::Const(0.0),
+                obj_constant: 0.0,
+                constraints: rows,
+                x_l: vec![-1.0; n],
+                x_u: vec![1.0; n],
+                x0: vec![0.3; n],
+                g_l: vec![-1e19; m],
+                g_u: vec![1e19; m],
+                var_names: vec![],
+                con_names: vec![],
+            };
+            NlTnlp::try_new(NlProblem::from_expressions(parts).unwrap()).unwrap()
+        };
+        let per_row: Vec<Expr> = roots.iter().map(materialize).collect();
+        let (mut a, mut b) = (assemble(built), assemble(per_row));
+        let x: Vec<Number> = (0..rows_n + 10)
+            .map(|j| 0.1 + 0.8 * j as Number / (rows_n + 10) as Number)
+            .collect();
+        let (mut ga, mut gb) = (vec![0.0; rows_n], vec![0.0; rows_n]);
+        pounce_nlp::tnlp::TNLP::eval_g(&mut a, &x, true, &mut ga);
+        pounce_nlp::tnlp::TNLP::eval_g(&mut b, &x, true, &mut gb);
+        assert_eq!(ga, gb, "eval_g");
+        assert!(!a.has_shared_cse_tape(), "an unread hybrid tape was kept");
     }
 
     /// A row the quadratic recognizer admits from its per-row tree keeps that
@@ -1852,9 +1718,7 @@ mod tests {
     fn a_row_the_quadratic_recognizer_admits_keeps_its_private_tree() {
         // r = x0 - x1 and w = -(2), both shared by every quadratic row:
         // w r^2 + x_{2+i}, a least-squares shape. Next to them, rows sharing
-        // a deep rate expression, so that the model's sharing pays and is
-        // kept (`sharing_pays`) — otherwise every row would be materialized
-        // on its own and the guard would never be reached.
+        // a deep rate expression, which do share it.
         let r = binary(BinOp::Sub, v(0).operand(), v(1).operand()).unwrap();
         let sq = binary(BinOp::Pow, r.operand(), num(2.0)).unwrap();
         let w = unary(UnaryOp::Neg, num(2.0)).unwrap();

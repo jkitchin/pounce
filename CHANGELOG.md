@@ -9,6 +9,31 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+- **`build_nl_problem` builds kinetics-style rows in less than half the
+  memory, and no longer builds a shared-body tape that nothing reads
+  (gh#1235).** The shared-body constraint tape (pounce#476) was built for
+  any model with a subexpression shared between summands, and was always used
+  for the constraint values, even when its Jacobian and Hessian gates were
+  both off. In that case it served `eval_g` only, more slowly than the
+  per-summand tapes kept beside it, because its sweep is serial and theirs is
+  parallel. It also cost about as much memory as those tapes. Below both
+  gates it is no longer built, and the decision is now made from op counts
+  before either tape exists. Between the gates it is still kept for the
+  Hessian, but the constraint values then use the parallel per-summand walk
+  when it applies. `build_nl_problem` therefore always keeps the sharing
+  between rows, and the estimate that declined it is gone: below the gates
+  sharing no longer costs anything in the tapes. On the issue's implicit-Euler
+  kinetics rows (57 344 rows) the build takes 291 MiB, against 635 MiB in
+  0.18.0 and 618 MiB in 0.17.0. With m rate terms per row it costs 2.2, 3.8,
+  5.3 and 6.9 KiB a row for m = 1–4, against 3.0, 8.2, 11.5 and 14.7. That
+  is about 0.8 KiB for each added summand, down from 1.6–2.6. Constraint,
+  Jacobian and Hessian values and both sparsity patterns are bit-identical to
+  0.18.0 on these models. `.nl` models with a defined variable shared across
+  rows, sitting below both gates, also stop building the tape. Their values
+  are bit-identical too, since the per-summand tapes compute exactly what
+  the shared one did.
+
 ## [0.18.0] - 2026-11-21
 
 ### Added
