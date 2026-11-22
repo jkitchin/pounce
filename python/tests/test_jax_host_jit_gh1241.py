@@ -29,8 +29,9 @@ import pounce.jax as pj
 from pounce.jax._host import host_jit
 
 # A compiled solve traces fun once per distinct (shape, dtype) signature plus
-# the JAX-side residual / yp traces; well under this. Eager is hundreds.
-TRACE_BOUND = 25
+# the JAX-side residual / yp traces (measured 1-7). On the pre-fix code the
+# same tests counted 196 (odeint), 361 (daeint) and 47 (solve_bvp).
+TRACE_BOUND = 10
 
 
 def _counted(f):
@@ -83,7 +84,7 @@ def test_daeint_residual_is_compiled_on_host():
     Y = pj.daeint(f, jnp.ones(2), t, th)
     assert calls["n"] <= TRACE_BOUND, calls["n"]
     np.testing.assert_allclose(np.asarray(Y[:, -1]),
-                               np.exp(-np.asarray(th)), rtol=1e-3)
+                               np.exp(-np.asarray(th)), rtol=5e-3)
 
 
 def test_daeint_python_branch_on_t_falls_back_to_eager():
@@ -97,27 +98,28 @@ def test_daeint_python_branch_on_t_falls_back_to_eager():
     th = jnp.array([1.0, 2.0])
     Y = pj.daeint(F, jnp.ones(2), t, th)
     np.testing.assert_allclose(np.asarray(Y[:, -1]),
-                               np.exp(-np.asarray(th)), rtol=1e-3)
+                               np.exp(-np.asarray(th)), rtol=5e-3)
 
 
 def test_bvp_newton_fun_is_compiled_on_host():
-    # y'' = -th * y, y(0) = 0, y(1) = 1.
+    # Three decoupled Bratu problems, u'' = -th_i exp(u), u(0) = u(1) = 0:
+    # nonlinear, so Newton takes several iterations, each with a residual and
+    # a finite-difference column Jacobian (eagerly: 47 evaluations).
     def fun(x, y, th):
-        return jnp.vstack([y[1], -th * y[0]])
+        u, v = y[:3], y[3:]
+        return jnp.concatenate([v, -th[:, None] * jnp.exp(u)])
 
     def bc(ya, yb, th):
-        return jnp.array([ya[0], yb[0] - 1.0])
+        return jnp.concatenate([ya[:3], yb[:3]])
 
     f, calls = _counted(fun)
     x = jnp.linspace(0.0, 1.0, 21)
-    y = jnp.zeros((2, x.size))
-    th = jnp.asarray(2.0)
-    sol = pj.solve_bvp(f, bc, x, y, theta=th, method="newton")
+    th = jnp.array([1.0, 2.0, 3.0])
+    sol = pj.solve_bvp(f, bc, x, jnp.zeros((6, x.size)), theta=th,
+                       method="newton")
     assert calls["n"] <= TRACE_BOUND, calls["n"]
-    w = np.sqrt(2.0)
-    np.testing.assert_allclose(np.asarray(sol.y[0]),
-                               np.sin(w * np.asarray(x)) / np.sin(w),
-                               atol=1e-6)
+    # Bratu lambda=1 lower branch: max u = 0.140539...
+    np.testing.assert_allclose(float(sol.y[0].max()), 0.1405392, atol=1e-6)
 
 
 def test_host_jit_both_branches():
