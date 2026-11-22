@@ -776,6 +776,11 @@ pub struct NlProblem {
     /// the inlined tree, op for op, without anyone building that tree. Off
     /// for a parsed model, whose `Cse`s are `.nl` defined variables, each
     /// meant as one, and for any model a caller assembles itself.
+    ///
+    /// `build_nl_problem` sets it for the compact copy it stores, in which
+    /// the only hand-offs left are around summand leaves several summands
+    /// share: copied once, each reference holds the copy behind a `Cse` of
+    /// its own, which this split looks through to the plain node it was.
     pub frontend_dag: bool,
 }
 
