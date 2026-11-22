@@ -10,6 +10,19 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **Less per-iteration overhead outside the linear solver on large NLPs
+  (gh#1238).** On a model of ~92k variables, each iteration made several
+  multi-megabyte copies that it did not need. The bound classification was
+  deep-copied at every evaluation, the Jacobian row indices were copied for
+  each Jacobian evaluation, and a full-size Hessian scratch buffer was used
+  even when it was not needed. The convergence check computed its residuals
+  twice, and the KKT right-hand side was copied even with no dump armed.
+  A presolve that made no reductions still paid for rebuilding each
+  iterate. It now forwards evaluations unchanged and skips that rebuild;
+  `presolve=no` was the workaround before. Iterates are meant to be
+  unchanged. One visible difference: under a presolve that changed
+  nothing, the live iterate a callback reads now matches `presolve=no`,
+  including its Lagrangian gradient.
 - **`build_nl_problem` builds kinetics-style rows in a fifth of the memory,
   and every taped model gets smaller tapes (gh#1235).** On the issue's
   implicit-Euler kinetics rows (57 344 rows) the build takes 132 MiB, against
