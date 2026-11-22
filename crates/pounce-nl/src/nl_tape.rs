@@ -600,6 +600,11 @@ impl Tape {
         let mut ops = Vec::new();
         let mut cache: HashMap<*const Expr, usize> = HashMap::new();
         build_recursive(expr, &mut ops, &mut cache, resolver);
+        // A tape is built once and kept for the whole solve, and doubling
+        // growth leaves up to half its buffer unused: on a model of many
+        // ~150-op summands that was 8 KiB a tape holding 4.8 KiB of ops
+        // (gh#1232).
+        ops.shrink_to_fit();
         Tape { ops }
     }
 
@@ -2475,11 +2480,17 @@ pub struct Summand {
     pub local_reach: Vec<usize>,
     /// Prelude slots reachable from the summand's Shared refs,
     /// ascending (topo in prelude's operand DAG).
-    pub prelude_reach: Vec<usize>,
+    ///
+    /// Shared between summands with the same set of `Shared` refs, which
+    /// have the same reach by construction. It is as long as the bodies the
+    /// summand reaches, so one private copy per summand made a body shared
+    /// by `k` rows cost `k` times its size here (gh#1232).
+    pub prelude_reach: Arc<[usize]>,
     /// Variables touched by Var ops inside `local_reach`.
     pub local_vars: Vec<usize>,
-    /// Variables touched by Var ops inside `prelude_reach`.
-    pub prelude_vars: Vec<usize>,
+    /// Variables touched by Var ops inside `prelude_reach`. Shared like
+    /// `prelude_reach`, which determines it.
+    pub prelude_vars: Arc<[usize]>,
     /// `local_vars ∪ prelude_vars`, sorted — every problem variable this
     /// summand can contribute a derivative for. `eval_h` maps it through
     /// the Hessian coloring to decide which colors the summand
@@ -2536,9 +2547,9 @@ impl HybridTape {
                 ops: local,
                 root_slot,
                 local_reach: Vec::new(),
-                prelude_reach: Vec::new(),
+                prelude_reach: Arc::from([]),
                 local_vars: Vec::new(),
-                prelude_vars: Vec::new(),
+                prelude_vars: Arc::from([]),
                 all_vars: Vec::new(),
             });
         }
@@ -2549,6 +2560,10 @@ impl HybridTape {
         let mut p_visited: Vec<u32> = vec![0; prelude.len()];
         let mut p_epoch: u32 = 0;
         let mut p_stack: Vec<usize> = Vec::new();
+        // Reach and vars by the (sorted) set of shared refs that determines
+        // them, so summands referencing the same bodies share one copy.
+        type Reach = (Arc<[usize]>, Arc<[usize]>);
+        let mut by_refs: HashMap<Vec<usize>, Reach> = HashMap::new();
         for s in &mut summands {
             let (local_reach, shared_refs) = compute_local_reach(&s.ops, s.root_slot);
             s.local_reach = local_reach;
@@ -2562,25 +2577,32 @@ impl HybridTape {
             s.local_vars = lv.iter().copied().collect();
 
             if !shared_refs.is_empty() {
-                p_epoch += 1;
-                let mut preach: Vec<usize> = Vec::new();
-                for &start in &shared_refs {
-                    bfs_prelude(
-                        &prelude,
-                        start,
-                        &mut p_visited,
-                        p_epoch,
-                        &mut p_stack,
-                        &mut preach,
-                    );
-                }
-                preach.sort_unstable();
-                s.prelude_vars = vars_in(&prelude, &preach);
-                s.prelude_reach = preach;
+                let mut key = shared_refs;
+                key.sort_unstable();
+                key.dedup();
+                let (reach, vars) = by_refs.entry(key).or_insert_with_key(|refs| {
+                    p_epoch += 1;
+                    let mut preach: Vec<usize> = Vec::new();
+                    for &start in refs {
+                        bfs_prelude(
+                            &prelude,
+                            start,
+                            &mut p_visited,
+                            p_epoch,
+                            &mut p_stack,
+                            &mut preach,
+                        );
+                    }
+                    preach.sort_unstable();
+                    let vars = vars_in(&prelude, &preach);
+                    (Arc::from(preach), Arc::from(vars))
+                });
+                s.prelude_reach = Arc::clone(reach);
+                s.prelude_vars = Arc::clone(vars);
             }
 
             let mut av: BTreeSet<usize> = lv;
-            for &v in &s.prelude_vars {
+            for &v in s.prelude_vars.iter() {
                 av.insert(v);
             }
             s.all_vars = av.into_iter().collect();
@@ -2658,7 +2680,7 @@ impl HybridTape {
         for &i in &s.local_reach {
             local_adj[i] = 0.0;
         }
-        for &i in &s.prelude_reach {
+        for &i in s.prelude_reach.iter() {
             prelude_adj[i] = 0.0;
         }
         local_adj[s.root_slot] = seed;

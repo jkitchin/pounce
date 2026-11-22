@@ -415,6 +415,14 @@ consequences worth knowing:
   size. Expressions that are *only* tractable as a DAG work too: `for _ in
   range(40): e = e * e` is 40 nodes describing `x ** 2**40`, and it builds,
   tapes, and differentiates in under a millisecond.
+* The sharing reaches across rows. A rate expression that every species
+  balance references is one body in the assembled problem, not a copy per
+  row, so `build_nl_problem` memory follows the number of distinct `NlExpr`
+  nodes. Each row still splits into the same summands it would have as a
+  plain tree, so values, gradients and the Jacobian are exactly those of the
+  copy-per-row model. The Lagrangian Hessian of a model with such sharing is
+  evaluated through the shared bodies, and agrees with the copy-per-row one
+  to rounding rather than bit for bit.
 
 ```python
 e = pounce.NlExpr.const_(0.0)

@@ -1077,3 +1077,66 @@ def test_parse_nl_text_depth_guard_fires_at_any_depth():
     for wraps in (20000, 40000, 80000):
         with pytest.raises(ValueError, match="levels"):
             pounce.parse_nl_text(_long_sum_nl(4, wraps))
+
+
+def _rate_model(shared, n=60, rows=600, pool=12, depth=8):
+    """A kinetics-shaped model: ``pool`` rate expressions, each referenced by
+    ``rows / pool`` constraint rows in several row shapes. ``shared=False``
+    gives every row its own copy of its rate — the same model, with no
+    sharing for ``build_nl_problem`` to keep."""
+    E = pounce.NlExpr
+
+    def rate(i):
+        e = E.var(i % n)
+        for j in range(depth):
+            e = E.exp(e * E.var((i + j) % n)) * 0.5
+        return e
+
+    rates = [rate(i) for i in range(pool)]
+    cons = []
+    for i in range(rows):
+        k = rates[i % pool] if shared else rate(i % pool)
+        x = E.var(i % n)
+        shape = i % 4
+        if shape == 0:
+            cons.append(k + x)
+        elif shape == 1:
+            cons.append(2.0 * (k - x**2) / 3.0)
+        elif shape == 2:
+            cons.append(E.sin(k) * E.var((i + 3) % n) + k)
+        else:
+            cons.append(-(k * k) + E.log(1 + x**2))
+    obj = E.sum([rates[j] if shared else rate(j) for j in range(4)])
+    return pounce.build_nl_problem(n, obj, constraints=cons, x_l=[-1.0] * n, x_u=[1.0] * n)
+
+
+def test_rows_sharing_a_subexpression_evaluate_as_if_each_had_its_own_copy():
+    # gh#1232: a subexpression many rows reference is assembled as one shared
+    # body instead of a copy per row. That is a memory change and must not be
+    # a numerical one: values, gradients and the Jacobian are bit-identical to
+    # the copy-per-row build, and so are both sparsity patterns. The Hessian
+    # goes through the shared-body prelude, which sums the multiplier-weighted
+    # contributions before propagating them through the body, so it agrees to
+    # rounding.
+    shared, fresh = _rate_model(True), _rate_model(False)
+    assert shared.jacobian_structure()[0].tolist() == fresh.jacobian_structure()[0].tolist()
+    assert shared.jacobian_structure()[1].tolist() == fresh.jacobian_structure()[1].tolist()
+    for a, b in zip(shared.hessian_structure(), fresh.hessian_structure()):
+        assert np.array_equal(a, b)
+
+    rng = np.random.default_rng(1232)
+    for _ in range(3):
+        x = rng.uniform(-0.6, 0.6, shared.n)
+        lam = rng.normal(size=shared.m)
+        v = rng.normal(size=shared.n)
+        assert shared.objective(x) == fresh.objective(x)
+        for f in ("gradient", "constraints", "jacobian"):
+            assert np.array_equal(getattr(shared, f)(x), getattr(fresh, f)(x)), f
+        for a, b in [
+            (shared.hessian(x, lam, 0.7), fresh.hessian(x, lam, 0.7)),
+            (
+                shared.hessian_vector_product(x, v, lam, 0.7),
+                fresh.hessian_vector_product(x, v, lam, 0.7),
+            ),
+        ]:
+            assert np.max(np.abs(a - b)) <= 1e-13 * np.max(np.abs(b))

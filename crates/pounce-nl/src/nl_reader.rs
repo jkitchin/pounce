@@ -3696,6 +3696,10 @@ struct ConHybrid {
     /// Whether `eval_h` routes the constraint block through the shared
     /// prelude (issue #557). See [`HYBRID_HESS_MIN_OP_RATIO`].
     use_for_hess: bool,
+    /// Every prelude slot, ascending: the reach a Hessian-vector product
+    /// sweeps, since an arbitrary direction is not confined to one color's
+    /// bodies. Filled on first use by `hybrid_constraint_hvps`.
+    prelude_all: Vec<u32>,
     // ---- eval_h (shared-CSE Hessian, issue #557) state. Populated in
     // `try_new` after the Hessian coloring exists; cheap enough (a few
     // index tables plus one f64 per local op) to build whenever the
@@ -3818,6 +3822,14 @@ pub struct NlTnlp {
     /// Per-constraint, per-summand tapes. Length `m`; row `i` holds
     /// one `Tape` per summand of constraint `i`.
     con_tapes: Vec<Vec<Tape>>,
+    /// Whether `con_tapes` holds the constraint block's flat tapes. `false`
+    /// only when `con_hybrid` serves every constraint evaluator (both of its
+    /// gates on), in which case every row of `con_tapes` is empty and the
+    /// flat arms below must not be reached: the flat tapes re-emit each
+    /// shared CSE body once per summand that references it, so keeping them
+    /// next to the prelude made memory scale with the expanded tree rather
+    /// than with the DAG (gh#1232).
+    con_flat: bool,
     /// Constraint-block tape with a **shared** CSE prelude, used by
     /// `eval_g` when the model benefits (see [`ConHybrid`]). `None` keeps
     /// `eval_g` on the per-summand `con_tapes` above.
@@ -4308,6 +4320,32 @@ pub fn constraint_jacobian_sparsity(prob: &NlProblem) -> (Vec<Index>, Vec<Index>
 /// `factor` is materialised onto each leaf only when it differs from
 /// `1` (as `Neg` for `-1`, else a `Const·term` multiply), so the math
 /// is unchanged and the per-summand op count grows by at most one.
+/// Append one tape's structural Hessian pairs to the running union, sorting
+/// and deduplicating whenever it has doubled since the last time.
+///
+/// Many summands report the same pairs — every row that references one
+/// shared body reports all of that body's — so holding every copy until a
+/// single sort at the end makes the transient scale with the expanded tree
+/// rather than with the pattern (gh#1232). Compacting at each doubling keeps
+/// the buffer within about twice the distinct pairs plus one tape's worth,
+/// for amortized `O(log)` extra work per pair. The caller still sorts and
+/// deduplicates once at the end, so the result is exactly the set a single
+/// final pass would give.
+fn push_pairs(
+    pairs: &mut Vec<(usize, usize)>,
+    deduped: &mut usize,
+    new: impl IntoIterator<Item = (usize, usize)>,
+) {
+    /// Below this the compaction costs more than the memory it saves.
+    const MIN_COMPACT: usize = 1 << 16;
+    pairs.extend(new);
+    if pairs.len() >= MIN_COMPACT && pairs.len() >= 2 * *deduped {
+        pairs.sort_unstable();
+        pairs.dedup();
+        *deduped = pairs.len();
+    }
+}
+
 fn split_top_sums(expr: &Expr) -> Vec<Expr> {
     let mut out = Vec::new();
     fn push_leaf(e: &Expr, factor: f64, out: &mut Vec<Expr>) {
@@ -4817,7 +4855,7 @@ fn build_color_tables(
             epoch += 1;
             let start = reach.len();
             for &si in list {
-                for &p in &h.tape.summands[si as usize].prelude_reach {
+                for &p in h.tape.summands[si as usize].prelude_reach.iter() {
                     if seen[p] != epoch {
                         seen[p] = epoch;
                         reach.push(p as u32);
@@ -4968,6 +5006,24 @@ impl NlTnlp {
     /// and compare the derivatives — so the knob is a parameter here and the
     /// env var only chooses its default.
     pub fn try_new_with_quadratic(prob: NlProblem, use_quadratic: bool) -> Result<Self, String> {
+        Self::build(prob, use_quadratic, true)
+    }
+
+    /// The flat-tape reference for a differential test: the model as
+    /// [`Self::new`] builds it, but with no shared-CSE hybrid tape, so every
+    /// constraint evaluator walks the flat per-summand tapes. Clearing
+    /// `con_hybrid` on an already-built TNLP is not the same thing — when
+    /// the hybrid served every evaluator the flat tapes were never kept
+    /// (`con_flat`), and what remained would evaluate as zero.
+    #[cfg(test)]
+    fn flat_reference(prob: NlProblem) -> Self {
+        Self::build(prob, std::env::var("POUNCE_DBG_NO_QUAD").is_err(), false)
+            .unwrap_or_else(|e| panic!("failed to resolve AMPL external functions: {e}"))
+    }
+
+    /// [`Self::try_new_with_quadratic`], with the shared-CSE hybrid
+    /// constraint tape allowed (`use_hybrid`) or not.
+    fn build(prob: NlProblem, use_quadratic: bool, use_hybrid: bool) -> Result<Self, String> {
         // Resolve any AMPL imported (external) functions. Walk every
         // nonlinear expression to collect the funcall ids actually
         // referenced; load the libraries named in $AMPLFUNC and bind
@@ -5031,9 +5087,10 @@ impl NlTnlp {
 
         // Flatten objective and each constraint into independent
         // summands. Each summand becomes its own `Tape` (CSE bodies
-        // are deduplicated within a tape via Rc identity in
-        // `Tape::build`; bodies shared across summands are
-        // duplicated, which we accept as a simplicity tradeoff).
+        // are deduplicated within a tape via `Arc` identity in
+        // `Tape::build`; a body shared across summands is re-emitted in
+        // every tape that reaches it, which is what the shared-prelude
+        // `con_hybrid` below exists to avoid).
         let obj_tapes: Vec<Tape> = if quad.objective_form().is_some() {
             Vec::new()
         } else {
@@ -5043,7 +5100,14 @@ impl NlTnlp {
                 .collect()
         };
 
-        let mut con_tapes: Vec<Vec<Tape>> = Vec::with_capacity(prob.m);
+        // Split every taped row into its summands before building any
+        // constraint tape: the hybrid tape is built from these roots, and
+        // whether it ends up serving every constraint evaluator decides
+        // whether the flat tapes are kept at all (gh#1232).
+        //
+        // The roots must be the parse's own allocations as far as `Cse`
+        // goes — `build_multi` keys sharing on `Arc` pointer identity — and
+        // `split_top_sums` clones a `Cse` by bumping its `Arc`, so they are.
         let mut con_roots: Vec<Expr> = Vec::new();
         let mut row_start: Vec<usize> = Vec::with_capacity(prob.m + 1);
         for k in 0..prob.m {
@@ -5052,96 +5116,141 @@ impl NlTnlp {
             // hybrid-tape root, so `con_tapes[k]` is empty and its
             // `row_start` range is empty too.
             if quad.row_form(k).is_some() {
-                con_tapes.push(Vec::new());
                 continue;
             }
-            let summands = split_top_sums(&prob.con_expr(k));
-            con_tapes.push(
-                summands
-                    .iter()
-                    .map(|e| Tape::build_with_externals(e, &resolver))
-                    .collect(),
-            );
-            // Move (not clone) the split summands into the root list: their
-            // `Expr::Cse` payloads are `Arc`s, and `build_multi` keys CSE
-            // sharing on `Arc` pointer identity, so the roots must be the
-            // same allocations the parse produced.
-            con_roots.extend(summands);
+            con_roots.extend(split_top_sums(&prob.con_expr(k)));
         }
         row_start.push(con_roots.len());
 
-        // Shared-CSE constraint tape for `eval_g` (pounce#476). Worth
-        // building only when some CSE body is actually referenced from two
-        // or more summands — otherwise the prelude comes out empty and the
-        // hybrid tape is the flat tape plus an indirection. `hybrid_supported`
-        // gates the opcodes `build_multi` would panic on.
+        // Shared-CSE constraint tape (pounce#476). Worth building only when
+        // some CSE body is actually referenced from two or more summands —
+        // otherwise the prelude comes out empty and the hybrid tape is the
+        // flat tape plus an indirection. `hybrid_supported` gates the
+        // opcodes `build_multi` would panic on.
         // `POUNCE_DBG_NO_HYBRID=1` forces the flat per-summand tapes for the
         // whole constraint block. Diagnostic only: it is how the
         // flat-versus-shared trade in `HYBRID_JAC_MIN_OP_RATIO` is measured
         // on a real model, and how a suspected hybrid-path bug is bisected
         // against a reference that computes the same derivatives a
         // different way.
-        let mut con_hybrid = if std::env::var("POUNCE_DBG_NO_HYBRID").is_ok() {
+        let hybrid_tape = if !use_hybrid || std::env::var("POUNCE_DBG_NO_HYBRID").is_ok() {
             None
         } else if hybrid_supported(&con_roots) {
             let tape = HybridTape::build_multi(&con_roots);
-            (tape.n_prelude_ops() > 0).then(|| {
-                let flat_ops: usize = con_tapes.iter().flatten().map(|t| t.ops.len()).sum();
-                let shared_ops = tape.n_prelude_ops() + tape.total_local_ops();
-                // `POUNCE_DBG_FORCE_HYBRID_HESS=1` turns the Hessian gate on
-                // regardless of the op ratio. Diagnostic only — it is how the
-                // crossover in `HYBRID_HESS_MIN_OP_RATIO` is measured
-                // (same-binary A/B against `POUNCE_DBG_NO_HYBRID=1`) on
-                // models that sit below the gate.
-                let force_hess = std::env::var("POUNCE_DBG_FORCE_HYBRID_HESS").is_ok();
-                ConHybrid {
-                    prelude_vals: vec![0.0; tape.n_prelude_ops()],
-                    local_vals: vec![0.0; tape.max_summand_ops()],
-                    local_adj: vec![0.0; tape.max_summand_ops()],
-                    prelude_adj: vec![0.0; tape.n_prelude_ops()],
-                    use_for_jac: flat_ops as f64
-                        >= HYBRID_JAC_MIN_OP_RATIO * shared_ops.max(1) as f64,
-                    use_for_hess: force_hess
-                        || flat_ops as f64 >= HYBRID_HESS_MIN_OP_RATIO * shared_ops.max(1) as f64,
-                    local_vals_all: Vec::new(),
-                    local_off: Vec::new(),
-                    summand_row: Vec::new(),
-                    hess_color_summands: Vec::new(),
-                    hess_color_reach: Vec::new(),
-                    hess_color_reach_off: Vec::new(),
-                    prelude_dot: Vec::new(),
-                    hess_prelude_adj: Vec::new(),
-                    prelude_adj_dot: Vec::new(),
-                    local_dot: Vec::new(),
-                    local_adj_dot: Vec::new(),
-                    row_start,
-                    tape,
-                }
-            })
+            (tape.n_prelude_ops() > 0).then_some(tape)
         } else {
             None
         };
-        drop(con_roots);
+        let shared_ops = hybrid_tape
+            .as_ref()
+            .map_or(0, |t| t.n_prelude_ops() + t.total_local_ops());
+        // `POUNCE_DBG_FORCE_HYBRID_HESS=1` turns the Hessian gate on
+        // regardless of the op ratio. Diagnostic only — it is how the
+        // crossover in `HYBRID_HESS_MIN_OP_RATIO` is measured (same-binary
+        // A/B against `POUNCE_DBG_NO_HYBRID=1`) on models that sit below the
+        // gate.
+        let force_hess = std::env::var("POUNCE_DBG_FORCE_HYBRID_HESS").is_ok();
+        let jac_gate =
+            |flat: usize| flat as f64 >= HYBRID_JAC_MIN_OP_RATIO * shared_ops.max(1) as f64;
+        let hess_gate = |flat: usize| {
+            force_hess || flat as f64 >= HYBRID_HESS_MIN_OP_RATIO * shared_ops.max(1) as f64
+        };
 
         // Hessian-of-Lagrangian sparsity: union of each tape's own
         // structural Hessian sparsity.
-        // One flat `Vec`, sorted and deduped once, rather than a global
+        // One flat `Vec`, sorted and deduped, rather than a global
         // `BTreeSet` fed a single insert at a time across every summand
         // in the model: sort+dedup walks contiguous memory where the tree
         // chased a pointer and allocated a node per entry. The result is
         // exactly the ascending order the rest of this function wants, so
         // it doubles as `lower_pairs` instead of being copied into it.
+        //
+        // It is deduped as it grows, not only at the end ([`push_pairs`]):
+        // summands that repeat one shared body all report that body's pairs,
+        // and holding every copy until the end was the peak of the whole
+        // build on gh#1232's reproducer — 297 MiB of pairs for a 1 935-entry
+        // pattern.
         let mut tape_pairs: Vec<(usize, usize)> = Vec::new();
+        let mut pairs_deduped = 0usize;
+        let mut max_tape_n: usize = 0;
         for t in &obj_tapes {
-            tape_pairs.extend(t.hessian_sparsity());
+            push_pairs(&mut tape_pairs, &mut pairs_deduped, t.hessian_sparsity());
+            max_tape_n = max_tape_n.max(t.ops.len());
         }
-        for row in &con_tapes {
-            for t in row {
-                tape_pairs.extend(t.hessian_sparsity());
+
+        // One flat tape per summand, built in row order. Each tape's
+        // structural pairs, variables and length are taken as it is built;
+        // the tape itself is kept only while the flat tapes may still be
+        // needed. Once the running op count proves both hybrid gates will be
+        // on, every constraint evaluator — `eval_g`, `eval_jac_g`, `eval_h`
+        // and `hessian_vector_products` — reads the shared prelude instead,
+        // and the flat tapes are dead weight holding each shared body once
+        // per referencing summand: on gh#1232's reproducer (50 bodies of
+        // ~150 ops, each shared by 400 rows) that was 8 KiB a row for a DAG
+        // whose shared part is 7 550 ops in all. The gates are monotone in
+        // the op count, so crossing them part-way through is final.
+        let mut con_tapes: Vec<Vec<Tape>> = Vec::with_capacity(prob.m);
+        let mut con_tape_vars: Vec<Vec<usize>> = Vec::with_capacity(prob.m);
+        let mut flat_ops = 0usize;
+        let mut n_con_summands = 0usize;
+        let mut con_flat = true;
+        for k in 0..prob.m {
+            let mut row: Vec<Tape> = Vec::new();
+            let mut vars: Vec<usize> = Vec::new();
+            for e in &con_roots[row_start[k]..row_start[k + 1]] {
+                let t = Tape::build_with_externals(e, &resolver);
+                flat_ops += t.ops.len();
+                n_con_summands += 1;
+                max_tape_n = max_tape_n.max(t.ops.len());
+                push_pairs(&mut tape_pairs, &mut pairs_deduped, t.hessian_sparsity());
+                vars.extend(t.variables());
+                if con_flat {
+                    row.push(t);
+                }
+            }
+            con_tapes.push(row);
+            con_tape_vars.push(vars);
+            if con_flat && hybrid_tape.is_some() && jac_gate(flat_ops) && hess_gate(flat_ops) {
+                con_flat = false;
+                for r in &mut con_tapes {
+                    *r = Vec::new();
+                }
             }
         }
+        drop(con_roots);
         tape_pairs.sort_unstable();
         tape_pairs.dedup();
+        tape_pairs.shrink_to_fit();
+
+        let mut con_hybrid = hybrid_tape.map(|tape| ConHybrid {
+            prelude_vals: vec![0.0; tape.n_prelude_ops()],
+            local_vals: vec![0.0; tape.max_summand_ops()],
+            local_adj: vec![0.0; tape.max_summand_ops()],
+            prelude_adj: vec![0.0; tape.n_prelude_ops()],
+            use_for_jac: jac_gate(flat_ops),
+            use_for_hess: hess_gate(flat_ops),
+            prelude_all: Vec::new(),
+            local_vals_all: Vec::new(),
+            local_off: Vec::new(),
+            summand_row: Vec::new(),
+            hess_color_summands: Vec::new(),
+            hess_color_reach: Vec::new(),
+            hess_color_reach_off: Vec::new(),
+            prelude_dot: Vec::new(),
+            hess_prelude_adj: Vec::new(),
+            prelude_adj_dot: Vec::new(),
+            local_dot: Vec::new(),
+            local_adj_dot: Vec::new(),
+            row_start,
+            tape,
+        });
+        debug_assert!(
+            con_flat
+                || con_hybrid
+                    .as_ref()
+                    .is_some_and(|h| h.use_for_jac && h.use_for_hess),
+            "flat constraint tapes dropped without the hybrid serving every evaluator"
+        );
 
         // The assembled pattern is the tapes' union *plus* the quadratic
         // forms'. They are kept apart because the coloring only ever needs
@@ -5231,13 +5340,12 @@ impl NlTnlp {
 
         // Per-row Jacobian sparsity = union of tape vars plus
         // linear-segment vars.
+        // The tape vars were collected as each flat tape was built, so this
+        // holds whether or not those tapes were kept.
         let mut jac_cols: Vec<Vec<usize>> = Vec::with_capacity(prob.m);
         let mut jac_nnz = 0;
-        for (i, row_tapes) in con_tapes.iter().enumerate() {
-            let mut cols: Vec<usize> = Vec::with_capacity(prob.con_linear[i].len());
-            for t in row_tapes {
-                cols.extend(t.variables());
-            }
+        for (i, mut cols) in con_tape_vars.into_iter().enumerate() {
+            cols.reserve(prob.con_linear[i].len());
             // A quadratic row has no tape, so its Jacobian support comes
             // from the form: `Hx + a` is nonzero exactly on the union of the
             // Hessian's rows and the folded linear part.
@@ -5250,16 +5358,6 @@ impl NlTnlp {
             cols.shrink_to_fit();
             jac_nnz += cols.len();
             jac_cols.push(cols);
-        }
-
-        let mut max_tape_n: usize = 0;
-        for t in &obj_tapes {
-            max_tape_n = max_tape_n.max(t.ops.len());
-        }
-        for row in &con_tapes {
-            for t in row {
-                max_tape_n = max_tape_n.max(t.ops.len());
-            }
         }
 
         if std::env::var("POUNCE_DBG_TAPE_STATS").is_ok() {
@@ -5279,17 +5377,11 @@ impl NlTnlp {
             }
             let colors_per_tape = tape_color_pairs as f64 / n_live_tapes.max(1) as f64;
             let n_obj = obj_tapes.len();
-            let n_con: usize = con_tapes.iter().map(|r| r.len()).sum();
+            // Counted as the tapes were built: the constraint tapes may not
+            // have been kept (`con_flat`).
+            let n_con = n_con_summands;
             let total = n_obj + n_con;
-            let mut sum_ops: usize = 0;
-            for t in &obj_tapes {
-                sum_ops += t.ops.len();
-            }
-            for row in &con_tapes {
-                for t in row {
-                    sum_ops += t.ops.len();
-                }
-            }
+            let sum_ops: usize = obj_tapes.iter().map(|t| t.ops.len()).sum::<usize>() + flat_ops;
             let t = total.max(1);
             let nnz_h = h_irow.len();
             let avg_decode =
@@ -5307,17 +5399,18 @@ impl NlTnlp {
             // Hessian through the same prelude could save.
             match &con_hybrid {
                 Some(h) => {
-                    let flat: usize = con_tapes.iter().flatten().map(|t| t.ops.len()).sum();
+                    let flat = flat_ops;
                     let prelude = h.tape.n_prelude_ops();
                     let local = h.tape.total_local_ops();
                     eprintln!(
                         "[hybrid stats] con flat_ops={flat} prelude_ops={prelude} \
                          local_ops={local} shared_total={} flat/shared={:.2}x \
-                         jac_gate={} hess_gate={}",
+                         jac_gate={} hess_gate={} flat_tapes={}",
                         prelude + local,
                         flat as f64 / (prelude + local).max(1) as f64,
                         if h.use_for_jac { "on" } else { "off" },
                         if h.use_for_hess { "on" } else { "off" },
+                        if con_flat { "kept" } else { "dropped" },
                     );
                 }
                 None => eprintln!("[hybrid stats] con hybrid not built (no shared CSE bodies)"),
@@ -5360,6 +5453,7 @@ impl NlTnlp {
             prob,
             obj_tapes,
             con_tapes,
+            con_flat,
             con_hybrid,
             quad,
             h_tape_mask,
@@ -5553,6 +5647,101 @@ impl NlTnlp {
         // because nothing downstream can detect the staleness.
         self.hess_color_index = hess_color_index;
         self.compressed = vec![vec![0.0; self.prob.n]; n_colors];
+    }
+
+    /// The constraint block's share of [`Self::hessian_vector_products`],
+    /// through the shared-CSE prelude: `out[c] += Σ_i λ_i ∇²g_i · v_c` for
+    /// every live direction `c`.
+    ///
+    /// Taken when the flat constraint tapes were not kept (`con_flat`), so it
+    /// is the only constraint HVP such a model has. It is `eval_h`'s hybrid
+    /// arm with the direction in place of a color seed and the whole prelude
+    /// as the reach: one forward sweep for all directions, then per direction
+    /// one prelude tangent, the summands' local passes, and one unit-weight
+    /// reverse sweep over the λ-weighted prelude adjoints. Like that arm it
+    /// agrees with the flat tapes to rounding, not bit for bit — the prelude
+    /// contribution is summed across summands before it is propagated, which
+    /// reassociates the products.
+    fn hybrid_constraint_hvps(
+        &mut self,
+        x: &[Number],
+        v: &[Number],
+        lam: &[Number],
+        out: &mut [Number],
+    ) {
+        let n = self.prob.n;
+        let Self {
+            con_hybrid,
+            hvp_live,
+            ..
+        } = self;
+        let ConHybrid {
+            tape,
+            prelude_vals,
+            local_vals_all,
+            local_off,
+            summand_row,
+            prelude_dot,
+            hess_prelude_adj,
+            prelude_adj_dot,
+            local_dot,
+            local_adj,
+            local_adj_dot,
+            prelude_all,
+            ..
+        } = con_hybrid
+            .as_mut()
+            .expect("flat constraint tapes are dropped only when the hybrid tape exists");
+        let np = tape.n_prelude_ops();
+        if prelude_all.len() != np {
+            *prelude_all = (0..np as u32).collect();
+        }
+        let live_row = |si: usize| lam[summand_row[si] as usize] != 0.0;
+        tape.forward_prelude(x, prelude_vals);
+        for (si, s) in tape.summands.iter().enumerate() {
+            if live_row(si) {
+                tape.forward_summand(
+                    s,
+                    x,
+                    prelude_vals,
+                    &mut local_vals_all[local_off[si]..local_off[si + 1]],
+                );
+            }
+        }
+        for (c, out_col) in out.chunks_mut(n).enumerate() {
+            if !hvp_live[c] {
+                continue;
+            }
+            let dir = &v[c * n..(c + 1) * n];
+            tape.prelude_tangent(prelude_vals, dir, prelude_all, prelude_dot);
+            for (si, s) in tape.summands.iter().enumerate() {
+                let w = lam[summand_row[si] as usize];
+                if w == 0.0 {
+                    continue;
+                }
+                tape.hessian_summand_directional(
+                    s,
+                    &local_vals_all[local_off[si]..local_off[si + 1]],
+                    prelude_dot,
+                    dir,
+                    w,
+                    out_col,
+                    local_dot,
+                    local_adj,
+                    local_adj_dot,
+                    hess_prelude_adj,
+                    prelude_adj_dot,
+                );
+            }
+            tape.prelude_reverse_directional(
+                prelude_vals,
+                prelude_dot,
+                prelude_all,
+                out_col,
+                hess_prelude_adj,
+                prelude_adj_dot,
+            );
+        }
     }
 
     pub fn final_x(&self) -> Option<&[Number]> {
@@ -5868,6 +6057,10 @@ impl NlTnlp {
         }
 
         if let Some(lam) = lambda {
+            if !self.con_flat {
+                self.hybrid_constraint_hvps(x, v, lam, out);
+                return Ok(());
+            }
             // `lam.len() == m` was checked above, so `con_tapes[k]` is in
             // range for every k.
             for (i, &w) in lam.iter().enumerate() {
@@ -6657,6 +6850,7 @@ impl TNLP for NlTnlp {
                 let Self {
                     prob,
                     con_tapes,
+                    con_flat,
                     con_hybrid,
                     quad,
                     jac_cols,
@@ -6712,6 +6906,7 @@ impl TNLP for NlTnlp {
                     }
                     return true;
                 }
+                debug_assert!(*con_flat, "flat Jacobian arm without flat tapes");
                 for i in 0..prob.m {
                     for &j in &jac_cols[i] {
                         scratch_row_grad[j] = 0.0;
@@ -6927,6 +7122,7 @@ impl TNLP for NlTnlp {
                         self.hess_flat_colors_parallel(x_arg, lam);
                     }
                     (Some(lam), _) => {
+                        debug_assert!(self.con_flat, "flat Hessian arm without flat tapes");
                         for k in 0..self.prob.m {
                             let w = lam[k];
                             if w == 0.0 {
@@ -9932,9 +10128,8 @@ G0 3
             .expect("CSE shared by 3 constraints must build the hybrid tape")
             .use_for_jac = true;
 
-        let mut flat = NlTnlp::new(p);
+        let mut flat = NlTnlp::flat_reference(p);
         flat.get_nlp_info().unwrap();
-        flat.con_hybrid = None;
 
         for x in [[1.0, 1.0, 1.0], [-2.0, 0.5, 3.0], [0.0, -1.5, -0.25]] {
             let mut jh = vec![0.0_f64; nnz];
@@ -10072,9 +10267,8 @@ G0 3
             "a 40-deep body shared by 16 rows is well past the op-ratio gate"
         );
 
-        let mut flat = NlTnlp::new(p);
+        let mut flat = NlTnlp::flat_reference(p);
         flat.get_nlp_info().unwrap();
-        flat.con_hybrid = None;
 
         for scale in [1.0_f64, -0.7, 2.5] {
             let x: Vec<f64> = (0..info.n as usize)
@@ -10086,6 +10280,116 @@ G0 3
             assert!(flat.eval_jac_g(Some(&x), true, SparsityRequest::Values { values: &mut jf }));
             assert_eq!(jh, jf, "gate-on Jacobian differs from the flat tape");
             assert!(jh.iter().any(|v| *v != 0.0), "all-zero Jacobian is no test");
+        }
+    }
+
+    /// gh#1232: once the hybrid tape serves every constraint evaluator, the
+    /// flat constraint tapes — one private copy of each shared body per
+    /// referencing summand — are not kept, and every evaluator still answers
+    /// what the flat tapes answer: `eval_g` and `eval_jac_g` bit for bit,
+    /// `eval_h` and `hessian_vector_products` to rounding (the prelude sums
+    /// λ-weighted adjoints before propagating them, see `ConHybrid`).
+    ///
+    /// The HVP is the evaluator this pins hardest, because before gh#1232 it
+    /// had no hybrid route at all: with the flat tapes gone it would have
+    /// returned the objective's share alone, a wrong answer and not an error.
+    #[test]
+    fn flat_constraint_tapes_are_dropped_when_the_hybrid_serves_every_evaluator() {
+        // The bounded body: its second derivatives are finite and nonzero,
+        // which the Hessian and HVP comparisons need.
+        let p = parse_nl_text(&bounded_deep_shared_cse_nl(16, 20)).expect("parse");
+        let mut hybrid = NlTnlp::new(p.clone());
+        let info = hybrid.get_nlp_info().unwrap();
+        let (n, m) = (info.n as usize, info.m as usize);
+        let (nnz_j, nnz_h) = (info.nnz_jac_g as usize, info.nnz_h_lag as usize);
+        {
+            let h = hybrid
+                .con_hybrid
+                .as_ref()
+                .expect("shared CSE builds the hybrid tape");
+            assert!(
+                h.use_for_jac && h.use_for_hess,
+                "both gates on for a 20-deep body"
+            );
+        }
+        assert!(
+            !hybrid.con_flat,
+            "flat tapes kept although the hybrid serves everything"
+        );
+        assert!(hybrid.con_tapes.iter().all(|r| r.is_empty()));
+
+        let mut flat = NlTnlp::flat_reference(p);
+        flat.get_nlp_info().unwrap();
+        assert!(flat.con_flat && flat.con_hybrid.is_none());
+        assert!(flat.con_tapes.iter().any(|r| !r.is_empty()));
+
+        // Same structure either way: it is collected from each flat tape as
+        // it is built, whether or not the tape is then kept.
+        for t in [&mut hybrid, &mut flat] {
+            let (mut ir, mut jc) = (vec![0; nnz_j], vec![0; nnz_j]);
+            t.eval_jac_g(
+                None,
+                true,
+                SparsityRequest::Structure {
+                    irow: &mut ir,
+                    jcol: &mut jc,
+                },
+            );
+        }
+        assert_eq!(hybrid.jac_cols, flat.jac_cols);
+        assert_eq!(
+            (&hybrid.h_irow, &hybrid.h_jcol),
+            (&flat.h_irow, &flat.h_jcol)
+        );
+
+        let close = |a: &[f64], b: &[f64], what: &str| {
+            let scale = b.iter().fold(0.0f64, |s, v| s.max(v.abs()));
+            assert!(scale > 0.0, "{what}: all-zero reference is no test");
+            for (k, (x, y)) in a.iter().zip(b).enumerate() {
+                assert!(
+                    (x - y).abs() <= 1e-13 * scale,
+                    "{what}[{k}]: hybrid {x} vs flat {y}"
+                );
+            }
+        };
+        let lam: Vec<f64> = (0..m).map(|k| 0.4 - 0.05 * k as f64).collect();
+        for scale in [1.0_f64, -0.7] {
+            let x: Vec<f64> = (0..n).map(|j| scale * (0.2 + 0.03 * j as f64)).collect();
+
+            let (mut gh, mut gf) = (vec![0.0; m], vec![0.0; m]);
+            assert!(hybrid.eval_g(&x, true, &mut gh) && flat.eval_g(&x, true, &mut gf));
+            assert_eq!(gh, gf, "eval_g");
+
+            let (mut jh, mut jf) = (vec![0.0; nnz_j], vec![0.0; nnz_j]);
+            assert!(hybrid.eval_jac_g(Some(&x), true, SparsityRequest::Values { values: &mut jh }));
+            assert!(flat.eval_jac_g(Some(&x), true, SparsityRequest::Values { values: &mut jf }));
+            assert_eq!(jh, jf, "eval_jac_g");
+
+            let (mut hh, mut hf) = (vec![0.0; nnz_h], vec![0.0; nnz_h]);
+            let (vh, vf) = (
+                SparsityRequest::Values { values: &mut hh },
+                SparsityRequest::Values { values: &mut hf },
+            );
+            assert!(hybrid.eval_h(Some(&x), true, 0.5, Some(&lam), true, vh));
+            assert!(flat.eval_h(Some(&x), true, 0.5, Some(&lam), true, vf));
+            close(&hh, &hf, "eval_h");
+
+            // Two directions at once, one of them zero (skipped), so the
+            // block form and the live mask are both exercised.
+            let k = 3;
+            let mut v = vec![0.0; n * k];
+            for j in 0..n {
+                v[j] = 1.0 - 0.1 * j as f64;
+                v[2 * n + j] = if j % 2 == 0 { 0.5 } else { -0.25 };
+            }
+            let (mut oh, mut of) = (vec![0.0; n * k], vec![0.0; n * k]);
+            hybrid
+                .hessian_vector_products(&x, &v, k, 0.5, Some(&lam), &mut oh)
+                .unwrap();
+            flat.hessian_vector_products(&x, &v, k, 0.5, Some(&lam), &mut of)
+                .unwrap();
+            close(&oh, &of, "hessian_vector_products");
+            assert!(oh[n..2 * n].iter().all(|&e| e == 0.0), "zero direction");
         }
     }
 
@@ -10128,9 +10432,8 @@ G0 3
             .expect("CSE shared by 3 constraints must build the hybrid tape")
             .use_for_hess = true;
 
-        let mut flat = NlTnlp::new(p);
+        let mut flat = NlTnlp::flat_reference(p);
         flat.get_nlp_info().unwrap();
-        flat.con_hybrid = None;
 
         let pairs: Vec<(usize, usize)> = hybrid
             .h_irow
@@ -10216,9 +10519,8 @@ G0 3
             "a 40-op body shared by 16 rows is well past the op-ratio gate"
         );
 
-        let mut flat = NlTnlp::new(p);
+        let mut flat = NlTnlp::flat_reference(p);
         flat.get_nlp_info().unwrap();
-        flat.con_hybrid = None;
 
         let lam: Vec<f64> = (0..m).map(|k| 0.25 + 0.125 * k as f64).collect();
         for scale in [1.0_f64, -0.7, 2.5] {
@@ -10414,9 +10716,8 @@ G0 3
             }
         }
 
-        let mut flat = NlTnlp::new(p);
+        let mut flat = NlTnlp::flat_reference(p);
         flat.get_nlp_info().unwrap();
-        flat.con_hybrid = None;
 
         let lam: Vec<f64> = (0..m).map(|k| 0.3 + 0.2 * k as f64).collect();
         for scale in [1.0_f64, -0.6] {
@@ -10491,9 +10792,8 @@ G0 3
         );
 
         // Same model with the hybrid path switched off: the reference.
-        let mut flat = NlTnlp::new(p);
+        let mut flat = NlTnlp::flat_reference(p);
         flat.get_nlp_info().unwrap();
-        flat.con_hybrid = None;
 
         for x in [[1.0, 1.0, 1.0], [-2.0, 0.5, 3.0], [0.0, -1.5, -0.25]] {
             let mut gh = [0.0_f64; 3];
