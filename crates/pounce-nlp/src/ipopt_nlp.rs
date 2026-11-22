@@ -486,7 +486,11 @@ pub trait IpoptNlp: Nlp {
     /// what lets `pounce-sensitivity` undo the NLP scaling baked into
     /// the converged KKT factor (pounce#128). Default `None`;
     /// `OrigIpoptNlp` overrides.
-    fn c_scale_vec(&self) -> Option<Vec<Number>> {
+    ///
+    /// Shared (`Rc`), not copied: the unscaled convergence measures read
+    /// it every iteration, and on a large model a fresh `Vec` per call was
+    /// a measurable per-iteration cost (gh#1238).
+    fn c_scale_vec(&self) -> Option<std::rc::Rc<[Number]>> {
         None
     }
 
@@ -494,7 +498,7 @@ pub trait IpoptNlp: Nlp {
     /// upstream), same convention as [`Self::c_scale_vec`]. Length
     /// `m_ineq()` when present. Default `None`; `OrigIpoptNlp`
     /// overrides.
-    fn d_scale_vec(&self) -> Option<Vec<Number>> {
+    fn d_scale_vec(&self) -> Option<std::rc::Rc<[Number]>> {
         None
     }
 

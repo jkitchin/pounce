@@ -194,8 +194,9 @@ fn installed(s: Supplied, k: Knobs) -> (Number, Vec<Number>, Vec<Number>) {
     assert!(!nlp.user_x_scaling_rejected());
     (
         nlp.obj_scale_factor(),
-        nlp.c_scale_vec().unwrap_or_else(|| vec![1.0]),
-        nlp.d_scale_vec().unwrap_or_else(|| vec![1.0, 1.0]),
+        nlp.c_scale_vec().map_or_else(|| vec![1.0], |v| v.to_vec()),
+        nlp.d_scale_vec()
+            .map_or_else(|| vec![1.0, 1.0], |v| v.to_vec()),
     )
 }
 
@@ -445,8 +446,8 @@ fn pair_model_factors(answer: PairAnswer, rule: UntaggedConstrScaling) -> Vec<Nu
     let mut nlp = OrigIpoptNlp::new(adapter, Rc::new(NoScaling)).unwrap();
     nlp.set_untagged_constr_scaling(rule);
     nlp.determine_scaling_from_starting_point(ScalingMethod::UserScaling, 100.0, 1e-8, 0.0, 0.0);
-    let mut all = nlp.c_scale_vec().unwrap_or_default();
-    all.extend(nlp.d_scale_vec().unwrap_or_default());
+    let mut all = nlp.c_scale_vec().map(|v| v.to_vec()).unwrap_or_default();
+    all.extend(nlp.d_scale_vec().iter().flat_map(|v| v.iter().copied()));
     all
 }
 
