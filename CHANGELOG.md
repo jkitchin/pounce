@@ -10,29 +10,40 @@ changes.
 ## [Unreleased]
 
 ### Fixed
-- **`build_nl_problem` builds kinetics-style rows in less than half the
-  memory, and no longer builds a shared-body tape that nothing reads
-  (gh#1235).** The shared-body constraint tape (pounce#476) was built for
-  any model with a subexpression shared between summands, and was always used
-  for the constraint values, even when its Jacobian and Hessian gates were
-  both off. In that case it served `eval_g` only, more slowly than the
-  per-summand tapes kept beside it, because its sweep is serial and theirs is
-  parallel. It also cost about as much memory as those tapes. Below both
-  gates it is no longer built, and the decision is now made from op counts
-  before either tape exists. Between the gates it is still kept for the
-  Hessian, but the constraint values then use the parallel per-summand walk
-  when it applies. `build_nl_problem` therefore always keeps the sharing
-  between rows, and the estimate that declined it is gone: below the gates
-  sharing no longer costs anything in the tapes. On the issue's implicit-Euler
-  kinetics rows (57 344 rows) the build takes 291 MiB, against 635 MiB in
-  0.18.0 and 618 MiB in 0.17.0. With m rate terms per row it costs 2.2, 3.8,
-  5.3 and 6.9 KiB a row for m = 1–4, against 3.0, 8.2, 11.5 and 14.7. That
-  is about 0.8 KiB for each added summand, down from 1.6–2.6. Constraint,
-  Jacobian and Hessian values and both sparsity patterns are bit-identical to
-  0.18.0 on these models. `.nl` models with a defined variable shared across
-  rows, sitting below both gates, also stop building the tape. Their values
-  are bit-identical too, since the per-summand tapes compute exactly what
-  the shared one did.
+- **`build_nl_problem` builds kinetics-style rows in a quarter of the memory,
+  and every taped model gets smaller tapes (gh#1235).** On the issue's
+  implicit-Euler kinetics rows (57 344 rows) the build takes 159 MiB,
+  against 636 MiB in 0.18.0 and 618 MiB in 0.17.0. With m rate terms per row
+  it costs 1.3, 2.1, 3.0 and 3.7 KiB a row for m = 1–4, against 3.0, 8.2,
+  11.5 and 14.7. That is about 0.4 KiB for each added summand, down from
+  1.6–2.6. Constraint, Jacobian and Hessian values and both sparsity patterns
+  are bit-identical to 0.18.0 on these models, and the fixture sweep's
+  statuses, objectives and iteration counts are unchanged. Four changes do
+  this:
+  - **The shared-body constraint tape is no longer built when nothing reads
+    it.** Below both of its derivative gates it served only the constraint
+    values, and more slowly than the per-summand tapes beside it, because its
+    sweep is serial and theirs is parallel. It also cost about as much memory
+    as those tapes. The decision is now made from op counts before either
+    tape exists. Between the gates the shared tape is kept for the Hessian,
+    and the constraint values use the parallel per-summand walk when it
+    applies. `build_nl_problem` therefore always keeps sharing between rows,
+    and the estimate that declined it is gone.
+  - **Summands are no longer copied to be taped.** Splitting a row into its
+    summands used to copy each one as a tree before taping it.
+  - **Tape ops are 16 bytes instead of 32**, with `u32` operands. A tape or
+    variable index past 2³² is refused rather than wrapped.
+  - **The constraint tapes share one buffer, and so do their Hessian colour
+    lists and the Jacobian's columns.** Each used to be a separate allocation
+    per summand or per row.
+
+  The smaller tapes evaluate faster too. On the issue's rows in a single
+  thread, the Jacobian takes 7.3 ms instead of 9.3, and the Hessian 16.4 ms
+  instead of 20.0. #1232's shared reproducer builds in 35 MiB instead of
+  50. `.nl` models gain the same packing, and those whose defined variables
+  are shared across rows below both gates stop building the shared tape, with
+  bit-identical values. `TapeOp` and `SummandOp` in `pounce-nl` now take `u32`
+  operands, and its evaluators are available on a borrowed `TapeRef`.
 
 ## [0.18.0] - 2026-11-21
 
