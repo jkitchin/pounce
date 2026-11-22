@@ -81,6 +81,7 @@ def _make_newton_vjp(fun, bc, n, m, k, uses_p, tol, theta_ndim):
     from ..bvp._jac import CollocationJacobian
     from ..bvp._newton import newton_solve
     from ..bvp._solve import ift_solve_lanes
+    from ._host import host_jit
     from ._ift import make_ift_root
 
     def residual_jax(z, theta, x):
@@ -88,10 +89,24 @@ def _make_newton_vjp(fun, bc, n, m, k, uses_p, tol, theta_ndim):
         Y, pp = _core.unpack_z(z, n, m)
         return _core.collocation_residual(nfun, nbc, x, Y, pp, jnp.concatenate)
 
+    # The host Newton loop and its finite-difference Jacobian evaluate fun /
+    # bc outside any enclosing jit trace; compile them once per solve, with
+    # theta an argument rather than a baked-in constant, instead of
+    # dispatching op by op (gh#1241).
+    def _fun_th(xx, YY, pp, th):
+        return _core._make_normalized(fun, bc, theta=th, uses_p=uses_p)[0](xx, YY, pp)
+
+    def _bc_th(ya, yb, pp, th):
+        return _core._make_normalized(fun, bc, theta=th, uses_p=uses_p)[1](ya, yb, pp)
+
+    fun_host = host_jit(_fun_th)
+    bc_host = host_jit(_bc_th)
+
     def _np_normalized(theta_np):
-        nfun_j, nbc_j = _core._make_normalized(fun, bc, theta=theta_np, uses_p=uses_p)
-        nfun = lambda xx, YY, pp: np.asarray(nfun_j(xx, YY, pp), dtype=np.float64)
-        nbc = lambda ya, yb, pp: np.asarray(nbc_j(ya, yb, pp), dtype=np.float64)
+        nfun = lambda xx, YY, pp: np.asarray(fun_host(xx, YY, pp, theta_np),
+                                             dtype=np.float64)
+        nbc = lambda ya, yb, pp: np.asarray(bc_host(ya, yb, pp, theta_np),
+                                            dtype=np.float64)
         return nfun, nbc
 
     def _host_newton(theta_np, x_np, z0_np):

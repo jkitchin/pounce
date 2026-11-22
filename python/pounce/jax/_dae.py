@@ -22,6 +22,7 @@ import numpy as np
 
 from ..bvp._solve import solve_by_primal_lanes
 from ..ode import _dae_collocation as C
+from ._host import host_jit
 from ._ift import make_ift_root
 
 
@@ -40,9 +41,15 @@ def daeint(F, y0, t, theta, *, order=2, tol=1e-10):
     def _split(p):
         return p[:k].reshape(theta.shape), p[k:]
 
+    # The host Newton loop and its finite-difference Jacobian evaluate F
+    # outside any enclosing jit trace; compile it once per solve instead of
+    # dispatching op by op (gh#1241).
+    F_host = host_jit(F)
+
     # numpy residual callable F(t,y,yp) closed over a concrete theta
     def _np_F(th):
-        return lambda ti, yi, ypi: np.asarray(F(ti, yi, ypi, th), dtype=np.float64)
+        return lambda ti, yi, ypi: np.asarray(F_host(ti, yi, ypi, th),
+                                              dtype=np.float64)
 
     def _full_from_flat_np(zflat, y0v):
         Yint = np.asarray(zflat, np.float64).reshape(m - 1, n).T   # (n, m-1)
