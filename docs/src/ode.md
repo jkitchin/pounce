@@ -60,9 +60,29 @@ The call signature and the returned object match SciPy: `res.t`, `res.y`
 result is also dict-subscriptable like SciPy's `Bunch`, so `res["y"]` and
 `"success" in res` work too.
 
-Provide an analytic Jacobian with `jac=...` (else it is estimated by finite
-differences), and the usual `t_eval`, `args`, `first_step`, `max_step`,
-`rtol`, `atol` controls.
+Provide an analytic Jacobian with `jac=...` (else it is estimated by JAX
+autodiff or finite differences), and the usual `t_eval`, `args`,
+`first_step`, `max_step`, `rtol`, `atol` controls. As in SciPy, `jac` may be a
+constant dense or `scipy.sparse` matrix, or a callable returning either.
+
+A sparse `jac` (or a sparse `mass=`) keeps the per-step linear algebra sparse:
+the stage and error systems are factored with SuperLU instead of being
+densified. That is the case to use for method-of-lines PDEs, where the
+Jacobian is banded:
+
+```python
+import numpy as np, scipy.sparse as sp
+import pounce.ode as po
+
+n = 1500
+dx = 1 / (n + 1)
+L = sp.diags([1.0, -2.0, 1.0], [-1, 0, 1], shape=(n, n), format="csc") / dx**2
+y0 = np.sin(np.pi * np.linspace(dx, 1 - dx, n))
+res = po.solve_ivp(lambda t, y: L @ y, (0, 0.1), y0, jac=L)
+```
+
+Passing `L.toarray()` instead gives the same answer about 70 times slower at
+this size.
 
 ## Index-1 DAE via a mass matrix
 
