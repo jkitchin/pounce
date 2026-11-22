@@ -10,15 +10,15 @@ changes.
 ## [Unreleased]
 
 ### Fixed
-- **`build_nl_problem` builds kinetics-style rows in a quarter of the memory,
-  and every taped model gets smaller tapes (gh#1235).** On the issue's
-  implicit-Euler kinetics rows (57 344 rows) the build takes 159 MiB,
+- **`build_nl_problem` builds kinetics-style rows in an eighth of the
+  memory, and every taped model gets smaller tapes (gh#1235).** On the
+  issue's implicit-Euler kinetics rows (57 344 rows) the build takes 78 MiB,
   against 636 MiB in 0.18.0 and 618 MiB in 0.17.0. With m rate terms per row
-  it costs 1.3, 2.1, 3.0 and 3.7 KiB a row for m = 1–4, against 3.0, 8.2,
-  11.5 and 14.7. That is about 0.4 KiB for each added summand, down from
+  it costs 0.73, 1.05, 1.41 and 1.73 KiB a row for m = 1–4, against 3.0, 8.2,
+  11.5 and 14.7. That is about 0.17 KiB for each added summand, down from
   1.6–2.6. Constraint, Jacobian and Hessian values and both sparsity patterns
   are bit-identical to 0.18.0 on these models, and the fixture sweep's
-  statuses, objectives and iteration counts are unchanged. Four changes do
+  statuses, objectives and iteration counts are unchanged. Five changes do
   this:
   - **The shared-body constraint tape is no longer built when nothing reads
     it.** Below both of its derivative gates it served only the constraint
@@ -36,14 +36,23 @@ changes.
   - **The constraint tapes share one buffer, and so do their Hessian colour
     lists and the Jacobian's columns.** Each used to be a separate allocation
     per summand or per row.
+  - **The rows are no longer copied.** `build_nl_problem` used to rebuild
+    every row as a tree of its own before splitting it into summands. It now
+    stores the `NlExpr` DAG the caller already holds, and the problem splits
+    it in place (`NlProblem::frontend_dag`). Only a row taken by the
+    quadratic fast path keeps a tree of its own.
 
   The smaller tapes evaluate faster too. On the issue's rows in a single
   thread, the Jacobian takes 7.3 ms instead of 9.3, and the Hessian 16.4 ms
-  instead of 20.0. #1232's shared reproducer builds in 35 MiB instead of
-  50. `.nl` models gain the same packing, and those whose defined variables
+  instead of 20.0. `build_nl_problem` itself runs twice as fast on them. On
+  #1232's shared reproducer the build takes 30 MiB instead of 50 and about
+  6% longer: its summand leaves sit on long chains of operators, which are
+  now taped through rather than copied first. `.nl` models gain the same packing, and those whose defined variables
   are shared across rows below both gates stop building the shared tape, with
-  bit-identical values. `TapeOp` and `SummandOp` in `pounce-nl` now take `u32`
-  operands, and its evaluators are available on a borrowed `TapeRef`.
+  bit-identical values. In `pounce-nl`, `TapeOp` and `SummandOp` now take
+  `u32` operands, the evaluators are available on a borrowed `TapeRef`, and
+  `NlProblem` has a new `frontend_dag` field, which a struct literal must set
+  (`false` keeps the existing behaviour).
 
 ## [0.18.0] - 2026-11-21
 
