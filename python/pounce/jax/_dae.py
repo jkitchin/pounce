@@ -22,6 +22,7 @@ import numpy as np
 
 from ..bvp._solve import solve_by_primal_lanes
 from ..ode import _dae_collocation as C
+from ._host import _UNTRACEABLE, host_jit
 from ._ift import make_ift_root
 
 
@@ -40,9 +41,36 @@ def daeint(F, y0, t, theta, *, order=2, tol=1e-10):
     def _split(p):
         return p[:k].reshape(theta.shape), p[k:]
 
+    # The host Newton loop and its finite-difference Jacobian evaluate F
+    # outside any enclosing jit trace; compile it once per solve instead of
+    # dispatching op by op (gh#1241).
+    F_host = host_jit(F)
+
     # numpy residual callable F(t,y,yp) closed over a concrete theta
     def _np_F(th):
-        return lambda ti, yi, ypi: np.asarray(F(ti, yi, ypi, th), dtype=np.float64)
+        return lambda ti, yi, ypi: np.asarray(F_host(ti, yi, ypi, th),
+                                              dtype=np.float64)
+
+    # Node Jacobians (dF/dy, dF/dy') by forward-mode autodiff, built once per
+    # solve with theta an argument. The collocation core's own jacfwd probe
+    # cannot see through the numpy wrapper in ``_np_F`` and silently fell
+    # back to central differences (2n residuals per node per Newton step,
+    # sqrt(eps)-accurate). ``host_jit`` compiles it; if F branches in Python
+    # on a concrete value, jit cannot trace it but un-jitted jacfwd can (its
+    # JVP tracers carry concrete primals), so the fallback is still exact.
+    JF_host = host_jit(jax.jacfwd(lambda *a: jnp.asarray(F(*a)),
+                                  argnums=(1, 2)))
+
+    def _np_jac(th):
+        def jac(ti, yi, ypi):
+            try:
+                Fy, Fyp = JF_host(ti, yi, ypi, th)
+            except _UNTRACEABLE as e:
+                raise TypeError(
+                    "daeint: F must be JAX-traceable (jax.jacfwd of F "
+                    "failed even without jit): " + str(e)) from e
+            return np.asarray(Fy, np.float64), np.asarray(Fyp, np.float64)
+        return jac
 
     def _full_from_flat_np(zflat, y0v):
         Yint = np.asarray(zflat, np.float64).reshape(m - 1, n).T   # (n, m-1)
@@ -52,8 +80,9 @@ def daeint(F, y0, t, theta, *, order=2, tol=1e-10):
         p_np = np.asarray(p_np, np.float64)
         t_np = np.asarray(t_np, np.float64)
         th, y0v = _split(p_np)
-        Y = C.collocation_forward(_np_F(np.asarray(th)), t_np, np.asarray(y0v),
-                                  order=order, tol=tol)
+        th = np.asarray(th)
+        Y = C.collocation_forward(_np_F(th), t_np, np.asarray(y0v),
+                                  order=order, jac=_np_jac(th), tol=tol)
         return np.ascontiguousarray(Y[:, 1:].T.reshape(-1))   # node-major flat
 
     def _host_lin(z_np, p_np, t_np, v_np, transpose):
@@ -62,8 +91,9 @@ def daeint(F, y0, t, theta, *, order=2, tol=1e-10):
         def group(z_i, p_i, t_i, V):
             th, y0v = _split(p_i)
             Y = _full_from_flat_np(z_i, y0v)
+            th = np.asarray(th)
             return C.collocation_lin_solve(
-                _np_F(np.asarray(th)), t_i, Y, V, order=order,
+                _np_F(th), t_i, Y, V, order=order, jac=_np_jac(th),
                 transpose=transpose)
         return solve_by_primal_lanes(group, v_np, (z_np, p_np, t_np), (1, 1, 1))
 

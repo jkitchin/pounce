@@ -10,6 +10,21 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **`pounce.jax.odeint`, `daeint` and `solve_bvp(method="newton")` no longer
+  evaluate the user's function eagerly in their host Newton loop
+  (gh#1241).** The host solve runs in a `pure_callback`, outside any
+  enclosing `jax.jit`, and called the RHS / residual as-is for every
+  residual and finite-difference Jacobian column, which re-ran the Python
+  body and dispatched each primitive separately. The issue's 28-state
+  kinetics reproduction took 33.9 s per solve, against 0.70 s with
+  `jax.jit(rhs)`. The host evaluators are now compiled once per call, and
+  the same solve takes 0.15 s with a plain RHS. A function that cannot be
+  traced, such as one branching in Python on a concrete `t` in `daeint`,
+  falls back to eager evaluation as before. `daeint`'s per-node Jacobians
+  were also silently taken by central differences, because the numpy
+  wrapper around `F` hid it from the `jax.jacfwd` probe; they are now exact
+  forward-mode autodiff, compiled, and still exact (un-jitted `jacfwd`) for
+  an `F` with Python control flow.
 - **Less per-iteration overhead outside the linear solver on large NLPs
   (gh#1238).** On a model of ~92k variables, each iteration made several
   multi-megabyte copies that it did not need. The bound classification was

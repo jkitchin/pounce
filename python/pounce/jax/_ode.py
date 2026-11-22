@@ -34,6 +34,7 @@ import numpy as np
 from ..bvp import _core
 from ..bvp._solve import _make_spline, ift_solve_lanes
 from ..ode._solve import mesh_initial_guess
+from ._host import host_jit
 from ._ift import make_ift_root
 
 
@@ -114,6 +115,10 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
             return fun(xi, yi, th) if has_theta else fun(xi, yi)
         return jax.vmap(col, in_axes=(0, 1), out_axes=1)(xx, YY)
 
+    # The host Newton loop evaluates the RHS outside any enclosing jit trace;
+    # compile it once per solve instead of dispatching op by op (gh#1241).
+    _vec_rhs_host = host_jit(_vec_rhs)
+
     def residual_jax(z, p, t_):
         th, y0v = _split(p)
         nfun = lambda xx, YY, pp: _vec_rhs(xx, YY, th)
@@ -128,7 +133,7 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
         y0v = np.asarray(y0v, dtype=np.float64)
 
         def nfun(xx, YY, pp):
-            return np.asarray(_vec_rhs(xx, YY, th), dtype=np.float64)
+            return np.asarray(_vec_rhs_host(xx, YY, th), dtype=np.float64)
 
         def nbc(ya, yb, pp):
             return np.asarray(ya, dtype=np.float64) - y0v
