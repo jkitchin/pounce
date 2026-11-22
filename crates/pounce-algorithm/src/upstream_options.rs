@@ -554,6 +554,25 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          yes.",
     )?;
     r.add_string_option(
+        "qp_kkt_row_elim",
+        "Eliminate variable-bound rows from the convex IPM's factored KKT.",
+        "yes",
+        &[
+            (
+                "yes",
+                "Carry each single-column orthant row (every finite variable bound) as a diagonal term on its column (default).",
+            ),
+            ("no", "Factor the full augmented system with one row per bound."),
+        ],
+        "Convex LP/QP and symmetric-cone interior point (both the HSDE and \
+         the direct driver), gh#1243. An exact Schur-complement elimination: \
+         the Newton step and the inertia test are the full system's, but the \
+         factored matrix loses one row per finite bound, which on a boxed LP \
+         can halve its dimension and the factor's fill with it. `no` is the \
+         pre-gh#1243 behaviour, kept for comparison and as an escape hatch. \
+         Default yes.",
+    )?;
+    r.add_string_option(
         "qp_crossover",
         "Run LP crossover to purify the IPM iterate to an exact vertex.",
         "no",

@@ -295,6 +295,20 @@ pub struct QpOptions {
     /// recommendation and the value the HSDE driver has always used, so the
     /// default leaves that driver bit-for-bit unchanged.
     pub gondzio_max_corr: usize,
+    /// Eliminate the single-column rows of nonnegative-orthant blocks —
+    /// every expanded variable bound, and any singleton inequality — from
+    /// the factored KKT, carrying each as a diagonal term on its column
+    /// instead (gh#1243). Exact: the Newton step and the inertia verdict are
+    /// those of the full system, and refinement residuals are still measured
+    /// on it. What changes is the matrix handed to the factorization, which
+    /// on a bounded LP loses one row per finite bound. Default `true`;
+    /// `false` factors the full augmented system, as before gh#1243.
+    ///
+    /// Read by the drivers that assemble the shared KKT assembly: the
+    /// symmetric HSDE and the direct interior-point loop, including the
+    /// reusable [`QpFactorization`]. The nonsymmetric-cone HSDE assembles its
+    /// own KKT and does not eliminate.
+    pub kkt_row_elim: bool,
 }
 
 impl Default for QpOptions {
@@ -322,6 +336,7 @@ impl Default for QpOptions {
             // the LPs it targets, and does not yet reach Optimal on GEN (#133).
             crossover: false,
             gondzio_max_corr: crate::correctors::MAX_CORR,
+            kkt_row_elim: true,
         }
     }
 }
@@ -4462,8 +4477,8 @@ where
     let mut e = vec![0.0; prob.m_ineq()];
     cone.identity(&mut e);
 
-    let kkt = KktStructure::build(prob, cone, opts.reg);
-    let dim = kkt.dim; // base rows + per-SOC auxiliary variables
+    let kkt = KktStructure::build(prob, cone, opts.reg, opts.kkt_row_elim);
+    let dim = kkt.fact_dim; // factored rows + per-SOC auxiliary variables
     let mut kkt_vals = kkt.values.clone();
     kkt.update_blocks(cone, &e, &e, opts.reg, &mut kkt_vals);
     // gh#986 item 3: the seed factorization is numeric as well as symbolic,
@@ -4481,9 +4496,14 @@ where
     }
     // Borrowed, not cloned: a clone moved into `new` lived through the first
     // numeric factorization, the solve's memory peak (gh#1243).
-    let fact =
-        Factorization::with_pattern(dim as Index, &kkt.airn, &kkt.ajcn, kkt_vals, make_backend())
-            .map_err(|_| ())?;
+    let fact = Factorization::with_pattern(
+        dim as Index,
+        &kkt.airn,
+        &kkt.ajcn,
+        kkt.factor_values(kkt_vals),
+        make_backend(),
+    )
+    .map_err(|_| ())?;
     Ok((kkt, fact))
 }
 
@@ -5029,7 +5049,7 @@ fn run_ipm(
         // per-iteration matrix factorable, and what failed was only the
         // *seed* factorization, which `build_factorization` floors. Removed
         // rather than kept untested.
-        if fact.refactor(&kkt_vals).is_err() {
+        if kkt.refactor(fact, &mut kkt_vals).is_err() {
             status = QpStatus::NumericalFailure;
             break;
         }
@@ -5039,7 +5059,7 @@ fn run_ipm(
         cone.comp_residual(&s, &z, 0.0, &mut r_c);
         cone.rhs_comp_term(&s, &z, &r_c, &mut rhs_term);
         build_rhs(&r_d, &r_p, &r_g, &rhs_term, n, m_eq, m_ineq, &mut rhs);
-        if fact.solve_one(&mut rhs).is_err() {
+        if kkt.solve(fact, &kkt_vals, &mut rhs).is_err() {
             status = QpStatus::NumericalFailure;
             break;
         }
@@ -5076,7 +5096,7 @@ fn run_ipm(
             cone.comp_residual_corrector(&s, &z, &ds_aff, &dz_aff, sigma_mu, &mut r_c);
             cone.rhs_comp_term(&s, &z, &r_c, &mut rhs_term);
             build_rhs(&r_d, &r_p, &r_g, &rhs_term, n, m_eq, m_ineq, &mut rhs);
-            if fact.solve_one(&mut rhs).is_err() {
+            if kkt.solve(fact, &kkt_vals, &mut rhs).is_err() {
                 status = QpStatus::NumericalFailure;
                 break;
             }
@@ -5152,7 +5172,7 @@ fn run_ipm(
                     build_rhs(
                         &zeros_n, &zeros_meq, &zeros_m, &rhs_term, n, m_eq, m_ineq, &mut rhs,
                     );
-                    if fact.solve_one(&mut rhs).is_err() {
+                    if kkt.solve(fact, &kkt_vals, &mut rhs).is_err() {
                         // A failed corrector is not a failed iteration: the
                         // Mehrotra direction in hand is still usable, so drop
                         // the correction and step with it.
@@ -5479,8 +5499,12 @@ impl QpFactorization {
         };
         // Rebuild this instance's pattern and require it to match the
         // captured one exactly (same nnz, same row/col indices).
-        let kkt = KktStructure::build(&expanded, &self.cone, self.opts.reg);
-        if prob.n != self.n || kkt.airn != self.airn || kkt.ajcn != self.ajcn {
+        let kkt = KktStructure::build(&expanded, &self.cone, self.opts.reg, self.opts.kkt_row_elim);
+        if prob.n != self.n
+            || kkt.fact_dim as Index != self.fact.dim()
+            || kkt.airn != self.airn
+            || kkt.ajcn != self.ajcn
+        {
             return failed_solution(
                 prob,
                 vec![0.0; prob.n],
@@ -5868,7 +5892,8 @@ pub fn assemble_kkt_for_bench(
     _dim: usize,
 ) -> (Vec<Index>, Vec<Index>, Vec<Number>) {
     let cone = CompositeCone::single_nonneg(prob.m_ineq());
-    let kkt = KktStructure::build(prob, &cone, reg);
+    // The full augmented system, as the bench has always timed it.
+    let kkt = KktStructure::build(prob, &cone, reg, false);
     let mut vals = kkt.values.clone();
     // Orthant block s/z = scaling at z = 1.
     let ones = vec![1.0; prob.m_ineq()];
@@ -5926,9 +5951,27 @@ pub(crate) struct KktStructure {
     pub(crate) ajcn: Vec<Index>,
     /// Constant values (everything except the scaling block; the `(z, z)`
     /// diagonal entries hold their `-reg` term here).
+    ///
+    /// The first `airn.len()` entries are the factored pattern's. When rows
+    /// are eliminated ([`RowElim`]) one more entry per eliminated row
+    /// follows, holding that row's `(z, z)` diagonal value: the drivers write
+    /// it through [`Self::update_blocks`] exactly as if it were still in the
+    /// matrix, and [`Self::refactor`] folds it onto the `(x, x)` diagonal.
     pub(crate) values: Vec<Number>,
-    /// Total KKT dimension, including the per-SOC auxiliary variables.
+    /// Dimension of the **driver's** KKT layout `[x | y | z | aux]`: every
+    /// right-hand side and solution vector has this length, whether or not
+    /// rows are eliminated from the factored matrix.
     pub(crate) dim: usize,
+    /// Dimension of the matrix actually factored: `dim` minus the
+    /// eliminated rows. Equal to `dim` when nothing is eliminated.
+    pub(crate) fact_dim: usize,
+    n: usize,
+    m_eq: usize,
+    m_ineq: usize,
+    /// Orthant rows eliminated from the factored matrix by an exact Schur
+    /// complement onto the `(x, x)` diagonal (gh#1243). Empty when the
+    /// build was asked not to eliminate, or no row qualified.
+    elim: RowElim,
     /// Per-cone `(z, z)` block positions, in `cone.blocks()` order.
     z_blocks: Vec<ZBlockPos>,
     /// Value-array positions of the `(y, y)` equality-multiplier diagonal,
@@ -5961,9 +6004,41 @@ impl KktStructure {
     /// position; all seeded with `-reg` on the diagonal. The pattern is
     /// constant across iterations — only the scaling values change — so the
     /// solver `refactor`s rather than re-analyzing.
-    pub(crate) fn build(prob: &QpProblem, cone: &CompositeCone, reg: f64) -> Self {
+    ///
+    /// With `eliminate`, every single-column row of a nonnegative-orthant
+    /// block — each expanded variable bound among them — is taken out of the
+    /// factored matrix and carried as a diagonal term instead; see
+    /// [`RowElim`] for the algebra. The drivers see no difference in layout:
+    /// they still write that row's scaling, and still pass and receive
+    /// full-length vectors, through [`Self::refactor`], [`Self::solve`] and
+    /// [`Self::matvec`].
+    pub(crate) fn build(prob: &QpProblem, cone: &CompositeCone, reg: f64, eliminate: bool) -> Self {
         let n = prob.n;
         let m_eq = prob.m_eq();
+        let m_ineq = prob.m_ineq();
+        let elim = if eliminate {
+            RowElim::detect(prob, cone)
+        } else {
+            RowElim::default()
+        };
+        // `zmap[i]`: row `i`'s index inside the factored `(z, z)` block, or
+        // `usize::MAX` for an eliminated row. The identity when nothing is
+        // eliminated, which keeps the pattern — and so every value — exactly
+        // what it was before elimination existed.
+        let mut zmap = vec![usize::MAX; m_ineq];
+        let mut m_kept = 0usize;
+        {
+            let mut k = 0usize;
+            for (i, slot) in zmap.iter_mut().enumerate() {
+                if k < elim.zrow.len() && elim.zrow[k] == i {
+                    k += 1;
+                } else {
+                    *slot = m_kept;
+                    m_kept += 1;
+                }
+            }
+        }
+        let zr = |i: usize| n + m_eq + zmap[i];
         let mut entries: BTreeMap<(usize, usize), f64> = BTreeMap::new();
         let mut add = |r: usize, c: usize, v: f64| {
             let (r, c) = if r >= c { (r, c) } else { (c, r) };
@@ -5990,28 +6065,33 @@ impl KktStructure {
         for i in 0..m_eq {
             add(n + i, n + i, -reg);
         }
-        // (z,x): G.
+        // (z,x): G. An eliminated row's entry is carried by `elim` instead.
         for t in &prob.g {
-            add(n + m_eq + t.row, t.col, t.val);
+            if zmap[t.row] != usize::MAX {
+                add(zr(t.row), t.col, t.val);
+            }
         }
         // (z,z): per cone block, seeded with −δI. SOC blocks get an
         // auxiliary variable (appended after the base rows) carrying the
         // rank-1 term. The scaling values are written by `update_blocks`.
-        let base_dim = n + m_eq + prob.m_ineq();
+        let base_dim = n + m_eq + m_kept;
         let shapes = block_shapes(cone);
         let mut aux = base_dim; // next auxiliary-variable index
         for ((off, k), shape) in cone.blocks().iter().zip(&shapes) {
             let d = k.dim();
-            let zbase = n + m_eq + off;
             for i in 0..d {
-                add(zbase + i, zbase + i, -reg); // diagonal (filled per iter)
+                // Diagonal (filled per iter); an eliminated row's lives in
+                // its trailing value slot, seeded below.
+                if zmap[off + i] != usize::MAX {
+                    add(zr(off + i), zr(off + i), -reg);
+                }
             }
             match shape {
                 BlockShape::Diagonal => {}
                 BlockShape::DiagRank1 => {
                     // Aux: coupling (z_i, ξ) = u_i and (ξ, ξ) = +1.
                     for i in 0..d {
-                        add(aux, zbase + i, 0.0);
+                        add(aux, zr(off + i), 0.0);
                     }
                     add(aux, aux, 1.0);
                     aux += 1;
@@ -6021,18 +6101,20 @@ impl KktStructure {
                     // the diagonal was already added above.
                     for i in 0..d {
                         for j in 0..i {
-                            add(zbase + i, zbase + j, 0.0);
+                            add(zr(off + i), zr(off + j), 0.0);
                         }
                     }
                 }
             }
         }
-        let dim = aux;
+        let fact_dim = aux;
+        let n_aux = aux - base_dim;
+        let dim = n + m_eq + m_ineq + n_aux;
 
         let nnz = entries.len();
         let mut airn = Vec::with_capacity(nnz);
         let mut ajcn = Vec::with_capacity(nnz);
-        let mut values = Vec::with_capacity(nnz);
+        let mut values = Vec::with_capacity(nnz + elim.zrow.len());
         let mut coord_to_pos: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for (pos, ((r, c), v)) in entries.into_iter().enumerate() {
             airn.push((r + 1) as Index);
@@ -6040,25 +6122,33 @@ impl KktStructure {
             values.push(v);
             coord_to_pos.insert((r, c), pos);
         }
+        // One trailing slot per eliminated row: its `(z, z)` diagonal, seeded
+        // `0.0 + (−reg)` exactly as the in-matrix entry was.
+        values.extend(elim.zrow.iter().map(|_| 0.0 + -reg));
+        // Trailing-slot index of each eliminated row, by row.
+        let elim_slot =
+            |row: usize| -> Option<usize> { elim.zrow.binary_search(&row).ok().map(|k| nnz + k) };
 
         // Record each cone block's positions in `blocks()` order.
         let mut z_blocks = Vec::with_capacity(cone.blocks().len());
         let mut aux = base_dim;
         for ((off, k), shape) in cone.blocks().iter().zip(&shapes) {
             let d = k.dim();
-            let zbase = n + m_eq + off;
             match shape {
                 BlockShape::Diagonal => {
                     let diag_pos = (0..d)
-                        .map(|i| coord_to_pos[&(zbase + i, zbase + i)])
+                        .map(|i| match elim_slot(off + i) {
+                            Some(p) => p,
+                            None => coord_to_pos[&(zr(off + i), zr(off + i))],
+                        })
                         .collect();
                     z_blocks.push(ZBlockPos::Diagonal(diag_pos));
                 }
                 BlockShape::DiagRank1 => {
                     let diag_pos = (0..d)
-                        .map(|i| coord_to_pos[&(zbase + i, zbase + i)])
+                        .map(|i| coord_to_pos[&(zr(off + i), zr(off + i))])
                         .collect();
-                    let u_pos = (0..d).map(|i| coord_to_pos[&(aux, zbase + i)]).collect();
+                    let u_pos = (0..d).map(|i| coord_to_pos[&(aux, zr(off + i))]).collect();
                     let aux_pos = coord_to_pos[&(aux, aux)];
                     z_blocks.push(ZBlockPos::DiagRank1 {
                         diag_pos,
@@ -6072,7 +6162,7 @@ impl KktStructure {
                     let mut pos = Vec::with_capacity(d * (d + 1) / 2);
                     for i in 0..d {
                         for j in 0..=i {
-                            pos.push(coord_to_pos[&(zbase + i, zbase + j)]);
+                            pos.push(coord_to_pos[&(zr(off + i), zr(off + j))]);
                         }
                     }
                     z_blocks.push(ZBlockPos::Dense { pos });
@@ -6085,12 +6175,21 @@ impl KktStructure {
         // `-reg` seed is already in `values` from the loop above.
         let y_diag_pos: Vec<usize> = (0..m_eq).map(|i| coord_to_pos[&(n + i, n + i)]).collect();
         let x_diag_pos: Vec<usize> = (0..n).map(|i| coord_to_pos[&(i, i)]).collect();
+        let mut elim = elim;
+        elim.xpos = elim.col.iter().map(|&c| x_diag_pos[c]).collect();
+        elim.vpos = nnz;
+        elim.alloc_scratch(fact_dim);
 
         KktStructure {
             airn,
             ajcn,
             values,
             dim,
+            fact_dim,
+            n,
+            m_eq,
+            m_ineq,
+            elim,
             z_blocks,
             y_diag_pos,
             x_diag_pos,
@@ -6170,6 +6269,309 @@ impl KktStructure {
         for (&p, &base) in self.x_diag_pos.iter().zip(&self.x_diag_base) {
             out[p] = base + delta_w;
         }
+    }
+
+    /// Rows taken out of the factored matrix. Each one removes exactly one
+    /// negative eigenvalue from it (see [`RowElim`]), so an inertia test
+    /// against the full KKT's count subtracts this.
+    pub(crate) fn n_eliminated(&self) -> usize {
+        self.elim.zrow.len()
+    }
+
+    /// Fold every eliminated row's `−a²/v` onto its column's `(x, x)` entry
+    /// of `vals`, run `f` on the factored prefix, and put the `(x, x)`
+    /// entries back exactly. The drivers' value array is therefore never
+    /// left holding the folded matrix: later updates, and [`Self::matvec`],
+    /// see the full KKT's own values.
+    fn with_folded<R>(&self, vals: &mut [Number], f: impl FnOnce(&[Number]) -> R) -> R {
+        let nnz = self.airn.len();
+        if self.elim.zrow.is_empty() {
+            return f(&vals[..nnz]);
+        }
+        let e = &self.elim;
+        let mut saved = e.saved.borrow_mut();
+        // Save every touched entry before folding any: a column with both a
+        // lower and an upper bound is touched twice.
+        for (sv, &p) in saved.iter_mut().zip(&e.xpos) {
+            *sv = vals[p];
+        }
+        for k in 0..e.zrow.len() {
+            let v = vals[e.vpos + k];
+            vals[e.xpos[k]] -= e.coef[k] * e.coef[k] / v;
+        }
+        let out = f(&vals[..nnz]);
+        for (&sv, &p) in saved.iter().zip(&e.xpos).rev() {
+            vals[p] = sv;
+        }
+        out
+    }
+
+    /// The values to seed a [`Factorization`] with: the factored prefix of
+    /// `vals`, with the eliminated rows folded in.
+    pub(crate) fn factor_values(&self, mut vals: Vec<Number>) -> Vec<Number> {
+        if self.elim.zrow.is_empty() {
+            vals.truncate(self.airn.len());
+            return vals;
+        }
+        self.with_folded(&mut vals, |v| v.to_vec())
+    }
+
+    /// Numeric refactorization of the KKT whose full values are `vals`
+    /// (see [`Self::with_folded`]). Identical to `fact.refactor(vals)` when
+    /// nothing is eliminated.
+    ///
+    /// The elimination divides by each eliminated row's `(z, z)` value `v`,
+    /// which is `−(s/z) − δ < 0` for any interior iterate. If roundoff ever
+    /// leaves one that is not a finite negative number — `δ = 0` with `s/z`
+    /// underflowed, say — or makes a fold overflow, the reduced system is not
+    /// a faithful Schur complement, so this reports the factorization
+    /// singular instead of factoring it. The drivers already answer a
+    /// singular factor: the HSDE raises the `(z, z)` regularization, which
+    /// moves every `v` further from zero; the direct driver stops with
+    /// `NumericalFailure`.
+    pub(crate) fn refactor(
+        &self,
+        fact: &mut Factorization,
+        vals: &mut [Number],
+    ) -> Result<(), pounce_linsol::FactorizationError> {
+        let e = &self.elim;
+        let faithful = (0..e.zrow.len()).all(|k| {
+            let v = vals[e.vpos + k];
+            v < 0.0 && v.is_finite() && (e.coef[k] * e.coef[k] / v).is_finite()
+        });
+        if !faithful {
+            return Err(pounce_linsol::FactorizationError::Singular);
+        }
+        self.with_folded(vals, |v| fact.refactor(v))
+    }
+
+    /// Solve the **full** KKT system `K u = rhs` in place, through the
+    /// factor of the reduced one. `vals` are the full values the factor was
+    /// built from. Identical to `fact.solve_one(rhs)` when nothing is
+    /// eliminated.
+    ///
+    /// For an eliminated row `i` with entry `a` in column `j` and diagonal
+    /// `v`, the full system's two rows touching it are
+    /// `(K_r)_{j·} u + a u_i = r_j` and `a u_j + v u_i = r_i`. Eliminating
+    /// `u_i = (r_i − a u_j)/v` leaves the reduced system with `−a²/v` added
+    /// to `(j, j)` (the fold) and `r_j − a r_i / v` on the right; `u_i` is
+    /// recovered from `u_j` afterwards. Exact in exact arithmetic.
+    pub(crate) fn solve(
+        &self,
+        fact: &mut Factorization,
+        vals: &[Number],
+        rhs: &mut [Number],
+    ) -> Result<(), pounce_linsol::FactorizationError> {
+        if self.elim.zrow.is_empty() {
+            return fact.solve_one(rhs);
+        }
+        let e = &self.elim;
+        let head = self.n + self.m_eq;
+        let mut red = e.red_x.borrow_mut();
+        self.compact(rhs, &mut red);
+        for k in 0..e.zrow.len() {
+            let v = vals[e.vpos + k];
+            red[e.col[k]] -= e.coef[k] * rhs[head + e.zrow[k]] / v;
+        }
+        fact.solve_one(&mut red)?;
+        for k in 0..e.zrow.len() {
+            let v = vals[e.vpos + k];
+            let i = head + e.zrow[k];
+            rhs[i] = (rhs[i] - e.coef[k] * red[e.col[k]]) / v;
+        }
+        self.expand(&red, rhs);
+        Ok(())
+    }
+
+    /// `y ← K x` for the **full** KKT with values `vals` (lower-triangle
+    /// pattern, symmetric product), as iterative refinement needs it: the
+    /// residual is measured on the system the drivers are solving, not on
+    /// the reduced one. Identical to the plain triplet matvec over
+    /// `(airn, ajcn, vals)` when nothing is eliminated.
+    pub(crate) fn matvec(&self, vals: &[Number], x: &[f64], y: &mut [f64]) {
+        let nnz = self.airn.len();
+        if self.elim.zrow.is_empty() {
+            triplet_matvec(&self.airn, &self.ajcn, &vals[..nnz], x, y);
+            return;
+        }
+        let e = &self.elim;
+        let head = self.n + self.m_eq;
+        let mut xr = e.red_x.borrow_mut();
+        let mut yr = e.red_y.borrow_mut();
+        self.compact(x, &mut xr);
+        triplet_matvec(&self.airn, &self.ajcn, &vals[..nnz], &xr, &mut yr);
+        for v in y.iter_mut() {
+            *v = 0.0;
+        }
+        self.expand(&yr, y);
+        for k in 0..e.zrow.len() {
+            let i = head + e.zrow[k];
+            let j = e.col[k];
+            let a = e.coef[k];
+            y[j] += a * x[i];
+            y[i] = a * x[j] + vals[e.vpos + k] * x[i];
+        }
+    }
+
+    /// Gather the factored coordinates of a full-layout vector.
+    fn compact(&self, full: &[f64], red: &mut [f64]) {
+        let head = self.n + self.m_eq;
+        let zrow = &self.elim.zrow;
+        red[..head].copy_from_slice(&full[..head]);
+        let (mut k, mut j) = (0usize, head);
+        for i in 0..self.m_ineq {
+            if k < zrow.len() && zrow[k] == i {
+                k += 1;
+            } else {
+                red[j] = full[head + i];
+                j += 1;
+            }
+        }
+        red[j..].copy_from_slice(&full[head + self.m_ineq..]);
+    }
+
+    /// Scatter a factored-coordinate vector into a full-layout one, leaving
+    /// the eliminated rows' entries untouched.
+    fn expand(&self, red: &[f64], full: &mut [f64]) {
+        let head = self.n + self.m_eq;
+        let zrow = &self.elim.zrow;
+        full[..head].copy_from_slice(&red[..head]);
+        let (mut k, mut j) = (0usize, head);
+        for i in 0..self.m_ineq {
+            if k < zrow.len() && zrow[k] == i {
+                k += 1;
+            } else {
+                full[head + i] = red[j];
+                j += 1;
+            }
+        }
+        full[head + self.m_ineq..].copy_from_slice(&red[j..]);
+    }
+}
+
+/// Symmetric matvec `y ← M x` for lower-triangle KKT triplets (`airn`/`ajcn`
+/// 1-based with `row ≥ col`). Each strictly-lower entry contributes to both
+/// `y[i]` and `y[j]`; the diagonal once.
+pub(crate) fn triplet_matvec(
+    airn: &[Index],
+    ajcn: &[Index],
+    vals: &[f64],
+    x: &[f64],
+    y: &mut [f64],
+) {
+    for v in y.iter_mut() {
+        *v = 0.0;
+    }
+    for k in 0..vals.len() {
+        let i = (airn[k] - 1) as usize;
+        let j = (ajcn[k] - 1) as usize;
+        let v = vals[k];
+        y[i] += v * x[j];
+        if i != j {
+            y[j] += v * x[i];
+        }
+    }
+}
+
+/// Inequality rows of a nonnegative-orthant block that touch exactly one
+/// column, eliminated from the factored KKT (gh#1243).
+///
+/// Every finite variable bound reaches the convex drivers as such a row
+/// (`expand_bounds`: `x_j ≤ u` is `e_jᵀx + s = u`, `x_j ≥ l` is
+/// `−e_jᵀx + s = −l`), and so does any singleton row the user wrote. Each
+/// one enters the KKT as a column-`j` entry `a` and a `(z, z)` diagonal
+/// `v = −(s_i/z_i) − δ < 0`. A `2×2` pivot on it is exact Gaussian
+/// elimination: the reduced matrix gets `−a²/v = a²·z_i/(s_i + δ z_i) > 0`
+/// on `(j, j)` — the bound's `Σ = z/s`, which is how Ipopt's augmented
+/// system carries bounds — and the row leaves the factorization.
+///
+/// What that buys is size: on Mittelmann's `Primal2_1000` the bound rows
+/// made the HSDE KKT 8.84 M rows and 19.3 M nonzeros against 3.86 M rows for
+/// the same model on the NLP arm, and the factor's fill and every copy of
+/// the matrix scaled with it.
+///
+/// Why it is exact, and why the drivers cannot tell:
+///
+/// * **The step.** In exact arithmetic the full and reduced systems have
+///   the same solution ([`KktStructure::solve`] spells out the algebra).
+/// * **Inertia.** By the Haynsworth inertia additivity formula the full
+///   matrix's inertia is the reduced Schur complement's plus that of the
+///   eliminated diagonal block, which is all negative (`v < 0` on the
+///   orthant). So the reduced factor has exactly [`Self`]`.len()` fewer
+///   negative eigenvalues and the same positives and zeros, and the HSDE's
+///   wrong-inertia test subtracts that count.
+/// * **Refinement.** Residuals are still formed against the full matrix
+///   ([`KktStructure::matvec`]), so the refinement residual the HSDE's
+///   dynamic regularization keys on measures the same quantity it always
+///   did.
+///
+/// Only orthant rows qualify: their `(z, z)` block is diagonal and its sign
+/// is known. Second-order, PSD and nonsymmetric-cone rows stay in the matrix.
+#[derive(Default)]
+struct RowElim {
+    /// Inequality-row index of each eliminated row, ascending.
+    zrow: Vec<usize>,
+    /// The row's one column.
+    col: Vec<usize>,
+    /// Its coefficient, summed over duplicate triplets in input order as the
+    /// in-matrix entry would have been.
+    coef: Vec<f64>,
+    /// Value-array position of `col`'s `(x, x)` diagonal.
+    xpos: Vec<usize>,
+    /// Value-array position of the first trailing `(z, z)` slot; row `k`'s is
+    /// `vpos + k`.
+    vpos: usize,
+    /// Scratch: the `(x, x)` values [`KktStructure::with_folded`] restores.
+    saved: std::cell::RefCell<Vec<f64>>,
+    /// Scratch: factored-coordinate vectors for solve and matvec.
+    red_x: std::cell::RefCell<Vec<f64>>,
+    red_y: std::cell::RefCell<Vec<f64>>,
+}
+
+impl RowElim {
+    fn detect(prob: &QpProblem, cone: &CompositeCone) -> Self {
+        let m_ineq = prob.m_ineq();
+        let mut in_orthant = vec![false; m_ineq];
+        for (off, k) in cone.blocks() {
+            if matches!(k, crate::cones::ConeKind::Nonneg(_)) {
+                in_orthant[*off..off + k.dim()]
+                    .iter_mut()
+                    .for_each(|b| *b = true);
+            }
+        }
+        const EMPTY: usize = usize::MAX;
+        const MANY: usize = usize::MAX - 1;
+        let mut rcol = vec![EMPTY; m_ineq];
+        let mut rcoef = vec![0.0f64; m_ineq];
+        for t in &prob.g {
+            match rcol[t.row] {
+                EMPTY => {
+                    rcol[t.row] = t.col;
+                    rcoef[t.row] = 0.0 + t.val;
+                }
+                c if c == t.col => rcoef[t.row] += t.val,
+                MANY => {}
+                _ => rcol[t.row] = MANY,
+            }
+        }
+        let mut e = RowElim::default();
+        for i in 0..m_ineq {
+            if in_orthant[i] && rcol[i] < MANY {
+                e.zrow.push(i);
+                e.col.push(rcol[i]);
+                e.coef.push(rcoef[i]);
+            }
+        }
+        e
+    }
+
+    fn alloc_scratch(&mut self, fact_dim: usize) {
+        if self.zrow.is_empty() {
+            return;
+        }
+        self.saved = std::cell::RefCell::new(vec![0.0; self.zrow.len()]);
+        self.red_x = std::cell::RefCell::new(vec![0.0; fact_dim]);
+        self.red_y = std::cell::RefCell::new(vec![0.0; fact_dim]);
     }
 }
 
@@ -8907,5 +9309,277 @@ mod sigma_crossover_rerecord_tests {
             1e-8,
             false
         ));
+    }
+}
+
+#[cfg(test)]
+mod kkt_row_elim_tests {
+    //! gh#1243: eliminating single-column orthant rows from the factored KKT
+    //! must leave the *full* system the drivers solve unchanged — its
+    //! solution, its product, its inertia — and must hand the drivers back
+    //! their value array bit for bit.
+    //!
+    //! The fixture is built to reach every branch of the detection rule:
+    //! bound pairs on one column (two eliminated rows sharing an `(x, x)`
+    //! entry), a lone bound, a user singleton row with a non-unit
+    //! coefficient, a singleton written as two duplicate triplets, a row with
+    //! two columns (kept), a single-column row inside a second-order cone
+    //! (kept: not orthant), and a PSD `P`.
+    use super::{KktStructure, triplet_matvec};
+    use crate::cones::{CompositeCone, ConeSpec};
+    use crate::qp::{QpProblem, Triplet};
+    use pounce_common::types::Index;
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linsol::Factorization;
+
+    fn lcg(state: &mut u64) -> f64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((*state >> 11) as f64) / ((1u64 << 53) as f64)
+    }
+
+    /// `(problem, cone, rows the rule must eliminate)`.
+    fn fixture() -> (QpProblem, CompositeCone, Vec<usize>) {
+        let n = 7;
+        let t = Triplet::new;
+        // Orthant block A: rows 0..6.
+        //   0: x0 + x1 ≤ ·        (two columns: kept)
+        //   1: 2.5·x2 ≤ ·         (user singleton: eliminated)
+        //   2: 0.75·x3 + 0.25·x3  (duplicate triplets, one column: eliminated)
+        //   3: x4 - x5 + x6 ≤ ·   (kept)
+        //   4: x1 ≤ u             (bound: eliminated)
+        //   5: -x1 ≤ -l           (bound on the same column: eliminated)
+        // SOC block: rows 6..9 — row 7 touches only x0 (kept: not orthant).
+        // Orthant block B: rows 9..11 — two more bounds.
+        let g = vec![
+            t(0, 0, 1.0),
+            t(0, 1, 1.0),
+            t(1, 2, 2.5),
+            t(2, 3, 0.75),
+            t(2, 3, 0.25),
+            t(3, 4, 1.0),
+            t(3, 5, -1.0),
+            t(3, 6, 1.0),
+            t(4, 1, 1.0),
+            t(5, 1, -1.0),
+            t(6, 4, -1.0),
+            t(6, 5, 0.5),
+            t(7, 0, -2.0),
+            t(8, 6, 1.0),
+            t(8, 2, 0.3),
+            t(9, 6, -1.0),
+            t(10, 0, 1.0),
+        ];
+        let prob = QpProblem {
+            n,
+            p_lower: vec![t(0, 0, 2.0), t(1, 0, 0.5), t(1, 1, 1.0), t(4, 4, 3.0)],
+            c: vec![1.0, -1.0, 0.5, 0.0, 2.0, -0.5, 1.5],
+            a: vec![t(0, 0, 1.0), t(0, 3, 1.0), t(1, 5, 1.0), t(1, 6, -2.0)],
+            b: vec![1.0, 0.5],
+            g,
+            h: vec![1.0; 11],
+            lb: Vec::new(),
+            ub: Vec::new(),
+        };
+        let cone = CompositeCone::from_specs(&[
+            ConeSpec::Nonneg(6),
+            ConeSpec::SecondOrder(3),
+            ConeSpec::Nonneg(2),
+        ]);
+        (prob, cone, vec![1, 2, 4, 5, 9, 10])
+    }
+
+    /// A strictly interior `(s, z)`: positive on the orthant rows, inside the
+    /// Lorentz cone on the SOC rows.
+    fn interior(seed: u64) -> (Vec<f64>, Vec<f64>) {
+        let mut st = seed;
+        let mut s: Vec<f64> = (0..11).map(|_| 0.05 + 3.0 * lcg(&mut st)).collect();
+        let mut z: Vec<f64> = (0..11).map(|_| 0.05 + 3.0 * lcg(&mut st)).collect();
+        s[6..9].copy_from_slice(&[2.0, 0.3, -0.4]);
+        z[6..9].copy_from_slice(&[1.5, -0.2, 0.5]);
+        (s, z)
+    }
+
+    fn values(kkt: &KktStructure, cone: &CompositeCone, s: &[f64], z: &[f64]) -> Vec<f64> {
+        let mut v = kkt.values.clone();
+        kkt.update_blocks(cone, s, z, 1e-8, &mut v);
+        kkt.update_eq_reg(1e-7, &mut v);
+        kkt.update_primal_reg(1e-6, &mut v);
+        v
+    }
+
+    fn factor(kkt: &KktStructure, vals: &[f64]) -> Factorization {
+        Factorization::with_pattern(
+            kkt.fact_dim as Index,
+            &kkt.airn,
+            &kkt.ajcn,
+            kkt.factor_values(vals.to_vec()),
+            Box::new(FeralSolverInterface::new()),
+        )
+        .expect("the fixture's KKT factors")
+    }
+
+    fn rel_diff(a: &[f64], b: &[f64]) -> f64 {
+        let scale = a.iter().chain(b).fold(1.0f64, |m, v| m.max(v.abs()));
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f64::max)
+            / scale
+    }
+
+    #[test]
+    fn detection_takes_exactly_the_single_column_orthant_rows() {
+        let (prob, cone, want) = fixture();
+        let red = KktStructure::build(&prob, &cone, 1e-8, true);
+        assert_eq!(red.elim.zrow, want);
+        assert_eq!(red.elim.col, vec![2, 3, 1, 1, 6, 0]);
+        // Duplicate triplets summed in input order, from 0.0, as the
+        // in-matrix entry would have been.
+        assert_eq!(
+            red.elim.coef,
+            vec![2.5, 0.0 + 0.75 + 0.25, 1.0, -1.0, -1.0, 1.0]
+        );
+        let full = KktStructure::build(&prob, &cone, 1e-8, false);
+        assert_eq!(full.n_eliminated(), 0);
+        assert_eq!(full.fact_dim, full.dim);
+        assert_eq!(red.dim, full.dim, "the drivers' layout must not change");
+        assert_eq!(red.fact_dim, full.dim - want.len());
+        assert_eq!(red.values.len(), red.airn.len() + want.len());
+    }
+
+    #[test]
+    fn the_full_product_is_unchanged() {
+        let (prob, cone, _) = fixture();
+        let full = KktStructure::build(&prob, &cone, 1e-8, false);
+        let red = KktStructure::build(&prob, &cone, 1e-8, true);
+        for seed in 1..6 {
+            let (s, z) = interior(seed);
+            let (vf, vr) = (values(&full, &cone, &s, &z), values(&red, &cone, &s, &z));
+            let mut st = seed * 977;
+            let x: Vec<f64> = (0..full.dim).map(|_| lcg(&mut st) - 0.5).collect();
+            let mut yf = vec![0.0; full.dim];
+            let mut yr = vec![0.0; full.dim];
+            full.matvec(&vf, &x, &mut yf);
+            red.matvec(&vr, &x, &mut yr);
+            let mut yt = vec![0.0; full.dim];
+            triplet_matvec(&full.airn, &full.ajcn, &vf, &x, &mut yt);
+            assert_eq!(
+                yf, yt,
+                "with nothing eliminated, matvec is the triplet product"
+            );
+            assert!(
+                rel_diff(&yf, &yr) < 1e-14,
+                "seed {seed}: {}",
+                rel_diff(&yf, &yr)
+            );
+        }
+    }
+
+    #[test]
+    fn the_reduced_factor_solves_the_full_system() {
+        let (prob, cone, _) = fixture();
+        let full = KktStructure::build(&prob, &cone, 1e-8, false);
+        let red = KktStructure::build(&prob, &cone, 1e-8, true);
+        for seed in 1..6 {
+            let (s, z) = interior(seed);
+            let (vf, vr) = (values(&full, &cone, &s, &z), values(&red, &cone, &s, &z));
+            let mut ff = factor(&full, &vf);
+            let mut fr = factor(&red, &vr);
+            let mut st = seed * 31;
+            let b: Vec<f64> = (0..full.dim).map(|_| lcg(&mut st) - 0.5).collect();
+            let (mut uf, mut ur) = (b.clone(), b.clone());
+            full.solve(&mut ff, &vf, &mut uf).unwrap();
+            red.solve(&mut fr, &vr, &mut ur).unwrap();
+            assert!(
+                rel_diff(&uf, &ur) < 1e-10,
+                "seed {seed}: {}",
+                rel_diff(&uf, &ur)
+            );
+            // And it is a solution of the full system, not merely close to
+            // the other one.
+            let mut ku = vec![0.0; full.dim];
+            full.matvec(&vf, &ur, &mut ku);
+            assert!(
+                rel_diff(&ku, &b) < 1e-10,
+                "seed {seed}: residual {}",
+                rel_diff(&ku, &b)
+            );
+        }
+    }
+
+    #[test]
+    fn each_eliminated_row_takes_exactly_one_negative_eigenvalue() {
+        let (prob, cone, want) = fixture();
+        let full = KktStructure::build(&prob, &cone, 1e-8, false);
+        let red = KktStructure::build(&prob, &cone, 1e-8, true);
+        for seed in 1..6 {
+            let (s, z) = interior(seed);
+            let ff = factor(&full, &values(&full, &cone, &s, &z));
+            let fr = factor(&red, &values(&red, &cone, &s, &z));
+            let (nf, nr) = (
+                ff.number_of_neg_evals().expect("feral reports inertia"),
+                fr.number_of_neg_evals().expect("feral reports inertia"),
+            );
+            assert_eq!(nf as usize - nr as usize, want.len(), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn refactor_hands_the_value_array_back_bit_for_bit() {
+        let (prob, cone, _) = fixture();
+        let red = KktStructure::build(&prob, &cone, 1e-8, true);
+        let (s, z) = interior(3);
+        let mut fr = factor(&red, &values(&red, &cone, &s, &z));
+        let (s2, z2) = interior(4);
+        let mut v2 = values(&red, &cone, &s2, &z2);
+        let before = v2.clone();
+        red.refactor(&mut fr, &mut v2).unwrap();
+        assert_eq!(
+            v2.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            before.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "the folded (x, x) entries must be restored exactly"
+        );
+        // The refactored factor is the one for `v2`, not for `v`.
+        let mut fresh = factor(&red, &v2);
+        let b: Vec<f64> = (0..red.dim).map(|i| (i as f64).sin()).collect();
+        let (mut u1, mut u2) = (b.clone(), b.clone());
+        red.solve(&mut fr, &v2, &mut u1).unwrap();
+        red.solve(&mut fresh, &v2, &mut u2).unwrap();
+        assert!(rel_diff(&u1, &u2) < 1e-12);
+    }
+
+    /// The guard's branch: an eliminated row whose `(z, z)` value is not a
+    /// finite negative number makes `refactor` report `Singular` — the
+    /// signal the HSDE escalates on — and leaves the values untouched.
+    #[test]
+    fn a_non_negative_eliminated_diagonal_is_reported_singular() {
+        let (prob, cone, _) = fixture();
+        let red = KktStructure::build(&prob, &cone, 1e-8, true);
+        let (s, z) = interior(2);
+        let mut fr = factor(&red, &values(&red, &cone, &s, &z));
+        for bad in [0.0, -0.0, 1e-3, f64::NAN, f64::NEG_INFINITY] {
+            let mut v = values(&red, &cone, &s, &z);
+            v[red.elim.vpos + 2] = bad;
+            let before: Vec<u64> = v.iter().map(|x| x.to_bits()).collect();
+            assert_eq!(
+                red.refactor(&mut fr, &mut v),
+                Err(pounce_linsol::FactorizationError::Singular),
+                "v = {bad}"
+            );
+            assert_eq!(v.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), before);
+        }
+        // A genuine negative `v` can still overflow the fold: with a = 2.5,
+        // a²/v at v = −1e-308 is −6.25e308, past `f64::MAX`.
+        let mut v = values(&red, &cone, &s, &z);
+        v[red.elim.vpos] = -1e-308;
+        assert_eq!(
+            red.refactor(&mut fr, &mut v),
+            Err(pounce_linsol::FactorizationError::Singular)
+        );
+        // And the ordinary case still factors.
+        let mut v = values(&red, &cone, &s, &z);
+        assert!(red.refactor(&mut fr, &mut v).is_ok());
     }
 }

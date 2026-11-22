@@ -135,6 +135,7 @@ const PROBES: &[(&str, &[Probe])] = &[
     ),
     ("qp_equilibrate", &[Probe::Str("yes"), Probe::Str("no")]),
     ("qp_crossover", &[Probe::Str("yes"), Probe::Str("no")]),
+    ("qp_kkt_row_elim", &[Probe::Str("yes"), Probe::Str("no")]),
     ("qp_presolve", &[Probe::Str("yes"), Probe::Str("no")]),
     ("presolve", &[Probe::Str("yes"), Probe::Str("no")]),
     (
@@ -249,6 +250,7 @@ fn an_untouched_registry_yields_exactly_the_rust_defaults() {
     assert_eq!(qp.use_hsde, expected.use_hsde);
     assert_eq!(qp.equilibrate, expected.equilibrate);
     assert_eq!(qp.crossover, expected.crossover);
+    assert_eq!(qp.kkt_row_elim, expected.kkt_row_elim);
 
     assert_eq!(
         ConvexPresolveOptions::try_from_options_list(app.options()).expect("defaults must parse"),
