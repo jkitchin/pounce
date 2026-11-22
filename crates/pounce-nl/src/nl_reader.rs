@@ -45,7 +45,7 @@ use pounce_nlp::tnlp::{
     ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -763,6 +763,20 @@ pub struct NlProblem {
     /// `pounce_nlp::mpcc::MpccTnlp`, which a solve of a model with entries
     /// here must go through. Empty for every model without complementarity.
     pub complementarity: Vec<NlComplementarity>,
+    /// Whether the bodies are a frontend's expression DAG, in which every
+    /// operator holds its operands behind `Cse` hand-offs (gh#1235).
+    ///
+    /// `NlExpr` builds `a + b` as `Add(Cse(a), Cse(b))`, sharing the operands
+    /// rather than copying them, so in such a DAG almost every `Cse` is an
+    /// operand passed once, not a subexpression used twice. The summand split
+    /// treats a `Cse` as an opaque leaf, so splitting the DAG as it stands
+    /// would tape a whole row as one summand. With this set, [`NlTnlp`]
+    /// splits it as if every `Cse` its row references fewer than twice were
+    /// inlined (see [`split_top_sums_handoffs`]). That gives the summands of
+    /// the inlined tree, op for op, without anyone building that tree. Off
+    /// for a parsed model, whose `Cse`s are `.nl` defined variables, each
+    /// meant as one, and for any model a caller assembles itself.
+    pub frontend_dag: bool,
 }
 
 /// One `.nl` complementarity row: `body(row) complements x[var]`.
@@ -952,6 +966,7 @@ impl NlProblem {
             src: None,
             cse_bodies: Vec::new(),
             complementarity: Vec::new(),
+            frontend_dag: false,
         })
     }
 
@@ -1669,6 +1684,7 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
         src: kept_src,
         cse_bodies: p.cses.clone(),
         complementarity,
+        frontend_dag: false,
     })
 }
 
@@ -4431,6 +4447,144 @@ fn split_top_sums<'a>(expr: &'a Expr, out: &mut Vec<ScaledExpr<'a>>) {
     }
 }
 
+/// How many references reach each `Cse` body in `e`, keyed by the body's
+/// address. A body is descended into only the first time it is reached, so
+/// a DAG costs one visit per distinct node, and a body nested in one that is
+/// referenced twice is still counted once: what the count measures is how
+/// often the expression *names* the body, which is what decides whether
+/// inlining it would copy it (gh#1235).
+pub fn count_cse_refs(e: &Expr, refs: &mut HashMap<*const Expr, usize>) {
+    match e {
+        Expr::Const(_) | Expr::Var(_) => {}
+        Expr::Binary(_, a, b) | Expr::Compare(_, a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+            count_cse_refs(a, refs);
+            count_cse_refs(b, refs);
+        }
+        Expr::Unary(_, a) | Expr::Not(a) => count_cse_refs(a, refs),
+        Expr::Sum(args) | Expr::MinList(args) | Expr::MaxList(args) => {
+            for a in args {
+                count_cse_refs(a, refs);
+            }
+        }
+        Expr::Cond { cond, then_, else_ } => {
+            count_cse_refs(cond, refs);
+            count_cse_refs(then_, refs);
+            count_cse_refs(else_, refs);
+        }
+        Expr::Funcall { args, .. } => {
+            for a in args {
+                if let FuncallArg::Real(inner) = a {
+                    count_cse_refs(inner, refs);
+                }
+            }
+        }
+        Expr::Cse(body) => {
+            let seen = refs.entry(Arc::as_ptr(body)).or_insert(0);
+            *seen += 1;
+            if *seen == 1 {
+                count_cse_refs(body, refs);
+            }
+        }
+    }
+}
+
+/// `e` with every `Cse` its row references fewer than twice looked through:
+/// the node that stands in its place once those hand-offs are inlined.
+fn see_through_handoffs<'a>(mut e: &'a Expr, row: &HashMap<*const Expr, usize>) -> &'a Expr {
+    while let Expr::Cse(body) = e {
+        if row.get(&Arc::as_ptr(body)).copied().unwrap_or(0) >= 2 {
+            break;
+        }
+        e = body;
+    }
+    e
+}
+
+/// [`split_top_sums`] of the tree `expr` would be with every `Cse` hand-off
+/// inlined — every `Cse` its row (`row`, from [`count_cse_refs`]) references
+/// fewer than twice — read straight off the DAG (gh#1235).
+///
+/// That tree is what a frontend sharing its operands would otherwise have to
+/// build for every row: [`split_top_sums`] treats a `Cse` as an opaque leaf,
+/// so it has to see the sum spine without them. This sees through them on
+/// the spine instead, node for node as the split walks the inlined tree, so
+/// it finds the same summands with the same factors:
+///
+/// * a constant on either side of a product, or a nonzero divisor, is
+///   recognized behind its hand-offs, as the inlined tree would show it;
+/// * a summand leaf is the node behind its hand-offs, borrowed. Below it the
+///   DAG keeps its `Cse`s, which the tape builders treat as transparent —
+///   each body is emitted where the inlined copy was — so the leaf tapes op
+///   for op as its copy would, flat and hybrid alike. The leaf itself is a
+///   plain node unique to its summand, as the copy was, so the hybrid tape
+///   promotes exactly the bodies it would have.
+///
+/// A `Cse` the row references twice or more is not a hand-off and stays an
+/// opaque leaf, as it does in the inlined tree.
+fn split_top_sums_handoffs<'a>(
+    expr: &'a Expr,
+    row: &HashMap<*const Expr, usize>,
+    out: &mut Vec<ScaledExpr<'a>>,
+) {
+    static ZERO: Expr = Expr::Const(0.0);
+    fn go<'a>(
+        e: &'a Expr,
+        factor: f64,
+        row: &HashMap<*const Expr, usize>,
+        out: &mut Vec<ScaledExpr<'a>>,
+    ) {
+        let e = see_through_handoffs(e, row);
+        let konst = |x: &Expr| match see_through_handoffs(x, row) {
+            Expr::Const(c) => Some(*c),
+            _ => None,
+        };
+        match e {
+            Expr::Sum(terms) => {
+                for t in terms {
+                    go(t, factor, row, out);
+                }
+            }
+            Expr::Binary(BinOp::Add, l, r) => {
+                go(l, factor, row, out);
+                go(r, factor, row, out);
+            }
+            Expr::Binary(BinOp::Sub, l, r) => {
+                go(l, factor, row, out);
+                go(r, -factor, row, out);
+            }
+            Expr::Unary(UnaryOp::Neg, x) => go(x, -factor, row, out),
+            Expr::Binary(BinOp::Mul, l, r) => match (konst(l), konst(r)) {
+                (Some(c), _) => go(r, factor * c, row, out),
+                (None, Some(c)) => go(l, factor * c, row, out),
+                (None, None) => out.push(ScaledExpr { expr: e, factor }),
+            },
+            Expr::Binary(BinOp::Div, l, r) => match konst(r) {
+                Some(c) if c != 0.0 => go(l, factor / c, row, out),
+                _ => out.push(ScaledExpr { expr: e, factor }),
+            },
+            _ => out.push(ScaledExpr { expr: e, factor }),
+        }
+    }
+    let start = out.len();
+    go(expr, 1.0, row, out);
+    if out.len() == start {
+        out.push(ScaledExpr::unit(&ZERO));
+    }
+}
+
+/// The summands of one body: [`split_top_sums`], or for a model whose bodies
+/// are a frontend's DAG ([`NlProblem::frontend_dag`]), the same split of the
+/// tree with its hand-offs inlined.
+fn split_body<'a>(expr: &'a Expr, frontend_dag: bool, out: &mut Vec<ScaledExpr<'a>>) {
+    if frontend_dag {
+        let mut row = HashMap::new();
+        count_cse_refs(expr, &mut row);
+        split_top_sums_handoffs(expr, &row, out);
+    } else {
+        split_top_sums(expr, out);
+    }
+}
+
 /// Greedy column coloring of a symmetric sparsity pattern stored
 /// as lower-triangle pairs.
 ///
@@ -5233,7 +5387,7 @@ impl NlTnlp {
         } else {
             let obj = prob.obj_expr();
             let mut summands = Vec::new();
-            split_top_sums(&obj, &mut summands);
+            split_body(&obj, prob.frontend_dag, &mut summands);
             summands
                 .into_iter()
                 .map(|s| Tape::build_scaled(s, &resolver))
@@ -5266,7 +5420,7 @@ impl NlTnlp {
         for (k, body) in con_bodies.iter().enumerate() {
             row_start.push(con_roots.len());
             if quad.row_form(k).is_none() {
-                split_top_sums(body, &mut con_roots);
+                split_body(body, prob.frontend_dag, &mut con_roots);
             }
         }
         row_start.push(con_roots.len());
@@ -8051,6 +8205,7 @@ b
             n_discrete: None,
             var_names: vec![],
             con_names: vec![],
+            frontend_dag: false,
         };
         let mut tnlp = NlTnlp::new(prob);
         let mut types = vec![Linearity::Linear; 2];
@@ -8111,6 +8266,7 @@ b
             n_discrete: None,
             var_names: vec![],
             con_names: vec![],
+            frontend_dag: false,
         };
         let mut tnlp = NlTnlp::new(prob);
 

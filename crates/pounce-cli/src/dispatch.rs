@@ -1348,6 +1348,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         };
         assert_eq!(classify_problem(&prob), ProblemClass::Lp);
     }
@@ -1573,6 +1574,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         }
     }
 
@@ -1777,6 +1779,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         }
     }
 
@@ -1821,6 +1824,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         }
     }
 
@@ -2054,6 +2058,7 @@ mod tests {
             n_discrete: None,
             var_names: Vec::new(),
             con_names: Vec::new(),
+            frontend_dag: false,
         }
     }
 

@@ -1022,6 +1022,89 @@ fn rebuild(
     }
 }
 
+/// The rows of a model as `build_nl_problem` stores them: each the caller's
+/// own `NlExpr` DAG, uncopied (gh#1235), except a row the quadratic
+/// recognizer admits.
+///
+/// An operator holds its operands behind `Cse` hand-offs, so a row's DAG is
+/// not the tree its summands are taped from; [`materialize`] used to build
+/// that tree for every row, and before gh#1235 those copies cost about as
+/// much as the tapes. The problem is marked [`NlProblem::frontend_dag`]
+/// instead, and `NlTnlp` splits each row as if its hand-offs were inlined,
+/// straight off the DAG. Every flat and hybrid tape comes out op for op what
+/// the copied tree gave, so values and derivatives are bit-identical to it
+/// (`stored_dag_rows_evaluate_exactly_as_the_copied_rows_did` holds the two
+/// to each other on every evaluator); and since a body several rows
+/// reference is one `Arc` in the DAG, it is one body in the model (gh#1232)
+/// without anything being counted or rebuilt.
+///
+/// **A row the quadratic recognizer admits keeps its per-row tree**, built
+/// here. The recognizer refuses some `Cse` placements a plain tree passes —
+/// a `Cse` on the sum spine of a factored form, or inside the scaling around
+/// a square — so the hand-off DAG of such a row would move it off the
+/// constant-structure fast path. Every other row is stored as given: the
+/// recognizer's other walks see through a `Cse`, so on those rows its
+/// verdict is the one the inlined tree gets.
+fn materialize_model(roots: &[&Expr]) -> Vec<Expr> {
+    roots
+        .iter()
+        .map(|root| {
+            // Building the per-row tree to ask the recognizer is the cost of
+            // this function, so it is asked only where it could answer yes.
+            if !polynomial_ops_only(root) {
+                return (*root).clone();
+            }
+            let mut row = HashMap::new();
+            count_refs(root, &mut row);
+            let mut private = HashMap::new();
+            let tree = rebuild(root, &row, &mut private);
+            let body = NlBody::Tree(tree);
+            if body.admitted_quad_form().is_some() || body.admitted_factored_form().is_some() {
+                match body {
+                    NlBody::Tree(tree) => tree,
+                    NlBody::Quad(_) => unreachable!("built as a tree"),
+                }
+            } else {
+                (*root).clone()
+            }
+        })
+        .collect()
+}
+
+/// Whether `e` reaches only the operations a quadratic form can be read out
+/// of: constants, variables, sums, differences, negation, products,
+/// quotients and powers. Both forms the recognizer admits are built from
+/// these alone — the expanded form's monomials and the factored form's
+/// spine, constant weights and squared affine bases — so a row reaching any
+/// other operation (`exp`, `sin`, a comparison, …) is admitted by neither,
+/// and [`materialize_model`] need not build its tree to ask. Each `Cse` body
+/// is visited once.
+fn polynomial_ops_only(e: &Expr) -> bool {
+    let mut seen: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
+    let mut work: Vec<&Expr> = vec![e];
+    while let Some(e) = work.pop() {
+        match e {
+            Expr::Const(_) | Expr::Var(_) => {}
+            Expr::Cse(body) => {
+                if seen.insert(Arc::as_ptr(body)) {
+                    work.push(body);
+                }
+            }
+            Expr::Sum(args) => work.extend(args.iter()),
+            Expr::Unary(UnaryOp::Neg, a) => work.push(a),
+            Expr::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow, a, b) => {
+                work.push(a);
+                work.push(b);
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// The rows as `build_nl_problem` stored them before gh#1235, kept as the
+/// reference [`materialize_model`] is tested against. Its original doc:
+///
 /// [`materialize`] for a whole model at once: every row (the objective is
 /// one more) inlined exactly as [`materialize`] would inline it on its own,
 /// except that a subexpression reached from more than one row stays **one**
@@ -1073,7 +1156,8 @@ fn rebuild(
 /// 11.4 when the estimate declined to share and an unused prelude was built
 /// anyway. Between the gates the prelude is kept for `eval_h`, next to the
 /// flat tapes, as the measured Hessian gate says it should be.
-fn materialize_model(roots: &[&Expr]) -> Vec<Expr> {
+#[cfg(test)]
+fn materialize_model_copied(roots: &[&Expr]) -> Vec<Expr> {
     // Pass 1: which rows keep their per-row tree, and — over the summand
     // leaves of every other row — how often each `Cse` body is referenced
     // model-wide.
@@ -1084,14 +1168,29 @@ fn materialize_model(roots: &[&Expr]) -> Vec<Expr> {
         count_refs(root, &mut row);
         let keep = quadratic_row(root, &row);
         if !keep {
-            spine(root, &row, &mut |leaf: &Expr| {
+            spine(root, &row, &mut |leaf: &Expr, _| {
                 count_refs(leaf, &mut global);
                 Expr::Const(0.0)
             });
         }
         keep_tree.push(keep);
     }
-    // Pass 2: rebuild, one `Arc` per shared body for the whole model.
+    // Pass 2: rebuild the spines; below them, reference the caller's own
+    // nodes (gh#1235). A summand leaf reached through a `Cse` hand-off is
+    // copied one node deep — `clone` copies the node and bumps the `Arc` of
+    // each operand — so everything below it is the frontend's own DAG rather
+    // than a private copy. The tape builders treat a `Cse` as transparent,
+    // so each summand tapes op for op as the deep copy did.
+    //
+    // The leaf node itself must stay a fresh node, not the caller's `Cse`:
+    // a leaf several rows reach (every row's `exp(…)` in gh#1232's model)
+    // would otherwise become a body the hybrid tape promotes into its
+    // prelude, which the deep copy never was, and the hybrid Hessian, which
+    // sums adjoints per promoted body, would move in the last bits. Below a
+    // node unique to its summand, the first body a hybrid tape can promote
+    // on any path is one referenced from two places, which is exactly where
+    // the deep copy kept a `Cse`. A leaf that arrived bare is rebuilt as
+    // before, one `Arc` per body shared across the model.
     let mut shared: HashMap<*const Expr, Arc<Expr>> = HashMap::new();
     roots
         .iter()
@@ -1103,8 +1202,9 @@ fn materialize_model(roots: &[&Expr]) -> Vec<Expr> {
                 let mut private = HashMap::new();
                 rebuild(root, &row, &mut private)
             } else {
-                spine(root, &row, &mut |leaf: &Expr| {
-                    rebuild(leaf, &global, &mut shared)
+                spine(root, &row, &mut |leaf: &Expr, orig: &Expr| match orig {
+                    Expr::Cse(_) => leaf.clone(),
+                    _ => rebuild(leaf, &global, &mut shared),
                 })
             }
         })
@@ -1115,6 +1215,7 @@ fn materialize_model(roots: &[&Expr]) -> Vec<Expr> {
 /// admits (`push_body_form`'s two tests), in which case it is kept as is so
 /// that the recognizer sees exactly what it saw before gh#1232. Built and
 /// dropped here, one row at a time.
+#[cfg(test)]
 fn quadratic_row(root: &Expr, row: &HashMap<*const Expr, usize>) -> bool {
     let mut private = HashMap::new();
     let body = NlBody::Tree(rebuild(root, row, &mut private));
@@ -1124,6 +1225,7 @@ fn quadratic_row(root: &Expr, row: &HashMap<*const Expr, usize>) -> bool {
 /// Look through every `Cse` [`materialize`] would inline in this row (one
 /// referenced fewer than twice in it), to the node that stands in its place
 /// in the per-row tree.
+#[cfg(test)]
 fn see_through<'a>(mut e: &'a Expr, row: &HashMap<*const Expr, usize>) -> &'a Expr {
     while let Expr::Cse(body) = e {
         if row.get(&Arc::as_ptr(body)).copied().unwrap_or(0) >= 2 {
@@ -1135,7 +1237,10 @@ fn see_through<'a>(mut e: &'a Expr, row: &HashMap<*const Expr, usize>) -> &'a Ex
 }
 
 /// Rebuild the part of a row that `split_top_sums` descends through, as
-/// [`materialize`] would inline it, handing each summand leaf to `leaf`.
+/// [`materialize`] would inline it, handing each summand leaf to `leaf` —
+/// as the node that stands in its place in the per-row tree, and as the
+/// expression that reached it, which is that node behind the `Cse`
+/// hand-offs [`see_through`] looked past.
 ///
 /// Mirrors `split_top_sums`'s `go` node for node — `Sum`, `+`, `-`, unary
 /// `-`, a product with a constant on either side, a quotient by a nonzero
@@ -1143,7 +1248,13 @@ fn see_through<'a>(mut e: &'a Expr, row: &HashMap<*const Expr, usize>) -> &'a Ex
 /// through, so the leaves it splits into, and the constant factors it
 /// folds into them, are the ones the per-row tree gave. Anything else is a
 /// leaf.
-fn spine(e: &Expr, row: &HashMap<*const Expr, usize>, leaf: &mut dyn FnMut(&Expr) -> Expr) -> Expr {
+#[cfg(test)]
+fn spine(
+    e: &Expr,
+    row: &HashMap<*const Expr, usize>,
+    leaf: &mut dyn FnMut(&Expr, &Expr) -> Expr,
+) -> Expr {
+    let orig = e;
     let e = see_through(e, row);
     let konst = |x: &Expr| match see_through(x, row) {
         Expr::Const(c) => Some(*c),
@@ -1168,7 +1279,7 @@ fn spine(e: &Expr, row: &HashMap<*const Expr, usize>, leaf: &mut dyn FnMut(&Expr
                 Box::new(spine(a, row, leaf)),
                 Box::new(Expr::Const(c)),
             ),
-            (None, None) => leaf(e),
+            (None, None) => leaf(e, orig),
         },
         Expr::Binary(BinOp::Div, a, b) => match konst(b) {
             Some(c) if c != 0.0 => Expr::Binary(
@@ -1176,9 +1287,9 @@ fn spine(e: &Expr, row: &HashMap<*const Expr, usize>, leaf: &mut dyn FnMut(&Expr
                 Box::new(spine(a, row, leaf)),
                 Box::new(Expr::Const(c)),
             ),
-            _ => leaf(e),
+            _ => leaf(e, orig),
         },
-        _ => leaf(e),
+        _ => leaf(e, orig),
     }
 }
 
@@ -1308,7 +1419,9 @@ pub fn build_nl_problem(
         .into_iter();
         parts.objective = built.next().expect("one materialized root per input root");
         parts.constraints = built.collect();
-        let prob = NlProblem::from_expressions(parts)?;
+        let mut prob = NlProblem::from_expressions(parts)?;
+        // The rows are the caller's DAG, hand-offs and all.
+        prob.frontend_dag = true;
         NlTnlp::try_new(prob)
     })
     .map_err(|e| PyValueError::new_err(format!("build_nl_problem: {e}")))?;
@@ -1528,184 +1641,302 @@ mod tests {
         refs.into_keys().collect()
     }
 
-    /// The whole point of gh#1232: a body every row references is one body
-    /// in the assembled model, not one private copy per row — while each row
-    /// still tapes exactly as its per-row materialization did, which is what
-    /// keeps the evaluations bit-identical.
-    #[test]
-    fn a_body_shared_by_many_rows_is_one_body_in_the_model() {
-        let k = rate();
-        let rows: Vec<PyNlExpr> = (0..40)
-            .map(|i| binary(BinOp::Add, k.operand(), v(2 + i).operand()).unwrap())
-            .collect();
-        let roots = roots(&rows);
-        let refs: Vec<&Expr> = roots.iter().collect();
-        let built = materialize_model(&refs);
+    /// `n`-variable model of `rows`, unbounded, with the rows marked as a
+    /// frontend DAG or not.
+    fn assemble(n: usize, rows: Vec<Expr>, frontend_dag: bool) -> NlTnlp {
+        let m = rows.len();
+        let mut prob = NlProblem::from_expressions(NlProblemParts {
+            minimize: true,
+            objective: Expr::Const(0.0),
+            obj_constant: 0.0,
+            constraints: rows,
+            x_l: vec![-1e19; n],
+            x_u: vec![1e19; n],
+            x0: vec![0.3; n],
+            g_l: vec![-1e19; m],
+            g_u: vec![1e19; m],
+            var_names: vec![],
+            con_names: vec![],
+        })
+        .unwrap();
+        prob.frontend_dag = frontend_dag;
+        NlTnlp::try_new(prob).unwrap()
+    }
 
-        let first = bodies(&built[0]);
-        // Below the row's spine (the trailing `· 0.5`), everything the rate
-        // is made of is reached from every row.
-        assert!(!first.is_empty(), "the rate's body is not shared");
-        for (b, r) in built.iter().zip(&roots) {
-            assert_eq!(bodies(b), first, "every row references the same body");
-            let private = materialize(r);
-            assert_eq!(count_cse(&private), 0, "per row, nothing looks shared");
-            assert_eq!(render_expression(b, &[]), render_expression(&private, &[]));
-            assert_eq!(
-                format!("{:?}", Tape::build(b).ops),
-                format!("{:?}", Tape::build(&private).ops),
-                "a row's tape must be op for op what it was"
+    /// Every evaluator of `a` against `b`, bit for bit: both sparsity
+    /// patterns, and `g`, the Jacobian, the Lagrangian Hessian and a
+    /// Hessian-vector product at three points with nonuniform multipliers.
+    /// Also that they agree on keeping a shared-CSE tape, since the hybrid
+    /// paths compute the same numbers by a different route.
+    fn assert_evaluate_alike(a: &mut NlTnlp, b: &mut NlTnlp, what: &str) {
+        use pounce_nlp::tnlp::{SparsityRequest, TNLP};
+        let (ia, ib) = (a.get_nlp_info().unwrap(), b.get_nlp_info().unwrap());
+        assert_eq!(
+            (ia.n, ia.m, ia.nnz_jac_g, ia.nnz_h_lag),
+            (ib.n, ib.m, ib.nnz_jac_g, ib.nnz_h_lag),
+            "{what}: sizes"
+        );
+        assert_eq!(
+            a.has_shared_cse_tape(),
+            b.has_shared_cse_tape(),
+            "{what}: hybrid kept"
+        );
+        let (n, m) = (ia.n as usize, ia.m as usize);
+        let (nj, nh) = (ia.nnz_jac_g as usize, ia.nnz_h_lag as usize);
+        let structure = |t: &mut NlTnlp| {
+            let (mut jr, mut jc) = (vec![0; nj], vec![0; nj]);
+            let (mut hr, mut hc) = (vec![0; nh], vec![0; nh]);
+            t.eval_jac_g(
+                None,
+                true,
+                SparsityRequest::Structure {
+                    irow: &mut jr,
+                    jcol: &mut jc,
+                },
             );
-        }
-        // The `* 0.5` the summand split distributes into the leaf is still
-        // visible on the row's spine, not hidden inside a shared `Cse`.
-        match &built[0] {
-            Expr::Binary(BinOp::Add, a, _) => {
-                assert!(
-                    matches!(&**a, Expr::Binary(BinOp::Mul, _, c) if matches!(**c, Expr::Const(_)))
-                )
-            }
-            other => panic!("row spine not inlined: {other:?}"),
+            t.eval_h(
+                None,
+                true,
+                1.0,
+                None,
+                true,
+                SparsityRequest::Structure {
+                    irow: &mut hr,
+                    jcol: &mut hc,
+                },
+            );
+            (jr, jc, hr, hc)
+        };
+        assert_eq!(structure(a), structure(b), "{what}: sparsity");
+        let bits = |v: &[Number]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (k, shift) in [0.0, 0.37, -0.81].into_iter().enumerate() {
+            let x: Vec<Number> = (0..n)
+                .map(|j| 0.2 + shift + 0.6 * ((j * 7919 + k * 104729) % 1000) as Number / 1000.0)
+                .collect();
+            let lam: Vec<Number> = (0..m).map(|i| 0.5 - (i % 7) as Number * 0.13).collect();
+            let v: Vec<Number> = (0..n).map(|j| 1.0 - 0.01 * (j % 13) as Number).collect();
+            let mut run = |t: &mut NlTnlp| {
+                let mut g = vec![0.0; m];
+                let mut jv = vec![0.0; nj];
+                let mut hv = vec![0.0; nh];
+                let mut hvp = vec![0.0; n];
+                assert!(t.eval_g(&x, true, &mut g));
+                assert!(t.eval_jac_g(Some(&x), true, SparsityRequest::Values { values: &mut jv }));
+                assert!(t.eval_h(
+                    Some(&x),
+                    true,
+                    0.7,
+                    Some(&lam),
+                    true,
+                    SparsityRequest::Values { values: &mut hv }
+                ));
+                t.hessian_vector_products(&x, &v, 1, 0.7, Some(&lam), &mut hvp)
+                    .unwrap();
+                (bits(&g), bits(&jv), bits(&hv), bits(&hvp))
+            };
+            let (ra, rb) = (run(a), run(b));
+            assert_eq!(ra.0, rb.0, "{what}: eval_g at point {k}");
+            assert_eq!(ra.1, rb.1, "{what}: eval_jac_g at point {k}");
+            assert_eq!(ra.2, rb.2, "{what}: eval_h at point {k}");
+            assert_eq!(ra.3, rb.3, "{what}: hessian_vector_products at point {k}");
         }
     }
 
-    /// The spine rule has to follow `split_top_sums` through scaling and
-    /// division by a constant, through subtraction and negation, and stop at
-    /// a `Cse` the row itself references twice — or rows would split into
-    /// different summands than before, and sum in a different order.
-    #[test]
-    fn the_row_spine_is_inlined_exactly_as_the_per_row_tree() {
+    /// gh#1235's kinetics rows, small: `y_s - x_s - h·(r_a - r_b + 2·r_c)`
+    /// with each rate `exp(p)·y·y - exp(p')·y` shared by several rows, so the
+    /// spine sees through hand-offs at every level and splits each rate into
+    /// two summands, scaled by `-h`, `h` and `-2h`.
+    fn kinetics_rows(steps: usize) -> (usize, Vec<PyNlExpr>) {
+        let s_n = 6;
+        let nx = (steps + 1) * s_n;
+        let n = nx + 4;
+        let ep: Vec<PyNlExpr> = (0..4)
+            .map(|j| unary(UnaryOp::Exp, v(nx + j).operand()).unwrap())
+            .collect();
+        let mut rows = Vec::new();
+        for k in 0..steps {
+            let y = |s: usize| v((k + 1) * s_n + s);
+            let rates: Vec<PyNlExpr> = (0..3)
+                .map(|j| {
+                    let t = binary(BinOp::Mul, ep[j % 4].operand(), y(j % s_n).operand()).unwrap();
+                    let t = binary(BinOp::Mul, t.operand(), y((j + 1) % s_n).operand()).unwrap();
+                    let u = binary(
+                        BinOp::Mul,
+                        ep[(j + 1) % 4].operand(),
+                        y((j + 2) % s_n).operand(),
+                    )
+                    .unwrap();
+                    binary(BinOp::Sub, t.operand(), u.operand()).unwrap()
+                })
+                .collect();
+            for s in 0..s_n {
+                let d = binary(
+                    BinOp::Sub,
+                    rates[s % 3].operand(),
+                    rates[(s + 1) % 3].operand(),
+                )
+                .unwrap();
+                let c = binary(BinOp::Mul, num(2.0), rates[(s + 2) % 3].operand()).unwrap();
+                let rhs = binary(BinOp::Add, d.operand(), c.operand()).unwrap();
+                let hr = binary(BinOp::Mul, num(0.01), rhs.operand()).unwrap();
+                let l = binary(BinOp::Sub, y(s).operand(), v(k * s_n + s).operand()).unwrap();
+                rows.push(binary(BinOp::Sub, l.operand(), hr.operand()).unwrap());
+            }
+        }
+        (n, rows)
+    }
+
+    /// gh#1232's shape, small: deep bodies each shared by many rows, whose
+    /// summand leaf — `exp(…)` behind the `· 0.5` the split distributes — is
+    /// itself one node every row of a body reaches. That clears both hybrid
+    /// gates, and it is the case where storing the leaf as the caller's `Cse`
+    /// rather than as a node of its own once moved the hybrid Hessian.
+    fn deep_shared_rows() -> (usize, Vec<PyNlExpr>) {
+        let n = 30;
+        let pool: Vec<PyNlExpr> = (0..3)
+            .map(|i| {
+                let mut e = v(i);
+                for j in 0..14 {
+                    let p = binary(BinOp::Mul, e.operand(), v((i + j) % 10).operand()).unwrap();
+                    let x = unary(UnaryOp::Exp, p.operand()).unwrap();
+                    e = binary(BinOp::Mul, x.operand(), num(0.5)).unwrap();
+                }
+                e
+            })
+            .collect();
+        let rows = (0..60)
+            .map(|i| binary(BinOp::Add, pool[i % 3].operand(), v(10 + i % 20).operand()).unwrap())
+            .collect();
+        (n, rows)
+    }
+
+    /// Spine shapes the split has to see through exactly as the inlined tree
+    /// shows them: scaling and division by a constant, subtraction and
+    /// negation, an n-ary sum, a quotient by zero (no scaling), a constant
+    /// reached through a hand-off, and a `Cse` the row references twice,
+    /// which stays a leaf of its own.
+    fn spine_shape_rows() -> (usize, Vec<PyNlExpr>) {
         let k = rate();
         let twice = binary(BinOp::Mul, k.operand(), v(3).operand()).unwrap();
-        let shapes: Vec<PyNlExpr> = vec![
-            // 2 * (k - x2) / 3
+        let three = binary(BinOp::Add, num(1.0), num(2.0)).unwrap();
+        let rows = vec![
             {
                 let d = binary(BinOp::Sub, k.operand(), v(2).operand()).unwrap();
                 let m = binary(BinOp::Mul, num(2.0), d.operand()).unwrap();
                 binary(BinOp::Div, m.operand(), num(3.0)).unwrap()
             },
-            // -(k) + k * x3: `k` is referenced twice in the row, so it stays
-            // a leaf of its own rather than splitting.
             {
-                let n = unary(UnaryOp::Neg, k.operand()).unwrap();
-                binary(BinOp::Add, n.operand(), twice.operand()).unwrap()
+                let n_ = unary(UnaryOp::Neg, k.operand()).unwrap();
+                binary(BinOp::Add, n_.operand(), twice.operand()).unwrap()
             },
-            // k / 0 is not a constant scaling: a leaf.
             binary(BinOp::Div, k.operand(), num(0.0)).unwrap(),
-            // An n-ary sum mixing all of it.
             PyNlExpr::nested(
                 Expr::Sum(vec![k.operand().expr, twice.operand().expr, Expr::Var(4)]),
                 1,
             )
             .unwrap(),
+            binary(
+                BinOp::Mul,
+                three.operand(),
+                binary(BinOp::Sub, v(1).operand(), v(4).operand())
+                    .unwrap()
+                    .operand(),
+            )
+            .unwrap(),
+            binary(BinOp::Add, k.operand(), k.operand()).unwrap(),
         ];
-        let roots = roots(&shapes);
+        (5, rows)
+    }
+
+    /// The point of gh#1235's last step: `build_nl_problem` stores the
+    /// caller's DAG rather than copying each row, and every evaluator gives
+    /// exactly what the copied rows gave — against the copy-based build
+    /// this replaced (cross-row sharing and all), and against each row
+    /// inlined on its own. The models reach each branch that matters: rows
+    /// that split through hand-offs at every level and keep no hybrid tape
+    /// (kinetics, spine shapes), small bodies shared by thousands of rows
+    /// (`exp(p_j)`), and a model above both hybrid gates whose summand leaf
+    /// many rows share (deep).
+    #[test]
+    fn stored_dag_rows_evaluate_exactly_as_the_copied_rows_did() {
+        let small = {
+            let rows_n = 200;
+            let p: Vec<PyNlExpr> = (0..10)
+                .map(|j| unary(UnaryOp::Exp, v(rows_n + j).operand()).unwrap())
+                .collect();
+            let rows: Vec<PyNlExpr> = (0..rows_n)
+                .map(|i| {
+                    let (a, b, c) = (v(i), v((i + 1) % rows_n), v((i + 2) % rows_n));
+                    let t1 = binary(BinOp::Mul, p[i % 10].operand(), a.operand()).unwrap();
+                    let t1 = binary(BinOp::Mul, t1.operand(), b.operand()).unwrap();
+                    let t2 = binary(BinOp::Mul, p[(i + 1) % 10].operand(), c.operand()).unwrap();
+                    let d = binary(BinOp::Sub, t1.operand(), t2.operand()).unwrap();
+                    let s = binary(BinOp::Mul, num(0.01), d.operand()).unwrap();
+                    let l = binary(BinOp::Sub, a.operand(), b.operand()).unwrap();
+                    binary(BinOp::Sub, l.operand(), s.operand()).unwrap()
+                })
+                .collect();
+            (rows_n + 10, rows)
+        };
+        let models = [
+            ("kinetics", kinetics_rows(12)),
+            ("deep shared", deep_shared_rows()),
+            ("spine shapes", spine_shape_rows()),
+            ("small shared bodies", small),
+        ];
+        for (what, (n, rows)) in models {
+            let roots = roots(&rows);
+            let refs: Vec<&Expr> = roots.iter().collect();
+            let mut stored = assemble(n, materialize_model(&refs), true);
+            let mut copied = assemble(n, materialize_model_copied(&refs), false);
+            assert_evaluate_alike(&mut stored, &mut copied, &format!("{what} vs copied"));
+            let mut per_row = assemble(n, roots.iter().map(materialize).collect(), false);
+            let mut stored = assemble(n, materialize_model(&refs), true);
+            if !stored.has_shared_cse_tape() {
+                // Without a hybrid tape there is no cross-row sharing to
+                // differ in, so each row inlined on its own must agree too.
+                assert_evaluate_alike(&mut stored, &mut per_row, &format!("{what} vs per row"));
+            }
+        }
+        // The branch the deep model exists for.
+        let (n, rows) = deep_shared_rows();
+        let roots = roots(&rows);
         let refs: Vec<&Expr> = roots.iter().collect();
-        let built = materialize_model(&refs);
-        for (b, r) in built.iter().zip(&roots) {
-            let private = materialize(r);
-            assert_eq!(render_expression(b, &[]), render_expression(&private, &[]));
-            assert_eq!(
-                format!("{:?}", Tape::build(b).ops),
-                format!("{:?}", Tape::build(&private).ops)
-            );
-            // Same summands, in the same order: the split and the per-row
-            // tree agree term by term.
-            let parts = NlProblem::from_expressions(NlProblemParts {
-                minimize: true,
-                objective: Expr::Const(0.0),
-                obj_constant: 0.0,
-                constraints: vec![b.clone(), private.clone()],
-                x_l: vec![-1.0; 5],
-                x_u: vec![1.0; 5],
-                x0: vec![0.3; 5],
-                g_l: vec![-1e19; 2],
-                g_u: vec![1e19; 2],
-                var_names: vec![],
-                con_names: vec![],
-            })
-            .unwrap();
-            let mut t = NlTnlp::try_new(parts).unwrap();
-            let x = [0.3, -0.2, 0.7, 0.1, -0.4];
-            let mut g = [0.0; 2];
-            pounce_nlp::tnlp::TNLP::eval_g(&mut t, &x, true, &mut g);
-            assert_eq!(
-                g[0].to_bits(),
-                g[1].to_bits(),
-                "{}",
-                render_expression(b, &[])
-            );
+        assert!(assemble(n, materialize_model(&refs), true).has_shared_cse_tape());
+    }
+
+    /// Stored as given: a row the recognizer does not admit is the caller's
+    /// own expression — the same `Arc`, nothing copied — so a body many rows
+    /// reference is one body in the model (gh#1232) for free.
+    #[test]
+    fn a_row_is_stored_as_the_callers_dag() {
+        let (_, rows) = kinetics_rows(3);
+        let roots = roots(&rows);
+        let refs: Vec<&Expr> = roots.iter().collect();
+        for (b, r) in materialize_model(&refs).iter().zip(&roots) {
+            match (b, r) {
+                (Expr::Cse(a), Expr::Cse(c)) => assert!(Arc::ptr_eq(a, c), "row was copied"),
+                other => panic!("row not stored as its operand: {other:?}"),
+            }
         }
     }
 
-    /// The gh#1232 review's counterexample: discopt hands over one `NlExpr`
-    /// per distinct node, so a two-node `exp(p_j)` is one object in thousands
-    /// of rows. Shared, it cannot let the hybrid tape replace the flat tapes —
-    /// the bodies are smaller than a summand's own ops — and that once built
-    /// the model 19% larger than unshared (145.6 against 173.9 MiB), the
-    /// hybrid tape's per-summand bookkeeping sitting next to the flat tapes.
-    /// Since gh#1235 the sharing is kept and the hybrid tape is not: the rows
-    /// still tape op for op as their per-row trees did, and `NlTnlp` builds
-    /// no prelude for evaluators that would not read it.
+    /// The same rows split as their inlined trees would: the summand tapes
+    /// of a frontend-DAG model are op for op those of each row inlined on its
+    /// own, read through `Tape::build` of the summands the split hands out.
+    /// Checked on the whole-row tape too, which no split is involved in.
     #[test]
-    fn small_bodies_shared_by_many_rows_stay_shared_but_build_no_prelude() {
-        let rows_n = 400;
-        let p: Vec<PyNlExpr> = (0..10)
-            .map(|j| unary(UnaryOp::Exp, v(rows_n + j).operand()).unwrap())
-            .collect();
-        let rows: Vec<PyNlExpr> = (0..rows_n)
-            .map(|i| {
-                let (a, b, c) = (v(i), v((i + 1) % rows_n), v((i + 2) % rows_n));
-                let t1 = binary(BinOp::Mul, p[i % 10].operand(), a.operand()).unwrap();
-                let t1 = binary(BinOp::Mul, t1.operand(), b.operand()).unwrap();
-                let t2 = binary(BinOp::Mul, p[(i + 1) % 10].operand(), c.operand()).unwrap();
-                let d = binary(BinOp::Sub, t1.operand(), t2.operand()).unwrap();
-                let s = binary(BinOp::Mul, num(0.01), d.operand()).unwrap();
-                let l = binary(BinOp::Sub, a.operand(), b.operand()).unwrap();
-                binary(BinOp::Sub, l.operand(), s.operand()).unwrap()
-            })
-            .collect();
-        let roots = roots(&rows);
-        let refs: Vec<&Expr> = roots.iter().collect();
-        let built = materialize_model(&refs);
-        for (b, r) in built.iter().zip(&roots) {
-            assert!(count_cse(b) > 0, "row's exp(p_j) not shared");
-            assert_eq!(
-                format!("{:?}", Tape::build(b).ops),
-                format!("{:?}", Tape::build(&materialize(r)).ops),
-                "a row's tape must be op for op what it was"
-            );
+    fn a_stored_row_tapes_as_its_inlined_tree() {
+        for (_, rows) in [kinetics_rows(2), spine_shape_rows()] {
+            for r in roots(&rows) {
+                assert_eq!(
+                    format!("{:?}", Tape::build(&r).ops),
+                    format!("{:?}", Tape::build(&materialize(&r)).ops),
+                    "whole-row tape of {}",
+                    render_expression(&r, &[])
+                );
+            }
         }
-
-        // Assembled both ways: identical values and derivatives, and the
-        // shared build keeps no hybrid tape, since no derivative gate is on.
-        let assemble = |rows: Vec<Expr>| {
-            let (n, m) = (rows_n + 10, rows.len());
-            let parts = NlProblemParts {
-                minimize: true,
-                objective: Expr::Const(0.0),
-                obj_constant: 0.0,
-                constraints: rows,
-                x_l: vec![-1.0; n],
-                x_u: vec![1.0; n],
-                x0: vec![0.3; n],
-                g_l: vec![-1e19; m],
-                g_u: vec![1e19; m],
-                var_names: vec![],
-                con_names: vec![],
-            };
-            NlTnlp::try_new(NlProblem::from_expressions(parts).unwrap()).unwrap()
-        };
-        let per_row: Vec<Expr> = roots.iter().map(materialize).collect();
-        let (mut a, mut b) = (assemble(built), assemble(per_row));
-        let x: Vec<Number> = (0..rows_n + 10)
-            .map(|j| 0.1 + 0.8 * j as Number / (rows_n + 10) as Number)
-            .collect();
-        let (mut ga, mut gb) = (vec![0.0; rows_n], vec![0.0; rows_n]);
-        pounce_nlp::tnlp::TNLP::eval_g(&mut a, &x, true, &mut ga);
-        pounce_nlp::tnlp::TNLP::eval_g(&mut b, &x, true, &mut gb);
-        assert_eq!(ga, gb, "eval_g");
-        assert!(!a.has_shared_cse_tape(), "an unread hybrid tape was kept");
     }
 
     /// A row the quadratic recognizer admits from its per-row tree keeps that
@@ -1743,8 +1974,13 @@ mod tests {
                 assert!(!admitted);
             }
         }
-        // The rate rows do share the rate among themselves.
-        assert!(!bodies(&built[1]).is_empty());
-        assert_eq!(bodies(&built[1]), bodies(&built[3]));
+        // The rate rows do share the rate among themselves: one body, the
+        // caller's, reached from each.
+        let rate_body = match k.operand().expr {
+            Expr::Cse(a) => Arc::as_ptr(&a),
+            other => panic!("rate not an operand: {other:?}"),
+        };
+        assert!(bodies(&built[1]).contains(&rate_body));
+        assert!(bodies(&built[3]).contains(&rate_body));
     }
 }
