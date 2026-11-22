@@ -28,6 +28,13 @@ changes.
   a cold solve fails the same way, and with it off, the bridge from the
   interior iterate already finds the vertex. The library-level tests never
   saw the defect because they gave crossover feral's default backend.
+  Across 98 LPs (89 NETLIB, the CLI's `lp_*` fixtures, the issue's LP) with
+  `qp_crossover=yes`, accepted vertices go from 89 to 94 (agg, grow15,
+  grow22, nesm, the issue's LP) and none are lost. Those rescues are also
+  faster, since the failing bridge used to spend its whole budget: agg
+  24 s → 0.06 s, nesm 105 s → 0.7 s. Total sweep time drops from 536 s to
+  395 s. One cost: PILOT's bridge now runs to its 1000-change cap without a
+  rescue, 63 s → 106 s (`dev-notes/known-limitations.md`).
 - **`pounce.jax.odeint`, `daeint` and `solve_bvp(method="newton")` no longer
   evaluate the user's function eagerly in their host Newton loop
   (gh#1241).** The host solve runs in a `pure_callback`, outside any
