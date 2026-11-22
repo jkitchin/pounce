@@ -336,7 +336,11 @@ changes.
   20 000 rows built as large as one with 20 000 private copies: 605 MiB on
   the issue's reproducer. It is now one shared body, and that model builds
   in 50 MiB. Three changes do this. Rows are assembled together, so sharing
-  between them survives. When the shared-body constraint tape serves the
+  between them survives — when it pays: sharing is kept only where the
+  shared-body tape will replace the per-row tapes, since below that it is
+  built next to them and its bookkeeping outweighs the copies it saves. A
+  model whose shared bodies are small (`exp(p_j)` reused by thousands of
+  rows) is assembled row by row, as before. When the shared-body constraint tape serves the
   constraint values, the Jacobian and the Hessian, the per-summand flat tapes
   (one copy of each shared body per row) are no longer kept;
   `hessian_vector_product` goes through the shared tape too. Each summand's

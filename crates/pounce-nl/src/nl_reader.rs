@@ -3809,6 +3809,22 @@ const HYBRID_JAC_MIN_OP_RATIO: f64 = 4.0;
 /// (#476) measures 4.03×.
 const HYBRID_HESS_MIN_OP_RATIO: f64 = 3.0;
 
+/// Whether a constraint block of `flat_ops` flat-tape ops, against
+/// `shared_ops` ops in its shared-CSE hybrid tape, clears **both** op-ratio
+/// gates — the condition under which [`NlTnlp`] serves every constraint
+/// evaluator from the hybrid tape and keeps no flat tapes (gh#1232).
+///
+/// Below it the hybrid tape, when one is built, sits *next to* the flat
+/// tapes and only speeds up `eval_g`, so a frontend deciding whether to
+/// expose sharing it could equally inline (`build_nl_problem`) asks this
+/// first: exposing it below the gates adds the hybrid tape's per-summand
+/// bookkeeping and removes nothing.
+pub fn hybrid_replaces_flat_tapes(flat_ops: usize, shared_ops: usize) -> bool {
+    let shared = shared_ops.max(1) as f64;
+    flat_ops as f64 >= HYBRID_JAC_MIN_OP_RATIO * shared
+        && flat_ops as f64 >= HYBRID_HESS_MIN_OP_RATIO * shared
+}
+
 // `Clone` supports the batched-solve path (pounce#126): one parsed
 // model is cloned per batch instance (tapes are flat `Vec`s of ops, so
 // the clone is cheap relative to a solve) and each clone gets its own
