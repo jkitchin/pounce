@@ -808,6 +808,9 @@ pub struct TapeRef<'a> {
 /// `u32` offsets. Each tape's operand indices stay relative to its own first
 /// op, so a [`TapeRef`] over its range evaluates exactly as the `Tape` it
 /// replaces.
+///
+/// The offsets limit the arena as a whole, not each tape, to 2³² ops (64 GiB
+/// at 16 bytes an op); [`slot`] panics past it rather than wrapping.
 #[derive(Debug, Clone)]
 pub struct TapeSet {
     ops: Vec<TapeOp>,
@@ -2880,6 +2883,11 @@ impl HybridTape {
 
     /// [`Self::build_multi`] over the trees `exprs` stand for, without
     /// building them. See [`ScaledExpr`].
+    ///
+    /// Keep in step with [`Self::op_counts`], which replays passes 1 and 2
+    /// below to predict this tape's size: `NlTnlp` decides from that
+    /// prediction whether to build the tape at all, and `debug_assert`s it
+    /// against the tape it then builds.
     pub fn build_multi_scaled(exprs: &[ScaledExpr<'_>]) -> Self {
         // Pass 1: per-Cse-pointer count of how many roots reference
         // it (each root contributes at most 1 to the count). The
@@ -2976,8 +2984,13 @@ impl HybridTape {
         HybridTape { prelude, summands }
     }
 
-    /// The op counts of the tape [`Self::build_multi`] would build from
-    /// `exprs`, without building it (gh#1235).
+    /// The op counts of the tape [`Self::build_multi_scaled`] would build
+    /// from `exprs`, without building it (gh#1235).
+    ///
+    /// Runs that builder's passes 1 and 2 (`count_cse_appearances`, then
+    /// `build_scaled_summand` per root into one shared prelude), so a change
+    /// to how `build_multi_scaled` promotes or emits must be made here too;
+    /// `NlTnlp::build` `debug_assert`s the two against each other.
     ///
     /// Runs the same two passes over the expressions, but holds one summand's
     /// ops at a time and none of the per-summand reach and variable lists,

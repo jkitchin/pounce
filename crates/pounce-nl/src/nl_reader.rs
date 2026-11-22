@@ -3677,6 +3677,21 @@ struct ColorWrite {
     hess_idx: u32,
 }
 
+/// Whether [`NlTnlp`] keeps the shared-CSE hybrid constraint tape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HybridPolicy {
+    /// Never build it: the flat-tape reference.
+    Off,
+    /// Keep it when some derivative evaluator reads it — either op-ratio
+    /// gate on (gh#1235). Below both it would serve `eval_g` alone, which it
+    /// does more slowly than the flat tapes, at the price of a second copy
+    /// of the constraint block.
+    WhenUsed,
+    /// Keep it whenever one can be built, as every build did before gh#1235.
+    #[cfg(test)]
+    Always,
+}
+
 /// Constraint-block [`HybridTape`]: one local op list per summand plus a
 /// **shared prelude** holding every CSE body referenced by two or more
 /// summands, evaluated once per sweep.
@@ -3696,21 +3711,6 @@ struct ColorWrite {
 /// derivative order has to earn its switch. It is kept only when one of
 /// them does ([`HybridPolicy::WhenUsed`]); `eval_g` then reads it too,
 /// unless the flat tapes are also kept and would run in parallel.
-/// Whether [`NlTnlp`] keeps the shared-CSE hybrid constraint tape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HybridPolicy {
-    /// Never build it: the flat-tape reference.
-    Off,
-    /// Keep it when some derivative evaluator reads it — either op-ratio
-    /// gate on (gh#1235). Below both it would serve `eval_g` alone, which it
-    /// does more slowly than the flat tapes, at the price of a second copy
-    /// of the constraint block.
-    WhenUsed,
-    /// Keep it whenever one can be built, as every build did before gh#1235.
-    #[cfg(test)]
-    Always,
-}
-
 #[derive(Debug, Clone)]
 struct ConHybrid {
     tape: HybridTape,
@@ -3857,6 +3857,10 @@ const HYBRID_HESS_MIN_OP_RATIO: f64 = 3.0;
 /// none is kept (gh#1235), so a frontend no longer needs to ask this before
 /// exposing sharing it could equally inline, as `build_nl_problem` did in
 /// 0.18.0: sharing then costs nothing in the tapes.
+#[deprecated(
+    note = "unused since gh#1235: NlTnlp no longer keeps a hybrid tape no derivative \
+            evaluator reads, so a frontend need not ask before exposing sharing"
+)]
 pub fn hybrid_replaces_flat_tapes(flat_ops: usize, shared_ops: usize) -> bool {
     let shared = shared_ops.max(1) as f64;
     flat_ops as f64 >= HYBRID_JAC_MIN_OP_RATIO * shared

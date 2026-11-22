@@ -15,10 +15,11 @@ changes.
   implicit-Euler kinetics rows (57 344 rows) the build takes 132 MiB, against
   636 MiB in 0.18.0 and 618 MiB in 0.17.0. With m rate terms per row it
   costs 1.2, 1.8, 2.4 and 3.1 KiB a row for m = 1–4, against 3.0, 8.2, 11.5
-  and 14.7. That is about 0.6 KiB for each added summand, down from 1.6–2.6. Constraint, Jacobian and Hessian values and both sparsity patterns
-  are bit-identical to 0.18.0 on these models, and the fixture sweep's
-  statuses, objectives and iteration counts are unchanged. Five changes do
-  this:
+  and 14.7. That is about 0.6 KiB for each added summand, down from
+  1.6–2.6. Constraint, Jacobian and Hessian values and both sparsity
+  patterns are bit-identical to 0.18.0 on these models, and the fixture
+  sweep's statuses, objectives and iteration counts are unchanged. Five
+  changes do this:
   - **The shared-body constraint tape is no longer built when nothing reads
     it.** Below both of its derivative gates it served only the constraint
     values, and more slowly than the per-summand tapes beside it, because its
@@ -47,9 +48,21 @@ changes.
   The smaller tapes evaluate faster too. On the issue's rows in a single
   thread, the Jacobian takes 7.3 ms instead of 9.3, and the Hessian 16.4 ms
   instead of 20.0. On #1232's shared reproducer the build takes 34 MiB
-  instead of 50. `.nl` models gain the same packing, and those whose defined variables
-  are shared across rows below both gates stop building the shared tape, with
-  bit-identical values. In `pounce-nl`, `TapeOp` and `SummandOp` now take
+  instead of 50. `.nl` models gain the same packing, and those whose
+  defined variables are shared across rows below both gates stop building
+  the shared tape, with bit-identical values.
+
+  **One class of `build_nl_problem` model now evaluates its Hessian on the
+  shared-body tape and moves in the last bits.** In 0.18.0 the dropped
+  estimate kept a model's rows unshared unless it expected the shared tape
+  to clear both gates by a margin. A model whose subexpressions shared
+  across rows put it above the Hessian gate (3x) without that margin was
+  left unshared, and took the per-summand tapes. It now shares, so its
+  Hessian comes from the shared tape, which sums the multiplier-weighted
+  contributions in a different order: within about 1e-15 relative, not bit
+  for bit. Above 4x its Jacobian and constraint values take the shared tape
+  too; those agree bit for bit. Solves on such models can take a slightly
+  different path. In `pounce-nl`, `TapeOp` and `SummandOp` now take
   `u32` operands, the evaluators are available on a borrowed `TapeRef`, and
   `NlProblem` has a new `frontend_dag` field, which a struct literal must set
   (`false` keeps the existing behaviour).
