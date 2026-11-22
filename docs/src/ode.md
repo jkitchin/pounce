@@ -157,6 +157,14 @@ val  = y_final(0.7)            # = exp(-0.7 * 2)
 grad = jax.grad(y_final)(0.7)  # exact d/dk via the implicit-function theorem
 ```
 
+Forward mode works too: `jax.jvp` and `jax.jacfwd` go through the same
+implicit-function rule, one sparse linear solve per tangent against the
+collocation Jacobian at the solution. For parameter fitting, with a few
+parameters and many residuals, `jax.jacfwd` of the residual vector is the
+cheap way to get a Gauss–Newton Jacobian: it costs one solve per parameter,
+where `jax.jacrev` costs one per residual. Both compose with `jax.vmap` and
+`jax.jit`.
+
 The PyTorch mirror is `pounce.torch.odeint`, with `theta`/`y0` as tensors and
 `.backward()` filling `theta.grad` / `y0.grad`. Both return a solution whose
 `y` is `(n, m)` in SciPy layout and carries the autodiff graph; `sol` is a
