@@ -6286,6 +6286,69 @@ mod tests {
         );
     }
 
+    /// A tape read out of a [`TapeSet`] is the tape that went in: same ops,
+    /// and the same value and gradient, whatever sits before it in the arena
+    /// (its operand indices are relative to its own start). Rows may be
+    /// empty, and global and in-row indexing agree.
+    #[test]
+    fn a_tape_set_holds_each_tape_as_built() {
+        let resolver = ExternalResolver::default();
+        let exprs = [
+            mul(var(0), var(1)),
+            add(Expr::Unary(UnaryOp::Exp, Box::new(var(2))), cnst(3.0)),
+            Expr::Binary(BinOp::Pow, Box::new(var(1)), Box::new(cnst(3.0))),
+            var(2),
+        ];
+        let tapes: Vec<Tape> = exprs.iter().map(Tape::build).collect();
+        // Rows: [0, 1], [], [2, 3], [].
+        let mut set = TapeSet::default();
+        let mut scratch = Vec::new();
+        let mut cache = HashMap::new();
+        for row in [&[0usize, 1][..], &[], &[2, 3], &[]] {
+            for &i in row {
+                Tape::build_scaled_into(
+                    ScaledExpr::unit(&exprs[i]),
+                    &resolver,
+                    &mut scratch,
+                    &mut cache,
+                );
+                set.push_tape(&scratch);
+            }
+            set.end_row();
+        }
+        assert_eq!((set.n_rows(), set.n_tapes()), (4, 4));
+        assert_eq!(
+            set.n_ops(),
+            tapes.iter().map(|t| t.ops.len()).sum::<usize>()
+        );
+        assert!(set.row_is_empty(1) && set.row_is_empty(3) && !set.row_is_empty(2));
+        assert_eq!(set.row_tapes(2), 2..4);
+        let x = [0.7, -1.3, 0.4];
+        let mut vals = vec![0.0; 16];
+        let mut adj = vec![0.0; 16];
+        for (t, tape) in tapes.iter().enumerate() {
+            let r = set.get(t);
+            assert_eq!(format!("{:?}", r.ops), format!("{:?}", tape.ops));
+            assert_eq!(
+                r.eval_into(&x, &mut vals).to_bits(),
+                tape.eval(&x).to_bits()
+            );
+            let (mut ga, mut gb) = ([0.0; 3], [0.0; 3]);
+            r.gradient_seed_into(&x, 1.0, &mut ga, &mut vals, &mut adj);
+            tape.gradient_seed(&x, 1.0, &mut gb);
+            assert_eq!(ga, gb);
+        }
+        let row2: Vec<String> = set.row(2).map(|r| format!("{:?}", r.ops)).collect();
+        assert_eq!(
+            row2,
+            [format!("{:?}", tapes[2].ops), format!("{:?}", tapes[3].ops)]
+        );
+        assert_eq!(
+            format!("{:?}", set.tape(2, 1).ops),
+            format!("{:?}", tapes[3].ops)
+        );
+    }
+
     /// `HybridTape::op_counts` is what `NlTnlp` decides from before it builds
     /// either tape (gh#1235), so it has to be the tape's own counts exactly:
     /// the prelude and local sizes `build_multi` gives, and as the flat side

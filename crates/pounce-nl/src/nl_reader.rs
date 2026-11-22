@@ -3852,8 +3852,8 @@ pub struct NlTnlp {
     /// Per-summand objective tapes (one `Tape` per top-level
     /// summand after `split_top_sums`).
     obj_tapes: Vec<Tape>,
-    /// Per-constraint, per-summand tapes. Length `m`; row `i` holds
-    /// one `Tape` per summand of constraint `i`.
+    /// Per-constraint, per-summand tapes, in one arena (gh#1235). `m` rows;
+    /// row `i` holds one tape per summand of constraint `i`.
     con_tapes: TapeSet,
     /// Whether `con_tapes` holds the constraint block's flat tapes. `false`
     /// only when `con_hybrid` serves every constraint evaluator (both of its
@@ -3888,7 +3888,7 @@ pub struct NlTnlp {
     /// structurally nonzero second derivative in the Lagrangian.
     h_irow: Vec<i32>,
     h_jcol: Vec<i32>,
-    /// Per-row sorted variable indices for the constraint Jacobian.
+    /// Per-row sorted variable indices for the constraint Jacobian, packed.
     jac_cols: JacCols,
     jac_nnz: usize,
     /// Per-color seed vector: `seeds[c][k] = 1.0` iff variable `k`
@@ -3906,7 +3906,8 @@ pub struct NlTnlp {
     /// references. Lets us skip tape × color pairs where the tape
     /// has zero overlap with the color's seed.
     obj_tape_colors: Vec<Vec<u32>>,
-    /// Same as `obj_tape_colors` but per constraint × summand.
+    /// Same as `obj_tape_colors` but per constraint tape, by its index in
+    /// `con_tapes`, packed.
     con_tape_colors: TapeColors,
     /// The same work, color-major, for the parallel flat Hessian path.
     hess_color_index: HessColorIndex,
