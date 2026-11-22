@@ -36,7 +36,7 @@ use crate::nl_quadratic::{
     FactoredQuadratic, Quad2, QuadForm, QuadHessian, is_expanded_quadratic, is_trivially_zero,
     quad_form_readout, recognize_expr, recognize_factored_quadratic,
 };
-use crate::nl_tape::{HybridTape, Tape, hybrid_supported};
+use crate::nl_tape::{HybridTape, ScaledExpr, Tape, hybrid_supports};
 use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::constant_derivatives::{DerivativeProof, DerivativeProofs};
 use pounce_nlp::quadratic::{QuadraticStructure, SquareTerm};
@@ -4379,22 +4379,19 @@ fn push_pairs(
     }
 }
 
-fn split_top_sums(expr: &Expr) -> Vec<Expr> {
-    let mut out = Vec::new();
-    fn push_leaf(e: &Expr, factor: f64, out: &mut Vec<Expr>) {
-        if factor == 1.0 {
-            out.push(e.clone());
-        } else if factor == -1.0 {
-            out.push(Expr::Unary(UnaryOp::Neg, Box::new(e.clone())));
-        } else {
-            out.push(Expr::Binary(
-                BinOp::Mul,
-                Box::new(Expr::Const(factor)),
-                Box::new(e.clone()),
-            ));
-        }
-    }
-    fn go(e: &Expr, factor: f64, out: &mut Vec<Expr>) {
+/// Split `expr` into its top-level summands, each a leaf of the sum spine
+/// with the constant factor the spine applies to it: through `Sum`, `+`,
+/// `-`, unary `-`, a product with a constant on either side, and a quotient
+/// by a nonzero constant. Appends to `out`; an expression with no summands
+/// at all contributes the constant `0`.
+///
+/// The summands borrow their leaves from `expr` (gh#1235). The trees the
+/// split used to allocate instead — `c · leaf`, `-leaf` or `leaf` itself, a
+/// deep copy each — are what the tape builders emit from a [`ScaledExpr`]
+/// op for op, and at the build's peak they cost as much as the tapes.
+fn split_top_sums<'a>(expr: &'a Expr, out: &mut Vec<ScaledExpr<'a>>) {
+    static ZERO: Expr = Expr::Const(0.0);
+    fn go<'a>(e: &'a Expr, factor: f64, out: &mut Vec<ScaledExpr<'a>>) {
         match e {
             Expr::Sum(terms) => {
                 for t in terms {
@@ -4417,20 +4414,20 @@ fn split_top_sums(expr: &Expr) -> Vec<Expr> {
             Expr::Binary(BinOp::Mul, l, r) => match (l.as_ref(), r.as_ref()) {
                 (Expr::Const(c), _) => go(r, factor * c, out),
                 (_, Expr::Const(c)) => go(l, factor * c, out),
-                _ => push_leaf(e, factor, out),
+                _ => out.push(ScaledExpr { expr: e, factor }),
             },
             Expr::Binary(BinOp::Div, l, r) => match r.as_ref() {
                 Expr::Const(c) if *c != 0.0 => go(l, factor / c, out),
-                _ => push_leaf(e, factor, out),
+                _ => out.push(ScaledExpr { expr: e, factor }),
             },
-            _ => push_leaf(e, factor, out),
+            _ => out.push(ScaledExpr { expr: e, factor }),
         }
     }
-    go(expr, 1.0, &mut out);
-    if out.is_empty() {
-        out.push(Expr::Const(0.0));
+    let start = out.len();
+    go(expr, 1.0, out);
+    if out.len() == start {
+        out.push(ScaledExpr::unit(&ZERO));
     }
-    out
 }
 
 /// Greedy column coloring of a symmetric sparsity pattern stored
@@ -5153,9 +5150,12 @@ impl NlTnlp {
         let obj_tapes: Vec<Tape> = if quad.objective_form().is_some() {
             Vec::new()
         } else {
-            split_top_sums(&prob.obj_expr())
-                .iter()
-                .map(|e| Tape::build_with_externals(e, &resolver))
+            let obj = prob.obj_expr();
+            let mut summands = Vec::new();
+            split_top_sums(&obj, &mut summands);
+            summands
+                .into_iter()
+                .map(|s| Tape::build_scaled(s, &resolver))
                 .collect()
         };
 
@@ -5164,20 +5164,29 @@ impl NlTnlp {
         // whether it ends up serving every constraint evaluator decides
         // whether the flat tapes are kept at all (gh#1232).
         //
-        // The roots must be the parse's own allocations as far as `Cse`
-        // goes — `build_multi` keys sharing on `Arc` pointer identity — and
-        // `split_top_sums` clones a `Cse` by bumping its `Arc`, so they are.
-        let mut con_roots: Vec<Expr> = Vec::new();
+        // The roots borrow the problem's own trees, so every `Cse` is the
+        // parse's own allocation, which `build_multi` keys sharing on. A
+        // body the parser recognized and did not keep is re-parsed by
+        // `con_expr`, which is the one case `con_bodies` owns a tree.
+        let con_bodies: Vec<std::borrow::Cow<'_, Expr>> = (0..prob.m)
+            .map(|k| {
+                // A row with a quadratic form contributes no tape and no
+                // hybrid-tape root, so `con_tapes[k]` is empty and its
+                // `row_start` range is empty too.
+                if quad.row_form(k).is_some() {
+                    std::borrow::Cow::Owned(Expr::Const(0.0))
+                } else {
+                    prob.con_expr(k)
+                }
+            })
+            .collect();
+        let mut con_roots: Vec<ScaledExpr<'_>> = Vec::new();
         let mut row_start: Vec<usize> = Vec::with_capacity(prob.m + 1);
-        for k in 0..prob.m {
+        for (k, body) in con_bodies.iter().enumerate() {
             row_start.push(con_roots.len());
-            // A row with a quadratic form contributes no tape and no
-            // hybrid-tape root, so `con_tapes[k]` is empty and its
-            // `row_start` range is empty too.
-            if quad.row_form(k).is_some() {
-                continue;
+            if quad.row_form(k).is_none() {
+                split_top_sums(body, &mut con_roots);
             }
-            con_roots.extend(split_top_sums(&prob.con_expr(k)));
         }
         row_start.push(con_roots.len());
 
@@ -5194,7 +5203,7 @@ impl NlTnlp {
         // different way.
         let hybrid_counts = if hybrid == HybridPolicy::Off
             || std::env::var("POUNCE_DBG_NO_HYBRID").is_ok()
-            || !hybrid_supported(&con_roots)
+            || !hybrid_supports(con_roots.iter().map(|s| s.expr))
         {
             None
         } else {
@@ -5237,7 +5246,7 @@ impl NlTnlp {
             .filter(|_| hybrid == HybridPolicy::WhenUsed && !use_for_jac && !use_for_hess);
         let hybrid_tape = match hybrid_counts {
             Some(counts) if dropped_hybrid.is_none() => {
-                let tape = HybridTape::build_multi(&con_roots);
+                let tape = HybridTape::build_multi_scaled(&con_roots);
                 debug_assert_eq!(
                     (
                         tape.flat_op_count(),
@@ -5293,7 +5302,7 @@ impl NlTnlp {
             let mut row: Vec<Tape> = Vec::new();
             let mut vars: Vec<usize> = Vec::new();
             for e in &con_roots[row_start[k]..row_start[k + 1]] {
-                let t = Tape::build_with_externals(e, &resolver);
+                let t = Tape::build_scaled(*e, &resolver);
                 flat_ops += t.ops.len();
                 n_con_summands += 1;
                 max_tape_n = max_tape_n.max(t.ops.len());
@@ -5313,6 +5322,7 @@ impl NlTnlp {
             );
         }
         drop(con_roots);
+        drop(con_bodies);
         tape_pairs.sort_unstable();
         tape_pairs.dedup();
         tape_pairs.shrink_to_fit();
@@ -11078,6 +11088,133 @@ G0 3
             var_names: Vec::new(),
             con_names: Vec::new(),
         }
+    }
+
+    /// The summand split before gh#1235, which allocated each summand as a
+    /// tree: the reference the borrowed [`split_top_sums`] is held to.
+    fn split_top_sums_cloned(expr: &Expr) -> Vec<Expr> {
+        let mut out = Vec::new();
+        fn push_leaf(e: &Expr, factor: f64, out: &mut Vec<Expr>) {
+            if factor == 1.0 {
+                out.push(e.clone());
+            } else if factor == -1.0 {
+                out.push(Expr::Unary(UnaryOp::Neg, Box::new(e.clone())));
+            } else {
+                out.push(Expr::Binary(
+                    BinOp::Mul,
+                    Box::new(Expr::Const(factor)),
+                    Box::new(e.clone()),
+                ));
+            }
+        }
+        fn go(e: &Expr, factor: f64, out: &mut Vec<Expr>) {
+            match e {
+                Expr::Sum(terms) => terms.iter().for_each(|t| go(t, factor, out)),
+                Expr::Binary(BinOp::Add, l, r) => {
+                    go(l, factor, out);
+                    go(r, factor, out);
+                }
+                Expr::Binary(BinOp::Sub, l, r) => {
+                    go(l, factor, out);
+                    go(r, -factor, out);
+                }
+                Expr::Unary(UnaryOp::Neg, x) => go(x, -factor, out),
+                Expr::Binary(BinOp::Mul, l, r) => match (l.as_ref(), r.as_ref()) {
+                    (Expr::Const(c), _) => go(r, factor * c, out),
+                    (_, Expr::Const(c)) => go(l, factor * c, out),
+                    _ => push_leaf(e, factor, out),
+                },
+                Expr::Binary(BinOp::Div, l, r) => match r.as_ref() {
+                    Expr::Const(c) if *c != 0.0 => go(l, factor / c, out),
+                    _ => push_leaf(e, factor, out),
+                },
+                _ => push_leaf(e, factor, out),
+            }
+        }
+        go(expr, 1.0, &mut out);
+        if out.is_empty() {
+            out.push(Expr::Const(0.0));
+        }
+        out
+    }
+
+    /// Splitting without copying the summands (gh#1235) must tape every
+    /// summand op for op as the copies did — flat and hybrid — or the
+    /// values would move. Rows cover each factor branch the wrapper has
+    /// (`1`, `-1`, any other, including `-0.0` and a `1.0` reached through
+    /// `2 · 0.5`), a leaf under a constant `Pow` (rewritten to multiplies),
+    /// a quotient by zero (not a scaling), an empty sum, a `Cse` shared
+    /// across rows and a nested one, and a row with no summands at all.
+    #[test]
+    fn borrowed_summands_tape_exactly_as_the_copies_did() {
+        let inner = Expr::Cse(Arc::new(bin(BinOp::Mul, v(0), v(1))));
+        let shared = Expr::Cse(Arc::new(bin(
+            BinOp::Add,
+            un(UnaryOp::Exp, inner.clone()),
+            c(2.0),
+        )));
+        let rows = vec![
+            bin(BinOp::Sub, v(2), bin(BinOp::Mul, c(0.01), shared.clone())),
+            un(
+                UnaryOp::Neg,
+                bin(
+                    BinOp::Div,
+                    bin(BinOp::Sub, shared.clone(), inner.clone()),
+                    c(4.0),
+                ),
+            ),
+            bin(
+                BinOp::Mul,
+                bin(BinOp::Mul, c(2.0), bin(BinOp::Add, v(3), shared.clone())),
+                c(0.5),
+            ),
+            bin(BinOp::Mul, c(-0.0), bin(BinOp::Pow, v(4), c(3.0))),
+            bin(BinOp::Div, shared.clone(), c(0.0)),
+            Expr::Sum(vec![
+                inner.clone(),
+                un(UnaryOp::Neg, bin(BinOp::Mul, v(1), v(2))),
+                Expr::Sum(vec![]),
+                bin(BinOp::Mul, bin(BinOp::Sub, v(0), v(4)), c(-3.0)),
+            ]),
+            Expr::Sum(vec![]),
+        ];
+        let resolver = super::super::nl_external::ExternalResolver::default();
+        let mut borrowed: Vec<ScaledExpr<'_>> = Vec::new();
+        let mut cloned: Vec<Expr> = Vec::new();
+        for r in &rows {
+            let start = borrowed.len();
+            split_top_sums(r, &mut borrowed);
+            let copies = split_top_sums_cloned(r);
+            assert_eq!(borrowed.len() - start, copies.len(), "{r:?}");
+            cloned.extend(copies);
+        }
+        assert!(borrowed.iter().any(|s| s.factor == -1.0));
+        assert!(borrowed.iter().any(|s| s.factor != 1.0 && s.factor != -1.0));
+        for (b, e) in borrowed.iter().zip(&cloned) {
+            assert_eq!(
+                format!("{:?}", Tape::build_scaled(*b, &resolver).ops),
+                format!("{:?}", Tape::build(e).ops),
+                "flat tape of {e:?}"
+            );
+        }
+        let (hb, hc) = (
+            HybridTape::build_multi_scaled(&borrowed),
+            HybridTape::build_multi(&cloned),
+        );
+        assert!(
+            hc.n_prelude_ops() > 0,
+            "the shared body must reach the prelude"
+        );
+        assert_eq!(format!("{:?}", hb.prelude), format!("{:?}", hc.prelude));
+        assert_eq!(hb.summands.len(), hc.summands.len());
+        for (a, b) in hb.summands.iter().zip(&hc.summands) {
+            assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        }
+        let counts = HybridTape::op_counts(&borrowed);
+        assert_eq!(
+            (counts.flat, counts.prelude, counts.local),
+            (hc.flat_op_count(), hc.n_prelude_ops(), hc.total_local_ops())
+        );
     }
 
     /// A model built from expressions evaluates exactly like a parsed one:

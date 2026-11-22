@@ -577,6 +577,46 @@ fn ext_eval_or_nan(
         })
 }
 
+/// One summand of a split row, `factor · expr`, borrowed rather than built.
+///
+/// Splitting a row into its top-level summands distributes the constant
+/// factors of the sum spine into the leaves: `c · (a − b)` becomes the
+/// summands `c·a` and `−c·b`. Building those as `Expr`s means copying each
+/// leaf's tree, which for a row of small summands costs about as much as
+/// the tapes built from them, and held all at once it set the build's peak
+/// (gh#1235). The builders here instead emit the wrapper themselves, exactly
+/// as they would for the tree the split used to make: nothing for a factor
+/// of `1`, a trailing `Neg` for `-1`, and otherwise a leading `Const(factor)`
+/// and a trailing `Mul` — `Mul(Const(factor), expr)` op for op.
+#[derive(Debug, Clone, Copy)]
+pub struct ScaledExpr<'a> {
+    pub expr: &'a Expr,
+    pub factor: f64,
+}
+
+impl<'a> ScaledExpr<'a> {
+    /// `expr` itself, unscaled.
+    pub fn unit(expr: &'a Expr) -> Self {
+        ScaledExpr { expr, factor: 1.0 }
+    }
+
+    /// The tree the builders emit this as — what `split_top_sums` used to
+    /// allocate. For tests and diagnostics; the builders never call it.
+    pub fn to_expr(&self) -> Expr {
+        if self.factor == 1.0 {
+            self.expr.clone()
+        } else if self.factor == -1.0 {
+            Expr::Unary(UnaryOp::Neg, Box::new(self.expr.clone()))
+        } else {
+            Expr::Binary(
+                BinOp::Mul,
+                Box::new(Expr::Const(self.factor)),
+                Box::new(self.expr.clone()),
+            )
+        }
+    }
+}
+
 /// A flattened expression tape. The result of evaluation is the value
 /// at slot `ops.len() - 1` (i.e. the last op).
 #[derive(Debug, Clone)]
@@ -597,9 +637,24 @@ impl Tape {
     /// funcall id that is not in the resolver — `NlProblem::resolve_externals`
     /// must populate the resolver before tape construction.
     pub fn build_with_externals(expr: &Expr, resolver: &ExternalResolver) -> Self {
+        Self::build_scaled(ScaledExpr::unit(expr), resolver)
+    }
+
+    /// [`Self::build_with_externals`] of `s.to_expr()`, op for op, without
+    /// building that tree. See [`ScaledExpr`].
+    pub fn build_scaled(s: ScaledExpr<'_>, resolver: &ExternalResolver) -> Self {
         let mut ops = Vec::new();
         let mut cache: HashMap<*const Expr, usize> = HashMap::new();
-        build_recursive(expr, &mut ops, &mut cache, resolver);
+        if s.factor == 1.0 {
+            build_recursive(s.expr, &mut ops, &mut cache, resolver);
+        } else if s.factor == -1.0 {
+            let v = build_recursive(s.expr, &mut ops, &mut cache, resolver);
+            ops.push(TapeOp::Neg(v));
+        } else {
+            ops.push(TapeOp::Const(s.factor));
+            let v = build_recursive(s.expr, &mut ops, &mut cache, resolver);
+            ops.push(TapeOp::Mul(0, v));
+        }
         // A tape is built once and kept for the whole solve, and doubling
         // growth leaves up to half its buffer unused: on a model of many
         // ~150-op summands that was 8 KiB a tape holding 4.8 KiB of ops
@@ -2527,13 +2582,20 @@ impl HybridTape {
     /// shared prelude; CSEs touched by only one root are inlined
     /// into that summand's local ops.
     pub fn build_multi(exprs: &[Expr]) -> Self {
+        let roots: Vec<ScaledExpr<'_>> = exprs.iter().map(ScaledExpr::unit).collect();
+        Self::build_multi_scaled(&roots)
+    }
+
+    /// [`Self::build_multi`] over the trees `exprs` stand for, without
+    /// building them. See [`ScaledExpr`].
+    pub fn build_multi_scaled(exprs: &[ScaledExpr<'_>]) -> Self {
         // Pass 1: per-Cse-pointer count of how many roots reference
         // it (each root contributes at most 1 to the count). The
         // ≥2 threshold means a CSE is shared across summands.
         let mut cse_count: HashMap<*const Expr, usize> = HashMap::new();
         for e in exprs {
             let mut seen_in_root: HashSet<*const Expr> = HashSet::new();
-            count_cse_appearances(e, &mut seen_in_root, &mut cse_count);
+            count_cse_appearances(e.expr, &mut seen_in_root, &mut cse_count);
         }
 
         // Pass 2: build prelude + each summand. The summand builder
@@ -2546,8 +2608,8 @@ impl HybridTape {
         for e in exprs {
             let mut local: Vec<SummandOp> = Vec::new();
             let mut local_cache: HashMap<*const Expr, usize> = HashMap::new();
-            let root_slot = build_into_summand(
-                e,
+            let root_slot = build_scaled_summand(
+                *e,
                 &mut local,
                 &mut local_cache,
                 &mut prelude,
@@ -2630,11 +2692,11 @@ impl HybridTape {
     /// which are most of the tape. A caller that may not keep the tape asks
     /// this first: one built and then dropped costs, as process RSS, about
     /// what one kept does.
-    pub fn op_counts(exprs: &[Expr]) -> HybridOpCounts {
+    pub fn op_counts(exprs: &[ScaledExpr<'_>]) -> HybridOpCounts {
         let mut cse_count: HashMap<*const Expr, usize> = HashMap::new();
         for e in exprs {
             let mut seen_in_root: HashSet<*const Expr> = HashSet::new();
-            count_cse_appearances(e, &mut seen_in_root, &mut cse_count);
+            count_cse_appearances(e.expr, &mut seen_in_root, &mut cse_count);
         }
         let mut prelude: Vec<TapeOp> = Vec::new();
         let mut prelude_map: HashMap<*const Expr, usize> = HashMap::new();
@@ -2646,8 +2708,8 @@ impl HybridTape {
         for e in exprs {
             local.clear();
             local_cache.clear();
-            build_into_summand(
-                e,
+            build_scaled_summand(
+                *e,
                 &mut local,
                 &mut local_cache,
                 &mut prelude,
@@ -3006,7 +3068,14 @@ impl HybridTape {
 /// deeper than the default thread stack) and visits each shared CSE body
 /// once, so the cost is linear in the DAG rather than in its unfolding.
 pub fn hybrid_supported(exprs: &[Expr]) -> bool {
-    let mut stack: Vec<&Expr> = exprs.iter().collect();
+    hybrid_supports(exprs.iter())
+}
+
+/// [`hybrid_supported`] over any set of roots, e.g. the leaves of the
+/// [`ScaledExpr`] summands of a split (the scale wrapper is `Const` and
+/// `Mul`/`Neg`, which the hybrid path always takes).
+pub fn hybrid_supports<'a>(exprs: impl IntoIterator<Item = &'a Expr>) -> bool {
+    let mut stack: Vec<&Expr> = exprs.into_iter().collect();
     let mut seen_cse: HashSet<*const Expr> = HashSet::new();
     while let Some(e) = stack.pop() {
         match e {
@@ -3139,6 +3208,33 @@ fn count_cse_appearances(
 /// emission via `build_recursive`; the summand records a Shared op
 /// pointing at the prelude slot. Non-promoted CSEs are inlined
 /// into the summand with intra-summand Arc-pointer dedup.
+/// [`build_into_summand`] of `s.to_expr()`, op for op; see [`ScaledExpr`].
+fn build_scaled_summand(
+    s: ScaledExpr<'_>,
+    local: &mut Vec<SummandOp>,
+    local_cache: &mut HashMap<*const Expr, usize>,
+    prelude: &mut Vec<TapeOp>,
+    prelude_map: &mut HashMap<*const Expr, usize>,
+    cse_count: &HashMap<*const Expr, usize>,
+) -> usize {
+    let mut leaf = |local: &mut Vec<SummandOp>| {
+        build_into_summand(s.expr, local, local_cache, prelude, prelude_map, cse_count)
+    };
+    if s.factor == 1.0 {
+        leaf(local)
+    } else if s.factor == -1.0 {
+        let v = leaf(local);
+        local.push(SummandOp::Local(TapeOp::Neg(v)));
+        local.len() - 1
+    } else {
+        let c = local.len();
+        local.push(SummandOp::Local(TapeOp::Const(s.factor)));
+        let v = leaf(local);
+        local.push(SummandOp::Local(TapeOp::Mul(c, v)));
+        local.len() - 1
+    }
+}
+
 fn build_into_summand(
     expr: &Expr,
     local: &mut Vec<SummandOp>,
@@ -5892,7 +5988,7 @@ mod tests {
         let flat: usize = roots.iter().map(|r| Tape::build(r).ops.len()).sum();
         assert_eq!(tape.flat_op_count(), flat);
         assert_eq!(
-            HybridTape::op_counts(&roots),
+            HybridTape::op_counts(&roots.iter().map(ScaledExpr::unit).collect::<Vec<_>>()),
             HybridOpCounts {
                 flat,
                 prelude: tape.n_prelude_ops(),
@@ -5902,7 +5998,7 @@ mod tests {
         // Chains, where a body nests the previous one all the way down.
         let chain = shooting_chain_roots(24, cnst(0.5));
         let tape = HybridTape::build_multi(&chain);
-        let c = HybridTape::op_counts(&chain);
+        let c = HybridTape::op_counts(&chain.iter().map(ScaledExpr::unit).collect::<Vec<_>>());
         assert_eq!(c.flat, chain.iter().map(|r| Tape::build(r).ops.len()).sum());
         assert_eq!(
             (c.prelude, c.local),
