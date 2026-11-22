@@ -72,6 +72,10 @@ control.
 finite-differenced (`2n` evaluations) when omitted. Supplying them avoids the
 FD cost and improves robustness on stiff problems.
 
+Either block may be a `scipy.sparse` matrix, and `jac` may also be a constant
+`(F_y, F_y')` pair for a linear DAE. If either block is sparse, the stage
+systems are assembled sparse and factored with SuperLU rather than densified.
+
 ## Scope
 
 - **Index-1 only.** The stage matrix `I₃⊗∂F/∂y' + h(A⊗∂F/∂y)` stays nonsingular
