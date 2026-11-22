@@ -37,12 +37,33 @@ use pounce_nlp::tnlp::{
 /// (its convergence test needs `∇f`, `J`, `g` at the iterate), through
 /// this layer, so those calls are answered from here: same values, no
 /// evaluation. A record taken at any other `x` is not used.
+///
+/// Each entry is shared (`Rc`), so the per-fire clone a lift takes is a
+/// refcount bump rather than a copy of the full Jacobian (gh#1238).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EvalRecord {
     on: Option<bool>,
-    grad_f: Option<(Vec<Number>, Vec<Number>)>,
-    g: Option<(Vec<Number>, Vec<Number>)>,
-    jac: Option<(Vec<Number>, Vec<Number>)>,
+    grad_f: Option<Rc<Recorded>>,
+    g: Option<Rc<Recorded>>,
+    jac: Option<Rc<Recorded>>,
+}
+
+/// One recorded evaluation: the `x` it was taken at, and its values.
+type Recorded = (Vec<Number>, Vec<Number>);
+
+/// Overwrite `slot` with `(x, v)`, reusing its buffers when no lift still
+/// holds them.
+fn store(slot: &mut Option<Rc<Recorded>>, x: &[Number], v: &[Number]) {
+    if let Some(rc) = slot
+        && let Some((at, vals)) = Rc::get_mut(rc)
+    {
+        at.clear();
+        at.extend_from_slice(x);
+        vals.clear();
+        vals.extend_from_slice(v);
+        return;
+    }
+    *slot = Some(Rc::new((x.to_vec(), v.to_vec())));
 }
 
 impl EvalRecord {
@@ -53,19 +74,19 @@ impl EvalRecord {
             .get_or_insert_with(|| inner.borrow().wants_current_iterate())
     }
     pub(crate) fn grad_f(&mut self, x: &[Number], v: &[Number]) {
-        self.grad_f = Some((x.to_vec(), v.to_vec()));
+        store(&mut self.grad_f, x, v);
     }
     pub(crate) fn g(&mut self, x: &[Number], v: &[Number]) {
-        self.g = Some((x.to_vec(), v.to_vec()));
+        store(&mut self.g, x, v);
     }
     pub(crate) fn jac(&mut self, x: &[Number], v: &[Number]) {
-        self.jac = Some((x.to_vec(), v.to_vec()));
+        store(&mut self.jac, x, v);
     }
 }
 
 /// `rec`'s values, into `out`, when they were taken at `x` and fit.
-fn serve(rec: &Option<(Vec<Number>, Vec<Number>)>, x: &[Number], out: &mut [Number]) -> bool {
-    match rec {
+fn serve(rec: &Option<Rc<Recorded>>, x: &[Number], out: &mut [Number]) -> bool {
+    match rec.as_deref() {
         Some((at, v)) if at.as_slice() == x && v.len() == out.len() => {
             out.copy_from_slice(v);
             true

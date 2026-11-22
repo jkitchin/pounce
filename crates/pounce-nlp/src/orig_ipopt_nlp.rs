@@ -957,7 +957,7 @@ impl OrigIpoptNlp {
             let mut t = a.tnlp().borrow_mut();
             t.derivative_proofs()
         };
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         if cls.n_x_fixed > 0 {
             // A proof is stated about the model the *user* wrote; pounce
             // then solves a smaller one, with the fixed variables folded
@@ -1187,7 +1187,7 @@ impl OrigIpoptNlp {
             // adjustment instead. Measured on a fixed `z = 0.5` beside three
             // bound-active controls: un-widened, `z` came back `3.1e-13`
             // below its value; the base attempt, widened, `1.2e-11`.
-            let cls = self.adapter.borrow().classification().clone();
+            let cls = self.adapter.borrow().classification_rc();
             let n_var = cls.x_not_fixed_map.len();
             let mut lower = vec![Number::NEG_INFINITY; n_var];
             let mut upper = vec![Number::INFINITY; n_var];
@@ -1269,7 +1269,7 @@ impl OrigIpoptNlp {
         }
 
         // ---- Get starting x_full (needed by both gradient + user paths) ----
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let n_full_x = cls.n_full_x as usize;
         let n_full_g = cls.n_full_g as usize;
         let mut full_x = vec![0.0; n_full_x];
@@ -1658,7 +1658,7 @@ impl OrigIpoptNlp {
     /// `OrigIpoptNLP::Initialize` does this via
     /// `Pd_L_->TransMultVector(scaling.apply_vec_d(...))`.
     fn apply_d_scale_to_bounds(&mut self) {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         if let Some(dd) = self.d_scale.borrow().as_ref() {
             if let Some(d_l) = Rc::get_mut(&mut self.d_l) {
                 let xs = d_l.values_mut();
@@ -1767,7 +1767,7 @@ impl OrigIpoptNlp {
         if !self.honor_original_bounds.get() {
             return full;
         }
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         // Fixed variables are spliced in at their exact fixed value, so
         // only the free block can have drifted past a bound.
         if let Some(x_l) = self.declared_x_l.borrow().as_ref() {
@@ -1801,7 +1801,7 @@ impl OrigIpoptNlp {
     /// `application.rs::finalize_via_orig_nlp` to populate the
     /// `Solution.lambda` slot — pounce#11.
     pub fn finalize_solution_lambda(&self, y_c: &dyn Vector, y_d: &dyn Vector) -> Vec<Number> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let mut lambda = self.pack_lambda_for_user(y_c, y_d, &cls);
         let obj_scal = self.obj_scale_factor.get();
         if obj_scal != 0.0 && obj_scal != 1.0 {
@@ -1821,7 +1821,7 @@ impl OrigIpoptNlp {
     /// bounds, divided by `obj_scale_factor` so the user sees the
     /// unscaled-Lagrangian dual.
     pub fn finalize_solution_z_l(&self, z_l: &dyn Vector) -> Vec<Number> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let n_full_x = cls.n_full_x as usize;
         let mut full_z_l = vec![0.0; n_full_x];
         let n_x_l = self.x_l.dim() as usize;
@@ -1932,7 +1932,7 @@ impl OrigIpoptNlp {
     /// Mirror of [`Self::finalize_solution_z_l`] for the upper-bound
     /// duals. Indexed via `x_u_map`.
     pub fn finalize_solution_z_u(&self, z_u: &dyn Vector) -> Vec<Number> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let n_full_x = cls.n_full_x as usize;
         let mut full_z_u = vec![0.0; n_full_x];
         let n_x_u = self.x_u.dim() as usize;
@@ -2001,7 +2001,7 @@ impl OrigIpoptNlp {
     // -------------------- Initialization --------------------
 
     fn fetch_warm_start_snapshot(&self) -> Option<StartingPointSnapshot> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         // The bound-multiplier slots start *unseeded*, not at zero
         // (gh#622). `TNLP::get_starting_point` is asked for `init_z`
         // and is free to leave the blocks untouched — a caller warm
@@ -2097,7 +2097,7 @@ impl OrigIpoptNlp {
             return false;
         }
 
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let obj_scal = self.obj_scale_factor.get();
         let c_scale = self.c_scale.borrow();
         let d_scale = self.d_scale.borrow();
@@ -2195,7 +2195,7 @@ impl OrigIpoptNlp {
             full_g.fill(f64::NAN);
         }
         // Compress full_g → grad in x_var-space, scale by obj_scal.
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         if ok && !cls.x_fixed_map.is_empty() {
             *self.fixed_reach.last_full_grad_f.borrow_mut() =
                 Some((full_x.clone(), Rc::new(full_g.clone())));
@@ -2288,7 +2288,7 @@ impl OrigIpoptNlp {
     }
 
     fn eval_c_internal(&self, x: &dyn Vector) -> Rc<dyn Vector> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         if cls.n_c == 0 {
             // Empty constraint vector — still cache so the tag is stable.
             if let Some(v) = self.c_cache.borrow().get_1dep(x.as_tagged()) {
@@ -2337,7 +2337,7 @@ impl OrigIpoptNlp {
     }
 
     fn eval_d_internal(&self, x: &dyn Vector) -> Rc<dyn Vector> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         if cls.n_d == 0 {
             if let Some(v) = self.d_cache.borrow().get_1dep(x.as_tagged()) {
                 return v;
@@ -2391,7 +2391,9 @@ impl OrigIpoptNlp {
         let mut jac_c = GenTMatrix::new(Rc::clone(&self.jac_c_space));
         {
             let cs = self.c_scale.borrow();
-            let irows = self.jac_c_space.irows().to_vec();
+            // Borrowed, not copied: a `to_vec()` here cost one
+            // nnz-length allocation per Jacobian evaluation (gh#1238).
+            let irows = self.jac_c_space.irows();
             let vs = jac_c.values_mut();
             for (k, &src) in self.jac_c_entry_in_g.iter().enumerate() {
                 let raw = full_vals[src as usize];
@@ -2432,7 +2434,9 @@ impl OrigIpoptNlp {
         let mut jac_d = GenTMatrix::new(Rc::clone(&self.jac_d_space));
         {
             let ds = self.d_scale.borrow();
-            let irows = self.jac_d_space.irows().to_vec();
+            // Borrowed, not copied: a `to_vec()` here cost one
+            // nnz-length allocation per Jacobian evaluation (gh#1238).
+            let irows = self.jac_d_space.irows();
             let vs = jac_d.values_mut();
             for (k, &src) in self.jac_d_entry_in_g.iter().enumerate() {
                 let raw = full_vals[src as usize];
@@ -2492,7 +2496,7 @@ impl OrigIpoptNlp {
                  eval_h sparsity. The L-BFGS path lands in Phase 8."
             );
         };
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let full_x = self.lift_x_to_full(x);
         // Upstream `IpOrigIpoptNLP.cpp:792-794` passes the user TNLP's
         // `eval_h` the multipliers in the user's unscaled-constraint
@@ -2508,8 +2512,7 @@ impl OrigIpoptNlp {
         // (var-x ⊗ var-x) subset has `h_space.nonzeros()` entries
         // selected via `h_entry_in_full`. They differ when fixed
         // variables drop entries.
-        let mut full_vals = vec![0.0; self.nnz_h_lag_full as usize];
-        let ok = {
+        let eval_user_h = |values: &mut [Number]| -> bool {
             let a = self.adapter.borrow();
             let mut t = a.tnlp().borrow_mut();
             t.eval_h(
@@ -2518,22 +2521,40 @@ impl OrigIpoptNlp {
                 scaled_obj_factor,
                 Some(&full_lambda),
                 true,
-                SparsityRequest::Values {
-                    values: &mut full_vals,
-                },
+                SparsityRequest::Values { values },
             )
         };
-        if !ok {
-            full_vals.fill(f64::NAN);
-        }
         let mut h = SymTMatrix::new(Rc::clone(h_space));
         let kept = h_space.nonzeros() as usize;
-        let h_vals = h.values_mut();
-        // `h_entry_in_full` always has length `kept` (identity when no
-        // fixed-var filtering, sparse selection otherwise).
+        // `h_entry_in_full` always has length `kept`, and is a strictly
+        // increasing selection from `0..nnz_h_lag_full`.
         debug_assert_eq!(kept, self.h_entry_in_full.len());
-        for (k, &src) in self.h_entry_in_full.iter().enumerate() {
-            h_vals[k] = full_vals[src as usize];
+        if kept == self.nnz_h_lag_full as usize {
+            // Nothing filtered, so the selection is the identity: let
+            // the TNLP write straight into the matrix instead of into a
+            // full-size scratch buffer that is then gathered through an
+            // identity map (two nnz-length allocations and a pass per
+            // evaluation, gh#1238). Both buffers start zeroed, so the
+            // values are bit-identical to the gather path.
+            debug_assert!(
+                self.h_entry_in_full
+                    .iter()
+                    .enumerate()
+                    .all(|(k, &src)| src as usize == k)
+            );
+            let h_vals = h.values_mut();
+            if !eval_user_h(h_vals) {
+                h_vals.fill(f64::NAN);
+            }
+        } else {
+            let mut full_vals = vec![0.0; self.nnz_h_lag_full as usize];
+            if !eval_user_h(&mut full_vals) {
+                full_vals.fill(f64::NAN);
+            }
+            let h_vals = h.values_mut();
+            for (k, &src) in self.h_entry_in_full.iter().enumerate() {
+                h_vals[k] = full_vals[src as usize];
+            }
         }
         let reuse = self.const_deriv.hessian && all_finite(h.values());
         let result: Rc<dyn SymMatrix> = Rc::new(h);
@@ -2682,7 +2703,7 @@ impl IpoptNlp for OrigIpoptNlp {
         // scaled `d_l`/`d_u` in place after the snapshot was taken, so the
         // same per-row factors apply here.
         if let Some(dd) = self.d_scale.borrow().as_ref() {
-            let cls = self.adapter.borrow().classification().clone();
+            let cls = self.adapter.borrow().classification_rc();
             for (i, slot) in dl.iter_mut().enumerate() {
                 *slot *= dd[cls.d_l_map[i] as usize];
             }
@@ -2705,7 +2726,7 @@ impl IpoptNlp for OrigIpoptNlp {
             return None;
         }
         let full = self.lift_x_to_full(x);
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let mut worst = 0.0_f64;
         if let Some(x_l) = x_l.as_ref() {
             for (i, &var_idx) in cls.x_l_map.iter().enumerate() {
@@ -2893,7 +2914,7 @@ impl IpoptNlp for OrigIpoptNlp {
     /// compressed via `x_not_fixed_map`. Mirrors the `init_x` arm of
     /// upstream `IpOrigIpoptNLP::GetStartingPoint`.
     fn get_starting_x(&mut self, x: &mut dyn Vector) -> bool {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         if let Some(snapshot) = self.warm_start_snapshot.borrow().as_ref() {
             let Some(dx) = x.as_any_mut().downcast_mut::<DenseVector>() else {
                 return false;
@@ -2943,7 +2964,7 @@ impl IpoptNlp for OrigIpoptNlp {
             return false;
         };
         if let Some(snapshot) = self.warm_start_snapshot.borrow().as_ref() {
-            let cls = self.adapter.borrow().classification().clone();
+            let cls = self.adapter.borrow().classification_rc();
             let obj_scal = self.obj_scale_factor.get();
             let c_scale = self.c_scale.borrow();
             for (i, &g_idx) in cls.c_map.iter().enumerate() {
@@ -2981,7 +3002,7 @@ impl IpoptNlp for OrigIpoptNlp {
             return false;
         };
         if let Some(snapshot) = self.warm_start_snapshot.borrow().as_ref() {
-            let cls = self.adapter.borrow().classification().clone();
+            let cls = self.adapter.borrow().classification_rc();
             let obj_scal = self.obj_scale_factor.get();
             for (i, slot) in z_l.values_mut().iter_mut().enumerate() {
                 let var_idx = cls.x_l_map[i] as usize;
@@ -3020,12 +3041,12 @@ impl IpoptNlp for OrigIpoptNlp {
     }
 
     fn pack_lambda_for_user(&self, y_c: &dyn Vector, y_d: &dyn Vector) -> Vec<Number> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         OrigIpoptNlp::pack_lambda_for_user(self, y_c, y_d, &cls)
     }
 
     fn pack_g_for_user(&self, c: &dyn Vector, d: &dyn Vector) -> Vec<Number> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let mut g = vec![0.0; cls.n_full_g as usize];
         if cls.n_c > 0 {
             let Some(dc) = c.as_any().downcast_ref::<DenseVector>() else {
@@ -3073,7 +3094,7 @@ impl IpoptNlp for OrigIpoptNlp {
     }
 
     fn pack_z_l_for_user(&self, z_l: &dyn Vector) -> Vec<Number> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let mut full = vec![0.0; cls.n_full_x as usize];
         if z_l.dim() == 0 {
             return full;
@@ -3090,7 +3111,7 @@ impl IpoptNlp for OrigIpoptNlp {
     }
 
     fn pack_z_u_for_user(&self, z_u: &dyn Vector) -> Vec<Number> {
-        let cls = self.adapter.borrow().classification().clone();
+        let cls = self.adapter.borrow().classification_rc();
         let mut full = vec![0.0; cls.n_full_x as usize];
         if z_u.dim() == 0 {
             return full;

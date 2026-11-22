@@ -789,6 +789,14 @@ struct PresolveState {
     /// the variables they touch (the inverse of the `dual_recovery`
     /// postsolve).
     phase2_dropped_rows: Vec<(usize, Vec<(usize, Number)>)>,
+    /// Presolve changed nothing: every row and Jacobian entry is kept in
+    /// its own position, no reduction frame or singleton-row bound was
+    /// recorded, and the bounds handed to the solver are bit-identical to
+    /// the declared ones. The outer problem *is* the inner one, so the
+    /// evaluations forward straight through, the live-iterate record is
+    /// not kept, and `intermediate_callback` does not lift (gh#1238) —
+    /// the same passthrough `LinearEqElimTnlp` already has.
+    identity: bool,
 }
 
 /// A variable bound that exists only because a singleton linear row
@@ -1057,6 +1065,11 @@ impl PresolveTnlp {
             .as_ref()
             .filter(|o| o.n_spurious > 0 || o.rolled_back)
             .map(|o| (o.n_spurious, !o.rolled_back))
+    }
+
+    /// Whether presolve ran and changed nothing (`PresolveState::identity`).
+    fn is_identity(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| s.identity)
     }
 
     /// Which sides of each variable's box presolve derived: its bound there
@@ -2211,6 +2224,21 @@ impl PresolveTnlp {
             index_style: info_inner.index_style,
         };
 
+        let same_bits = |a: &[Number], b: &[Number]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(p, q)| p.to_bits() == q.to_bits())
+        };
+        let identity = rows_kept.len() == m_in
+            && rows_kept.iter().enumerate().all(|(k, &i)| k == i)
+            && jac_kept_idx.len() == nnz_in
+            && jac_kept_idx.iter().enumerate().all(|(k, &i)| k == i)
+            && reduction_stack.is_empty()
+            && singleton_bounds.is_empty()
+            && phase2_dropped_rows.is_empty()
+            && same_bits(&x_l, &inner_x_l)
+            && same_bits(&x_u, &inner_x_u)
+            && same_bits(&g_l, &g_l_inner)
+            && same_bits(&g_u, &g_u_inner);
+
         self.state = Some(PresolveState {
             info_inner,
             info_outer,
@@ -2237,6 +2265,7 @@ impl PresolveTnlp {
             decl_g_l: g_l_inner,
             decl_g_u: g_u_inner,
             phase2_dropped_rows,
+            identity,
         });
         self.state.as_ref()
     }
@@ -2503,7 +2532,7 @@ impl TNLP for PresolveTnlp {
 
     fn eval_grad_f(&mut self, x: &[Number], new_x: bool, grad_f: &mut [Number]) -> bool {
         let ok = self.inner.borrow_mut().eval_grad_f(x, new_x, grad_f);
-        if ok && self.live_record.enabled(&self.inner) {
+        if ok && !self.is_identity() && self.live_record.enabled(&self.inner) {
             self.live_record.grad_f(x, grad_f);
         }
         ok
@@ -2514,6 +2543,9 @@ impl TNLP for PresolveTnlp {
             return false;
         };
         let s = self.state.as_mut().expect("inited");
+        if s.identity {
+            return self.inner.borrow_mut().eval_g(x, new_x, g);
+        }
         if !self.inner.borrow_mut().eval_g(x, new_x, &mut s.scratch_g) {
             return false;
         }
@@ -2539,6 +2571,13 @@ impl TNLP for PresolveTnlp {
             }
             SparsityRequest::Values { values } => {
                 let s = self.state.as_mut().expect("inited");
+                if s.identity {
+                    return self.inner.borrow_mut().eval_jac_g(
+                        x,
+                        new_x,
+                        SparsityRequest::Values { values },
+                    );
+                }
                 if !self.inner.borrow_mut().eval_jac_g(
                     x,
                     new_x,
@@ -2952,7 +2991,22 @@ impl TNLP for PresolveTnlp {
         // hand the inner TNLP its own, lifted by `finalize_solution`'s
         // rule. The lift runs that function, so the state it records about
         // the *final* solution is put back afterwards.
+        //
+        // An identity layer's space is the inner one, and its
+        // `finalize_solution` forwards the solution unchanged — except on a
+        // warm start the solver has not moved, whose supplied duals it
+        // reports instead (`echoed_warm_start`), so that case still lifts.
+        // Skipping the lift skips a `finalize_solution` run and the record
+        // clone it needs, every iteration (gh#1238).
+        let identity_lift = self.is_identity()
+            && self.served_warm_start.as_ref().is_none_or(|w| {
+                pounce_nlp::live_iterate::with_current_user_iterate(|it| {
+                    !w.echoed_by(&it.z_l, &it.z_u, &it.lambda)
+                })
+                .unwrap_or(true)
+            });
         let lifted = match self.get_nlp_info() {
+            _ if identity_lift => None,
             Some(info) => {
                 // Every field `finalize_solution` writes, including the
                 // derived-bound dual recovery's, so a lift never leaves a
@@ -2967,6 +3021,8 @@ impl TNLP for PresolveTnlp {
                 // Columns are the inner ones; outer row `k` is inner
                 // `rows_kept[k]`.
                 let cols: Vec<usize> = (0..info.n as usize).collect();
+                // A refcount bump: the record's buffers are shared.
+                let record_for_lift = self.live_record.clone();
                 let rows: Vec<usize> = self
                     .state
                     .as_ref()
@@ -2982,7 +3038,7 @@ impl TNLP for PresolveTnlp {
                         rows: &rows,
                         declared_x_l: &[],
                         declared_x_u: &[],
-                        record: self.live_record.clone(),
+                        record: record_for_lift,
                     },
                 );
                 (
@@ -3857,6 +3913,93 @@ mod tests {
             true
         }
         fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    /// gh#1238: a layer that changed nothing is flagged identity, so it
+    /// forwards evaluations straight through and skips the per-iteration
+    /// live-iterate lift; one that tightened a bound is not.
+    ///
+    /// Two fixtures, one per branch of the predicate. `TightenSeed`'s
+    /// linear row tightens `x_u` (the non-identity branch). The same model
+    /// with linearity left undeclared gives presolve nothing to use, so
+    /// it is the identity — and its evaluations must be the inner ones,
+    /// bit for bit.
+    #[test]
+    fn identity_layer_is_flagged_only_when_presolve_changed_nothing() {
+        struct Untouched(TightenSeed);
+        impl TNLP for Untouched {
+            fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+                self.0.get_nlp_info()
+            }
+            fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+                self.0.get_bounds_info(b)
+            }
+            fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+                self.0.get_starting_point(sp)
+            }
+            fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+                self.0.eval_f(x, new_x)
+            }
+            fn eval_grad_f(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+                self.0.eval_grad_f(x, new_x, g)
+            }
+            fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+                self.0.eval_g(x, new_x, g)
+            }
+            fn eval_jac_g(
+                &mut self,
+                x: Option<&[Number]>,
+                new_x: bool,
+                mode: SparsityRequest<'_>,
+            ) -> bool {
+                self.0.eval_jac_g(x, new_x, mode)
+            }
+            fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+        }
+        let opts = || PresolveOptions {
+            enabled: true,
+            ..PresolveOptions::defaults()
+        };
+        let bounds = |w: &mut PresolveTnlp| {
+            let (mut x_l, mut x_u) = (vec![0.0; 2], vec![0.0; 2]);
+            let (mut g_l, mut g_u) = (vec![0.0; 1], vec![0.0; 1]);
+            assert!(w.get_bounds_info(BoundsInfo {
+                x_l: &mut x_l,
+                x_u: &mut x_u,
+                g_l: &mut g_l,
+                g_u: &mut g_u,
+            }));
+            x_u
+        };
+
+        let mut tightened = PresolveTnlp::new(
+            Rc::new(RefCell::new(TightenSeed { x0: vec![1.0, 1.0] })),
+            opts(),
+        );
+        assert_eq!(bounds(&mut tightened), vec![3.0, 3.0]);
+        assert!(
+            !tightened.is_identity(),
+            "a tightened bound is a change; the lift must run"
+        );
+
+        let mut untouched = PresolveTnlp::new(
+            Rc::new(RefCell::new(Untouched(TightenSeed { x0: vec![1.0, 1.0] }))),
+            opts(),
+        );
+        assert_eq!(bounds(&mut untouched), vec![5.0, 5.0]);
+        assert!(untouched.is_identity(), "presolve changed nothing");
+
+        let x = [1.25, 0.5];
+        let mut g = [0.0];
+        assert!(untouched.eval_g(&x, true, &mut g));
+        assert_eq!(g[0].to_bits(), (1.25f64 + 0.5).to_bits());
+        let mut jac = [0.0; 2];
+        assert!(untouched.eval_jac_g(
+            Some(&x),
+            false,
+            SparsityRequest::Values { values: &mut jac }
+        ));
+        assert_eq!(jac, [1.0, 1.0]);
     }
 
     /// The report is recorded by the same call that projects the served seed.

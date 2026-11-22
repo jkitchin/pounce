@@ -1854,14 +1854,22 @@ impl TNLP for LinearEqElimTnlp {
         // hand the inner TNLP its own, lifted by `finalize_solution`'s
         // rule. The lift runs that function, so the state it records about
         // the *final* solution is put back afterwards.
+        //
+        // A passthrough layer's `finalize_solution` forwards the solution
+        // untouched, so its lift is the identity: forward the installed
+        // iterate as it is, as every evaluation already does, rather than
+        // rebuild it through a `finalize_solution` run each iteration
+        // (gh#1238).
+        let passthrough = self.ensure_init().is_none_or(|s| s.passthrough);
         let lifted = match self.get_nlp_info() {
+            _ if passthrough => None,
             Some(info) => {
                 let saved = self.finalized.take();
                 // Outer column/row `k` is inner `vars_kept[k]` /
-                // `rows_kept[k]`; a passthrough layer is the identity.
+                // `rows_kept[k]`.
                 type Maps = (Vec<usize>, Vec<usize>, Vec<Number>, Vec<Number>);
                 let (cols, rows, decl_l, decl_u): Maps = match self.state.as_ref() {
-                    Some(s) if !s.passthrough => (
+                    Some(s) => (
                         s.plan.vars_kept.clone(),
                         s.plan.rows_kept.clone(),
                         s.x_l_full.clone(),
