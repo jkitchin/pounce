@@ -9,65 +9,7 @@ changes.
 
 ## [Unreleased]
 
-### Fixed
-- **`build_nl_problem` builds kinetics-style rows in a fifth of the memory,
-  and every taped model gets smaller tapes (gh#1235).** On the issue's
-  implicit-Euler kinetics rows (57 344 rows) the build takes 132 MiB, against
-  636 MiB in 0.18.0 and 618 MiB in 0.17.0. With m rate terms per row it
-  costs 1.2, 1.8, 2.4 and 3.1 KiB a row for m = 1–4, against 3.0, 8.2, 11.5
-  and 14.7. That is about 0.6 KiB for each added summand, down from
-  1.6–2.6. Constraint, Jacobian and Hessian values and both sparsity
-  patterns are bit-identical to 0.18.0 on these models, and the fixture
-  sweep's statuses, objectives and iteration counts are unchanged. Five
-  changes do this:
-  - **The shared-body constraint tape is no longer built when nothing reads
-    it.** Below both of its derivative gates it served only the constraint
-    values, and more slowly than the per-summand tapes beside it, because its
-    sweep is serial and theirs is parallel. It also cost about as much memory
-    as those tapes. The decision is now made from op counts before either
-    tape exists. Between the gates the shared tape is kept for the Hessian,
-    and the constraint values use the parallel per-summand walk when it
-    applies. `build_nl_problem` therefore always keeps sharing between rows,
-    and the estimate that declined it is gone.
-  - **Summands are no longer copied to be taped.** Splitting a row into its
-    summands used to copy each one as a tree before taping it.
-  - **Tape ops are 16 bytes instead of 32**, with `u32` operands. A tape or
-    variable index past 2³² is refused rather than wrapped.
-  - **The constraint tapes share one buffer, and so do their Hessian colour
-    lists and the Jacobian's columns.** Each used to be a separate allocation
-    per summand or per row.
-  - **Rows are copied once, not once per reference.** `build_nl_problem`
-    used to copy every summand leaf once for each row that referenced it. It
-    now copies each leaf once and shares it between those rows, and the
-    problem splits rows through the shared copies itself
-    (`NlProblem::frontend_dag`). The problem still holds a copy rather than
-    the caller's `NlExpr` nodes, so a caller that frees its expressions after
-    building frees them. With the expressions dropped, the issue's rows at
-    28 672 rows hold 62 MiB instead of 77.
-
-  The smaller tapes evaluate faster too. On the issue's rows in a single
-  thread, the Jacobian takes 7.3 ms instead of 9.3, and the Hessian 16.4 ms
-  instead of 20.0. On #1232's shared reproducer the build takes 34 MiB
-  instead of 50. `.nl` models gain the same packing, and those whose
-  defined variables are shared across rows below both gates stop building
-  the shared tape, with bit-identical values.
-
-  **One class of `build_nl_problem` model now evaluates its Hessian on the
-  shared-body tape and moves in the last bits.** In 0.18.0 the dropped
-  estimate kept a model's rows unshared unless it expected the shared tape
-  to clear both gates by a margin. A model whose subexpressions shared
-  across rows put it above the Hessian gate (3x) without that margin was
-  left unshared, and took the per-summand tapes. It now shares, so its
-  Hessian comes from the shared tape, which sums the multiplier-weighted
-  contributions in a different order: within about 1e-15 relative, not bit
-  for bit. Above 4x its Jacobian and constraint values take the shared tape
-  too; those agree bit for bit. Solves on such models can take a slightly
-  different path. In `pounce-nl`, `TapeOp` and `SummandOp` now take
-  `u32` operands, the evaluators are available on a borrowed `TapeRef`, and
-  `NlProblem` has a new `frontend_dag` field, which a struct literal must set
-  (`false` keeps the existing behaviour).
-
-## [0.18.0] - 2026-11-21
+## [0.18.0] - 2026-11-22
 
 ### Added
 - **The current iterate inside a Python `intermediate` callback, and an
@@ -395,31 +337,51 @@ changes.
   POUNCE's edition 2024 already did.
 
 ### Fixed
-- **`build_nl_problem` memory follows the `NlExpr` DAG, not the expanded
-  tree (gh#1232).** A subexpression several constraint rows reference was
-  copied into every row, so a model of 50 shared subexpressions used by
-  20 000 rows built as large as one with 20 000 private copies: 605 MiB on
-  the issue's reproducer. It is now one shared body, and that model builds
-  in 50 MiB. Three changes do this. Rows are assembled together, so sharing
-  between them survives — when it pays: sharing is kept only where the
-  shared-body tape will replace the per-row tapes, since below that it is
-  built next to them and its bookkeeping outweighs the copies it saves. A
-  model whose shared bodies are small (`exp(p_j)` reused by thousands of
-  rows) is assembled row by row, as before. When the shared-body constraint tape serves the
-  constraint values, the Jacobian and the Hessian, the per-summand flat tapes
-  (one copy of each shared body per row) are no longer kept;
-  `hessian_vector_product` goes through the shared tape too. Each summand's
-  list of the shared slots it reaches is shared between summands that reach
-  the same bodies. Objective, gradient, constraint and Jacobian values, and
-  both sparsity patterns, are bit-identical to building each row separately.
-  The Hessian and Hessian-vector products of such a model now come from the
-  shared tape, which sums the multiplier-weighted contributions before
-  propagating them through the body, so they agree with the per-row build to
-  rounding (about 1e-15 relative), not bit for bit. Rows whose per-row tree
-  the quadratic recognizer admits keep that tree, so no row changes between
-  the quadratic fast path and the AD tape. `.nl` models whose defined
-  variables are shared across rows also stop keeping the flat tapes once the
-  shared tape serves all three evaluators.
+- **`build_nl_problem` memory follows the `NlExpr` DAG, and every taped
+  model gets smaller tapes (gh#1232, gh#1235).** A subexpression several
+  constraint rows reference was copied into every row, so a model of 50
+  shared subexpressions used by 20 000 rows built as large as one with
+  20 000 private copies: 605 MiB on gh#1232's reproducer in 0.17.0, 34 MiB
+  now. On gh#1235's implicit-Euler kinetics rows (57 344 rows) the build
+  takes 132 MiB, against 618 MiB in 0.17.0; with m rate terms per row it
+  costs 1.2 KiB a row for m = 1 and 3.1 KiB for m = 4, against about 3.7 and
+  14.6. The changes:
+  - **Rows are assembled together, so sharing between them survives.** A
+    shared body is copied once into the problem and referenced by every row
+    that uses it, and the problem splits rows through those references
+    itself (`NlProblem::frontend_dag`). The problem holds that copy, not the
+    caller's `NlExpr` nodes, so a caller that frees its expressions after
+    building frees them.
+  - **The shared-body constraint tape is built only when a derivative
+    evaluator reads it.** The decision is made from op counts before either
+    tape exists. Below both op-ratio gates no shared tape is built and the
+    per-summand tapes serve everything; between the gates it is kept beside
+    them for the Hessian; above both it serves the constraint values, the
+    Jacobian, the Hessian and `hessian_vector_product`, and the per-summand
+    tapes (one copy of each shared body per row) are not kept. Each
+    summand's list of the shared slots it reaches is shared between summands
+    that reach the same bodies. `.nl` models get the same rule for defined
+    variables shared across rows.
+  - **Summands are no longer copied to be taped**, tape ops are 16 bytes
+    instead of 32 (`u32` operands; a tape or variable index past 2³² is
+    refused rather than wrapped), and the constraint tapes share one buffer,
+    as do their Hessian colour lists and the Jacobian's columns. `.nl`
+    models get these too.
+
+  Objective, gradient, constraint and Jacobian values, and both sparsity
+  patterns, are bit-identical to 0.17.0. A model whose shared tape serves
+  the Hessian now gets its Hessian and Hessian-vector products from that
+  tape, which sums the multiplier-weighted contributions before propagating
+  them through the body, so they agree with 0.17.0 to rounding (about 1e-15
+  relative), not bit for bit, and a solve on such a model can take a
+  slightly different path. Rows whose per-row tree the quadratic recognizer
+  admits keep that tree, so no row changes between the quadratic fast path
+  and the AD tape. The smaller tapes evaluate faster: on gh#1235's rows in a
+  single thread the Jacobian takes 7.3 ms instead of 9.3 and the Hessian
+  16.4 ms instead of 20.0. In `pounce-nl`, `TapeOp` and `SummandOp` take
+  `u32` operands, the evaluators are available on a borrowed `TapeRef`,
+  `NlProblem` has a new `frontend_dag` field, which a struct literal must
+  set (`false` keeps the existing behaviour).
 - **`solve_ivp` / `solve_dae` accept a sparse `jac` and `mass`
   (gh#1228).** SciPy's `solve_ivp(method="Radau")` takes `jac` as a dense
   or sparse constant, or a callable returning either; pounce raised
