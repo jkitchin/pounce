@@ -310,9 +310,9 @@ pub struct OrigIpoptNlp {
     /// Per-row scaling for equality constraints (`dc_`). `None` ↔
     /// `IsValid(dc) == false` — i.e. row-max gradient is below the
     /// `nlp_scaling_max_gradient` cutoff so no scaling is applied.
-    c_scale: RefCell<Option<Vec<Number>>>,
+    c_scale: RefCell<Option<Rc<[Number]>>>,
     /// Same as [`Self::c_scale`] but for inequality rows.
-    d_scale: RefCell<Option<Vec<Number>>>,
+    d_scale: RefCell<Option<Rc<[Number]>>>,
     /// The *declared* compressed `d_L / d_U` — snapshotted (unscaled) at
     /// [`Self::relax_bounds`] time, before `bound_relax_factor` widens the
     /// live bounds and before any safe-slack adjustment moves them. The
@@ -1421,14 +1421,14 @@ impl OrigIpoptNlp {
 
         if n_c > 0 && any_row_above(&c_row_max) {
             let dc: Vec<Number> = c_row_max.iter().map(|&v| row_max_to_scale(v)).collect();
-            *self.c_scale.borrow_mut() = Some(dc);
+            *self.c_scale.borrow_mut() = Some(dc.into());
         } else {
             *self.c_scale.borrow_mut() = None;
         }
 
         if n_d > 0 && any_row_above(&d_row_max) {
             let dd: Vec<Number> = d_row_max.iter().map(|&v| row_max_to_scale(v)).collect();
-            *self.d_scale.borrow_mut() = Some(dd);
+            *self.d_scale.borrow_mut() = Some(dd.into());
         } else {
             *self.d_scale.borrow_mut() = None;
         }
@@ -1625,13 +1625,13 @@ impl OrigIpoptNlp {
         // `Option::None ↔ identity` convention used elsewhere).
         let nontrivial_c = dc.iter().any(|&s| s != 1.0);
         *self.c_scale.borrow_mut() = if nontrivial_c && n_c > 0 {
-            Some(dc)
+            Some(dc.into())
         } else {
             None
         };
         let nontrivial_d = dd.iter().any(|&s| s != 1.0);
         *self.d_scale.borrow_mut() = if nontrivial_d && n_d > 0 {
-            Some(dd)
+            Some(dd.into())
         } else {
             None
         };
@@ -2827,11 +2827,11 @@ impl IpoptNlp for OrigIpoptNlp {
         self.start_obj_grad_max.get()
     }
 
-    fn c_scale_vec(&self) -> Option<Vec<Number>> {
+    fn c_scale_vec(&self) -> Option<Rc<[Number]>> {
         self.c_scale.borrow().clone()
     }
 
-    fn d_scale_vec(&self) -> Option<Vec<Number>> {
+    fn d_scale_vec(&self) -> Option<Rc<[Number]>> {
         self.d_scale.borrow().clone()
     }
 

@@ -1685,7 +1685,11 @@ impl PdSensBacksolver {
     /// `None` when the corresponding block carries no row scaling.
     pub fn nlp_scaling(&self) -> (Number, Option<Vec<Number>>, Option<Vec<Number>>) {
         let n = self.nlp.borrow();
-        (n.obj_scaling_factor(), n.c_scale_vec(), n.d_scale_vec())
+        (
+            n.obj_scaling_factor(),
+            n.c_scale_vec().map(|v| v.to_vec()),
+            n.d_scale_vec().map(|v| v.to_vec()),
+        )
     }
 
     /// Inertia-correction perturbations `(δ_x, δ_s, δ_c, δ_d)` baked

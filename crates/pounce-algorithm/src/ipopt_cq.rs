@@ -3368,11 +3368,11 @@ mod tests {
         fn obj_scaling_factor(&self) -> Number {
             self.obj_scale
         }
-        fn c_scale_vec(&self) -> Option<Vec<Number>> {
-            self.c_scale.clone()
+        fn c_scale_vec(&self) -> Option<std::rc::Rc<[Number]>> {
+            self.c_scale.as_deref().map(Into::into)
         }
-        fn d_scale_vec(&self) -> Option<Vec<Number>> {
-            self.d_scale.clone()
+        fn d_scale_vec(&self) -> Option<std::rc::Rc<[Number]>> {
+            self.d_scale.as_deref().map(Into::into)
         }
         fn declared_c_rhs(&self) -> Option<Vec<Number>> {
             self.c_rhs.clone()

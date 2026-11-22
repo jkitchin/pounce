@@ -15,9 +15,10 @@ changes.
   multi-megabyte copies that it did not need. The bound classification was
   deep-copied at every evaluation, the Jacobian row indices were copied for
   each Jacobian evaluation, and a full-size Hessian scratch buffer was used
-  even when it was not needed. The convergence check computed its residuals
-  twice, and the KKT right-hand side was copied even with no dump armed.
-  A presolve that made no reductions still paid for rebuilding each
+  even when it was not needed. When row scaling is active, the constraint
+  scaling vectors were copied on every unscaled infeasibility check. The
+  convergence check computed its residuals twice, and the KKT right-hand
+  side was copied even with no dump armed. A presolve that made no reductions still paid for rebuilding each
   iterate. It now forwards evaluations unchanged and skips that rebuild;
   `presolve=no` was the workaround before. On the issue's 93 504-variable
   reproducer this work drops from 175 to 114 ms per iteration with presolve
