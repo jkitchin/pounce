@@ -373,6 +373,9 @@ impl SparseSymLinearSolverInterface for PooledFeralBackend {
     fn set_reused_scaling_zero_pivot_recheck(&mut self, on: bool) {
         self.get().set_reused_scaling_zero_pivot_recheck(on);
     }
+    fn set_static_pivoting(&mut self, on: bool) {
+        self.get().set_static_pivoting(on);
+    }
     fn singularity_certified(&self) -> bool {
         self.inner
             .as_ref()

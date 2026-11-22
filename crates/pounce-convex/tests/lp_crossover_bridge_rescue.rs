@@ -490,3 +490,95 @@ fn seed_311() -> QpProblem {
         b: vec![],
     }
 }
+
+/// gh#1244: a 3x4 transportation LP (`0 <= x <= supply`, supply rows `<=`,
+/// demand rows written `-sum <= -demand`) whose cost tie between two routes
+/// is broken by 1e-9 on a 2000 coefficient, so `x[R2,T4] = 10` is the unique
+/// optimum. The simplex vertex is declined, and the bridge rescues it.
+fn transportation_tie_1244() -> QpProblem {
+    let supply = [120.0, 90.0, 70.0];
+    let demand = [60.0, 80.0, 50.0, 70.0];
+    let mut cost = [
+        [1.2, 2.1, 3.0, 2.4],
+        [1.8, 0.9, 1.6, 2.0],
+        [2.6, 1.9, 1.1, 1.5],
+    ];
+    cost[1][3] += -1e-12;
+    let mut c = Vec::with_capacity(12);
+    let mut ub = Vec::with_capacity(12);
+    for (i, row) in cost.iter().enumerate() {
+        for &cij in row {
+            c.push(1000.0 * cij);
+            ub.push(supply[i]);
+        }
+    }
+    let mut g = Vec::new();
+    for i in 0..3 {
+        for j in 0..4 {
+            g.push(Triplet::new(i, i * 4 + j, 1.0));
+        }
+    }
+    for j in 0..4 {
+        for i in 0..3 {
+            g.push(Triplet::new(3 + j, i * 4 + j, -1.0));
+        }
+    }
+    let mut h = supply.to_vec();
+    h.extend(demand.iter().map(|d| -d));
+    QpProblem {
+        n: 12,
+        c,
+        g,
+        h,
+        lb: vec![0.0; 12],
+        ub,
+        p_lower: vec![],
+        a: vec![],
+        b: vec![],
+    }
+}
+
+/// gh#1244: crossover with the backend the CLI and the Python frontend give
+/// it, the convex IPM's (`for_convex_ipm`, static pivoting on at the default
+/// `tol`). Its active-set bridge used to inherit static pivoting, which
+/// falsifies the inertia that engine reads; every bridge solve ended in
+/// exhausted inertia control and the interior iterate (`x[R2,T4] = 5.6`,
+/// 7 positive flows plus a slack) came back. The tests above use feral's
+/// default backend, on which the bridge always worked, so they could not
+/// see it.
+#[test]
+fn the_bridge_does_not_inherit_the_ipms_static_pivoting() {
+    let prob = transportation_tie_1244();
+    let opts = QpOptions::default();
+    let free = prob.free_column_fraction();
+    let ipm_backend = || -> Box<dyn SparseSymLinearSolverInterface> {
+        Box::new(FeralSolverInterface::for_convex_ipm(opts.tol, free))
+    };
+    // Precondition: the frontends' backend really has static pivoting on
+    // here. If the rule in `convex_ipm_static_pivoting` changes so that it
+    // does not, this test no longer reaches the defect: force it on.
+    assert_eq!(
+        pounce_feral::convex_ipm_static_pivoting(None, opts.tol, free),
+        Some(true)
+    );
+    let interior = solve_qp_ipm(&prob, &opts, ipm_backend);
+    let on = QpOptions {
+        crossover: true,
+        ..opts
+    };
+    clear_report();
+    let mut make = ipm_backend;
+    let out = maybe_crossover(&prob, interior.clone(), &on, &mut make);
+    let report = take_report().expect("crossover ran");
+    assert_bridge_rescued(&interior, &out, &report);
+    assert!(report.bridge_working_set_changes > 0, "{report:?}");
+    // The unique optimum: R2->T4 at its upper end, 6 positive flows.
+    assert!(
+        (out.x[7] - 10.0).abs() < 1e-9,
+        "x[R2,T4] = {}: {report:?}",
+        out.x[7]
+    );
+    let positive = out.x.iter().filter(|&&v| v > 1e-7).count();
+    assert_eq!(positive, 6, "not a vertex: {:?}", out.x);
+    assert_eq!(report.kkt_error_after, 0.0, "{report:?}");
+}
