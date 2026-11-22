@@ -38,6 +38,9 @@ jobs:
           - os: ubuntu-latest
             julia: '1'
             native: v0.16.0
+          - os: ubuntu-latest
+            julia: '1'
+            native: v0.17.0
     steps:
       - uses: actions/checkout@v5
       - name: Check out older native release
