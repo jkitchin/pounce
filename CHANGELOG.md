@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-21
+
 ### Added
 - **The current iterate inside a Python `intermediate` callback, and an
   `intermediate=` argument for Pyomo solves.** `Problem.get_current_iterate()`
@@ -268,6 +270,11 @@ changes.
   variable.
 
 ### Changed
+- **Pounce.jl accepts native POUNCE 0.18.** The 0.18 C API only adds
+  symbols (`SetPounce*MetaData`, `ClearPounceMetaData` and the
+  `PounceLinearSolver` table) and changes none, so the existing bindings
+  are unaffected. The new symbols are not bound yet and are not required at
+  import. Julia CI now also checks the v0.17.0 native library.
 - **The crossover's QPs spend about 40% fewer back-solves** (gh#1214). On
   gh#1206's model the step-3 QP spent 192 of its 259 s in 645 back-solves,
   about 3.8 per working-set change. Three causes, three changes, all in
@@ -26781,7 +26788,8 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/jkitchin/pounce/releases/tag/v0.18.0
 [0.17.0]: https://github.com/jkitchin/pounce/releases/tag/v0.17.0
 [0.16.0]: https://github.com/jkitchin/pounce/releases/tag/v0.16.0
 [0.15.0]: https://github.com/jkitchin/pounce/releases/tag/v0.15.0

@@ -25,11 +25,12 @@ The default library is in the repository's `target/release` directory.
 For another build, set `ENV["POUNCE_LIBRARY_PATH"]` to the library file or its
 directory before loading Pounce. `Pounce.library_path()` reports the loaded
 file, and `Pounce.GetIpoptVersion()` reports its compiled POUNCE version.
-Pounce.jl 0.1 accepts native POUNCE 0.15.x, 0.16.x and 0.17.x and checks the required C symbols
+Pounce.jl 0.1 accepts native POUNCE 0.15.x through 0.18.x and checks the required C symbols
 at import. Other native minor versions require a wrapper ABI review.
 The existing NLP bindings and diagnostics work across these versions. Native
 0.17's complementarity API is optional and detected at runtime (see below).
-Convex/conic entry points are not yet exposed; see the [C API](c-api.md).
+Convex/conic entry points, and 0.18's metadata calls and custom linear solver
+table, are not yet exposed; see the [C API](c-api.md).
 The existing linear-solver statistics struct remains unchanged, without the
 `struct_size` field used by the new native output structs.
 There is no registered Julia package or bundled JLL binary yet.
