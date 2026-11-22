@@ -42,9 +42,10 @@ from ..bvp._solve import _make_spline
 class JaxBVPSolution:
     """Differentiable BVP solution.
 
-    ``y`` ``(n, m)`` and ``p`` ``(k,)`` are JAX arrays carrying the
-    custom-VJP back to ``theta``; differentiate through them with
-    ``jax.grad`` / ``jax.jacobian``. ``z`` is the flat unknown vector and
+    ``y`` ``(n, m)`` and ``p`` ``(k,)`` are JAX arrays differentiable
+    w.r.t. ``theta``; differentiate through them with ``jax.grad`` /
+    ``jax.jacrev`` or, on the default ``method="newton"`` path, also
+    ``jax.jvp`` / ``jax.jacfwd`` (gh#1229). ``z`` is the flat unknown vector and
     ``yp`` the node derivatives. ``sol`` is a (non-differentiable) cubic
     Hermite interpolant over concrete values for plotting / evaluation.
     """
@@ -61,15 +62,14 @@ def _make_newton_vjp(fun, bc, n, m, k, uses_p, tol, theta_ndim):
 
     Returns ``solve_fn(theta, x, z0) -> z*``. Forward: damped Newton on
     ``R(z, theta, x) = 0`` factoring the ``N x N`` collocation Jacobian with
-    FERAL's sparse LU (host ``pure_callback``). Backward: the
-    implicit-function-theorem VJP. For a cotangent ``v`` on ``z*``,
-    ``dL/d(theta, x) = -(dR/d(theta, x))^T u`` where ``R_z^T u = v`` is
-    solved with the *same* sparse LU (``solve_transpose``), and the
-    ``(dR/d(theta, x))^T`` product is taken by JAX VJP over the traceable
-    residual at the converged ``z*``. Both directions stay on the ``N``
-    system — no ``2N`` saddle — so it is the fast path. First-order only
-    (the forward is an opaque callback); use ``method="ipm",
-    second_order=True`` for higher-order derivatives.
+    FERAL's sparse LU (host ``pure_callback``). Derivatives: an
+    implicit-function-theorem ``custom_jvp`` (gh#1229, see
+    :mod:`pounce.jax._ift`). A tangent is ``ż = -R_z⁻¹ (∂R/∂(theta, x) ·
+    ṫheta)``, solved with the sparse LU of ``R_z`` at ``z*``; reverse mode
+    is JAX's transpose of that rule, which back-solves ``R_zᵀ u = v`` with
+    the same factor. Both directions stay on the ``N`` system — no ``2N``
+    saddle — so it is the fast path, and ``jvp`` / ``jacfwd`` work as well
+    as ``grad`` / ``jacrev``.
 
     The mesh ``x`` and the initial guess ``z0`` are callback *operands*,
     not values read at trace time, so either may be a tracer — built
@@ -80,7 +80,8 @@ def _make_newton_vjp(fun, bc, n, m, k, uses_p, tol, theta_ndim):
     import numpy as np
     from ..bvp._jac import CollocationJacobian
     from ..bvp._newton import newton_solve
-    from ..bvp._solve import ift_solve_transpose_lanes
+    from ..bvp._solve import ift_solve_lanes
+    from ._ift import make_ift_root
 
     def residual_jax(z, theta, x):
         nfun, nbc = _core._make_normalized(fun, bc, theta=theta, uses_p=uses_p)
@@ -107,14 +108,15 @@ def _make_newton_vjp(fun, bc, n, m, k, uses_p, tol, theta_ndim):
         )
         return np.asarray(z_star, dtype=np.float64)
 
-    def _host_btran(z_star_np, theta_np, x_np, v_np):
+    def _host_lin(z_star_np, theta_np, x_np, v_np, transpose):
         # Under vmap_method="broadcast_all" every operand gains the same
         # leading batch axes. Lanes may share one primal (jax.jacobian) or
         # carry distinct ones (an outer vmap over theta or the mesh), so the
         # helper groups them by primal rather than collapsing to lane 0
         # (gh#1049).
-        return ift_solve_transpose_lanes(
-            _np_normalized, x_np, n, m, k, z_star_np, theta_np, v_np, theta_ndim,
+        return ift_solve_lanes(
+            _np_normalized, x_np, n, m, k, z_star_np, theta_np, v_np,
+            theta_ndim, transpose=transpose,
         )
 
     N = n * m + k
@@ -125,33 +127,22 @@ def _make_newton_vjp(fun, bc, n, m, k, uses_p, tol, theta_ndim):
             vmap_method="sequential",
         )
 
-    @jax.custom_vjp
-    def solve_fn(theta, x, z0):
-        return _forward(theta, x, z0)
-
-    def fwd(theta, x, z0):
-        z_star = _forward(theta, x, z0)
-        return z_star, (z_star, theta, x)
-
-    def bwd(res, v):
-        z_star, theta, x = res
-        # jax.jacobian vmaps the VJP over output basis vectors, which vmaps
-        # this callback. vmap_method="broadcast_all" hands the whole cotangent
-        # batch to one callback invocation, so R_z is factored once per
-        # distinct primal and the back-solves run as multi-RHS
-        # solve_transpose_many.
-        u = jax.pure_callback(
-            _host_btran, jax.ShapeDtypeStruct((N,), jnp.float64),
-            z_star, theta, x, v, vmap_method="broadcast_all",
+    def _lin_solve(z_star, args, b, transpose):
+        theta, x, _z0 = args
+        # jacfwd / jacrev vmap the rule over basis vectors, which vmaps this
+        # callback; broadcast_all hands the whole batch to one invocation, so
+        # R_z is factored once per distinct primal and the solves run
+        # multi-RHS.
+        return jax.pure_callback(
+            lambda zz, th, xx, bb: _host_lin(zz, th, xx, bb, transpose),
+            jax.ShapeDtypeStruct((N,), jnp.float64),
+            z_star, theta, x, b, vmap_method="broadcast_all",
         )
-        # dL/d(theta, x) = -(dR/d(theta, x))^T u, via VJP of the residual
-        # at z*.
-        _, vjp_res = jax.vjp(lambda th, xx: residual_jax(z_star, th, xx), theta, x)
-        dtheta, dx = vjp_res(-u)
-        return dtheta, dx, jnp.zeros((N,), dtype=jnp.float64)
 
-    solve_fn.defvjp(fwd, bwd)
-    return solve_fn
+    # residual_jax ignores z0, so z0's tangent is an exact zero.
+    return make_ift_root(
+        _forward, lambda z, th, xx, _z0: residual_jax(z, th, xx), _lin_solve,
+    )
 
 
 def solve_bvp(
@@ -252,8 +243,8 @@ def solve_bvp(
         if second_order:
             raise ValueError(
                 "second_order=True is only supported with method='ipm' "
-                "(the Newton path's forward is an opaque callback, so it is "
-                "first-order differentiable)."
+                "(the Newton path is already an implicit-function "
+                "custom_jvp; it needs no opt-in for jvp / jacfwd)."
             )
         solve_root = _make_newton_vjp(
             fun, bc, n, m, k, uses_p, tol, int(jnp.ndim(theta))

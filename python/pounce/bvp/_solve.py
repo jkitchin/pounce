@@ -105,20 +105,21 @@ class BVPResult(ResultMixin):
     info: dict = field(default_factory=dict, repr=False)
 
 
-def ift_solve_transpose(nfun, nbc, x_np, n, m, k, z_star, v):
-    """Implicit-function-theorem back-solve, shared by the JAX/Torch VJPs.
+def ift_solve(nfun, nbc, x_np, n, m, k, z_star, v, *, transpose=False):
+    """Implicit-function-theorem linear solve, shared by the JAX/Torch rules.
 
-    Solves ``R_zᵀ u = v`` at the converged ``z*`` by factoring the sparse
-    collocation Jacobian with FERAL's LU. Both differentiable frontends route
-    their (framework-native) ``custom_vjp`` / ``autograd.Function`` backward
+    Solves ``R_z w = v`` (``transpose=False``, the JVP direction) or
+    ``R_zᵀ u = v`` (``transpose=True``, the VJP direction) at the converged
+    ``z*`` by factoring the sparse collocation Jacobian with FERAL's LU. Both
+    differentiable frontends route their (framework-native) derivative rules
     through this one host-side numpy routine, so the linear-algebra half of
     the IFT can't drift between them.
 
-    ``v`` may be a single cotangent ``(N,)`` or a batch ``(B, N)`` (e.g.
-    ``jax.jacobian``); the batch case uses one factorization and a multi-RHS
-    ``solve_transpose_many``. The factor is taken at ``z*`` (not reused from
-    the forward Newton, whose frozen-Jacobian factor is generally at an
-    earlier iterate) so the sensitivity is exact.
+    ``v`` may be a single right-hand side ``(N,)`` or a batch ``(B, N)``
+    (e.g. ``jax.jacobian`` / ``jacfwd``); the batch case uses one
+    factorization and a multi-RHS solve. The factor is taken at ``z*`` (not
+    reused from the forward Newton, whose frozen-Jacobian factor is generally
+    at an earlier iterate) so the sensitivity is exact.
     """
     v = np.asarray(v, dtype=np.float64)
     z_star = np.asarray(z_star, dtype=np.float64)
@@ -131,57 +132,87 @@ def ift_solve_transpose(nfun, nbc, x_np, n, m, k, z_star, v):
     lu.factor(jac.values(Y, pp))
     if v.ndim == 2:
         B = v.shape[0]
-        return np.asarray(lu.solve_transpose_many(v.reshape(-1), B), np.float64).reshape(B, N)
-    return np.asarray(lu.solve_transpose(v), np.float64)
+        many = lu.solve_transpose_many if transpose else lu.solve_many
+        return np.asarray(many(v.reshape(-1), B), np.float64).reshape(B, N)
+    one = lu.solve_transpose if transpose else lu.solve
+    return np.asarray(one(v), np.float64)
 
 
-def ift_solve_transpose_lanes(callables_of, x, n, m, k, z_star, theta, v, theta_ndim):
-    """:func:`ift_solve_transpose` for a ``vmap_method="broadcast_all"`` callback.
+def ift_solve_transpose(nfun, nbc, x_np, n, m, k, z_star, v):
+    """``R_zᵀ u = v`` at ``z*``: :func:`ift_solve` in the VJP direction."""
+    return ift_solve(nfun, nbc, x_np, n, m, k, z_star, v, transpose=True)
 
-    Under ``broadcast_all`` every operand arrives with the same leading batch
-    axes (``v.shape[:-1]``), and those lanes are of two kinds that the host
-    cannot tell apart from the shapes alone:
 
-    * ``jax.jacobian`` / ``jacrev`` vmaps the VJP over cotangents at **one**
-      primal, so ``z_star`` / ``theta`` / ``x`` are identical copies on every
-      lane;
+def solve_by_primal_lanes(solve_group, v, primals, primal_ndims):
+    """Group ``broadcast_all`` callback lanes by their primal and solve each
+    group against one factorization.
+
+    Under ``vmap_method="broadcast_all"`` every operand arrives with the same
+    leading batch axes (``v.shape[:-1]``), and those lanes are of two kinds
+    that the host cannot tell apart from the shapes alone:
+
+    * ``jax.jacobian`` / ``jacrev`` / ``jacfwd`` vmap the linear rule over
+      (co)tangents at **one** primal, so the primal operands are identical
+      copies on every lane;
     * an outer ``jax.vmap`` over parameters (or meshes) batches **distinct**
-      primals, each needing its own collocation Jacobian.
+      primals, each needing its own Jacobian.
 
     Collapsing to the first lane fits only the first case and silently
-    back-solves every lane against lane 0's Jacobian (gh#1049). So lanes are
-    grouped by their exact ``(z_star, theta, x)``: each distinct primal is
-    factored once and its cotangents go through one multi-RHS solve — the
-    fixed-primal ``jacrev`` case stays a single factorization.
+    solves every lane against lane 0's Jacobian (gh#1049). So lanes are
+    grouped by the exact bytes of their primal operands: each distinct
+    primal is factored once and its right-hand sides go through one
+    multi-RHS solve — the fixed-primal Jacobian case stays a single
+    factorization.
 
-    ``callables_of(theta_lane)`` returns ``(nfun, nbc)`` for one lane; ``x``
-    is the mesh ``(m,)``, batched like the other operands.
+    ``primals`` is a sequence of arrays and ``primal_ndims`` their unbatched
+    ranks. ``solve_group(*primal_lane, V)`` solves the ``(B_g, N)`` block
+    ``V`` for one lane's primals and returns ``(B_g, N)``.
     """
     v = np.asarray(v, dtype=np.float64)
     N = v.shape[-1]
     batch_shape = v.shape[:-1]
     if not batch_shape:
-        nfun, nbc = callables_of(np.asarray(theta))
-        return ift_solve_transpose(
-            nfun, nbc, np.asarray(x, np.float64), n, m, k, z_star, v,
-        )
+        prim = [np.asarray(a, np.float64) for a in primals]
+        return np.asarray(solve_group(*prim, v[None, :]), np.float64)[0]
     B = int(np.prod(batch_shape))
-    theta = np.asarray(theta)
-    theta_shape = theta.shape[theta.ndim - theta_ndim:]
     vs = v.reshape(B, N)
-    zs = np.broadcast_to(np.asarray(z_star, np.float64), batch_shape + (N,)).reshape(B, N)
-    ths = np.broadcast_to(theta, batch_shape + theta_shape).reshape((B,) + theta_shape)
-    xs = np.broadcast_to(np.asarray(x, np.float64), batch_shape + (m,)).reshape(B, m)
+    lanes = []
+    for a, nd in zip(primals, primal_ndims):
+        a = np.asarray(a, np.float64)
+        shape = a.shape[a.ndim - nd:] if nd else ()
+        lanes.append(np.ascontiguousarray(
+            np.broadcast_to(a, batch_shape + shape).reshape((B,) + shape)))
     groups: dict[bytes, list[int]] = {}
     for i in range(B):
-        key = zs[i].tobytes() + np.ascontiguousarray(ths[i]).tobytes() + xs[i].tobytes()
+        key = b"".join(a[i].tobytes() for a in lanes)
         groups.setdefault(key, []).append(i)
     out = np.empty((B, N), dtype=np.float64)
     for idx in groups.values():
         i0 = idx[0]
-        nfun, nbc = callables_of(ths[i0])
-        out[idx] = ift_solve_transpose(nfun, nbc, xs[i0], n, m, k, zs[i0], vs[idx])
+        out[idx] = solve_group(*(a[i0] for a in lanes), vs[idx])
     return out.reshape(batch_shape + (N,))
+
+
+def ift_solve_lanes(callables_of, x, n, m, k, z_star, theta, v, theta_ndim,
+                    *, transpose=False):
+    """:func:`ift_solve` for a ``vmap_method="broadcast_all"`` callback.
+
+    Lanes are grouped by their exact ``(z_star, theta, x)`` (see
+    :func:`solve_by_primal_lanes`, gh#1049). ``callables_of(theta_lane)``
+    returns ``(nfun, nbc)`` for one lane; ``x`` is the mesh ``(m,)``,
+    batched like the other operands.
+    """
+    def group(z_i, th_i, x_i, V):
+        nfun, nbc = callables_of(th_i)
+        return ift_solve(nfun, nbc, x_i, n, m, k, z_i, V, transpose=transpose)
+
+    return solve_by_primal_lanes(group, v, (z_star, theta, x), (1, theta_ndim, 1))
+
+
+def ift_solve_transpose_lanes(callables_of, x, n, m, k, z_star, theta, v, theta_ndim):
+    """:func:`ift_solve_lanes` in the VJP direction (``R_zᵀ u = v``)."""
+    return ift_solve_lanes(callables_of, x, n, m, k, z_star, theta, v,
+                           theta_ndim, transpose=True)
 
 
 def _to_numpy(a):

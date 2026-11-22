@@ -2,23 +2,27 @@
 
 ``daeint(F, y0, t, theta)`` integrates ``F(t, y, y', theta) = 0`` on the fixed
 mesh ``t`` with backward-Euler collocation and returns the node trajectory
-differentiable w.r.t. ``theta`` and ``y0``, via the implicit-function theorem on
-the collocation system (the same scheme as ``pounce.ode._dae_collocation``).
+differentiable w.r.t. ``theta``, ``y0`` and ``t``, via the implicit-function
+theorem on the collocation system (the same scheme as
+``pounce.ode._dae_collocation``).
 
-Forward solve and the ``R_Y^T`` back-solve run on the host (numpy + FERAL sparse
-LU); the parameter VJP ``(dR/dp)^T u`` is taken by JAX autodiff of a traced
-residual at the converged nodes. ``F`` must therefore be JAX-traceable.
+The rule is a ``jax.custom_jvp`` (gh#1229), so forward mode (``jax.jvp`` /
+``jax.jacfwd``) and reverse mode (``jax.grad`` / ``jax.jacrev``, by
+transposition) both work, as does ``jax.vmap``. The forward solve and the
+``R_Y`` / ``R_Y^T`` linear solves run on the host (numpy + FERAL sparse LU);
+the parameter terms ``dR/dp`` are taken by JAX autodiff of a traced residual
+at the converged nodes. ``F`` must therefore be JAX-traceable.
 """
 
 from __future__ import annotations
-
-from functools import partial
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..bvp._solve import solve_by_primal_lanes
 from ..ode import _dae_collocation as C
+from ._ift import make_ift_root
 
 
 def daeint(F, y0, t, theta, *, order=2, tol=1e-10):
@@ -52,13 +56,16 @@ def daeint(F, y0, t, theta, *, order=2, tol=1e-10):
                                   order=order, tol=tol)
         return np.ascontiguousarray(Y[:, 1:].T.reshape(-1))   # node-major flat
 
-    def _host_btran(z_np, p_np, t_np, v_np):
-        p_np = np.asarray(p_np, np.float64)
-        t_np = np.asarray(t_np, np.float64)
-        th, y0v = _split(p_np)
-        Y = _full_from_flat_np(z_np, y0v)
-        return C.collocation_transpose_solve(
-            _np_F(np.asarray(th)), t_np, Y, np.asarray(v_np), order=order)
+    def _host_lin(z_np, p_np, t_np, v_np, transpose):
+        # broadcast_all: lanes may share one primal (jacfwd / jacrev) or carry
+        # distinct ones (an outer vmap); group them by primal (gh#1049).
+        def group(z_i, p_i, t_i, V):
+            th, y0v = _split(p_i)
+            Y = _full_from_flat_np(z_i, y0v)
+            return C.collocation_lin_solve(
+                _np_F(np.asarray(th)), t_i, Y, V, order=order,
+                transpose=transpose)
+        return solve_by_primal_lanes(group, v_np, (z_np, p_np, t_np), (1, 1, 1))
 
     def _wp(Yfull, j, t_):
         # backward-difference y' stencil matching the collocation core; the
@@ -86,25 +93,16 @@ def daeint(F, y0, t, theta, *, order=2, tol=1e-10):
             _host_solve, jax.ShapeDtypeStruct((N,), jnp.float64), p, t_,
             vmap_method="sequential")
 
-    @jax.custom_vjp
-    def solve(p, t_):
-        return _forward(p, t_)
+    def _lin_solve(z, args, b, transpose):
+        p, t_ = args
+        return jax.pure_callback(
+            lambda zz, pp, tt, bb: _host_lin(zz, pp, tt, bb, transpose),
+            jax.ShapeDtypeStruct((N,), jnp.float64),
+            z, p, t_, b, vmap_method="broadcast_all")
 
-    def _fwd(p, t_):
-        z = _forward(p, t_)
-        return z, (z, p, t_)
-
-    def _bwd(res, v):
-        z, p, t_ = res
-        u = jax.pure_callback(
-            _host_btran, jax.ShapeDtypeStruct((N,), jnp.float64),
-            z, p, t_, v, vmap_method="sequential")
-        # IFT: dL/d(p, t) = -(dR/d(p, t))^T u, with R_Y^T u = v already
-        # solved on host.
-        _, vjp = jax.vjp(lambda pp, tt: _residual_jax(z, pp, tt), p, t_)
-        return vjp(-u)
-
-    solve.defvjp(_fwd, _bwd)
+    # Implicit-function custom_jvp (gh#1229): jvp / jacfwd directly,
+    # grad / jacrev by transposition, R_Y solves on the host sparse LU.
+    solve = make_ift_root(_forward, _residual_jax, _lin_solve)
 
     p = jnp.concatenate([theta.reshape(-1), y0])
     z = solve(p, t)
