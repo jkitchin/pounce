@@ -19,8 +19,10 @@ changes.
   twice, and the KKT right-hand side was copied even with no dump armed.
   A presolve that made no reductions still paid for rebuilding each
   iterate. It now forwards evaluations unchanged and skips that rebuild;
-  `presolve=no` was the workaround before. Iterates are meant to be
-  unchanged. One visible difference: under a presolve that changed
+  `presolve=no` was the workaround before. On the issue's 93 504-variable
+  reproducer this work drops from 175 to 114 ms per iteration with presolve
+  on, and from 120–128 to 97–103 with it off. Iterates are unchanged: the
+  fixture sweep diffs empty on both legs. One visible difference: under a presolve that changed
   nothing, the live iterate a callback reads now matches `presolve=no`,
   including its Lagrangian gradient.
 - **`build_nl_problem` builds kinetics-style rows in a fifth of the memory,
