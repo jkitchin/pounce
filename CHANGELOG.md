@@ -46,10 +46,8 @@ changes.
 
   The smaller tapes evaluate faster too. On the issue's rows in a single
   thread, the Jacobian takes 7.3 ms instead of 9.3, and the Hessian 16.4 ms
-  instead of 20.0. `build_nl_problem` itself runs about 35% faster on them.
-  On #1232's shared reproducer the build takes 34 MiB instead of 50 and about
-  5% longer, because each row's split now counts references across the long
-  chains its leaves sit on. `.nl` models gain the same packing, and those whose defined variables
+  instead of 20.0. On #1232's shared reproducer the build takes 34 MiB
+  instead of 50. `.nl` models gain the same packing, and those whose defined variables
   are shared across rows below both gates stop building the shared tape, with
   bit-identical values. In `pounce-nl`, `TapeOp` and `SummandOp` now take
   `u32` operands, the evaluators are available on a borrowed `TapeRef`, and
