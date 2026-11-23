@@ -157,3 +157,32 @@ fn a_passed_deadline_stops_between_the_phases() {
     let _g = factor_deadline(Some(std::time::Instant::now()));
     assert_eq!(solve(&mut plain, n), ESymSolverStatus::Success);
 }
+
+/// The convex backend races the orderings on a KKT of order
+/// `CONVEX_AUTO_RACE_MIN_DIM` or more, and keeps feral's default below it.
+/// A backend reused for a smaller pattern goes back to the default.
+#[test]
+fn the_convex_backend_races_orderings_on_a_large_kkt() {
+    use pounce_feral::{CONVEX_AUTO_RACE_MIN_DIM, OrderingMethod};
+    if std::env::var_os("POUNCE_FERAL_ORDERING").is_some() {
+        return; // an explicit ordering disables the switch by design
+    }
+    let diag = |n: usize| -> Vec<Index> { (1..=n as Index).collect() };
+    let mut s = FeralSolverInterface::for_convex_ipm(1e-8, 0.0);
+    let small = diag(1000);
+    s.initialize_structure(1000, 1000, &small, &small);
+    assert_eq!(s.ordering(), &OrderingMethod::Auto);
+
+    let n = CONVEX_AUTO_RACE_MIN_DIM;
+    let big = diag(n);
+    s.initialize_structure(n as Index, n as Index, &big, &big);
+    assert_eq!(s.ordering(), &OrderingMethod::AutoRace);
+
+    s.initialize_structure(1000, 1000, &small, &small);
+    assert_eq!(s.ordering(), &OrderingMethod::Auto);
+
+    // Only the convex constructor opts in.
+    let mut plain = FeralSolverInterface::with_config(FeralConfig::default());
+    plain.initialize_structure(n as Index, n as Index, &big, &big);
+    assert_eq!(plain.ordering(), &OrderingMethod::Auto);
+}

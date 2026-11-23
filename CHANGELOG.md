@@ -25,6 +25,16 @@ changes.
   then runs twice per pattern; the factor is unchanged.
 
 ### Changed
+- **The convex interior point races FERAL's orderings on KKTs of a million
+  rows or more (gh#1249).** FERAL's default ordering picks badly at this
+  size: on `fhnw-binschedule1` it chooses AMF, whose symbolic analysis alone
+  exhausts memory; on `Primal2_1000` it chooses AMD, predicting 4× the
+  memory and 8× the work of METIS or SCOTCH. Above that size the convex
+  backend now uses `auto_race`, which keeps the ordering with the least
+  predicted fill. It costs one extra analysis per pattern (minutes at this
+  size). `POUNCE_FERAL_ORDERING` still wins, and nothing in the benchmark
+  corpora is large enough to be affected. A stopgap until FERAL's default
+  is fixed (jkitchin/feral#246).
 - **The convex interior point carries variable bounds on the KKT diagonal
   instead of as rows of the factored matrix (gh#1243).** Every
   single-column row of a nonnegative-orthant block is now removed from the

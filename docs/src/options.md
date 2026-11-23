@@ -2442,6 +2442,19 @@ curvature scale.
 When in doubt: leave `feral_ordering` at the default, with one
 exception.
 
+#### Convex KKTs of a million rows or more race the orderings
+
+On the convex (LP/QP/conic) path, a KKT of order 1 000 000 or more is
+analysed with `auto_race` rather than `auto` unless `POUNCE_FERAL_ORDERING`
+is set (gh#1249). At that size the default's per-matrix rule picks
+orderings that do not fit: on the Mittelmann LP `fhnw-binschedule1` it
+picks AMF, whose symbolic analysis alone exhausts memory, and on
+`Primal2_1000` it picks AMD, predicting 8.3 GB and 2.5e12 flops per
+factorization against METIS's 2.2 GB and 3.2e11. The race keeps the ordering
+with the least predicted fill, which on both is one that fits, at the price
+of analysing each candidate once per pattern (minutes at this size). It is a
+stopgap until FERAL's own default is fixed (jkitchin/feral#246).
+
 #### Collocation, optimal-control and PDE-in-time models: set `metis`
 
 A model transcribed on a mesh — direct collocation of an ODE/DAE, a
