@@ -9,6 +9,21 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **FERAL's predicted fill can be reported before the numeric factor
+  (gh#1249).** `POUNCE_FERAL_REPORT_SYMBOLIC=1` runs the symbolic analysis
+  on its own for each new KKT pattern and logs the resolved ordering,
+  predicted `nnz(L)`, factor and contribution-block bytes, and largest
+  front, before any numeric work. Until now the factor size was recorded
+  only after a factorization succeeded, so a KKT that exhausted memory
+  inside FERAL (five large Mittelmann LPs on the convex HSDE) reported
+  nothing. `POUNCE_FERAL_MAX_FACTOR_BYTES=<bytes>` refuses a factorization
+  whose predicted peak exceeds the budget, with a message, instead of
+  running into an out-of-memory kill. With either set, the convex solvers
+  check `max_wall_time` between the symbolic and numeric phases and end
+  with `TimeLimit`. Both are off by default because the symbolic phase
+  then runs twice per pattern; the factor is unchanged.
+
 ### Changed
 - **The convex interior point carries variable bounds on the KKT diagonal
   instead of as rows of the factored matrix (gh#1243).** Every

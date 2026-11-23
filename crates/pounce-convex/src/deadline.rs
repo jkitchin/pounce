@@ -22,6 +22,9 @@ pub(crate) fn with_deadline<T>(limit: Option<Duration>, f: impl FnOnce() -> T) -
             }
         }
         let _reset = Reset(slot);
+        // gh#1249: the same deadline stops FERAL's symbolic pre-analysis
+        // from going on into the numeric factor once it has passed.
+        let _feral = pounce_feral::factor_deadline(deadline);
         f()
     })
 }

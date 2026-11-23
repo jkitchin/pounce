@@ -38,6 +38,7 @@ pub use feral::symbolic::OrderingPreprocess;
 pub mod block;
 pub use block::FeralBlockSolver;
 pub mod dependent_rows;
+pub mod preanalysis;
 pub use dependent_rows::{
     DEFAULT_PROBE_MAX_WORK, DependentRowsBudget, ProbeBailout, RankProbeDeadline,
     default_max_active_bytes, last_probe_bailout, rank_probe_deadline,
@@ -47,6 +48,7 @@ use pounce_linsol::summary::{FactorRecord, LinearSolverSummary};
 use pounce_linsol::{
     EMatrixFormat, ESymSolverStatus, FactorPattern, SparseSymLinearSolverInterface,
 };
+pub use preanalysis::{FactorDeadline, SymbolicReport, factor_deadline, factor_deadline_passed};
 
 /// Largest `nrhs` at which feral's blocked back-substitution is still
 /// **bit-identical** to looping one column at a time — the ceiling
@@ -179,6 +181,31 @@ pub struct FeralSolverInterface {
     /// [`Self::with_summary_sink`] and reads it after
     /// `optimize_tnlp` returns.
     sink: Option<Arc<Mutex<LinearSolverSummary>>>,
+
+    /// gh#1249: the symbolic pre-analysis ([`crate::preanalysis`]). `None`
+    /// when neither [`FeralConfig::report_symbolic`] nor
+    /// [`FeralConfig::max_factor_bytes`] asks for it.
+    preanalysis: Option<Preanalysis>,
+}
+
+/// Configuration and per-pattern state of the gh#1249 pre-analysis.
+struct Preanalysis {
+    params: SupernodeParams,
+    report: bool,
+    max_factor_bytes: Option<u64>,
+    state: PreanalysisState,
+    last: Option<SymbolicReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreanalysisState {
+    /// The current pattern has not been analysed yet.
+    Pending,
+    /// Analysed; the factorization goes ahead.
+    Done,
+    /// Analysed and over the byte budget: every factorization of this
+    /// pattern is refused until `initialize_structure` sets a new one.
+    Refused,
 }
 
 /// Construction-time configuration for [`FeralSolverInterface`].
@@ -714,6 +741,25 @@ pub struct FeralConfig {
     /// The empirical motivation is pounce#254 (emfl050's ~44 s single
     /// factorization); see `dev-notes/feral-factor-interrupt.md`.
     pub static_pivoting: Option<bool>,
+    /// Log FERAL's predicted fill before the numeric factor (gh#1249).
+    ///
+    /// On each new sparsity pattern, run the symbolic analysis on its own
+    /// first ([`crate::preanalysis`]) and log, at `info` on the
+    /// `pounce::linsol` target, one line as it starts and one with the
+    /// resolved ordering, the predicted `nnz(L)`, the factor and
+    /// contribution-block bytes and the largest front as it ends. The
+    /// symbolic phase then runs twice per pattern, so it is off by default.
+    /// Environment: `POUNCE_FERAL_REPORT_SYMBOLIC`.
+    pub report_symbolic: bool,
+    /// Refuse a factorization FERAL predicts will need more than this many
+    /// bytes at its peak (`factor_bytes + peak_contrib_bytes`, from the
+    /// symbolic analysis), reporting `FatalError` with a message instead of
+    /// running into an out-of-memory kill (gh#1249). Setting it turns the
+    /// pre-analysis of [`Self::report_symbolic`] on, without the log lines.
+    /// `None` (the default) never refuses. Environment:
+    /// `POUNCE_FERAL_MAX_FACTOR_BYTES` (scientific notation accepted,
+    /// e.g. `3e10`).
+    pub max_factor_bytes: Option<u64>,
 }
 
 impl Default for FeralConfig {
@@ -751,6 +797,8 @@ impl Default for FeralConfig {
             parallel: None,
             min_par_flops: None,
             static_pivoting: None,
+            report_symbolic: false,
+            max_factor_bytes: None,
         }
     }
 }
@@ -888,6 +936,13 @@ impl FeralConfig {
                     .ok()
                     .as_deref(),
             ),
+            report_symbolic: parse_bool_env(
+                std::env::var("POUNCE_FERAL_REPORT_SYMBOLIC")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or(false),
+            max_factor_bytes: feral::env::u64_var("POUNCE_FERAL_MAX_FACTOR_BYTES"),
         }
     }
 }
@@ -1018,6 +1073,11 @@ pub(crate) fn factor_record(
     }
 }
 
+/// Whether any value is NaN or infinite.
+fn has_non_finite(values: &[f64]) -> bool {
+    values.iter().any(|v| !v.is_finite())
+}
+
 /// Parse a `feral_ordering_preprocess` tag. `None` for an unrecognized one.
 pub fn parse_ordering_preprocess(s: &str) -> Option<OrderingPreprocess> {
     match s.trim().to_ascii_lowercase().as_str() {
@@ -1034,6 +1094,16 @@ pub fn parse_early_assembly(s: &str) -> Option<EarlyAssembly> {
         "off" => Some(EarlyAssembly::Off),
         "wide_parents" | "wide-parents" => Some(EarlyAssembly::WideParents),
         _ => None,
+    }
+}
+
+/// The symbolic-phase parameters [`configure_solver`] hands feral, shared
+/// with the pre-analysis (gh#1249) so its prediction is of the analysis the
+/// solver will actually compute.
+pub(crate) fn supernode_params(cfg: &FeralConfig) -> SupernodeParams {
+    SupernodeParams {
+        preprocess: cfg.ordering_preprocess,
+        ..SupernodeParams::default()
     }
 }
 
@@ -1076,11 +1146,7 @@ pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
             np.cascade_break_eps = None;
         }
     }
-    let sn = SupernodeParams {
-        preprocess: cfg.ordering_preprocess,
-        ..SupernodeParams::default()
-    };
-    let mut solver = Solver::with_params(np, sn);
+    let mut solver = Solver::with_params(np, supernode_params(cfg));
     // Internal-parallelism toggle. Explicit `cfg.parallel` is the primary
     // per-backend lever; when unset, fall back to the legacy process-wide
     // `FERAL_PARALLEL` env var. The env var is bidirectional and uses the
@@ -1254,6 +1320,14 @@ impl FeralSolverInterface {
     /// [`FeralConfig::cascade_break`] for the tri-state semantics.
     pub fn with_config(cfg: FeralConfig) -> Self {
         let solver = configure_solver(&cfg);
+        let preanalysis =
+            (cfg.report_symbolic || cfg.max_factor_bytes.is_some()).then(|| Preanalysis {
+                params: supernode_params(&cfg),
+                report: cfg.report_symbolic,
+                max_factor_bytes: cfg.max_factor_bytes,
+                state: PreanalysisState::Pending,
+                last: None,
+            });
         Self {
             solver,
             initialized: false,
@@ -1283,6 +1357,54 @@ impl FeralSolverInterface {
                 ..Default::default()
             },
             sink: None,
+            preanalysis,
+        }
+    }
+
+    /// What the gh#1249 pre-analysis predicted for the current pattern, if
+    /// it is enabled and has run.
+    pub fn symbolic_report(&self) -> Option<&SymbolicReport> {
+        self.preanalysis.as_ref().and_then(|p| p.last.as_ref())
+    }
+
+    /// Run the gh#1249 pre-analysis if the current pattern needs one.
+    /// `Some(status)` stops the factorization with that status.
+    fn run_preanalysis(&mut self) -> Option<ESymSolverStatus> {
+        let pre = self.preanalysis.as_mut()?;
+        match pre.state {
+            PreanalysisState::Done => return None,
+            PreanalysisState::Refused => return Some(ESymSolverStatus::FatalError),
+            PreanalysisState::Pending => {}
+        }
+        let matrix = self.matrix.as_ref()?;
+        // A non-finite value is rejected by `factor` itself, with its own
+        // message; MC64 preprocessing should not see one first.
+        if has_non_finite(&matrix.values) {
+            return None;
+        }
+        let (report, verdict) = preanalysis::preanalyze(
+            matrix,
+            &pre.params,
+            &self.ordering,
+            pre.report,
+            pre.max_factor_bytes,
+        );
+        pre.last = report;
+        match verdict {
+            preanalysis::Verdict::Proceed | preanalysis::Verdict::AnalysisFailed => {
+                pre.state = PreanalysisState::Done;
+                None
+            }
+            preanalysis::Verdict::OverBudget { .. } => {
+                pre.state = PreanalysisState::Refused;
+                Some(ESymSolverStatus::FatalError)
+            }
+            // Not latched: the analysis is known, and a later call (in a
+            // later deadline scope) factors without repeating it.
+            preanalysis::Verdict::DeadlinePassed => {
+                pre.state = PreanalysisState::Done;
+                Some(ESymSolverStatus::FatalError)
+            }
         }
     }
 
@@ -1454,6 +1576,11 @@ impl FeralSolverInterface {
         // regardless of the factor outcome.
         if !self.refresh_matrix() {
             return ESymSolverStatus::FatalError;
+        }
+        // gh#1249: FERAL's prediction for a new pattern, before the numeric
+        // factor (off unless `report_symbolic` / `max_factor_bytes` is set).
+        if let Some(status) = self.run_preanalysis() {
+            return status;
         }
         let matrix = self.matrix.as_ref().expect("refresh_matrix stored one");
 
@@ -2048,6 +2175,10 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         // rebuilds both from scratch. gh#562.
         self.slot = None;
         self.matrix = None;
+        if let Some(pre) = self.preanalysis.as_mut() {
+            pre.state = PreanalysisState::Pending;
+            pre.last = None;
+        }
 
         // Convert 1-based MA57-style indices to 0-based for FERAL, and
         // canonicalize each entry to the lower triangle. MA57 accepts

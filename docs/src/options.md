@@ -2736,6 +2736,31 @@ that autodetection is wrong (feral falls back to sequential when the
 rayon pool fails to build); the first-class per-backend lever,
 `FeralConfig.parallel`, is the Rust solver API, not an option.
 
+### FERAL fill prediction and factor memory budget
+
+FERAL runs its symbolic analysis and its numeric factorization in one call,
+and the factor's size (`factor_nnz` on the `linear_solve` span) is recorded
+only after the factorization succeeds. A KKT whose factor does not fit in
+memory therefore reports nothing before the process is killed. Two
+environment variables run the symbolic analysis on its own first, before the
+numeric factor, for each new sparsity pattern (gh#1249):
+
+| Variable | Value | Effect |
+|---|---|---|
+| `POUNCE_FERAL_REPORT_SYMBOLIC` | `1`/`on`/`true`/`yes` | Logs, at `info` on `pounce::linsol` (shown by default), one line as the analysis starts and one when it ends: the ordering it resolved to, the predicted `nnz(L)`, the factor and contribution-block bytes and their sum (the predicted peak), the largest front, and the time the analysis took. A run killed after only the first line died in the symbolic phase; one killed after the second died in the numeric factor, whose predicted size the second line gives. |
+| `POUNCE_FERAL_MAX_FACTOR_BYTES` | bytes, e.g. `3e10` | Refuses a factorization whose predicted peak exceeds this many bytes, with a warning naming the ordering and the prediction, instead of running into an out-of-memory kill. The factorization reports a fatal error, so the solve ends with a numerical-failure status. Logs nothing more unless `POUNCE_FERAL_REPORT_SYMBOLIC` is also set. |
+
+With either set, the convex solvers' `max_wall_time` (`time_limit`) is also
+checked between the two phases: a symbolic analysis that ran past the
+deadline does not start the numeric factor, and the solve ends with
+`TimeLimit`.
+
+The price is that the symbolic phase runs **twice** per pattern, because
+feral's solver cannot take an analysis computed outside it. The factor
+itself is unchanged. Both are off by default, and they do not interrupt
+either phase partway: a symbolic analysis that on its own exhausts memory
+or time still does so.
+
 ### Debug and diagnostic gates
 
 These switch on extra diagnostic emission for a specific subsystem. Most
