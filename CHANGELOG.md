@@ -80,8 +80,72 @@ changes.
   - On OSA-30, the solve goes from 18.2 s to 1.7 s.
   - KEN-18 and PDS-06 are unchanged by it.
   - Recorded as `convex_dominated_cols`.
+### Added
+- **FERAL's predicted fill can be reported before the numeric factor
+  (gh#1249).** `POUNCE_FERAL_REPORT_SYMBOLIC=1` runs the symbolic analysis
+  on its own for each new KKT pattern and logs the resolved ordering,
+  predicted `nnz(L)`, factor and contribution-block bytes, and largest
+  front, before any numeric work. Until now the factor size was recorded
+  only after a factorization succeeded, so a KKT that exhausted memory
+  inside FERAL (five large Mittelmann LPs on the convex HSDE) reported
+  nothing. `POUNCE_FERAL_MAX_FACTOR_BYTES=<bytes>` refuses a factorization
+  whose predicted peak exceeds the budget, instead of running into an
+  out-of-memory kill. The refusal ends the solve with `Insufficient_Memory`:
+  no LP → NLP fallback, restoration or second-opinion re-solve follows it,
+  and nothing else in the solve runs another analysis. The prediction covers
+  the factor only, so leave headroom for the rest of the process (5–6 GB on
+  the gh#1249 models). With either set, the convex solvers
+  check `max_wall_time` between the symbolic and numeric phases and end
+  with `TimeLimit`. Both are off by default because the symbolic phase
+  then runs twice per pattern; the factor is unchanged.
+
+- **`build_nl_problem(..., con_linear=(indptr, indices, data))`: a row's
+  linear part as coefficients (discopt#2293).** A frontend that knows which
+  terms of a row are linear can pass them as a CSR triple instead of
+  `Var` / `c*Var` nodes. They are stored in the problem's linear segment
+  (the `.nl` `J` segment's slot), with no expression tree, no AD tape and no
+  transient `NlExpr` nodes. Pass `0.0` as the expression of an all-linear row.
+  Such a row (constant expression plus segment) is folded into the same
+  constant-structure form the quadratic recognizer builds for an affine tree,
+  so it evaluates **bit-identically** to passing the row as a tree:
+  compensated sum over ascending variables, constant added last. Measured on
+  200,000 three-term rows: 597 → 268 B/row in the problem, and 600 → 72 B/row
+  of transient input. Parsed `.nl` models and calls without `con_linear` are
+  untouched: the fold applies only to `build_nl_problem` problems, whose
+  linear segment was always empty before. Indices out of range, non-finite
+  coefficients and malformed `indptr` are refused.
+- **The CLI reads QPS / MPS files directly (gh#1251).** `pounce model.mps`
+  and `pounce model.qps` (extension in any case) load an LP or QP with no
+  `.nl` conversion. The model is routed like a `.nl` input: an LP or convex
+  QP reaches the convex interior point, and a sibling `.sol` is written.
+  `verify`, `check-x0` and `diagnose` accept these files too. `OBJSENSE
+  MAX` is now honored, where the QPS reader used to reject it; integer
+  markers and `BV`/`LI`/`UI` bounds are still rejected.
+  `.mps.gz` / `.qps.gz` are read compressed (gh#1256).
 
 ### Changed
+- **Behaviour change: the convex interior point races FERAL's orderings on
+  KKTs of a million rows or more (gh#1249).** FERAL's default ordering picks
+  badly at this size: on `fhnw-binschedule1` it chooses AMF, whose symbolic
+  analysis alone exhausts memory; on `Primal2_1000` it chooses AMD,
+  predicting 4× the memory and 8× the work of METIS. Above that size the
+  convex backend now uses `auto_race`, which tries AMD and METIS and keeps
+  the one with less predicted fill. This changes the ordering, and so the
+  trajectory, of every convex solve that large, not only the models that
+  failed. It costs extra analysis time per pattern (minutes at this size),
+  and `max_wall_time` cannot interrupt it: on `L2CTA3D` the METIS candidate
+  runs far longer than AMF did. Set `POUNCE_FERAL_ORDERING=auto` to keep
+  FERAL's default, or name a concrete ordering. Nothing in the benchmark
+  corpora is large enough to be affected. A stopgap until FERAL's default is
+  fixed (jkitchin/feral#246).
+- **The CLI no longer parses a `.nl` twice when it routes the model to a
+  convex engine (gh#1255).** An LP, convex QP or SOCP used to be read a
+  second time for the convex solver while the first copy and its evaluation
+  tapes were still in memory. Both the convex solve and the convex-answer
+  replay after an NLP fallback (gh#1183) now reuse the problem that was
+  already loaded. On `Dual2_5000` (3.2 GB `.nl`) the re-read added about
+  1.2 GB of peak memory and about 12 s. The `Parsed …` line now reports the
+  model build time separately: `in Xs (read) + Ys (model build)`.
 - **The convex interior point carries variable bounds on the KKT diagonal
   instead of as rows of the factored matrix (gh#1243).** Every
   single-column row of a nonnegative-orthant block is now removed from the
@@ -131,6 +195,50 @@ changes.
   `convex_qp_qscfxm1` and `convex_qp_qpilotno` from optimal to the iteration
   limit, and the fixture sweep at that setting now diffs empty. Column
   reductions (finding 3) are not part of this change.
+- **QPS / MPS reader: lines with no set name are read correctly, and fixed-
+  format files with spaces in names are read (gh#1256).** An `RHS` or
+  `RANGES` line with no set name and two (row, value) pairs was misread,
+  and on NETLIB BLEND, whose rows are named by numbers, misread without an
+  error: every right-hand side was dropped and `pounce blend.mps` reported
+  an optimum of 0 instead of −30.8121. The set name is now optional in
+  `RHS`, `RANGES` and `BOUNDS`, every section checks its field count, and a
+  file that fails as free format is read again by fixed column positions,
+  which is how NETLIB FORPLAN's names like `DEDO3 1R` are written. Measured
+  on 247 files (139 Maros-Meszaros, 92 NETLIB, 16 Kennington): 239 parsed
+  before, all 247 now. Every file agrees with HiGHS's reading of it except
+  where HiGHS is the one that differs (it drops coefficients below 1e-9,
+  and misreads DPKLO1, whose RHS set name is also a row name; pounce's
+  reading solves DPKLO1 to its published optimum). The 239 files that
+  already parsed, BLEND aside, come out identical.
+  * Duplicate entries follow HiGHS: a repeated `COLUMNS` coefficient,
+    `RHS` or `RANGES` value keeps the first; repeated `QUADOBJ` entries are
+    summed. Before, `COLUMNS` summed and `RHS` / `RANGES` kept the last.
+  * A negative `UP` bound on a column with no lower bound now gives a lower
+    bound of −∞ (the CPLEX / Gurobi rule) instead of the empty box
+    `[0, u]`. Entries on a second `N` (free) row are dropped instead of
+    refused.
+  * Each of these is reported as a warning on stderr; the parsed model
+    carries them in the new `QpsModel::warnings`.
+- **The `.nl` reader uses much less memory on large models (gh#1248).**
+  On a Dual2_5000-shaped QP at one tenth scale (3.3 M variables, 3 M rows,
+  12 M Jacobian nonzeros, a 408 MB file), the process peak while parsing
+  drops from 2.60 to 1.25 GB, and the parse from 7.3 to 5.9 s. What the
+  parsed problem keeps for the rest of the solve drops from 1.15 to
+  0.82 GB. Four changes:
+  * The reader no longer builds a table of every line before parsing. At
+    16 bytes per line it outweighed the file itself, and building it by
+    doubling briefly needed half as much again.
+  * A long `o54` sum in a quadratic body is folded as each term is read,
+    instead of after holding every term at once (~1 GB for 3.3 M terms).
+  * A model whose recognized quadratic bodies are a small part of the file
+    keeps only those bodies' text, not the whole file.
+  * Jacobian rows and `.col`/`.row` names are allocated at their exact size,
+    and name files are read a line at a time.
+
+  Parsed problems are unchanged: the fixture sweep is identical, and the
+  quadratic recognizer still matches the tree walk bit for bit on every
+  `.nl` in the repository.
+
 - **The convex QP path no longer keeps duplicate copies of the problem and
   of the KKT pattern alive through the first factorization (gh#1243).**
   * Presolve's fixpoint chain held every intermediate problem twice, and

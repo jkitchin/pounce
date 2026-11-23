@@ -33,7 +33,7 @@
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyString;
+use pyo3::types::{PyBool, PyString};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1382,6 +1382,104 @@ fn opt_vec(
     }
 }
 
+/// The `con_linear=` argument of [`build_nl_problem`]: each row's linear part
+/// as a CSR triple `(indptr, indices, data)` over the `m` rows.
+///
+/// Validated here, while it is still a diagnosable user error, for the same
+/// reasons `from_expressions` validates the trees: an index at or beyond `n`
+/// is an out-of-bounds read in `eval_g` / `eval_jac_g`, and a non-finite
+/// coefficient would be read as a number by every evaluator (gh#847 refuses
+/// the same in a `.nl` file's bounds). A repeated column within a row is
+/// allowed -- every consumer of `con_linear` accumulates, as it does for a
+/// `.nl` file's `J` segment.
+fn csr_linear(
+    v: Option<&Bound<'_, PyAny>>,
+    m: usize,
+    n: usize,
+) -> PyResult<Option<Vec<Vec<(usize, Number)>>>> {
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    let err = |msg: String| PyValueError::new_err(format!("build_nl_problem: con_linear {msg}"));
+    let not_triple = || {
+        PyTypeError::new_err(
+            "build_nl_problem: con_linear must be a CSR triple (indptr, indices, data)",
+        )
+    };
+    let (py_indptr, py_indices, py_data): (Bound<'_, PyAny>, Bound<'_, PyAny>, Bound<'_, PyAny>) =
+        v.extract().map_err(|_| not_triple())?;
+    // A boolean extracts as an integer, so a mask passed where indices belong
+    // would silently become columns 0 and 1. Refuse it, for a NumPy bool
+    // array (dtype kind 'b') and for a sequence holding Python bools.
+    for (what, obj) in [("indptr", &py_indptr), ("indices", &py_indices)] {
+        let bool_dtype = obj
+            .getattr("dtype")
+            .and_then(|d| d.getattr("kind"))
+            .and_then(|k| k.extract::<String>())
+            .is_ok_and(|k| k == "b");
+        let bool_item = !bool_dtype
+            && obj.downcast::<pyo3::types::PySequence>().is_ok()
+            && obj
+                .iter()?
+                .any(|x| x.is_ok_and(|x| x.is_instance_of::<PyBool>()));
+        if bool_dtype || bool_item {
+            return Err(PyTypeError::new_err(format!(
+                "build_nl_problem: con_linear {what} must be integers, got booleans"
+            )));
+        }
+    }
+    let indptr: Vec<i64> = py_indptr.extract().map_err(|_| not_triple())?;
+    let indices: Vec<i64> = py_indices.extract().map_err(|_| not_triple())?;
+    let data: Vec<Number> = py_data.extract().map_err(|_| not_triple())?;
+    if indptr.len() != m + 1 {
+        return Err(err(format!(
+            "indptr has length {}, expected len(constraints) + 1 = {}",
+            indptr.len(),
+            m + 1
+        )));
+    }
+    if indices.len() != data.len() {
+        return Err(err(format!(
+            "indices and data have lengths {} and {}",
+            indices.len(),
+            data.len()
+        )));
+    }
+    // Monotonicity first, over the whole of `indptr`: checked row by row
+    // inside the loop below, a later decrease let an earlier row run past
+    // the end of `indices` before it was seen (`[0, 5, 2]` with two indices
+    // read `indices[2]`), a panic rather than this error.
+    if let Some(i) = indptr.windows(2).position(|w| w[1] < w[0]) {
+        return Err(err(format!("indptr decreases at row {i}")));
+    }
+    if indptr[0] != 0 || indptr[m] != indices.len() as i64 {
+        return Err(err(format!(
+            "indptr must run from 0 to len(indices) = {}, got {}..{}",
+            indices.len(),
+            indptr[0],
+            indptr[m]
+        )));
+    }
+    let mut rows = Vec::with_capacity(m);
+    for i in 0..m {
+        // In range by the two checks above: 0 = indptr[0] <= a <= b <= indptr[m].
+        let (a, b) = (indptr[i], indptr[i + 1]);
+        let mut row = Vec::with_capacity((b - a) as usize);
+        for k in a as usize..b as usize {
+            let (j, c) = (indices[k], data[k]);
+            if j < 0 || j as usize >= n {
+                return Err(err(format!("row {i} references variable {j} but n = {n}")));
+            }
+            if !c.is_finite() {
+                return Err(err(format!("row {i} has a non-finite coefficient {c}")));
+            }
+            row.push((j as usize, c));
+        }
+        rows.push(row);
+    }
+    Ok(Some(rows))
+}
+
 /// Build an evaluable [`crate::PyNlProblem`] from expressions, with no `.nl`
 /// file involved (issue #469).
 ///
@@ -1393,6 +1491,17 @@ fn opt_vec(
 /// Bound vectors default to unbounded (`±1e19`, the `.nl` sentinel) and
 /// `x0` to zeros. `var_names` / `con_names` are optional; when given they
 /// must match `n` / `len(constraints)`.
+///
+/// `con_linear`, optional, is each row's *linear part* as a CSR triple
+/// `(indptr, indices, data)`: row `i` is `constraints[i](x) + sum(data[k] *
+/// x[indices[k]] for k in indptr[i]:indptr[i+1])`. It is the `.nl` `J`
+/// segment by another name, and gets what a parsed model's linear part gets:
+/// no expression tree, no AD tape, a constant Jacobian entry. Pass `0.0` as
+/// the expression of a row that is linear outright. A frontend that already
+/// knows which terms are linear saves the tree, the tape and the `NlExpr`
+/// nodes it would otherwise build for them (discopt#2293 measured a
+/// three-term linear row at ~590 B in the problem plus ~490 B of transient
+/// `NlExpr` DAG this way, against ~250 B with the terms passed here).
 #[pyfunction]
 #[pyo3(signature = (
     n,
@@ -1407,6 +1516,7 @@ fn opt_vec(
     obj_constant=0.0,
     var_names=None,
     con_names=None,
+    con_linear=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn build_nl_problem(
@@ -1422,6 +1532,7 @@ pub fn build_nl_problem(
     obj_constant: Number,
     var_names: Option<Vec<String>>,
     con_names: Option<Vec<String>>,
+    con_linear: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyNlProblem> {
     let objective = coerce(objective, "build_nl_problem: objective")?;
     let (constraints, con_depth) = match constraints {
@@ -1429,6 +1540,7 @@ pub fn build_nl_problem(
         Some(c) => coerce_all(c, "build_nl_problem: constraints")?,
     };
     let m = constraints.len();
+    let con_linear = csr_linear(con_linear, m, n)?;
     // Assembly walks every expression recursively — materialization, the
     // variable-index validation, the top-level sum split, and one tape
     // build per summand — so it runs under the depth guard the query
@@ -1468,6 +1580,12 @@ pub fn build_nl_problem(
         let mut prob = NlProblem::from_expressions(parts)?;
         // The rows are the caller's DAG, hand-offs and all.
         prob.frontend_dag = true;
+        // Set after `from_expressions`, which builds every row's linear part
+        // empty: every evaluator, the Jacobian structure and presolve already
+        // read `con_linear`, because a parsed `.nl` model fills it.
+        if let Some(lin) = con_linear {
+            prob.con_linear = lin;
+        }
         NlTnlp::try_new(prob)
     })
     .map_err(|e| PyValueError::new_err(format!("build_nl_problem: {e}")))?;

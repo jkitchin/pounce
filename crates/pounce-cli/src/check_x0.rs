@@ -580,7 +580,7 @@ fn load_model(args: &CheckX0Args) -> Result<LoadedModel, String> {
         .ok_or("expected a <problem.nl> argument or --builtin <name>")?;
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let sha = sha256::hex(&bytes);
-    let prob = nl_reader::read_nl_file(path)?;
+    let prob = crate::problem_file::read_problem_file(path)?;
     if !prob.complementarity.is_empty() {
         // The diagnosis reads the rows and bounds; a complementarity pair is
         // neither, so its report would describe the relaxation.

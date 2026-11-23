@@ -26,6 +26,7 @@ pub mod dispatch;
 pub mod minima;
 pub mod nl_hessian_program;
 pub mod print;
+pub mod problem_file;
 pub mod qcqp_polish;
 pub mod qp_extract;
 pub mod seeded_tnlp;

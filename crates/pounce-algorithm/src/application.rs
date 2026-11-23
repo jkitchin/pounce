@@ -2325,6 +2325,10 @@ impl IpoptApplication {
         tnlp: Rc<RefCell<dyn TNLP>>,
         derivative_test_tnlp: Option<Rc<RefCell<dyn TNLP>>>,
     ) -> ApplicationReturnStatus {
+        // gh#1249: a FERAL budget refusal latched by an earlier solve on this
+        // thread is not this solve's; while latched it refuses every
+        // factorization (see `pounce_feral::budget_refusal`).
+        pounce_feral::clear_budget_refusal();
         // The statistics belong to this solve, all of them. A solve that
         // returns before any attempt runs (the degrees-of-freedom refusal, an
         // option refusal, a presolve proof) used to leave the previous solve's
@@ -2361,6 +2365,22 @@ impl IpoptApplication {
         // application a caught panic left behind.
         self.retry_keeps_declared_box.set(false);
         let status = self.optimize_tnlp_dispatch(tnlp, derivative_test_tnlp);
+        // gh#1249: a solve that failed after FERAL refused a factorization
+        // over `POUNCE_FERAL_MAX_FACTOR_BYTES` failed for that reason, whatever
+        // the algorithm made of the `FatalError` (restoration, a step error).
+        // Reporting it as such also keeps the second-opinion ladder from
+        // re-solving a model whose factor was predicted not to fit.
+        let status = if pounce_feral::budget_refusal().is_some()
+            && !matches!(
+                status,
+                ApplicationReturnStatus::SolveSucceeded
+                    | ApplicationReturnStatus::SolvedToAcceptableLevel
+                    | ApplicationReturnStatus::FeasiblePointFound
+            ) {
+            ApplicationReturnStatus::InsufficientMemory
+        } else {
+            status
+        };
         if !self.run_clock_held.get() {
             self.statistics.borrow_mut().run_wallclock_time_secs =
                 pounce_common::utils::wallclock_time() - self.run_clock.get().0;

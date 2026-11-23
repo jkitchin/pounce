@@ -604,6 +604,11 @@ fn real_main() -> ExitCode {
     let mut nl_expr_provider: Option<
         Rc<RefCell<dyn pounce_nlp::expression_provider::ExpressionProvider>>,
     > = None;
+    // gh#1255: the concrete `NlTnlp` behind `inner_tnlp`, kept so the convex
+    // dispatch and the gh#1183 replay can borrow the parsed `NlProblem` it
+    // owns (`NlTnlp::problem`) rather than parse the `.nl` a second time
+    // while this copy and its tapes are still alive.
+    let mut nl_tnlp_handle: Option<Rc<RefCell<nl_reader::NlTnlp>>> = None;
     let inner_tnlp: Rc<RefCell<dyn TNLP>> = match &args.problem {
         ProblemSource::Builtin(name) => match builtin::lookup(name) {
             Some(t) => t,
@@ -618,7 +623,7 @@ fn real_main() -> ExitCode {
                 println!("Reading {}...", path.display());
             }
             let t0 = std::time::Instant::now();
-            match nl_reader::read_nl_file(path) {
+            match pounce_cli::problem_file::read_problem_file(path) {
                 Ok(prob) => {
                     nl_suffixes = Some(prob.suffixes.clone());
                     nl_dims = Some((prob.n, prob.m));
@@ -713,6 +718,7 @@ fn real_main() -> ExitCode {
                     // `try_new`, not `new`: a model naming AMPL external
                     // functions that `$AMPLFUNC` cannot resolve is a load
                     // error like any other, not a panic (gh#1069).
+                    let t_build = std::time::Instant::now();
                     let nl_tnlp = match nl_reader::NlTnlp::try_new(prob) {
                         Ok(t) => t,
                         Err(e) => {
@@ -720,7 +726,11 @@ fn real_main() -> ExitCode {
                             return ExitCode::from(2);
                         }
                     };
+                    // Reported apart from the parse (gh#1255): on a large
+                    // model the tape build is a comparable cost of its own.
+                    let build_elapsed = t_build.elapsed().as_secs_f64();
                     let nl_rc = Rc::new(RefCell::new(nl_tnlp));
+                    nl_tnlp_handle = Some(Rc::clone(&nl_rc));
                     // gh #703: `nlp_scaling_method=curvature-based` derives
                     // its factors from the model's coefficients, so it has
                     // to be switched on here — while the handle is still
@@ -751,8 +761,14 @@ fn real_main() -> ExitCode {
                     if let Some(info) = t.borrow_mut().get_nlp_info() {
                         if !json_dbg {
                             println!(
-                                "Parsed {} vars, {} cons, jac_nnz={}, h_nnz={} in {:.2}s",
-                                info.n, info.m, info.nnz_jac_g, info.nnz_h_lag, elapsed
+                                "Parsed {} vars, {} cons, jac_nnz={}, h_nnz={} in {:.2}s \
+                                 (read) + {:.2}s (model build)",
+                                info.n,
+                                info.m,
+                                info.nnz_jac_g,
+                                info.nnz_h_lag,
+                                elapsed,
+                                build_elapsed
                             );
                         }
                     }
@@ -1336,29 +1352,28 @@ fn real_main() -> ExitCode {
                     class.name()
                 );
             }
-            // The convex solvers need the parsed `NlProblem`, but the initial
-            // parse moved it into `NlTnlp`. Re-parse the file here — only on
-            // the convex dispatch path (LP / convex-QP / SOCP), never for a
-            // general NLP solve. Only `.nl` inputs ever classify as convex, so
-            // the builtin arm falls through to NLP. A parse failure surfaces
-            // and exits rather than silently mis-routing to NLP (L24).
+            // The convex solvers need the parsed `NlProblem`. The initial
+            // parse moved it into `NlTnlp`, which keeps it unmodified and
+            // lends it out through `NlTnlp::problem`, so borrow it there.
+            // This used to re-parse the file, holding a second full copy next
+            // to the first one and its tapes (gh#1255: 14.7 → 15.9 GB and
+            // ~8 s of extra parse on `Dual2_5000`). The `NlTnlp` cannot be
+            // dropped instead: a declined convex attempt falls through to the
+            // NLP solve below, which evaluates it. Only `.nl` inputs ever
+            // classify as convex, so the builtin arm falls through to NLP.
             if decline_convex {
                 // Declined for #196 / gh#483: fall through to the NLP solve
                 // below, which runs the sensitivity / reduced-Hessian step in
                 // `on_converged` (writing `sens_sol_state_1` to the `.sol`) and
                 // reads the `scaling_factor` suffixes through the TNLP scaling
                 // callback.
-            } else if let ProblemSource::NlFile(path) = &args.problem {
-                let prob = match nl_reader::read_nl_file(path) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        eprintln!(
-                            "pounce: failed to re-read {} for the convex solver: {e}",
-                            path.display()
-                        );
-                        return ExitCode::from(2);
-                    }
-                };
+            } else if let (ProblemSource::NlFile(path), Some(nl_handle)) =
+                (&args.problem, nl_tnlp_handle.as_ref())
+            {
+                // Released at the end of this block, before the NLP fallback
+                // below needs the TNLP mutably.
+                let nl_guard = nl_handle.borrow();
+                let prob = nl_guard.problem();
                 // JSON solve report, when requested — same schema as the NLP
                 // path, so the benchmark harness can compare convex and NLP
                 // solves.
@@ -1410,7 +1425,7 @@ fn real_main() -> ExitCode {
                     // nothing, so control falls out of this whole block to the
                     // NLP solve below, which produces the one and only verdict.
                     if let Some(code) = run_convex_socp(
-                        &prob,
+                        prob,
                         class,
                         sol_path.as_deref(),
                         json_cfg,
@@ -1464,7 +1479,7 @@ fn real_main() -> ExitCode {
                     let sens_may_decline = matches!(selection, SolverSelection::Auto);
                     let mut stash: Option<Box<DeclinedQp>> = None;
                     if let Some(code) = run_convex_qp(
-                        &prob,
+                        prob,
                         class,
                         sol_path.as_deref(),
                         // A run that serves a sensitivity request presolves
@@ -1601,6 +1616,19 @@ fn real_main() -> ExitCode {
                         );
                     }
                 }
+            } else if let ProblemSource::NlFile(path) = &args.problem {
+                // Every `NlFile` load sets `nl_tnlp_handle`, so this is
+                // unreachable today. It is here so a future load path that
+                // forgets to set it fails loudly, as the old re-read did on
+                // a parse failure, rather than silently rerouting a convex
+                // model to the NLP arm.
+                eprintln!(
+                    "pounce: internal error: {} classified as {} but its parsed \
+                     problem is not available to the convex solver",
+                    path.display(),
+                    class.name()
+                );
+                return ExitCode::from(2);
             }
             // Builtins never classify as convex; fall through to NLP.
         }
@@ -2851,23 +2879,14 @@ fn real_main() -> ExitCode {
             nlp_solve_succeeded(status),
         );
         // The replay needs the parsed problem, which the challenger does not
-        // keep (see its memory note): re-read it now, before anything is
-        // committed. If that fails — the file changed or vanished during the
-        // NLP solve — the NLP answer, already in hand, reports instead.
-        let replay_prob = match (&args.problem, convex_wins) {
-            (ProblemSource::NlFile(path), true) => match nl_reader::read_nl_file(path) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    eprintln!(
-                        "pounce: warning: could not re-read {} to report the convex \
-                         answer ({e}); reporting the NLP answer instead.",
-                        path.display()
-                    );
-                    None
-                }
-            },
+        // keep (see its memory note). The `NlTnlp` the NLP arm just solved
+        // owns it, unmodified, so borrow it there (gh#1255) rather than
+        // re-read the `.nl`.
+        let replay_guard = match (&args.problem, convex_wins) {
+            (ProblemSource::NlFile(_), true) => nl_tnlp_handle.as_ref().map(|h| h.borrow()),
             _ => None,
         };
+        let replay_prob = replay_guard.as_deref().map(nl_reader::NlTnlp::problem);
         let convex_wins = replay_prob.is_some();
         let convex_engine = ch.engine();
         let convex_status = qp_status_to_ars(ch.declined.sol.status);
@@ -2917,9 +2936,9 @@ fn real_main() -> ExitCode {
                 _ => None,
             };
             let mut no_stash = None;
-            let replay_prob = replay_prob.expect("convex_wins implies a re-read problem");
+            let replay_prob = replay_prob.expect("convex_wins implies the parsed problem");
             let code = run_convex_qp(
-                &replay_prob,
+                replay_prob,
                 ch.class,
                 sol_path.as_deref(),
                 ch.presolve,
@@ -3457,6 +3476,38 @@ enum ConvexNext {
     Report(pounce_convex::QpStatus),
 }
 
+/// `qp_status_to_ars`, except that a `NumericalFailure` caused by a FERAL
+/// budget refusal (`POUNCE_FERAL_MAX_FACTOR_BYTES`, gh#1249) reports Ipopt's
+/// `Insufficient_Memory`: the solve stopped because the factorization was
+/// predicted not to fit, not because the linear algebra broke down.
+fn convex_ars(status: pounce_convex::QpStatus) -> ApplicationReturnStatus {
+    if status == pounce_convex::QpStatus::NumericalFailure
+        && pounce_feral::budget_refusal().is_some()
+    {
+        ApplicationReturnStatus::InsufficientMemory
+    } else {
+        qp_status_to_ars(status)
+    }
+}
+
+/// Whether a latched FERAL budget refusal (gh#1249) holds back the convex
+/// path's reroute to the NLP arm. Prints why when it does.
+fn budget_refusal_stops_reroute() -> bool {
+    let Some(r) = pounce_feral::budget_refusal() else {
+        return false;
+    };
+    eprintln!(
+        "pounce: note: the factorization was refused before it started: FERAL \
+         predicted a peak of {} against POUNCE_FERAL_MAX_FACTOR_BYTES = {} \
+         (gh#1249). Not re-solving on the NLP path, whose KKT is larger. Try \
+         another POUNCE_FERAL_ORDERING (POUNCE_FERAL_REPORT_SYMBOLIC=1 prints \
+         each ordering's prediction), or raise the budget.",
+        pounce_feral::preanalysis::human_bytes(r.peak_bytes),
+        pounce_feral::preanalysis::human_bytes(r.budget.min(usize::MAX as u64) as usize),
+    );
+    true
+}
+
 /// The convex driver's whole post-solve decision, as one pure function, so
 /// every branch of it is unit-testable without having to land a real solve on
 /// a deadline (gh#1182 review).
@@ -3798,7 +3849,7 @@ fn print_convex_verdict(
     // onto the NLP-side enumerator, which is what `status_message` phrases
     // and what `upstream_name` spells the way CUTEst tables and the
     // reference JSONs do.
-    let ars = qp_status_to_ars(status);
+    let ars = convex_ars(status);
     // The same quantity the NLP path prints on this line: the driver's own
     // `OverallAlgorithm` total, not the solve-only figure the one-line result
     // above already carries.
@@ -3891,10 +3942,10 @@ struct DeclinedQp {
 ///
 /// **Memory.** This is alive for the whole NLP solve, so it holds only what
 /// the comparison needs: the declared QP, its row map and the convex point
-/// (in `declined`). The parsed `NlProblem` is deliberately *not* kept — it
-/// carries the expression trees and is the largest of the three — and is
-/// re-read from the `.nl` only on the path that needs it, a convex win's
-/// replay. The QP the convex solve was handed (with the `bound_relax_factor`
+/// (in `declined`). The parsed `NlProblem` is not copied here — it carries
+/// the expression trees and is the largest of the three — and a convex win's
+/// replay borrows it from the `NlTnlp` the NLP arm solves, which owns it
+/// anyway (gh#1255). The QP the convex solve was handed (with the `bound_relax_factor`
 /// widening) is dropped at the decline. What remains is roughly one copy of
 /// the LP's matrix next to the NLP arm's own model.
 struct ConvexChallenger {
@@ -4528,6 +4579,12 @@ fn run_convex_qp(
             t0.elapsed(),
         )
     };
+    // gh#1249: a FERAL budget refusal is terminal. The NLP arm would factor
+    // a larger KKT of the same model, and be refused in turn; report the
+    // refusal instead of paying for the reroute.
+    if next == ConvexNext::Reroute && budget_refusal_stops_reroute() {
+        next = ConvexNext::Report(sol.status);
+    }
 
     // The model as the caller declared it — without the `bound_relax_factor`
     // widening this solve was handed — when it differs from `qp`. Both the
@@ -4986,7 +5043,7 @@ fn run_convex_qp(
             "cvx-qp"
         }
         .to_string();
-        builder.solution.status = qp_status_to_ars(sol.status);
+        builder.solution.status = convex_ars(sol.status);
         builder.solution.solve_result_num = srn;
         builder.solution.objective = reported_obj;
         builder.solution.x = sol.x.clone();
@@ -5288,6 +5345,7 @@ fn run_convex_socp(
     if allow_nlp_fallback
         && !budget_spent
         && matches!(sol.status, pounce_convex::QpStatus::NumericalFailure)
+        && !budget_refusal_stops_reroute()
     {
         let res = sol.kkt_residuals_conic(&qp, &cones);
         eprintln!(
@@ -5477,7 +5535,7 @@ fn run_convex_socp(
         builder.problem.n_objectives = 1;
         builder.problem.minimize = prob.minimize;
         builder.solution.engine = "cvx-qcqp".to_string();
-        builder.solution.status = qp_status_to_ars(sol.status);
+        builder.solution.status = convex_ars(sol.status);
         builder.solution.solve_result_num = srn;
         builder.solution.objective = reported_obj;
         builder.solution.x = sol.x.clone();
