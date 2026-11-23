@@ -54,6 +54,10 @@ pounce-convex.workspace = true
 # QPS / MPS reader: `pounce model.qps` / `pounce model.mps` load through
 # `problem_file::read_problem_file` with no `.nl` conversion (gh#1251).
 pounce-qp.workspace = true
+# Gzip-compressed QPS / MPS input (`model.mps.gz`, `model.qps.gz`), the form
+# the NETLIB and Meszaros LP sets are distributed in (gh#1256). Pure-Rust
+# backend (miniz_oxide), so the wasm build is unaffected.
+flate2 = "1"
 # Dense SVD for `pounce diagnose`'s numerical rank and minimal
 # dependent-row search (gh#1160).
 faer.workspace = true

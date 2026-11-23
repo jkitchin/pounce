@@ -9,37 +9,91 @@
 //! objective's nonlinear body. No `.nl` file is written or re-parsed.
 //!
 //! The format is chosen by file extension, case-insensitively: `.qps` and
-//! `.mps` read through [`pounce_qp::qps::parse_qps`]; anything else (including
-//! an extensionless AMPL stub) goes to [`nl_reader::read_nl_file`] as before.
+//! `.mps` — or `.qps.gz` / `.mps.gz`, decompressed on the fly — read through
+//! [`pounce_qp::qps::parse_qps`]; any other `.gz` is refused with a message
+//! saying what is read compressed; anything else (including an extensionless
+//! AMPL stub) goes to [`nl_reader::read_nl_file`] as before.
+//!
+//! The QPS reader's [`QpsModel::warnings`] — duplicates it ignored or summed,
+//! a negative `UP` that freed a lower bound, a fallback to fixed format — are
+//! printed to stderr, one line each, so a convention applied to the file is
+//! never silent.
 
 use crate::nl_reader::{self, BinOp, Expr, NlProblem, NlProblemParts};
 use pounce_qp::qps::{QpsModel, parse_qps};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Whether `path` names a QPS / MPS file (by extension, case-insensitive).
-pub fn is_qps_path(path: &Path) -> bool {
+fn is_qps_ext(e: &str) -> bool {
+    e.eq_ignore_ascii_case("qps") || e.eq_ignore_ascii_case("mps")
+}
+
+/// Whether `path` names a gzip-compressed file (`.gz`, any case).
+fn is_gz_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("qps") || e.eq_ignore_ascii_case("mps"))
+        .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
+}
+
+/// Whether `path` names a QPS / MPS file: `.qps` / `.mps`, or the same
+/// followed by `.gz` (by extension, case-insensitive).
+pub fn is_qps_path(path: &Path) -> bool {
+    let inner = if is_gz_path(path) {
+        path.file_stem().map(Path::new)
+    } else {
+        Some(path)
+    };
+    inner
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .is_some_and(is_qps_ext)
 }
 
 /// Read a problem file, dispatching on its extension: `.qps` / `.mps`
-/// through the QPS reader, everything else through the `.nl` reader.
+/// (optionally `.gz`) through the QPS reader, any other `.gz` refused,
+/// everything else through the `.nl` reader.
 pub fn read_problem_file(path: &Path) -> Result<NlProblem, String> {
     if is_qps_path(path) {
         read_qps_file(path)
+    } else if is_gz_path(path) {
+        Err(format!(
+            "{} is gzip-compressed; only .mps.gz and .qps.gz are read compressed. \
+             Decompress it first (gunzip).",
+            path.display()
+        ))
     } else {
         nl_reader::read_nl_file(path)
     }
 }
 
-/// Read a QPS / MPS file and convert it with [`qps_to_nl_problem`].
+/// Read a QPS / MPS file (decompressing a `.gz`), print the reader's
+/// warnings to stderr, and convert it with [`qps_to_nl_problem`].
 pub fn read_qps_file(path: &Path) -> Result<NlProblem, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
-    let model = parse_qps(&text)?;
+    let model = parse_qps_file(path)?;
+    for w in &model.warnings {
+        eprintln!("pounce: warning: {}: {w}", path.display());
+    }
     qps_to_nl_problem(&model)
+}
+
+/// Read and parse a QPS / MPS file, decompressing a `.gz`. Bytes that are
+/// not UTF-8 (old files carry Latin-1 in comments and names) are replaced
+/// rather than refused; the fixed-format reader rejects them where they
+/// would matter.
+pub fn parse_qps_file(path: &Path) -> Result<QpsModel, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let bytes = if is_gz_path(path) {
+        use std::io::Read;
+        let mut out = Vec::new();
+        flate2::read::MultiGzDecoder::new(&bytes[..])
+            .read_to_end(&mut out)
+            .map_err(|e| format!("could not decompress {}: {e}", path.display()))?;
+        out
+    } else {
+        bytes
+    };
+    parse_qps(&String::from_utf8_lossy(&bytes))
 }
 
 /// Assemble the [`NlProblem`] for a parsed QPS model:
@@ -153,6 +207,36 @@ ENDATA
         assert!(is_qps_path(Path::new("c.MPS")));
         assert!(!is_qps_path(Path::new("c.nl")));
         assert!(!is_qps_path(Path::new("stub")));
+        assert!(is_qps_path(Path::new("d/afiro.mps.gz")));
+        assert!(is_qps_path(Path::new("QAFIRO.QPS.GZ")));
+        assert!(!is_qps_path(Path::new("model.nl.gz")));
+        assert!(!is_qps_path(Path::new("x.gz")));
+    }
+
+    #[test]
+    fn gz_input_reads_like_the_plain_file() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("pounce_pf_gz_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("tiny.qps");
+        std::fs::write(&plain, TINY).unwrap();
+        let gz = dir.join("tiny.QPS.gz");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(TINY.as_bytes()).unwrap();
+        std::fs::write(&gz, enc.finish().unwrap()).unwrap();
+        let a = read_problem_file(&plain).unwrap();
+        let b = read_problem_file(&gz).unwrap();
+        assert_eq!(a.obj_linear, b.obj_linear);
+        assert_eq!(a.con_linear, b.con_linear);
+        assert_eq!((a.x_l, a.x_u), (b.x_l, b.x_u));
+
+        // Any other `.gz` is refused with a message that says why, not
+        // handed to the `.nl` reader.
+        let nlgz = dir.join("model.nl.gz");
+        std::fs::write(&nlgz, b"not read").unwrap();
+        let err = read_problem_file(&nlgz).unwrap_err();
+        assert!(err.contains("Decompress it first"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
