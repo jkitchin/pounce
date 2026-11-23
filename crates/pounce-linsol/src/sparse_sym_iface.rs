@@ -144,6 +144,22 @@ pub trait SparseSymLinearSolverInterface {
     /// cache has nothing to re-check.
     fn set_reused_scaling_zero_pivot_recheck(&mut self, _on: bool) {}
 
+    /// gh#1244: switch static pivoting (force-accepting a failing pivot in
+    /// place instead of delaying it) on or off for the factorizations that
+    /// follow.
+    ///
+    /// Static pivoting is safe for the convex interior point, whose reduced
+    /// KKT is quasi-definite, and is what the convex IPM's backend turns on
+    /// (pounce-feral's `for_convex_ipm`). It is not safe for a consumer that
+    /// reads inertia off the factorization of an indefinite matrix: a
+    /// force-accepted pivot can carry the wrong sign, so the inertia count is
+    /// wrong. LP crossover hands the IPM's backend factory to the active-set
+    /// bridge, and with static pivoting on every bridge solve of gh#1244's LP
+    /// ended in exhausted inertia control. The bridge turns it off here.
+    /// Defaults to a no-op: a backend without static pivoting has nothing to
+    /// switch.
+    fn set_static_pivoting(&mut self, _on: bool) {}
+
     /// Whether a blocked `multi_solve` of `nrhs` columns returns
     /// **bit-identical** results to `nrhs` separate `nrhs = 1` calls
     /// against the same factor.

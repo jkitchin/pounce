@@ -292,7 +292,7 @@ where
     // l1-elastic phase 1.
     if let Some(basis) = basis {
         let working = native.basis_working_set(&basis, m_eq);
-        let mut solver = ParametricActiveSetSolver::new(make_backend());
+        let mut solver = ParametricActiveSetSolver::new(bridge_backend(make_backend));
         if let Ok(Some(q)) =
             solver.solve_with_working_set_if_feasible(&qp, &working, &bridge_options())
             && let Some(c) = accept_bridge(prob, &q, &sol)
@@ -342,11 +342,32 @@ where
     // phase 1 and, on the declined vertices measured, rescued none this one
     // missed. After a simplex breakdown the retry is dropped on the same
     // reasoning, not on a measurement: one fixture reaches a breakdown.
-    let mut solver = ParametricActiveSetSolver::new(make_backend());
+    let mut solver = ParametricActiveSetSolver::new(bridge_backend(make_backend));
     match solver.solve_with_working_set(&qp, &working, &bridge_options()) {
         Ok(q) => accept_bridge(prob, &q, &sol).unwrap_or(sol),
         Err(_) => sol,
     }
+}
+
+/// A backend for one bridge solve: the caller's (`make_backend` is the IPM's
+/// factory, so crossover inherits its solver choice) with static pivoting
+/// off.
+///
+/// The IPM's backend may have static pivoting on: the CLI and the Python
+/// frontend build it with pounce-feral's `for_convex_ipm`, which turns it on
+/// by default since gh#1193, on the quasi-definite argument that is the IPM's
+/// alone. The active-set engine factors indefinite KKT systems and reads
+/// their inertia, which a force-accepted pivot falsifies. gh#1244: with it
+/// on, every bridge solve of a 12-variable transportation LP ended in
+/// exhausted inertia control, and crossover returned the interior iterate
+/// where 0.16.0 returned the unique optimal vertex.
+fn bridge_backend<F>(make_backend: &mut F) -> Box<dyn SparseSymLinearSolverInterface>
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let mut backend = make_backend();
+    backend.set_static_pivoting(false);
+    backend
 }
 
 /// The settings of every bridge solve. Bland's rule keeps the degenerate

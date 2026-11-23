@@ -2152,6 +2152,13 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         self.reused_scaling_zero_pivot_recheck = on;
     }
 
+    fn set_static_pivoting(&mut self, on: bool) {
+        // `with_static_pivoting` is a builder; it only sets a numeric
+        // parameter, so the cached symbolic analysis and scaling survive.
+        let solver = std::mem::take(&mut self.solver);
+        self.solver = solver.with_static_pivoting(on);
+    }
+
     fn singularity_certified(&self) -> bool {
         self.last_singular_certified
     }

@@ -274,6 +274,11 @@ impl FeralBackendPool {
         // A parked solver keeps whatever its last owner set; a new owner
         // starts from the default.
         inner.set_reused_scaling_zero_pivot_recheck(true);
+        // gh#1244: `set_static_pivoting` is forwarded too, so restore the
+        // pool's configured setting. `unwrap_or(false)` is feral's own
+        // default, which `configure_solver` leaves in place when the config
+        // does not set it.
+        inner.set_static_pivoting(self.cfg.static_pivoting.unwrap_or(false));
         PooledFeralBackend {
             inner: Some(inner),
             pool: Arc::clone(self),
@@ -372,6 +377,9 @@ impl SparseSymLinearSolverInterface for PooledFeralBackend {
     // overrides, not only the required ones.
     fn set_reused_scaling_zero_pivot_recheck(&mut self, on: bool) {
         self.get().set_reused_scaling_zero_pivot_recheck(on);
+    }
+    fn set_static_pivoting(&mut self, on: bool) {
+        self.get().set_static_pivoting(on);
     }
     fn singularity_certified(&self) -> bool {
         self.inner
