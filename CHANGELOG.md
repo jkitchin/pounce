@@ -9,6 +9,81 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+- **Convex presolve no longer keeps a full copy of the problem per fixpoint
+  layer (gh#1246). This improves presolve memory; it does not close the
+  problem for the largest Mittelmann LPs.** Each of up to 32 layers held
+  `orig`, a clone of the problem it reduced.
+  - **What a layer keeps now.** A chain layer keeps an undo record: the rows
+    and columns it dropped, and the entries it changed. Postsolve walks the
+    chain backward from the final reduced problem, rebuilding one layer's
+    input at a time.
+  - **Matrices.** A layer's matrices are a restriction of a base shared along
+    the chain, which only a coefficient-rewriting layer replaces.
+  - **Backstop.** `FixpointExit::MemoryCap` ("stopped at its memory budget"
+    in the CLI log) stops the loop if the *retained chain* passes three times
+    the input. It does not count the round in progress: the problem being
+    reduced, the problem being built, and the pass's scratch arrays, each
+    about one matrix's worth.
+  - **Measured.** On a synthetic LP with 4 M nonzeros, 32 layers deep, peak
+    presolve memory goes 5.4 GB → 1.2 GB, with the same reduction.
+  - **Not measured.** Not measured on `dlr1`, `dlr2`, `thk_48` or `thk_63`.
+    On `Dual2_5000` (93 M nonzeros) presolve still passes 24 GB, about 10 GB
+    of it on top of the 14.5 GB parse, mostly that working set.
+  - **Checks.** The fixture sweep diffs empty on both legs, default and
+    widened. Debug builds check at every layer that the record rebuilds its
+    input exactly.
+
+### Added
+- **Convex presolve substitutes implied-free columns out of equality rows
+  (gh#1246, finding 3).**
+  - **The rule.** A column in an equality row is implied free when the row,
+    over the other columns' boxes, already keeps the column inside its own
+    box. It is then replaced by the row's expression in the objective and
+    every other row, and both the column and the row go.
+  - **Postsolve** evaluates the expression and recovers the row's multiplier
+    from the column's stationarity. That is exact, because the reduced
+    problem's multipliers on the rewritten rows are valid for the original
+    rows.
+  - **Limits.** The column must not be in `P`, the pivot must be at least 1%
+    of the row's largest coefficient, and fill is capped by a Markowitz count
+    of 12. Substitutions in one layer must not touch each other's pivot rows.
+  - **Placement.** It runs every round, at most 16 layers. Run only when
+    nothing else fired, it was starved and removed 993 columns on PDS-06.
+  - **PDS-06:** 26,928 → 19,708 columns and 8,156 → 3,595 rows; the
+    `presolve` crate reaches 19,369 columns. The solve takes 12.1 s → 6.6 s,
+    with the same optimum.
+  - **Maros–Mészáros:** it fires on 33 models, all 137 still solve, with
+    unchanged objectives. CONT-300 goes 23.8 s → 16.6 s and UBH1
+    1.1 s → 0.45 s.
+  - **Fixture sweep:** TUFF 24 → 22 iterations, and `issue745` lands closer
+    to its zero optimum.
+  - **Widened models and the active-set engine.** Skipped under an explicit
+    `bound_relax_factor`, like the implied-bound pass, and the widened sweep
+    diffs empty. Both passes are also skipped for the active-set engine
+    (`solver_selection=qp-active-set` and the active-set session), because
+    they exist to spare the interior point barrier terms, and on
+    `convex_qp_qgfrdxpn` the substitution took that engine from optimal in
+    6,115 iterations to the iteration limit.
+  - Recorded as `implied_free_cols`.
+- **Convex presolve removes convex-dominated columns (gh#1246, finding 3).**
+  Take three linear columns with the same support that agree in every row but
+  one. If one of them lies between the other two in that row and costs
+  strictly more than the matching mix of them, its weight can always move
+  onto them, so it is zero at every optimum. Presolve fixes it at its lower
+  bound. The test is a lower convex hull over (coefficient, cost) per group,
+  compared cross-multiplied with a strict margin. With the margin, every
+  removed column has a strictly positive reduced cost at every dual optimum,
+  so a whole batch can go at once. Columns exactly on a hull edge are kept.
+  The rule runs after the implied-bound pass, because it needs columns
+  unbounded above, and if it removes anything the fixpoint runs again.
+  - Measured with the `presolve` crate, this rule and `lp_folding` account for
+    nearly all of cpo3's OSA-60 reduction.
+  - On OSA-60, columns go 232,966 → 57,591, and the solve goes from 71.1 s /
+    89 iterations on main to 5.9 s / 37 iterations at the same optimum.
+  - On OSA-30, the solve goes from 18.2 s to 1.7 s.
+  - KEN-18 and PDS-06 are unchanged by it.
+  - Recorded as `convex_dominated_cols`.
 ### Added
 - **FERAL's predicted fill can be reported before the numeric factor
   (gh#1249).** `POUNCE_FERAL_REPORT_SYMBOLIC=1` runs the symbolic analysis
@@ -103,6 +178,27 @@ changes.
   * Details and measurements: `dev-notes/kkt-bound-row-elimination.md`.
 
 ### Fixed
+- **Convex presolve no longer hands the interior point bound sides its rows
+  already imply (gh#1246, findings 1 and 2).** Bound tightening kept every
+  side it derived as a real bound. The convex IPM turns each finite side into
+  a barrier term and a KKT row, so on models bounded only through their rows,
+  presolve made the KKT system larger: OSA-60 went from 232,966 bound sides to
+  465,930. A new final presolve pass removes each side that a row still
+  implies. Sides are proved one at a time against the box as it stands, so no
+  proof is circular. Derived sides are removed first, then declared ones
+  (cpo3's `redundant_bounds`, e.g. `x ≤ 1` under `Σx = 1`). A coefficient
+  below `1e-3` of its row's largest never removes a bound. Postsolve is the
+  identity, with bound multipliers re-derived against the restored box. On
+  Maros–Mészáros, all 136 models that solved before still solve, with the
+  same statuses and total iterations 2660 → 2648. Wall time on the 60 models
+  over 0.2 s fell from 285 s to 202 s; CVXQP1_L went from 79.8 s to 35.9 s,
+  CONT-300 from 37.1 s to 19.2 s. The count is reported as `relaxed_bounds` in
+  the presolve stats and as "implied bounds dropped" in the CLI log. A model
+  widened by an explicit `bound_relax_factor` keeps every bound side
+  (`ImpliedBounds::Keep`). On the widened model the pass sent
+  `convex_qp_qscfxm1` and `convex_qp_qpilotno` from optimal to the iteration
+  limit, and the fixture sweep at that setting now diffs empty. Column
+  reductions (finding 3) are not part of this change.
 - **QPS / MPS reader: lines with no set name are read correctly, and fixed-
   format files with spaces in names are read (gh#1256).** An `RHS` or
   `RANGES` line with no set name and two (row, value) pairs was misread,

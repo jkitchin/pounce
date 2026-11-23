@@ -1878,3 +1878,58 @@ point within a few seconds of the simplex's own 63 s, and the five rescues
 above stay `vertex accepted`. A smaller cap or an early bail-out from an
 l1-elastic phase 1 that makes no progress are the obvious candidates; neither
 was tried.
+
+## Convex presolve: dropping a degenerate declared bound slows the direct driver on `scaled_feasible_a` (gh#1246)
+
+*Measured on `claude/busy-hypatia-jb79o6` after merging `main` at
+`913be167` (gh#1243). Recorded 2026-11-23.*
+
+**What moves.** The implied-bound pass (`relax_implied_bounds`, gh#1246
+finding 2) drops one declared side of `scaled_feasible_a`: `ub = 5.0e5` on
+column 1. Row 0 (`1e8·x₁ + … ≤ 5.3e8`, the rest of its activity at `−5e13`)
+implies exactly that value. The proof holds to `1.4e-8`. The bound and the row
+coincide, though, so the vertex is degenerate, and the direct driver's
+trajectory is sensitive to which of the two constraints it carries:
+
+| route | `main` | this branch |
+|---|---|---|
+| default (HSDE), convex arm alone (`solver_selection=qp-ipm`) | `Optimal` at 200, exactly the cap | **iteration limit at 200** (KKT `1.85e-13` relative, uncertified) |
+| default, `qp_kkt_row_elim=no` | `Optimal` at 200 | `Optimal` at 179 |
+| default `auto` route, as reported | `cvx-qp`, 200 | **`nlp`, 24 / 23** (gh#535 fallback; NLP answer `6.1e-17` against convex `3.0e-13`) |
+| `qp_hsde=no` (direct) | 24 | **98** |
+| `qp_hsde=no`, `qp_kkt_row_elim=no` | 24 | 24 |
+| `qp_hsde=no`, `qp_presolve=no` | 24 | 24 |
+
+Every reported answer is at the optimum `0`. On the default route the convex
+arm now stops at the cap without certifying, and the fallback's NLP answer
+reports. That answer is the more accurate of the two, but the total cost is
+the convex attempt plus the NLP solve, and the sweep's engine column moves
+`cvx-qp` → `nlp` on both legs. On `main` this model already certified with
+no iterations to spare (gh#689's `the_default_route_reaches_the_same_optimum`
+notes it needs about 3 596 as declared). Three things identify the trigger:
+- It needs the declared pass. With only derived sides dropped, the direct
+  driver takes 24 iterations.
+- It needs gh#1243's bound-row folding, which is on by default; with folding
+  off the count is 24 again.
+- `scaled_feasible_b` does not move (29 iterations).
+
+**Why it is not fixed.** No guard separates this case from the ones the pass
+exists for:
+- In x-units the implying row's scale is about the bound's own size
+  (`5e13 / 1e8 = 5e5`), so a row-scale guard would not exclude it.
+- Requiring a declared side to be *strictly* implied would also exclude the
+  canonical case, `x ≤ 1` under `Σx = 1`, where the two likewise coincide.
+
+So one deliberately pathological model costs more:
+- the opt-in direct driver takes 98 iterations instead of 24;
+- the default convex arm gives up at the cap and hands the model to the NLP
+  arm, where `main` certified at the cap.
+
+The reported answer is the optimum either way.
+
+**How to tell whether a fix works.** `issue_689_direct_driver_scaled_feasible.rs`
+asserts the direct driver's 60-iteration budget with `qp_presolve=no`. To
+check a fix, run `scaled_feasible_a` at `qp_hsde=no` with presolve on, and
+expect about 24 iterations. Then check that `solver_selection=qp-ipm` at
+defaults certifies again (`Optimal`, at most 200 iterations). The sweep should
+then show `scaled_feasible_a` back on `cvx-qp` on both legs.

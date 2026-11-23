@@ -232,6 +232,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// Outcome of presolve.
 // `Reduced` carries the full reduced problem and is by far the common case;
@@ -304,6 +305,10 @@ pub enum FixpointExit {
     /// are each a complete reduction, so this is a sound, less-reduced
     /// problem — exactly what `RoundCap` hands back, for a different reason.
     Deadline,
+    /// The layers already taken retain as much memory as the chain is allowed
+    /// ([`chain_memory_budget`]), so the loop stopped where it stood
+    /// (gh#1246). Sound and less reduced, like `RoundCap`.
+    MemoryCap,
 }
 
 impl std::fmt::Display for FixpointExit {
@@ -312,6 +317,7 @@ impl std::fmt::Display for FixpointExit {
             FixpointExit::Fixpoint => f.write_str("fixpoint"),
             FixpointExit::RoundCap => f.write_str("round cap"),
             FixpointExit::Deadline => f.write_str("deadline"),
+            FixpointExit::MemoryCap => f.write_str("memory cap"),
         }
     }
 }
@@ -522,6 +528,37 @@ enum Reduction {
     Aggregate {
         plan: Box<pounce_presolve::linear_eq_plan::EliminationPlan>,
     },
+    /// An **implied-free column substituted out** (gh#1246): `col` appears in
+    /// the equality row `eq_row` (coefficient `a_coef`), and that row, with
+    /// the other columns' bounds, implies `col`'s own bounds, so the column is
+    /// free in effect. It was replaced by `(b_r − Σ_{k≠col} a_rk x_k)/a_coef`
+    /// in the objective and every other row, and the row consumed. Postsolve
+    /// evaluates that expression and recovers the row's multiplier from the
+    /// column's stationarity, exactly as for [`Reduction::FixedVar`]; the
+    /// column's bound multipliers are then zero. See [`implied_free_once`].
+    ImpliedFreeSub {
+        col: usize,
+        eq_row: usize,
+        a_coef: f64,
+    },
+    /// A **convex-dominated column** (gh#1246): fixed at its finite lower
+    /// bound `value` and dropped, because its column is a convex combination
+    /// of two others that cost strictly less. See [`convex_dominance_once`].
+    /// Like [`Reduction::DominatedColumn`], postsolve restores the value and
+    /// the global bound recovery reads its multiplier off the reduced cost,
+    /// which the strict margin makes nonnegative at every dual optimum.
+    ConvexDominated { col: usize, value: f64 },
+    /// An **implied bound side removed** (gh#1246): the rows of the problem,
+    /// with the box as it stood when this side was examined, already imply
+    /// `col`'s upper (`is_upper`) or lower bound, so the reduced problem
+    /// carries it as infinite. Only ever produced by [`relax_implied_bounds`],
+    /// in a layer of its own whose stack holds nothing else. The column and
+    /// every row are kept, so postsolve is the identity on `x`, `y`, `z`, and
+    /// the global bound recovery re-derives the bound multipliers against the
+    /// box with the side restored. The fields name the side for anyone
+    /// inspecting a stack in a debugger; postsolve needs neither.
+    #[allow(dead_code)]
+    RedundantBound { col: usize, is_upper: bool },
 }
 
 /// What [`Presolve::project_warm`] did to a seed.
@@ -615,8 +652,21 @@ pub struct Presolve {
     kept_eq: Vec<usize>,
     /// `kept_ineq[reduced_ineq_row] = orig_ineq_row`.
     kept_ineq: Vec<usize>,
-    /// Original problem data, retained for fixing-row dual recovery.
-    orig: QpProblem,
+    /// For a chain layer, what its round changed ([`Undo`]); the layer's
+    /// input and its `kept_*` maps are rebuilt from it, and those maps are
+    /// not stored. Read the maps through [`Self::kept`].
+    undo: Option<Box<Undo>>,
+    /// For a fixpoint wrapper, the view of `reduced`'s matrices: where the
+    /// backward walk of [`Self::postsolve`] starts.
+    tail: Option<View>,
+    /// The problem this layer reduced, for its postsolve. Inside a fixpoint
+    /// chain this is a view sharing its matrices and unchanged vectors with
+    /// the neighbouring layers (gh#1246); see [`Orig`].
+    orig: Orig,
+    /// The reduced problem's dimensions, once `reduced` has been moved on to
+    /// the next layer ([`Self::take_reduced`]). `None` while `reduced` itself
+    /// is intact.
+    red_shape: Option<RedShape>,
     stack: Vec<Reduction>,
     /// For an *iterated* presolve, the ordered single-pass layers
     /// (`L0, L1, …`) whose composition this object represents; empty for a
@@ -639,6 +689,502 @@ pub struct Presolve {
     /// replaced by "the bound is finite", because a ray has no point to be
     /// active at — see that function.
     ray: bool,
+}
+
+/// What a layer keeps of the problem it reduced (gh#1246).
+///
+/// # Why a layer does not own a copy
+///
+/// Each fixpoint layer used to keep `orig: QpProblem`, a full clone of the
+/// problem it reduced, and a chain runs to [`presolve_fixpoint`]'s 32 layers.
+/// On a 4 M-nonzero LP whose bounds propagate along long chains that retained
+/// 5.4 GB, about 55 times the model; the Mittelmann LPs `dlr1`, `dlr2`,
+/// `thk_48` and `thk_63` ran out of memory inside presolve. A round usually
+/// changes a few thousand entries of a problem with millions, so almost all
+/// of each copy repeated the one before it.
+///
+/// A layer inside a chain therefore keeps an [`Undo`]: only what its round
+/// changed. Postsolve walks the chain backward from the final reduced
+/// problem, rebuilding each layer's input from the one after it
+/// ([`Undo::backward`]), and materializes one layer's problem at a time.
+#[derive(Clone)]
+enum Orig {
+    /// Not stored: a fixpoint wrapper, or a chain layer (see [`Undo`]).
+    Unset,
+    /// A standalone layer: a single pass, or a chain of one.
+    Owned(QpProblem),
+}
+
+/// The triplets a run of layers restricts.
+struct BaseMats {
+    n: usize,
+    m_eq: usize,
+    m_ineq: usize,
+    p_lower: Vec<Triplet>,
+    a: Vec<Triplet>,
+    g: Vec<Triplet>,
+}
+
+/// A layer's matrices as a restriction of `base`: its columns and rows are
+/// the listed base indices, in order; `None` keeps every index of that kind.
+///
+/// Every layer but an aggregation hands on such a restriction of its own
+/// matrices: fixing, substituting, dropping, merging and forcing remove rows
+/// and columns but never rewrite a surviving coefficient (`dedup_rows` keeps
+/// one row of each parallel group verbatim; `build_rows` only merges
+/// duplicates and moves fixed columns into the right-hand side). Only an
+/// aggregation rewrites coefficients, and it starts a new base. Debug builds
+/// check this at every layer ([`Track::adopt`]).
+#[derive(Clone)]
+struct View {
+    base: Arc<BaseMats>,
+    cols: Option<Arc<Vec<u32>>>,
+    eq: Option<Arc<Vec<u32>>>,
+    ineq: Option<Arc<Vec<u32>>>,
+}
+
+/// A layer's dense data plus the view of its matrices: everything needed to
+/// materialize the problem.
+#[derive(Clone)]
+struct State {
+    c: Vec<f64>,
+    b: Vec<f64>,
+    h: Vec<f64>,
+    lb: Vec<f64>,
+    ub: Vec<f64>,
+    view: View,
+}
+
+/// What a chain layer changed, so its input can be rebuilt from its output.
+///
+/// Indices in `gone_*` are in the layer's input space, ascending, with the
+/// dropped entry's data and base index; `d_*` are `(reduced index, before,
+/// after)` for surviving entries whose value changed. `prev_view` is set when
+/// the output starts a new base (an aggregation), and is the input's view.
+#[derive(Clone, Default)]
+struct Undo {
+    gone_cols: Vec<u32>,
+    gone_cols_base: Vec<u32>,
+    gone_c: Vec<f64>,
+    gone_lb: Vec<f64>,
+    gone_ub: Vec<f64>,
+    gone_eq: Vec<u32>,
+    gone_eq_base: Vec<u32>,
+    gone_b: Vec<f64>,
+    gone_ineq: Vec<u32>,
+    gone_ineq_base: Vec<u32>,
+    gone_h: Vec<f64>,
+    d_c: Vec<(u32, f64, f64)>,
+    d_lb: Vec<(u32, f64, f64)>,
+    d_ub: Vec<(u32, f64, f64)>,
+    d_b: Vec<(u32, f64, f64)>,
+    d_h: Vec<(u32, f64, f64)>,
+    prev_view: Option<View>,
+}
+
+/// The reduced problem's dimensions, once the problem itself has moved on
+/// ([`Presolve::take_reduced`]).
+#[derive(Clone)]
+struct RedShape {
+    n: usize,
+    m_eq: usize,
+    m_ineq: usize,
+}
+
+/// `0..len` without the ascending indices in `gone`.
+fn complement(len: usize, gone: &[u32]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(len - gone.len());
+    let mut g = 0;
+    for i in 0..len {
+        if g < gone.len() && gone[g] as usize == i {
+            g += 1;
+        } else {
+            out.push(i);
+        }
+    }
+    out
+}
+
+impl View {
+    fn of(prob: &QpProblem) -> Self {
+        View {
+            base: Arc::new(BaseMats {
+                n: prob.n,
+                m_eq: prob.m_eq(),
+                m_ineq: prob.m_ineq(),
+                p_lower: prob.p_lower.clone(),
+                a: prob.a.clone(),
+                g: prob.g.clone(),
+            }),
+            cols: None,
+            eq: None,
+            ineq: None,
+        }
+    }
+
+    /// The problem `st` describes. With `no_objective` the cost and `P` are
+    /// dropped ([`Presolve::postsolve_farkas`]).
+    fn materialize(st: &State, no_objective: bool) -> QpProblem {
+        let v = &st.view;
+        let inverse = |map: &Option<Arc<Vec<u32>>>, len: usize| -> Option<Vec<u32>> {
+            map.as_ref().map(|m| {
+                let mut inv = vec![u32::MAX; len];
+                for (i, &b) in m.iter().enumerate() {
+                    inv[b as usize] = i as u32;
+                }
+                inv
+            })
+        };
+        let base = &*v.base;
+        let col = inverse(&v.cols, base.n);
+        let eq = inverse(&v.eq, base.m_eq);
+        let ineq = inverse(&v.ineq, base.m_ineq);
+        let at = |inv: &Option<Vec<u32>>, i: usize| -> Option<usize> {
+            match inv {
+                None => Some(i),
+                Some(inv) => (inv[i] != u32::MAX).then_some(inv[i] as usize),
+            }
+        };
+        let restrict = |ts: &[Triplet], rows: &Option<Vec<u32>>| -> Vec<Triplet> {
+            ts.iter()
+                .filter_map(|t| Some(Triplet::new(at(rows, t.row)?, at(&col, t.col)?, t.val)))
+                .collect()
+        };
+        QpProblem {
+            n: st.c.len(),
+            p_lower: if no_objective {
+                Vec::new()
+            } else {
+                restrict(&base.p_lower, &col)
+            },
+            c: if no_objective {
+                vec![0.0; st.c.len()]
+            } else {
+                st.c.clone()
+            },
+            a: restrict(&base.a, &eq),
+            b: st.b.clone(),
+            g: restrict(&base.g, &ineq),
+            h: st.h.clone(),
+            lb: st.lb.clone(),
+            ub: st.ub.clone(),
+        }
+    }
+}
+
+impl Undo {
+    /// What a layer changed in going from `orig` (viewed as `view`) to
+    /// `next`, given its `kept` maps; and the view of `next`.
+    fn record(
+        orig: &QpProblem,
+        view: &View,
+        next: &QpProblem,
+        kept: [&[usize]; 3],
+        rewrites: bool,
+    ) -> (Undo, View) {
+        let gone = |len: usize, kept: &[usize]| -> Vec<u32> {
+            let mut out = Vec::with_capacity(len - kept.len());
+            let mut k = 0;
+            for i in 0..len {
+                if k < kept.len() && kept[k] == i {
+                    k += 1;
+                } else {
+                    out.push(i as u32);
+                }
+            }
+            out
+        };
+        let base_of = |map: &Option<Arc<Vec<u32>>>, i: u32| -> u32 {
+            match map {
+                None => i,
+                Some(m) => m[i as usize],
+            }
+        };
+        let pick = |v: &[f64], idx: &[u32], dflt: f64| -> Vec<f64> {
+            idx.iter()
+                .map(|&i| v.get(i as usize).copied().unwrap_or(dflt))
+                .collect()
+        };
+        let diff = |before: &[f64], after: &[f64], kept: &[usize], dflt_b: f64, dflt_a: f64| {
+            let mut d = Vec::new();
+            for (i, &k) in kept.iter().enumerate() {
+                let o = before.get(k).copied().unwrap_or(dflt_b);
+                let n = after.get(i).copied().unwrap_or(dflt_a);
+                if o.to_bits() != n.to_bits() {
+                    d.push((i as u32, o, n));
+                }
+            }
+            d
+        };
+        let ninf = crate::qp::NEG_INF;
+        let pinf = crate::qp::POS_INF;
+        let gone_cols = gone(orig.n, kept[0]);
+        let gone_eq = gone(orig.m_eq(), kept[1]);
+        let gone_ineq = gone(orig.m_ineq(), kept[2]);
+        let undo = Undo {
+            gone_cols_base: gone_cols.iter().map(|&i| base_of(&view.cols, i)).collect(),
+            gone_c: pick(&orig.c, &gone_cols, 0.0),
+            gone_lb: pick(&orig.lb, &gone_cols, ninf),
+            gone_ub: pick(&orig.ub, &gone_cols, pinf),
+            gone_eq_base: gone_eq.iter().map(|&i| base_of(&view.eq, i)).collect(),
+            gone_b: pick(&orig.b, &gone_eq, 0.0),
+            gone_ineq_base: gone_ineq.iter().map(|&i| base_of(&view.ineq, i)).collect(),
+            gone_h: pick(&orig.h, &gone_ineq, 0.0),
+            d_c: diff(&orig.c, &next.c, kept[0], 0.0, 0.0),
+            d_lb: diff(&orig.lb, &next.lb, kept[0], ninf, ninf),
+            d_ub: diff(&orig.ub, &next.ub, kept[0], pinf, pinf),
+            d_b: diff(&orig.b, &next.b, kept[1], 0.0, 0.0),
+            d_h: diff(&orig.h, &next.h, kept[2], 0.0, 0.0),
+            gone_cols,
+            gone_eq,
+            gone_ineq,
+            prev_view: rewrites.then(|| view.clone()),
+        };
+        let next_view = if rewrites {
+            View::of(next)
+        } else {
+            let compose = |map: &Option<Arc<Vec<u32>>>, kept: &[usize], len: usize| {
+                if kept.len() == len {
+                    return map.clone();
+                }
+                Some(Arc::new(match map {
+                    None => kept.iter().map(|&k| k as u32).collect(),
+                    Some(m) => kept.iter().map(|&k| m[k]).collect(),
+                }))
+            };
+            View {
+                base: Arc::clone(&view.base),
+                cols: compose(&view.cols, kept[0], orig.n),
+                eq: compose(&view.eq, kept[1], orig.m_eq()),
+                ineq: compose(&view.ineq, kept[2], orig.m_ineq()),
+            }
+        };
+        (undo, next_view)
+    }
+
+    /// The layer's input, rebuilt from its output `st` (dimensions `dims` of
+    /// the input).
+    fn backward(&self, st: &State, dims: (usize, usize, usize)) -> State {
+        let (n, m_eq, m_ineq) = dims;
+        let box_present = !st.lb.is_empty()
+            || !st.ub.is_empty()
+            || !self.d_lb.is_empty()
+            || !self.d_ub.is_empty()
+            || self.gone_lb.iter().any(|&v| v > -BOUND_INF)
+            || self.gone_ub.iter().any(|&v| v < BOUND_INF);
+        let expand = |red: &[f64],
+                      gone: &[u32],
+                      vals: &[f64],
+                      len: usize,
+                      d: &[(u32, f64, f64)],
+                      dflt: f64| {
+            let mut out = Vec::with_capacity(len);
+            let (mut g, mut r) = (0, 0);
+            let mut pos = Vec::with_capacity(len - gone.len()); // reduced index → input index
+            for i in 0..len {
+                if g < gone.len() && gone[g] as usize == i {
+                    out.push(vals[g]);
+                    g += 1;
+                } else {
+                    out.push(red.get(r).copied().unwrap_or(dflt));
+                    pos.push(i);
+                    r += 1;
+                }
+            }
+            for &(i, before, _) in d {
+                out[pos[i as usize]] = before;
+            }
+            out
+        };
+        let expand_map =
+            |map: &Option<Arc<Vec<u32>>>, gone: &[u32], gone_base: &[u32], len: usize| {
+                if gone.is_empty() {
+                    return map.clone();
+                }
+                let mut out = Vec::with_capacity(len);
+                let (mut g, mut r) = (0, 0u32);
+                for i in 0..len {
+                    if g < gone.len() && gone[g] as usize == i {
+                        out.push(gone_base[g]);
+                        g += 1;
+                    } else {
+                        out.push(match map {
+                            None => r,
+                            Some(m) => m[r as usize],
+                        });
+                        r += 1;
+                    }
+                }
+                Some(Arc::new(out))
+            };
+        let view = match &self.prev_view {
+            Some(v) => v.clone(),
+            None => View {
+                base: Arc::clone(&st.view.base),
+                cols: expand_map(&st.view.cols, &self.gone_cols, &self.gone_cols_base, n),
+                eq: expand_map(&st.view.eq, &self.gone_eq, &self.gone_eq_base, m_eq),
+                ineq: expand_map(&st.view.ineq, &self.gone_ineq, &self.gone_ineq_base, m_ineq),
+            },
+        };
+        let (lb, ub) = if box_present {
+            (
+                expand(
+                    &st.lb,
+                    &self.gone_cols,
+                    &self.gone_lb,
+                    n,
+                    &self.d_lb,
+                    crate::qp::NEG_INF,
+                ),
+                expand(
+                    &st.ub,
+                    &self.gone_cols,
+                    &self.gone_ub,
+                    n,
+                    &self.d_ub,
+                    crate::qp::POS_INF,
+                ),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        State {
+            c: expand(&st.c, &self.gone_cols, &self.gone_c, n, &self.d_c, 0.0),
+            b: expand(&st.b, &self.gone_eq, &self.gone_b, m_eq, &self.d_b, 0.0),
+            h: expand(&st.h, &self.gone_ineq, &self.gone_h, m_ineq, &self.d_h, 0.0),
+            lb,
+            ub,
+            view,
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        4 * (self.gone_cols.len() * 2 + self.gone_eq.len() * 2 + self.gone_ineq.len() * 2)
+            + 8 * (self.gone_cols.len() * 3 + self.gone_eq.len() + self.gone_ineq.len())
+            + 20 * (self.d_c.len()
+                + self.d_lb.len()
+                + self.d_ub.len()
+                + self.d_b.len()
+                + self.d_h.len())
+    }
+}
+
+/// How much memory a fixpoint chain may retain (gh#1246): three times the
+/// input problem, and never less than 256 MiB. Past it the loop stops with
+/// [`FixpointExit::MemoryCap`].
+///
+/// With [`Undo`] records a layer retains only what its round changed, so on
+/// every model measured the chain stays far below this; it is a backstop
+/// against a model whose every round rewrites most of it (an aggregation
+/// layer starts a new base, a full copy of the matrices).
+fn chain_memory_budget(prob: &QpProblem) -> usize {
+    (3 * problem_bytes(prob)).max(256 << 20)
+}
+
+fn problem_bytes(p: &QpProblem) -> usize {
+    let t = std::mem::size_of::<Triplet>();
+    (p.p_lower.len() + p.a.len() + p.g.len()) * t
+        + (p.c.len() + p.b.len() + p.h.len() + p.lb.len() + p.ub.len()) * 8
+}
+
+/// Follows `current` through a fixpoint: the view of its matrices, and the
+/// bytes the chain retains so far.
+struct Track {
+    view: View,
+    retained: usize,
+}
+
+impl Track {
+    fn of(prob: &QpProblem) -> Self {
+        Track {
+            view: View::of(prob),
+            retained: problem_bytes(prob),
+        }
+    }
+
+    /// Record what `layer` changed in reducing `orig` to `next`, drop the
+    /// layer's index maps (the record rebuilds them), and move the track on
+    /// to `next`. `rewrites` marks an aggregation, whose output starts a base.
+    fn adopt(&mut self, layer: &mut Presolve, orig: &QpProblem, next: &QpProblem, rewrites: bool) {
+        let (undo, next_view) = Undo::record(
+            orig,
+            &self.view,
+            next,
+            [&layer.kept_cols, &layer.kept_eq, &layer.kept_ineq],
+            rewrites,
+        );
+        // The invariant everything here rests on, checked in debug builds on
+        // every problem small enough to afford it, which is every test: the
+        // record rebuilds the input exactly, and the view reproduces the
+        // output.
+        #[cfg(debug_assertions)]
+        if orig.a.len() + orig.g.len() + orig.p_lower.len() < 200_000 {
+            let out = State {
+                c: next.c.clone(),
+                b: next.b.clone(),
+                h: next.h.clone(),
+                lb: next.lb.clone(),
+                ub: next.ub.clone(),
+                view: next_view.clone(),
+            };
+            assert!(
+                same_problem(&View::materialize(&out, false), next),
+                "a presolve layer's view does not reproduce its reduced problem"
+            );
+            let back = undo.backward(&out, (orig.n, orig.m_eq(), orig.m_ineq()));
+            assert!(
+                same_problem(&View::materialize(&back, false), orig),
+                "a presolve layer's undo record does not rebuild its input"
+            );
+        }
+        self.retained += undo.bytes() + layer.stack.len() * std::mem::size_of::<Reduction>();
+        if rewrites {
+            self.retained += problem_bytes(next);
+        }
+        layer.kept_cols = Vec::new();
+        layer.kept_eq = Vec::new();
+        layer.kept_ineq = Vec::new();
+        layer.undo = Some(Box::new(undo));
+        layer.red_shape = Some(RedShape {
+            n: next.n,
+            m_eq: next.m_eq(),
+            m_ineq: next.m_ineq(),
+        });
+        self.view = next_view;
+    }
+}
+
+/// Do `a` and `b` describe the same problem? Triplets are compared as the
+/// operator they define: duplicates summed, exact zeros dropped, order free.
+#[cfg(debug_assertions)]
+fn same_problem(a: &QpProblem, b: &QpProblem) -> bool {
+    fn canon(ts: &[Triplet]) -> Vec<(usize, usize, u64)> {
+        let mut m: HashMap<(usize, usize), f64> = HashMap::new();
+        for t in ts {
+            *m.entry((t.row, t.col)).or_insert(0.0) += t.val;
+        }
+        let mut v: Vec<_> = m
+            .into_iter()
+            .filter(|&(_, x)| x != 0.0)
+            .map(|((r, c), x)| (r, c, x.to_bits()))
+            .collect();
+        v.sort_unstable();
+        v
+    }
+    let boxes = |p: &QpProblem| -> (Vec<u64>, Vec<u64>) {
+        (
+            (0..p.n).map(|i| p.lb_of(i).to_bits()).collect(),
+            (0..p.n).map(|i| p.ub_of(i).to_bits()).collect(),
+        )
+    };
+    a.n == b.n
+        && a.c == b.c
+        && a.b == b.b
+        && a.h == b.h
+        && boxes(a) == boxes(b)
+        && canon(&a.p_lower) == canon(&b.p_lower)
+        && canon(&a.a) == canon(&b.a)
+        && canon(&a.g) == canon(&b.g)
 }
 
 /// Coefficients are treated as nonzero unless exactly 0.0.
@@ -870,13 +1416,56 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
 /// [`presolve`]); a re-derivation that the deadline cuts short returns the
 /// partial reduction, which is the conservative answer.
 pub fn presolve_until(prob: &QpProblem, deadline: Option<std::time::Instant>) -> PresolveOutcome {
-    match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled, deadline) {
+    presolve_until_with(prob, deadline, ImpliedBounds::Drop)
+}
+
+/// Whether presolve removes the bound sides the rows imply before handing
+/// the problem to the solver (gh#1246). See [`relax_implied_bounds`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImpliedBounds {
+    /// Remove them: the default, since every finite side is a barrier term
+    /// and a KKT row the solver gains nothing from.
+    Drop,
+    /// Hand the solver every bound side the fixpoint produced, and skip
+    /// implied-free substitution ([`implied_free_once`]), which leans on the
+    /// same implications.
+    ///
+    /// Also for the active-set engine. Both passes exist because every finite
+    /// bound side costs an interior point a barrier term and a KKT row. To an
+    /// active-set method a bound is cheap, and substitution rewrites the rows
+    /// it pivots on. Measured: `convex_qp_qgfrdxpn` under
+    /// `solver_selection=qp-active-set` went from optimal in 6 115 iterations
+    /// to the iteration limit at 37 825 once 10 columns were substituted out.
+    ///
+    /// For a problem that has been widened by `bound_relax_factor`. The pass
+    /// is exact there too (the proofs run on the widened rows), but it was
+    /// measured on the declared model, and on the widened one it changed the
+    /// trajectory for the worse. Fixture sweep at `bound_relax_factor=1e-8`:
+    /// `convex_qp_qscfxm1` went from optimal in 136 iterations to the
+    /// iteration limit, `convex_qp_qpilotno` from 50 to the iteration limit,
+    /// and both fell through to the NLP arm on both legs. Implied-free
+    /// substitution did the same kind of thing there: it moved
+    /// `convex_qp_qforplan` from the NLP arm's `Solve_Succeeded` to the convex
+    /// arm's `Solved_To_Acceptable_Level`. Widening is opt-in on the convex arm
+    /// and documented as the slower and less accurate model, so it keeps the
+    /// solver problem it had.
+    Keep,
+}
+
+/// [`presolve_until`] with the implied-bound pass chosen by the caller.
+pub fn presolve_until_with(
+    prob: &QpProblem,
+    deadline: Option<std::time::Instant>,
+    implied: ImpliedBounds,
+) -> PresolveOutcome {
+    match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled, deadline, implied) {
         PresolveOutcome::Infeasible(trigger) => {
             match presolve_fixpoint(
                 prob,
                 Catalog::NoSpeculativeFixings,
                 DedupMemo::Enabled,
                 deadline,
+                implied,
             ) {
                 // Confirmed without the speculative fixings: the problem
                 // really is infeasible, and this is the trigger that shows it.
@@ -963,6 +1552,21 @@ fn presolve_fixpoint(
     catalog: Catalog,
     memo: DedupMemo,
     deadline: Option<std::time::Instant>,
+    implied: ImpliedBounds,
+) -> PresolveOutcome {
+    let budget = chain_memory_budget(prob);
+    presolve_fixpoint_within(prob, catalog, memo, deadline, implied, budget)
+}
+
+/// [`presolve_fixpoint`] with the chain's memory budget given, so a test can
+/// reach [`FixpointExit::MemoryCap`] on a model small enough to run.
+fn presolve_fixpoint_within(
+    prob: &QpProblem,
+    catalog: Catalog,
+    memo: DedupMemo,
+    deadline: Option<std::time::Instant>,
+    implied: ImpliedBounds,
+    budget: usize,
 ) -> PresolveOutcome {
     // Cap layers defensively. A round can contribute two (the catalog pass
     // and an aggregation), so this is a bound on layers, not on rounds.
@@ -980,6 +1584,9 @@ fn presolve_fixpoint(
     const MAX_ROUNDS: usize = 32;
     let mut chain: Vec<Presolve> = Vec::new();
     let mut current = prob.clone();
+    // What each layer keeps of its input, and what the chain retains, which
+    // `budget` bounds (gh#1246).
+    let mut track = Track::of(prob);
     // Per-box refinement allowance, carried across rounds and renumbered onto
     // each layer's surviving columns.
     let mut refinements = BoxRefinements::new(prob.n);
@@ -990,56 +1597,145 @@ fn presolve_fixpoint(
     // only narrowed boxes), which lets the next pass skip the duplicate-row
     // hashing. False on the first round: nothing has been deduped yet.
     let mut structure_stable = false;
-    let exit;
-    loop {
-        let mut ps = match presolve_once(&current, &[], catalog, &refinements, structure_stable) {
-            infeasible @ PresolveOutcome::Infeasible(_) => return infeasible,
-            PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
-            PresolveOutcome::Reduced(ps) => ps,
-        };
-        let catalog_changed = ps.changed();
-        // A round that only narrowed boxes leaves every row exactly as the
-        // previous pass deduped it (gh #527).
-        let bounds_only = ps.reduced.n == ps.orig_n
-            && ps.reduced.m_eq() == ps.orig_m_eq
-            && ps.reduced.m_ineq() == ps.orig_m_ineq
-            && ps
-                .stack
-                .iter()
-                .all(|r| matches!(r, Reduction::BoundTightening { .. }));
-        if catalog_changed {
-            refinements.charge(&ps);
-            refinements.remap(&ps.kept_cols);
-            current = ps.take_reduced();
-            chain.push(ps);
-        } else if passthrough.is_none() {
-            passthrough = Some(ps);
-        }
-        // Doubleton-equality aggregation (gh #494). It runs *after* the
-        // catalog each round, so the cheap single-column reductions have
-        // already shrunk the rows it plans over, and the round that follows
-        // gets a crack at whatever the aggregation exposes.
-        let aggregated = match aggregate_once(&current) {
-            Some(mut ps) => {
+    // Which finite bound sides of `current` the user declared, as opposed to
+    // ones bound tightening derived (gh#1246). Only an ordering preference for
+    // [`relax_implied_bounds`]: correctness of what it removes comes from its
+    // own proof against the final problem, never from this record.
+    let mut declared = DeclaredSides::of(prob);
+    let mut exit;
+    // Convex-dominance stages and implied-free substitution layers run so far
+    // (gh#1246).
+    let mut dominance_stages = 0usize;
+    let mut substitution_layers = 0usize;
+    'stages: loop {
+        loop {
+            let mut ps = match presolve_once(&current, &[], catalog, &refinements, structure_stable)
+            {
+                infeasible @ PresolveOutcome::Infeasible(_) => return infeasible,
+                PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
+                PresolveOutcome::Reduced(ps) => ps,
+            };
+            let catalog_changed = ps.changed();
+            // A round that only narrowed boxes leaves every row exactly as the
+            // previous pass deduped it (gh #527).
+            let bounds_only = ps.reduced.n == ps.orig_n
+                && ps.reduced.m_eq() == ps.orig_m_eq
+                && ps.reduced.m_ineq() == ps.orig_m_ineq
+                && ps
+                    .stack
+                    .iter()
+                    .all(|r| matches!(r, Reduction::BoundTightening { .. }));
+            if catalog_changed {
+                refinements.charge(&ps);
                 refinements.remap(&ps.kept_cols);
-                current = ps.take_reduced();
+                // A catalog layer makes a side finite only by tightening it, and a
+                // tightened side is not declared: carry the flags, add nothing.
+                declared.remap(&ps.kept_cols, None);
+                let next = ps.take_reduced();
+                track.adopt(&mut ps, &current, &next, false);
+                current = next;
                 chain.push(ps);
-                true
+            } else if passthrough.is_none() {
+                passthrough = Some(ps);
             }
-            None => false,
-        };
-        structure_stable = memo == DedupMemo::Enabled && bounds_only && !aggregated;
-        if !catalog_changed && !aggregated {
-            exit = FixpointExit::Fixpoint; // neither half found anything
-            break;
+            // Doubleton-equality aggregation (gh #494). It runs *after* the
+            // catalog each round, so the cheap single-column reductions have
+            // already shrunk the rows it plans over, and the round that follows
+            // gets a crack at whatever the aggregation exposes.
+            let aggregated = match aggregate_once(&current) {
+                Some(mut ps) => {
+                    refinements.remap(&ps.kept_cols);
+                    // An aggregation transfers an eliminated column's box onto the
+                    // survivor it is folded into; a side that appears that way is
+                    // treated as declared (it is kept in preference to a tightened
+                    // one, and still removed if the rows imply it).
+                    declared.remap(&ps.kept_cols, Some((&current, &ps.reduced)));
+                    let next = ps.take_reduced();
+                    // An aggregation rewrites coefficients: `next` starts a base.
+                    track.adopt(&mut ps, &current, &next, true);
+                    current = next;
+                    chain.push(ps);
+                    true
+                }
+                None => false,
+            };
+            structure_stable = memo == DedupMemo::Enabled && bounds_only && !aggregated;
+            // Implied-free substitution (gh#1246), every round after the
+            // aggregation. Waiting for a round in which nothing else fires
+            // starves it: on PDS-06 bound tightening keeps finding work until
+            // the layer cap, and the substitution ran twice (993 columns)
+            // where running it each round removes 4 365.
+            let mut substituted = false;
+            if implied == ImpliedBounds::Drop
+                && substitution_layers < MAX_SUBSTITUTION_LAYERS
+                && let Some(mut ps) = implied_free_once(&current)
+            {
+                refinements.remap(&ps.kept_cols);
+                declared.remap(&ps.kept_cols, None);
+                let next = ps.take_reduced();
+                track.adopt(&mut ps, &current, &next, true);
+                current = next;
+                chain.push(ps);
+                substitution_layers += 1;
+                structure_stable = false;
+                substituted = true;
+            }
+            if !catalog_changed && !aggregated && !substituted {
+                exit = FixpointExit::Fixpoint; // nothing found anything
+                break;
+            }
+            if chain.len() >= MAX_ROUNDS {
+                exit = FixpointExit::RoundCap;
+                break;
+            }
+            if track.retained >= budget {
+                exit = FixpointExit::MemoryCap;
+                break;
+            }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                exit = FixpointExit::Deadline;
+                break;
+            }
         }
-        if chain.len() >= MAX_ROUNDS {
-            exit = FixpointExit::RoundCap;
-            break;
+        // Hand the solver only the bound sides the rows do not already imply
+        // (gh#1246). Skipped once the deadline has passed, like any further layer.
+        let out_of_time = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        if implied == ImpliedBounds::Drop
+            && !out_of_time()
+            && let Some(mut relaxed) = relax_implied_bounds(&current, &declared)
+        {
+            let next = relaxed.take_reduced();
+            track.adopt(&mut relaxed, &current, &next, false);
+            current = next;
+            chain.push(relaxed);
         }
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            exit = FixpointExit::Deadline;
-            break;
+        // Convex dominance (gh#1246) runs on the problem with its implied bounds
+        // gone, because it needs columns unbounded above, and bound tightening
+        // gives every column of a row-bounded model a finite upper side (OSA-60:
+        // all 232 965). When it removes columns, the rows they leave can be
+        // redundant, singleton or forcing, so the fixpoint runs again on what is
+        // left. Only after a genuine fixpoint: a layer-capped or deadline-cut
+        // reduction stops where it is.
+        if exit != FixpointExit::Fixpoint
+            || dominance_stages >= MAX_DOMINANCE_STAGES
+            || out_of_time()
+        {
+            break 'stages;
+        }
+        match convex_dominance_once(&current) {
+            None => break 'stages,
+            Some(mut dominated) => {
+                let next = dominated.take_reduced();
+                track.adopt(&mut dominated, &current, &next, false);
+                current = next;
+                chain.push(dominated);
+                dominance_stages += 1;
+                refinements = BoxRefinements::new(current.n);
+                // The box of the problem the next stage starts from is what the
+                // user's model now is; a side tightened from here on is derived.
+                declared = DeclaredSides::of(&current);
+                structure_stable = false;
+            }
         }
     }
     // An empty chain means the first round found nothing, and that breaks as
@@ -1047,15 +1743,20 @@ fn presolve_fixpoint(
     // passthrough layer's own `Fixpoint` is the right exit.
     if chain.is_empty() {
         // Nothing to do at all; hand back the verbatim-forwarding layer.
-        return PresolveOutcome::Reduced(
-            passthrough.expect("a round that changed nothing yields a passthrough layer"),
-        );
+        let mut only =
+            passthrough.expect("a round that changed nothing yields a passthrough layer");
+        only.orig = Orig::Owned(prob.clone());
+        return PresolveOutcome::Reduced(only);
     }
     // `current` is the last layer's reduced problem: every push above moved
     // it out of the layer it came from (gh#1243).
     if chain.len() == 1 {
         let mut only = chain.pop().expect("chain has one layer");
         only.reduced = current;
+        only.red_shape = None;
+        // A chain of one is returned as the layer itself, which then needs
+        // its input (its `Undo` record still answers `kept`).
+        only.orig = Orig::Owned(prob.clone());
         only.exit = exit;
         return PresolveOutcome::Reduced(only);
     }
@@ -1070,34 +1771,20 @@ fn presolve_fixpoint(
         kept_cols: Vec::new(),
         kept_eq: Vec::new(),
         kept_ineq: Vec::new(),
-        // Never read: with a non-empty `chain` every method that consults
-        // `orig` (postsolve, dual recovery) goes through the layers, and
-        // `chain[0].orig` already holds this problem. A clone here was a full
-        // copy of the original problem kept live through the whole solve
-        // (gh#1243).
-        orig: empty_problem(prob.n),
+        undo: None,
+        tail: Some(track.view.clone()),
+        // Never read: with a non-empty `chain`, postsolve rebuilds each
+        // layer's input from the layers' `Undo` records, starting at `tail`
+        // (gh#1246). A clone here was a full copy of the original problem
+        // kept live through the whole solve (gh#1243).
+        orig: Orig::Unset,
+        red_shape: None,
         stack: Vec::new(),
         chain,
         discarded_infeasibility: None,
         exit,
         ray: false,
     })
-}
-
-/// A problem with `n` columns and no data: the placeholder an iterated
-/// presolve's wrapper carries in `orig`, which it never reads (gh#1243).
-fn empty_problem(n: usize) -> QpProblem {
-    QpProblem {
-        n,
-        p_lower: Vec::new(),
-        c: Vec::new(),
-        a: Vec::new(),
-        b: Vec::new(),
-        g: Vec::new(),
-        h: Vec::new(),
-        lb: Vec::new(),
-        ub: Vec::new(),
-    }
 }
 
 /// One doubleton-equality aggregation layer over `prob`, or `None` when
@@ -1121,10 +1808,953 @@ fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
         kept_cols: plan.vars_kept.clone(),
         kept_eq: plan.rows_kept.clone(),
         kept_ineq: (0..prob.m_ineq()).collect(),
-        orig: prob.clone(),
+        undo: None,
+        tail: None,
+        orig: Orig::Unset,
+        red_shape: None,
         stack: vec![Reduction::Aggregate {
             plan: Box::new(plan),
         }],
+        chain: Vec::new(),
+        discarded_infeasibility: None,
+        exit: FixpointExit::Fixpoint,
+        ray: false,
+    })
+}
+
+/// Largest Markowitz count `(column entries − 1)·(row entries − 1)` an
+/// implied-free substitution may have (gh#1246): an upper bound on the
+/// nonzeros it adds. PaPILO and HiGHS cap substitution fill at about ten.
+const IMPLIED_FREE_MAX_MARKOWITZ: usize = 12;
+
+/// Smallest `|a_rj| / max_k |a_rk|` a pivot may have, so that dividing the
+/// row by it does not amplify the row's rounding error (gh#1246).
+const IMPLIED_FREE_PIVOT_RATIO: f64 = 1e-2;
+
+/// Substitute out every column an equality row makes free in effect
+/// (gh#1246, finding 3), returning the layer that does so, or `None`.
+///
+/// # The rule
+///
+/// Column `j` appears in the equality row `r`: `a_rj·x_j + Σ_{k≠j} a_rk x_k
+/// = b_r`. Over the other columns' boxes the sum ranges over an interval, so
+/// the row alone keeps `x_j` inside `[(b_r − max)/a_rj, (b_r − min)/a_rj]`
+/// (ends swapped for `a_rj < 0`). When that interval lies inside `j`'s own
+/// box, the box can never bind: `x_j` is *implied free*. Then
+/// `x_j = (b_r − Σ_{k≠j} a_rk x_k)/a_rj` can be substituted into the
+/// objective and every other row, removing both the column and the row.
+/// pounce already did this for columns declared free in exactly one row
+/// ([`Reduction::FreeColSingleton`]); this is the general case, which is
+/// most of the `presolve` crate's lead over pounce on PDS-06
+/// (`implied_free_equalities`, 5 614 substitutions).
+///
+/// # Why the duals are exact
+///
+/// Substituting into row `i` replaces it by `a_i − (a_ij/a_rj)·a_r`, and the
+/// cost by `c − (c_j/a_rj)·a_r`. Take the reduced problem's multipliers `y_i`
+/// on the rewritten rows and set `y_r = −(c_j + Σ_{i≠r} a_ij y_i)/a_rj`:
+/// column `j`'s stationarity then holds with zero bound multipliers, and
+/// every other column's original stationarity expands, term by term, into
+/// its reduced one. So the reduced multipliers are valid for the original
+/// rows unchanged, and postsolve only adds `y_r` and `x_j`.
+///
+/// # What is required
+///
+/// - `j` is absent from `P`: the substitution would otherwise rewrite `P`,
+///   and the `presolve` crate's own default forbids Hessian growth too.
+/// - The pivot is at least [`IMPLIED_FREE_PIVOT_RATIO`] of the row's largest
+///   coefficient, and the substitution's Markowitz count is at most
+///   [`IMPLIED_FREE_MAX_MARKOWITZ`].
+/// - Within one layer the substitutions are independent: no pivot column
+///   appears in another pivot's row. Then no rewrite touches another pivot
+///   row, every implied-free test stays valid while the others are applied,
+///   and postsolve can evaluate each `x_j` from columns that survive.
+/// - A row of two entries is left to the doubleton aggregation, which has
+///   no implied-free requirement at all.
+///
+/// The implied interval may exceed the box by [`BOUND_FEAS_TOL`] relative,
+/// the slack the rest of presolve allows a box; postsolve puts `x_j` back in
+/// its box.
+fn implied_free_once(prob: &QpProblem) -> Option<Presolve> {
+    let n = prob.n;
+    let m_eq = prob.m_eq();
+    let m_ineq = prob.m_ineq();
+    if m_eq == 0 || n == 0 {
+        return None;
+    }
+    let norm = |v: f64| {
+        if v <= -BOUND_INF {
+            f64::NEG_INFINITY
+        } else if v >= BOUND_INF {
+            f64::INFINITY
+        } else {
+            v
+        }
+    };
+    let lb: Vec<f64> = (0..n).map(|j| norm(prob.lb_of(j))).collect();
+    let ub: Vec<f64> = (0..n).map(|j| norm(prob.ub_of(j))).collect();
+    let mut in_p = vec![false; n];
+    for t in &prob.p_lower {
+        if t.val != 0.0 {
+            in_p[t.row] = true;
+            in_p[t.col] = true;
+        }
+    }
+    let eq_rows: Vec<Vec<(usize, f64)>> = {
+        let mut r = group_by_row(&prob.a, m_eq);
+        for row in &mut r {
+            merge_sort_coeffs(row);
+        }
+        r
+    };
+    let g_rows: Vec<Vec<(usize, f64)>> = {
+        let mut r = group_by_row(&prob.g, m_ineq);
+        for row in &mut r {
+            merge_sort_coeffs(row);
+        }
+        r
+    };
+    // Rows of each column: (unified row, coefficient), equalities first.
+    let mut col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for (r, row) in eq_rows.iter().enumerate() {
+        for &(c, v) in row {
+            col_rows[c].push((r, v));
+        }
+    }
+    for (r, row) in g_rows.iter().enumerate() {
+        for &(c, v) in row {
+            col_rows[c].push((m_eq + r, v));
+        }
+    }
+
+    // Candidates (Markowitz count, row, column, coefficient).
+    let mut cand: Vec<(usize, usize, usize, f64)> = Vec::new();
+    for (r, row) in eq_rows.iter().enumerate() {
+        if row.len() < 3 || !prob.b[r].is_finite() {
+            continue;
+        }
+        let amax = row.iter().fold(0.0_f64, |m, &(_, v)| m.max(v.abs()));
+        // Activity of the row as finite part plus a count of infinite terms.
+        let (mut min_f, mut max_f, mut min_i, mut max_i) = (0.0_f64, 0.0_f64, 0usize, 0usize);
+        let contrib = |c: usize, a: f64| {
+            if a > 0.0 {
+                (a * lb[c], a * ub[c])
+            } else {
+                (a * ub[c], a * lb[c])
+            }
+        };
+        for &(c, a) in row {
+            let (lo, hi) = contrib(c, a);
+            if lo.is_finite() {
+                min_f += lo;
+            } else {
+                min_i += 1;
+            }
+            if hi.is_finite() {
+                max_f += hi;
+            } else {
+                max_i += 1;
+            }
+        }
+        for &(j, a) in row {
+            if in_p[j] || a.abs() < IMPLIED_FREE_PIVOT_RATIO * amax {
+                continue;
+            }
+            let markowitz = (col_rows[j].len() - 1) * (row.len() - 1);
+            if markowitz > IMPLIED_FREE_MAX_MARKOWITZ {
+                continue;
+            }
+            // Activity of the rest of the row.
+            let (lo_j, hi_j) = contrib(j, a);
+            let rest_min = if min_i > usize::from(!lo_j.is_finite()) {
+                f64::NEG_INFINITY
+            } else {
+                min_f - if lo_j.is_finite() { lo_j } else { 0.0 }
+            };
+            let rest_max = if max_i > usize::from(!hi_j.is_finite()) {
+                f64::INFINITY
+            } else {
+                max_f - if hi_j.is_finite() { hi_j } else { 0.0 }
+            };
+            let b = prob.b[r];
+            let (imp_lo, imp_hi) = if a > 0.0 {
+                ((b - rest_max) / a, (b - rest_min) / a)
+            } else {
+                ((b - rest_min) / a, (b - rest_max) / a)
+            };
+            let lo_ok = !lb[j].is_finite()
+                || (imp_lo.is_finite() && imp_lo >= lb[j] - BOUND_FEAS_TOL * (1.0 + lb[j].abs()));
+            let hi_ok = !ub[j].is_finite()
+                || (imp_hi.is_finite() && imp_hi <= ub[j] + BOUND_FEAS_TOL * (1.0 + ub[j].abs()));
+            if lo_ok && hi_ok {
+                cand.push((markowitz, r, j, a));
+            }
+        }
+    }
+    if cand.is_empty() {
+        return None;
+    }
+    cand.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+
+    // Greedy independent set: no pivot column inside another pivot's row.
+    let mut row_used = vec![false; m_eq];
+    let mut col_pivot = vec![false; n]; // eliminated here
+    let mut col_in_pivot_row = vec![false; n]; // appears in a chosen pivot row
+    let mut chosen: Vec<(usize, usize, f64)> = Vec::new();
+    for &(_, r, j, a) in &cand {
+        if row_used[r] || col_pivot[j] || col_in_pivot_row[j] {
+            continue;
+        }
+        if eq_rows[r].iter().any(|&(k, _)| col_pivot[k]) {
+            continue;
+        }
+        row_used[r] = true;
+        col_pivot[j] = true;
+        for &(k, _) in &eq_rows[r] {
+            col_in_pivot_row[k] = true;
+        }
+        chosen.push((r, j, a));
+    }
+
+    // Rewrite: every other row containing a pivot column gets that pivot row,
+    // scaled, and the cost likewise.
+    let mut eq_new = eq_rows.clone();
+    let mut g_new = g_rows.clone();
+    let mut b = prob.b.clone();
+    let mut h = prob.h.clone();
+    let mut c = prob.c.clone();
+    let mut offset = 0.0;
+    let mut stack = Vec::with_capacity(chosen.len());
+    for &(r, j, a) in &chosen {
+        let pivot_row = &eq_rows[r];
+        let br = prob.b[r];
+        for &(i, aij) in &col_rows[j] {
+            if i == r {
+                continue;
+            }
+            let f = aij / a;
+            let (row, rhs) = if i < m_eq {
+                (&mut eq_new[i], &mut b[i])
+            } else {
+                (&mut g_new[i - m_eq], &mut h[i - m_eq])
+            };
+            for &(k, v) in pivot_row {
+                row.push((k, -f * v));
+            }
+            *rhs -= f * br;
+        }
+        let cj = prob.c[j];
+        if cj != 0.0 {
+            let f = cj / a;
+            for &(k, v) in pivot_row {
+                if k != j {
+                    c[k] -= f * v;
+                }
+            }
+            offset += f * br;
+        }
+        stack.push(Reduction::ImpliedFreeSub {
+            col: j,
+            eq_row: r,
+            a_coef: a,
+        });
+    }
+    // Merge, drop the eliminated column (its coefficient cancels to zero in
+    // every rewritten row; it is dropped exactly rather than trusted to
+    // cancel) and exact zeros.
+    let mut kept_cols = Vec::with_capacity(n - chosen.len());
+    let mut col_new = vec![usize::MAX; n];
+    for j in 0..n {
+        if !col_pivot[j] {
+            col_new[j] = kept_cols.len();
+            kept_cols.push(j);
+        }
+    }
+    let flatten = |rows: Vec<Vec<(usize, f64)>>,
+                   keep: &dyn Fn(usize) -> bool|
+     -> (Vec<Triplet>, Vec<usize>) {
+        let mut ts = Vec::new();
+        let mut kept = Vec::new();
+        for (i, mut row) in rows.into_iter().enumerate() {
+            if !keep(i) {
+                continue;
+            }
+            merge_sort_coeffs(&mut row);
+            let newr = kept.len();
+            kept.push(i);
+            for (k, v) in row {
+                if v != 0.0 && col_new[k] != usize::MAX {
+                    ts.push(Triplet::new(newr, col_new[k], v));
+                }
+            }
+        }
+        (ts, kept)
+    };
+    let (a_new, kept_eq) = flatten(eq_new, &|i| !row_used[i]);
+    let (g_trip, kept_ineq) = flatten(g_new, &|_| true);
+    let pick = |v: &[f64]| -> Vec<f64> {
+        if v.is_empty() {
+            Vec::new()
+        } else {
+            kept_cols.iter().map(|&j| v[j]).collect()
+        }
+    };
+    let reduced = QpProblem {
+        n: kept_cols.len(),
+        p_lower: prob
+            .p_lower
+            .iter()
+            .filter(|t| col_new[t.row] != usize::MAX && col_new[t.col] != usize::MAX)
+            .map(|t| Triplet::new(col_new[t.row], col_new[t.col], t.val))
+            .collect(),
+        c: kept_cols.iter().map(|&j| c[j]).collect(),
+        a: a_new,
+        b: kept_eq.iter().map(|&i| b[i]).collect(),
+        g: g_trip,
+        h: kept_ineq.iter().map(|&i| h[i]).collect(),
+        lb: pick(&prob.lb),
+        ub: pick(&prob.ub),
+    };
+    Some(Presolve {
+        reduced,
+        layer_obj_offset: offset,
+        orig_n: n,
+        orig_m_eq: m_eq,
+        orig_m_ineq: m_ineq,
+        kept_cols,
+        kept_eq,
+        kept_ineq,
+        undo: None,
+        tail: None,
+        orig: Orig::Unset,
+        red_shape: None,
+        stack,
+        chain: Vec::new(),
+        discarded_infeasibility: None,
+        exit: FixpointExit::Fixpoint,
+        ray: false,
+    })
+}
+
+/// How many [`implied_free_once`] layers one fixpoint may take (gh#1246).
+/// Each rewrites rows and so starts a new matrix base, a full copy the chain
+/// keeps, which the memory budget bounds. On PDS-06, 4 layers remove 1 728
+/// columns, 8 remove 1 825, and 16 remove 4 365, the same as 32. Raising the
+/// Markowitz limit from 12 to 64 adds one.
+const MAX_SUBSTITUTION_LAYERS: usize = 16;
+
+/// How many times [`presolve_fixpoint`] may run [`convex_dominance_once`] and
+/// iterate again on what it leaves (gh#1246). The second stage catches columns
+/// whose group only forms once the first stage's removals made a row
+/// redundant; past that there is nothing measured to gain, and each stage
+/// costs a fixpoint.
+const MAX_DOMINANCE_STAGES: usize = 3;
+
+/// Columns longer than this are not grouped by [`convex_dominance_once`]: a
+/// column with `k` entries is hashed `k` times at `O(k)` each.
+const DOMINANCE_MAX_COL_LEN: usize = 32;
+
+/// Relative margin by which a column must cost more than the convex
+/// combination that replaces it (gh#1246). See [`convex_dominance_once`].
+const DOMINANCE_COST_MARGIN: f64 = 1e-12;
+
+/// Fix every column that a convex combination of two others replaces at
+/// strictly lower cost (gh#1246, finding 3), returning the layer that does so,
+/// or `None` when there is none.
+///
+/// # The rule
+///
+/// Take linear columns `j`, `k₁`, `k₂` (no entries in `P`) with the same
+/// support, the same coefficient in every row but one row `r`, and
+/// `a_{r,k₁} < a_{r,j} < a_{r,k₂}`. With `λ` the weight that makes
+/// `a_{r,j} = λ·a_{r,k₁} + (1−λ)·a_{r,k₂}`, the column of `j` *is*
+/// `λ·A_{k₁} + (1−λ)·A_{k₂}` in every row. If `k₁` and `k₂` are unbounded
+/// above, any amount `t ≥ 0` of `x_j` above its lower bound can move onto
+/// them, `λt` and `(1−λ)t`, leaving every row activity unchanged and every
+/// box satisfied. If `c_j > λc_{k₁} + (1−λ)c_{k₂}`, the move strictly lowers
+/// the objective, so `x_j` sits at its lower bound at every optimum.
+///
+/// Within each group, the columns are points `(a_{r,·}, c)`. The ones that
+/// survive are on the lower convex hull; everything strictly above it goes.
+/// Columns at the same `a_r`, which are identical columns, keep the cheapest;
+/// an exact tie keeps the lowest index, which every group they share agrees
+/// on.
+///
+/// # Why the whole batch can go at once
+///
+/// At any dual optimum `y` every column's reduced cost `d = c − Aᵀy` is
+/// nonnegative, and `d_j = λd_{k₁} + (1−λ)d_{k₂} + (c_j − mix) > 0` because
+/// the margin is strict. So every removed column is zero at every primal
+/// optimum, whichever other columns are removed with it: two columns can
+/// each anchor the other's hull without that being circular. The same
+/// identity, applied at the reduced solve's dual, makes the multiplier
+/// postsolve recovers for `j` nonnegative. That is why exact ties (a column
+/// on a hull edge) are kept rather than removed: with `d_j` possibly zero,
+/// two removals could rely on each other.
+///
+/// The comparison is made cross-multiplied, `c_j(x₂−x₁)` against
+/// `c₁(x₂−x) + c₂(x−x₁)`, with a margin of [`DOMINANCE_COST_MARGIN`] relative
+/// to the magnitudes involved; a comparison inside the margin keeps the
+/// column. On OSA-60 the margin costs no removal at all (measured at `0`,
+/// `1e-12` and `1e-9`).
+///
+/// # Why it matters
+///
+/// OSA-60 has 232 966 columns of six positive entries in `≤ 1` rows, and no
+/// two share a support until presolve drops its 71 redundant rows. After
+/// that they fall into 15 815 groups that differ in one row, and this rule
+/// removes 175 374 of them. It is the `presolve` crate's `convex_dominance`
+/// idea (that crate reaches 57 634 columns with it and without `lp_folding`);
+/// no code was taken from it.
+fn convex_dominance_once(prob: &QpProblem) -> Option<Presolve> {
+    let n = prob.n;
+    let m_eq = prob.m_eq();
+    let m_ineq = prob.m_ineq();
+    if n < 2 || !prob.has_bounds() {
+        return None;
+    }
+    // Columns: (unified row, coefficient), rows `0..m_eq` equalities and
+    // `m_eq..` inequalities, sorted with duplicates summed and zeros dropped.
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for t in &prob.a {
+        cols[t.col].push((t.row, t.val));
+    }
+    for t in &prob.g {
+        cols[t.col].push((m_eq + t.row, t.val));
+    }
+    let mut in_p = vec![false; n];
+    for t in &prob.p_lower {
+        if t.val != 0.0 {
+            in_p[t.row] = true;
+            in_p[t.col] = true;
+        }
+    }
+    // An anchor must be able to take weight without limit: linear, unbounded
+    // above, finite data, and short enough to hash.
+    let mut anchor = vec![false; n];
+    for j in 0..n {
+        let e = &mut cols[j];
+        e.sort_by_key(|&(r, _)| r);
+        let mut w = 0;
+        for i in 0..e.len() {
+            if w > 0 && e[w - 1].0 == e[i].0 {
+                e[w - 1].1 += e[i].1;
+            } else {
+                e[w] = e[i];
+                w += 1;
+            }
+        }
+        e.truncate(w);
+        e.retain(|&(_, v)| v != 0.0);
+        anchor[j] = !in_p[j]
+            && prob.ub_of(j) >= BOUND_INF
+            && prob.c[j].is_finite()
+            && !e.is_empty()
+            && e.len() <= DOMINANCE_MAX_COL_LEN
+            && e.iter().all(|&(_, v)| v.is_finite());
+    }
+    // Removable: an anchor with a finite lower bound to be fixed at.
+    let removable = |j: usize| anchor[j] && prob.lb_of(j) > -BOUND_INF;
+
+    // Bucket every (column, varying position) by a hash of the row varied and
+    // the rest of the column. Equality is re-checked inside each bucket, so a
+    // hash collision costs a reduction, never correctness.
+    let key = |j: usize, pos: usize| -> u64 {
+        let mut h = DefaultHasher::new();
+        cols[j][pos].0.hash(&mut h);
+        for (i, &(r, v)) in cols[j].iter().enumerate() {
+            if i != pos {
+                r.hash(&mut h);
+                v.to_bits().hash(&mut h);
+            }
+        }
+        h.finish()
+    };
+    let mut buckets: HashMap<u64, Vec<(usize, usize)>> = HashMap::new();
+    for j in 0..n {
+        if !anchor[j] {
+            continue;
+        }
+        for pos in 0..cols[j].len() {
+            buckets.entry(key(j, pos)).or_default().push((j, pos));
+        }
+    }
+    let same_but = |j: usize, pj: usize, k: usize, pk: usize| -> bool {
+        let (a, b) = (&cols[j], &cols[k]);
+        a.len() == b.len()
+            && a[pj].0 == b[pk].0
+            && a.iter()
+                .zip(b.iter())
+                .enumerate()
+                .all(|(i, (x, y))| x.0 == y.0 && (i == pj || x.1.to_bits() == y.1.to_bits()))
+    };
+
+    let mut remove = vec![false; n];
+    for members in buckets.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        let (j0, p0) = members[0];
+        // (coefficient in the varying row, cost, column)
+        let mut pts: Vec<(f64, f64, usize)> = members
+            .iter()
+            .filter(|&&(j, p)| same_but(j0, p0, j, p))
+            .map(|&(j, p)| (cols[j][p].1, prob.c[j], j))
+            .collect();
+        if pts.len() < 2 {
+            continue;
+        }
+        pts.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then(a.1.total_cmp(&b.1))
+                .then(a.2.cmp(&b.2))
+        });
+        // Identical columns (same coefficient): the first is the cheapest,
+        // lowest index; any other that is not cheaper goes.
+        let mut reps: Vec<(f64, f64, usize)> = Vec::with_capacity(pts.len());
+        for &p in &pts {
+            match reps.last() {
+                Some(&(x, _, _)) if x == p.0 => {
+                    if removable(p.2) {
+                        remove[p.2] = true;
+                    }
+                }
+                _ => reps.push(p),
+            }
+        }
+        if reps.len() < 3 {
+            continue;
+        }
+        // Lower convex hull of the distinct coefficients.
+        let mut hull: Vec<usize> = Vec::new(); // indices into reps
+        for i in 0..reps.len() {
+            while hull.len() >= 2 {
+                let (x1, y1, _) = reps[hull[hull.len() - 2]];
+                let (x2, y2, _) = reps[hull[hull.len() - 1]];
+                let (x3, y3, _) = reps[i];
+                if (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1) <= 0.0 {
+                    hull.pop();
+                } else {
+                    break;
+                }
+            }
+            hull.push(i);
+        }
+        let mut on_hull = vec![false; reps.len()];
+        for &i in &hull {
+            on_hull[i] = true;
+        }
+        let mut seg = 0;
+        for (i, &(x, c, j)) in reps.iter().enumerate() {
+            while seg + 1 < hull.len() && hull[seg + 1] < i {
+                seg += 1;
+            }
+            if on_hull[i] || seg + 1 >= hull.len() || !removable(j) {
+                continue;
+            }
+            let (x1, c1, _) = reps[hull[seg]];
+            let (x2, c2, _) = reps[hull[seg + 1]];
+            let lhs = c * (x2 - x1);
+            let rhs = c1 * (x2 - x) + c2 * (x - x1);
+            let scale = (c.abs() + c1.abs() + c2.abs()) * (x1.abs() + x2.abs() + x.abs());
+            if lhs - rhs > DOMINANCE_COST_MARGIN * scale {
+                remove[j] = true;
+            }
+        }
+    }
+    if !remove.contains(&true) {
+        return None;
+    }
+
+    // The reduced problem: drop each removed column at its lower bound.
+    let mut kept_cols = Vec::new();
+    let mut col_new = vec![usize::MAX; n];
+    let mut stack = Vec::new();
+    let mut offset = 0.0;
+    let mut b = prob.b.clone();
+    let mut h = prob.h.clone();
+    for j in 0..n {
+        if remove[j] {
+            let v = prob.lb_of(j);
+            stack.push(Reduction::ConvexDominated { col: j, value: v });
+            if v != 0.0 {
+                offset += prob.c[j] * v;
+                for &(r, a) in &cols[j] {
+                    if r < m_eq {
+                        b[r] -= a * v;
+                    } else {
+                        h[r - m_eq] -= a * v;
+                    }
+                }
+            }
+        } else {
+            col_new[j] = kept_cols.len();
+            kept_cols.push(j);
+        }
+    }
+    let remap = |ts: &[Triplet]| -> Vec<Triplet> {
+        ts.iter()
+            .filter(|t| col_new[t.col] != usize::MAX)
+            .map(|t| Triplet::new(t.row, col_new[t.col], t.val))
+            .collect()
+    };
+    let p_lower = prob
+        .p_lower
+        .iter()
+        .filter(|t| col_new[t.row] != usize::MAX && col_new[t.col] != usize::MAX)
+        .map(|t| Triplet::new(col_new[t.row], col_new[t.col], t.val))
+        .collect();
+    let pick = |v: &[f64]| -> Vec<f64> {
+        if v.is_empty() {
+            Vec::new()
+        } else {
+            kept_cols.iter().map(|&j| v[j]).collect()
+        }
+    };
+    let reduced = QpProblem {
+        n: kept_cols.len(),
+        p_lower,
+        c: kept_cols.iter().map(|&j| prob.c[j]).collect(),
+        a: remap(&prob.a),
+        b,
+        g: remap(&prob.g),
+        h,
+        lb: pick(&prob.lb),
+        ub: pick(&prob.ub),
+    };
+    Some(Presolve {
+        reduced,
+        layer_obj_offset: offset,
+        orig_n: n,
+        orig_m_eq: m_eq,
+        orig_m_ineq: m_ineq,
+        kept_cols,
+        kept_eq: (0..m_eq).collect(),
+        kept_ineq: (0..m_ineq).collect(),
+        undo: None,
+        tail: None,
+        orig: Orig::Unset,
+        red_shape: None,
+        stack,
+        chain: Vec::new(),
+        discarded_infeasibility: None,
+        exit: FixpointExit::Fixpoint,
+        ray: false,
+    })
+}
+
+/// Which finite bound sides of the current fixpoint problem were declared by
+/// the user rather than derived by bound tightening (gh#1246).
+struct DeclaredSides {
+    lb: Vec<bool>,
+    ub: Vec<bool>,
+}
+
+impl DeclaredSides {
+    fn of(prob: &QpProblem) -> Self {
+        DeclaredSides {
+            lb: (0..prob.n).map(|c| prob.lb_of(c) > -BOUND_INF).collect(),
+            ub: (0..prob.n).map(|c| prob.ub_of(c) < BOUND_INF).collect(),
+        }
+    }
+
+    /// Renumber onto a layer's surviving columns (`kept_cols[new] = old`).
+    /// With `transfer = Some((input, reduced))` (an aggregation layer), a side
+    /// that was infinite in `input` and is finite in `reduced` came from the
+    /// box of a column folded into this one, and is marked declared.
+    fn remap(&mut self, kept_cols: &[usize], transfer: Option<(&QpProblem, &QpProblem)>) {
+        let mut lb: Vec<bool> = kept_cols.iter().map(|&c| self.lb[c]).collect();
+        let mut ub: Vec<bool> = kept_cols.iter().map(|&c| self.ub[c]).collect();
+        if let Some((input, reduced)) = transfer {
+            for (newc, &oldc) in kept_cols.iter().enumerate() {
+                if input.lb_of(oldc) <= -BOUND_INF && reduced.lb_of(newc) > -BOUND_INF {
+                    lb[newc] = true;
+                }
+                if input.ub_of(oldc) >= BOUND_INF && reduced.ub_of(newc) < BOUND_INF {
+                    ub[newc] = true;
+                }
+            }
+        }
+        self.lb = lb;
+        self.ub = ub;
+    }
+}
+
+/// Smallest `|a_k| / max_j |a_j|` a row coefficient may have for that row to
+/// prove a bound on `x_k` redundant (gh#1246).
+///
+/// The implied bound is `(rhs − activity₋ₖ) / a_k`, so a row satisfied to the
+/// solver's tolerance `ε` only keeps `x_k` within `ε / |a_k|` of it. Removing a
+/// declared bound on the strength of a tiny coefficient would let the solver
+/// return a point that violates the user's box by far more than it violates any
+/// row. Bounding the ratio keeps that excursion within a few orders of the row
+/// residual; PaPILO applies the same kind of guard to its bound deductions.
+const RELAX_MIN_COEF_RATIO: f64 = 1e-3;
+
+/// Remove every finite bound side of `prob` that its rows already imply
+/// (gh#1246), returning the layer that does so, or `None` when there is none.
+///
+/// # Why
+///
+/// The convex interior point turns every finite bound side into a barrier
+/// term, a complementarity pair and a row of its KKT system. Bound tightening
+/// keeps each side it derives as a real bound, so on a model whose variables
+/// are bounded only through its rows presolve *grew* the KKT system: OSA-60
+/// went from 232 966 bound sides to 465 930, case_ACTIVSg10k from 3 876 to
+/// 14 365, and the latter from 3.0 s to 12.1 s. Those sides are implied by
+/// rows that are still in the problem, so the solver gains nothing from
+/// them. The same holds for declared bounds the rows imply — `0 ≤ x ≤ 1`
+/// under `Σ x = 1` — which is what `cpo3`'s `redundant_bounds` removes.
+///
+/// # Why the result is exact
+///
+/// Sides are examined one at a time, each against the box *as it stands at
+/// that moment*: a side is removed only if some row, with every other bound
+/// side still present, implies it. Removing an implied side leaves the
+/// feasible set unchanged, so by induction the final box and the rows
+/// describe exactly the set the input did. No proof uses a side that has
+/// already been removed, so none is circular — two rows cannot each excuse
+/// the other's bound. The leave-one-out activity excludes `x_k` itself, so a
+/// side never proves itself either.
+///
+/// Tightened sides — infinite where the user wrote the model — are examined
+/// first, then declared ones, so that given a choice the bound the user wrote
+/// is the one the solver keeps.
+///
+/// A row emptied of all other finite activity proves nothing, a singleton
+/// row that *became* a bound (and was then dropped as redundant) has no row
+/// left to imply it, and a fixed column (`lb = ub`) is left alone.
+///
+/// # Postsolve
+///
+/// The identity on `x` and on every row multiplier, with the bound
+/// multipliers re-derived by the catalog's global recovery against the box
+/// with the removed sides restored. A removed side carries no multiplier in
+/// the reduced solve; if `x` lands on it, the row that implied it is active
+/// and carries the force, so a zero bound multiplier is a valid one.
+fn relax_implied_bounds(prob: &QpProblem, declared: &DeclaredSides) -> Option<Presolve> {
+    let n = prob.n;
+    if n == 0 || !prob.has_bounds() {
+        return None;
+    }
+    let m_eq = prob.m_eq();
+    let m = m_eq + prob.m_ineq();
+    // Rows as `lo ≤ Σ a_j x_j ≤ hi`: equalities `b ≤ · ≤ b`, inequalities
+    // `−∞ ≤ · ≤ h`.
+    let a_rows = group_by_row(&prob.a, m_eq);
+    let g_rows = group_by_row(&prob.g, prob.m_ineq());
+    let rows: Vec<&[(usize, f64)]> = a_rows
+        .iter()
+        .chain(g_rows.iter())
+        .map(Vec::as_slice)
+        .collect();
+    let lo = |r: usize| {
+        if r < m_eq {
+            prob.b[r]
+        } else {
+            f64::NEG_INFINITY
+        }
+    };
+    let hi = |r: usize| {
+        if r < m_eq {
+            prob.b[r]
+        } else {
+            prob.h[r - m_eq]
+        }
+    };
+
+    let norm = |v: f64| {
+        if v <= -BOUND_INF {
+            f64::NEG_INFINITY
+        } else if v >= BOUND_INF {
+            f64::INFINITY
+        } else {
+            v
+        }
+    };
+    let mut lb: Vec<f64> = (0..n).map(|c| norm(prob.lb_of(c))).collect();
+    let mut ub: Vec<f64> = (0..n).map(|c| norm(prob.ub_of(c))).collect();
+
+    // Column → (row, coefficient), and per row its largest |coefficient|.
+    let mut col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    let mut row_max = vec![0.0_f64; m];
+    for (r, entries) in rows.iter().enumerate() {
+        for &(c, a) in entries.iter() {
+            if a != 0.0 && c < n {
+                col_rows[c].push((r, a));
+                row_max[r] = row_max[r].max(a.abs());
+            }
+        }
+    }
+
+    // Row activity as a finite part plus a count of infinite terms, for the
+    // minimum and the maximum, and the magnitude of the finite terms the sums
+    // were accumulated from (the scale of their rounding error).
+    let mut min_fin = vec![0.0_f64; m];
+    let mut max_fin = vec![0.0_f64; m];
+    let mut min_inf = vec![0usize; m];
+    let mut max_inf = vec![0usize; m];
+    let mut scale = vec![0.0_f64; m];
+    let contrib = |a: f64, l: f64, u: f64| {
+        if a > 0.0 {
+            (a * l, a * u)
+        } else {
+            (a * u, a * l)
+        }
+    };
+    for (r, entries) in rows.iter().enumerate() {
+        for &(c, a) in entries.iter() {
+            if a == 0.0 || c >= n {
+                continue;
+            }
+            let (cmin, cmax) = contrib(a, lb[c], ub[c]);
+            if cmin.is_finite() {
+                min_fin[r] += cmin;
+                scale[r] += cmin.abs();
+            } else {
+                min_inf[r] += 1;
+            }
+            if cmax.is_finite() {
+                max_fin[r] += cmax;
+                scale[r] += cmax.abs();
+            } else {
+                max_inf[r] += 1;
+            }
+        }
+    }
+
+    // Does some row imply `x_k ≤ ub[k]` (`is_upper`) or `x_k ≥ lb[k]`?
+    let implied = |k: usize,
+                   is_upper: bool,
+                   lb: &[f64],
+                   ub: &[f64],
+                   min_fin: &[f64],
+                   max_fin: &[f64],
+                   min_inf: &[usize],
+                   max_inf: &[usize]|
+     -> bool {
+        let bound = if is_upper { ub[k] } else { lb[k] };
+        let tol = BOUND_FEAS_TOL * (1.0 + bound.abs());
+        for &(r, a) in &col_rows[k] {
+            if a.abs() < RELAX_MIN_COEF_RATIO * row_max[r] {
+                continue;
+            }
+            let (cmin, cmax) = contrib(a, lb[k], ub[k]);
+            // `a·x_k ≤ hi − min₋ₖ` and `a·x_k ≥ lo − max₋ₖ`. Upper bound on
+            // `x_k` from the first when `a > 0`, from the second when `a < 0`.
+            let (rhs, act) = if (a > 0.0) == is_upper {
+                let h = hi(r);
+                let rest = if min_inf[r] > usize::from(!cmin.is_finite()) {
+                    continue;
+                } else {
+                    min_fin[r] - if cmin.is_finite() { cmin } else { 0.0 }
+                };
+                (h, rest)
+            } else {
+                let l = lo(r);
+                let rest = if max_inf[r] > usize::from(!cmax.is_finite()) {
+                    continue;
+                } else {
+                    max_fin[r] - if cmax.is_finite() { cmax } else { 0.0 }
+                };
+                (l, rest)
+            };
+            if !rhs.is_finite() {
+                continue;
+            }
+            let val = (rhs - act) / a;
+            // Rounding in the activity sum, carried through the division.
+            let err = 64.0 * f64::EPSILON * (scale[r] + rhs.abs()) / a.abs();
+            if !val.is_finite() || !err.is_finite() {
+                continue;
+            }
+            let ok = if is_upper {
+                val + err <= bound + tol
+            } else {
+                val - err >= bound - tol
+            };
+            if ok {
+                return true;
+            }
+        }
+        false
+    };
+
+    let mut stack = Vec::new();
+    for want_declared in [false, true] {
+        for k in 0..n {
+            for is_upper in [true, false] {
+                let (bound, is_declared) = if is_upper {
+                    (ub[k], declared.ub.get(k).copied().unwrap_or(true))
+                } else {
+                    (lb[k], declared.lb.get(k).copied().unwrap_or(true))
+                };
+                if !bound.is_finite() || is_declared != want_declared {
+                    continue;
+                }
+                // A fixed (or hairline-crossed) column keeps its box.
+                if lb[k].is_finite()
+                    && ub[k].is_finite()
+                    && ub[k] - lb[k] <= BOUND_FEAS_TOL * (1.0 + lb[k].abs())
+                {
+                    continue;
+                }
+                if !implied(
+                    k, is_upper, &lb, &ub, &min_fin, &max_fin, &min_inf, &max_inf,
+                ) {
+                    continue;
+                }
+                // Remove the side, and move its term in every row it enters
+                // from the finite part of the activity to the infinite count.
+                for &(r, a) in &col_rows[k] {
+                    let term = a * bound;
+                    // The upper side feeds the max activity when `a > 0`, the
+                    // min when `a < 0`; the lower side the other way round.
+                    if (a > 0.0) == is_upper {
+                        max_fin[r] -= term;
+                        max_inf[r] += 1;
+                    } else {
+                        min_fin[r] -= term;
+                        min_inf[r] += 1;
+                    }
+                }
+                if is_upper {
+                    ub[k] = f64::INFINITY;
+                } else {
+                    lb[k] = f64::NEG_INFINITY;
+                }
+                stack.push(Reduction::RedundantBound { col: k, is_upper });
+            }
+        }
+    }
+    if stack.is_empty() {
+        return None;
+    }
+    let mut reduced = prob.clone();
+    reduced.lb = if lb.iter().all(|v| !v.is_finite()) && ub.iter().all(|v| !v.is_finite()) {
+        Vec::new()
+    } else {
+        lb
+    };
+    reduced.ub = if reduced.lb.is_empty() {
+        Vec::new()
+    } else {
+        ub
+    };
+    Some(Presolve {
+        reduced,
+        layer_obj_offset: 0.0,
+        orig_n: n,
+        orig_m_eq: m_eq,
+        orig_m_ineq: prob.m_ineq(),
+        kept_cols: (0..n).collect(),
+        kept_eq: (0..m_eq).collect(),
+        kept_ineq: (0..prob.m_ineq()).collect(),
+        undo: None,
+        tail: None,
+        orig: Orig::Unset,
+        red_shape: None,
+        stack,
         chain: Vec::new(),
         discarded_infeasibility: None,
         exit: FixpointExit::Fixpoint,
@@ -1183,15 +2813,28 @@ pub fn presolve_conic(prob: &QpProblem, cones: &[ConeSpec]) -> PresolveOutcome {
     // A single pass cannot cascade its own bound tightening, so it needs no
     // refinement budget (gh #527); the conic path does not iterate.
     let refinements = BoxRefinements::unlimited(prob.n);
-    match presolve_once(prob, &protected_row, Catalog::Full, &refinements, false) {
+    let own = |o: PresolveOutcome| match o {
+        PresolveOutcome::Reduced(mut ps) => {
+            ps.orig = Orig::Owned(prob.clone());
+            PresolveOutcome::Reduced(ps)
+        }
+        other => other,
+    };
+    match own(presolve_once(
+        prob,
+        &protected_row,
+        Catalog::Full,
+        &refinements,
+        false,
+    )) {
         PresolveOutcome::Infeasible(trigger) => {
-            match presolve_once(
+            match own(presolve_once(
                 prob,
                 &protected_row,
                 Catalog::NoSpeculativeFixings,
                 &refinements,
                 false,
-            ) {
+            )) {
                 confirmed @ PresolveOutcome::Infeasible(_) => confirmed,
                 PresolveOutcome::Reduced(mut ps) => {
                     ps.discarded_infeasibility = Some(trigger);
@@ -2190,7 +3833,10 @@ fn presolve_once(
         kept_cols,
         kept_eq,
         kept_ineq,
-        orig: prob.clone(),
+        undo: None,
+        tail: None,
+        orig: Orig::Unset,
+        red_shape: None,
         stack,
         chain: Vec::new(),
         discarded_infeasibility: None,
@@ -2501,8 +4147,18 @@ pub struct PresolveStats {
     pub forcing_rows: usize,
     /// Dominated columns fixed to a bound and dropped.
     pub dominated_cols: usize,
+    /// Columns fixed at their lower bound because a convex combination of
+    /// two others with the same support costs strictly less (gh#1246).
+    pub convex_dominated_cols: usize,
+    /// Implied-free columns substituted out of an equality row, each also
+    /// removing that row (gh#1246).
+    pub implied_free_cols: usize,
     /// Variable bounds tightened by domain propagation.
     pub tightened_bounds: usize,
+    /// Finite bound sides removed from the problem handed to the solver
+    /// because the remaining rows imply them (gh#1246). Counts both tightened
+    /// sides presolve derived itself and declared ones.
+    pub relaxed_bounds: usize,
     /// Variables folded onto another by a two-variable equality row
     /// (doubleton aggregation). Each also consumes its row.
     pub aggregated_vars: usize,
@@ -2585,6 +4241,15 @@ impl Presolve {
         out
     }
 
+    /// Is this the implied-bound layer [`relax_implied_bounds`] builds?
+    fn is_relax_layer(&self) -> bool {
+        !self.stack.is_empty()
+            && self
+                .stack
+                .iter()
+                .all(|r| matches!(r, Reduction::RedundantBound { .. }))
+    }
+
     /// Move this layer's reduced problem out, leaving a shell that keeps
     /// what a layer still reads of it once the next layer exists (gh#1243).
     ///
@@ -2594,30 +4259,61 @@ impl Presolve {
     /// intermediate problem for the life of the solve. A layer reads its own
     /// `reduced` only for its dimensions ([`Self::changed`],
     /// [`Self::stats_once`]) and its box ([`Self::project_warm_once`]);
-    /// postsolve reads `orig`, never `reduced`. The shell keeps `n`, `c`,
-    /// `b`, `h`, `lb`, `ub` — so `m_eq()`, `m_ineq()`, `lb_of` and `ub_of`
-    /// answer as before — and drops the triplet arrays, which are the bulk.
+    /// postsolve reads `orig`, never `reduced`. Since gh#1246 the dimensions
+    /// come from [`RedShape`] and a chain's projection walks the boxes from
+    /// the [`Undo`] records, so the shell keeps nothing but `n`.
     fn take_reduced(&mut self) -> QpProblem {
         let shell = QpProblem {
             n: self.reduced.n,
             p_lower: Vec::new(),
-            c: self.reduced.c.clone(),
+            c: Vec::new(),
             a: Vec::new(),
-            b: self.reduced.b.clone(),
+            b: Vec::new(),
             g: Vec::new(),
-            h: self.reduced.h.clone(),
-            lb: self.reduced.lb.clone(),
-            ub: self.reduced.ub.clone(),
+            h: Vec::new(),
+            lb: Vec::new(),
+            ub: Vec::new(),
         };
+        self.red_shape = Some(RedShape {
+            n: self.reduced.n,
+            m_eq: self.reduced.m_eq(),
+            m_ineq: self.reduced.m_ineq(),
+        });
         std::mem::replace(&mut self.reduced, shell)
+    }
+
+    /// `kept_cols` (`0`), `kept_eq` (`1`) or `kept_ineq` (`2`), rebuilt when
+    /// it was dropped as the identity.
+    fn kept(&self, which: usize) -> std::borrow::Cow<'_, [usize]> {
+        let v = match which {
+            0 => &self.kept_cols,
+            1 => &self.kept_eq,
+            _ => &self.kept_ineq,
+        };
+        match &self.undo {
+            None => std::borrow::Cow::Borrowed(v),
+            Some(u) => std::borrow::Cow::Owned(match which {
+                0 => complement(self.orig_n, &u.gone_cols),
+                1 => complement(self.orig_m_eq, &u.gone_eq),
+                _ => complement(self.orig_m_ineq, &u.gone_ineq),
+            }),
+        }
+    }
+
+    /// The reduced problem's dimensions, whether or not it has moved on.
+    fn red_dims(&self) -> (usize, usize, usize) {
+        match &self.red_shape {
+            Some(r) => (r.n, r.m_eq, r.m_ineq),
+            None => (self.reduced.n, self.reduced.m_eq(), self.reduced.m_ineq()),
+        }
     }
 
     /// Did this single pass change anything (a reduction, or a dropped
     /// row)? Used by [`presolve`] to detect the fixpoint.
     fn changed(&self) -> bool {
         !self.stack.is_empty()
-            || self.reduced.n < self.orig_n
-            || self.reduced.m_eq() + self.reduced.m_ineq() < self.orig_m_eq + self.orig_m_ineq
+            || self.red_dims().0 < self.orig_n
+            || self.red_dims().1 + self.red_dims().2 < self.orig_m_eq + self.orig_m_ineq
     }
 
     /// Reduction summary (sizes before/after and counts by reduction). For
@@ -2642,18 +4338,27 @@ impl Presolve {
             s.free_col_singletons += ls.free_col_singletons;
             s.forcing_rows += ls.forcing_rows;
             s.dominated_cols += ls.dominated_cols;
+            s.convex_dominated_cols += ls.convex_dominated_cols;
+            s.implied_free_cols += ls.implied_free_cols;
             s.tightened_bounds += ls.tightened_bounds;
+            s.relaxed_bounds += ls.relaxed_bounds;
             s.aggregated_vars += ls.aggregated_vars;
         }
+        // The implied-bound pass is a layer of the chain but not a round of
+        // the fixpoint: `rounds` is what the `cap-truncated after N layers`
+        // and deadline messages report, and it should not move by one
+        // because a bound was found redundant at the end.
+        let relax = self.chain.iter().filter(|l| l.is_relax_layer()).count();
+        s.rounds = (self.chain.len() - relax).max(1);
         s
     }
 
     fn stats_once(&self) -> PresolveStats {
         let mut s = PresolveStats {
             orig_vars: self.orig_n,
-            reduced_vars: self.reduced.n,
+            reduced_vars: self.red_dims().0,
             orig_rows: self.orig_m_eq + self.orig_m_ineq,
-            reduced_rows: self.reduced.m_eq() + self.reduced.m_ineq(),
+            reduced_rows: self.red_dims().1 + self.red_dims().2,
             exit: self.exit,
             // This handle is exactly one layer, however it was reached.
             rounds: 1,
@@ -2666,7 +4371,10 @@ impl Presolve {
                 Reduction::FreeColSingleton { .. } => s.free_col_singletons += 1,
                 Reduction::ForcingRow { .. } => s.forcing_rows += 1,
                 Reduction::DominatedColumn { .. } => s.dominated_cols += 1,
+                Reduction::ConvexDominated { .. } => s.convex_dominated_cols += 1,
+                Reduction::ImpliedFreeSub { .. } => s.implied_free_cols += 1,
                 Reduction::BoundTightening { .. } => s.tightened_bounds += 1,
+                Reduction::RedundantBound { .. } => s.relaxed_bounds += 1,
                 // A whole pass in one entry: report what its plan achieved.
                 Reduction::Aggregate { plan } => {
                     s.aggregated_vars += plan.report.n_aggregated_vars;
@@ -2707,15 +4415,31 @@ impl Presolve {
         warm: &crate::ipm::QpWarmStart,
     ) -> Option<(crate::ipm::QpWarmStart, ConvexWarmReport)> {
         if self.chain.is_empty() {
-            return self.project_warm_once(warm).map(|(w, mut r)| {
+            let (lb, ub) = (&self.reduced.lb, &self.reduced.ub);
+            return self.project_warm_once(warm, lb, ub).map(|(w, mut r)| {
                 r.layers = 1;
                 (w, r)
             });
         }
+        // Each layer clamps to its own reduced box. A chain keeps those boxes
+        // only as `Undo` records (gh#1246), so walk back to the input box once
+        // and then forward through the layers.
+        let mut boxes = Vec::with_capacity(self.chain.len());
+        let (mut lb, mut ub) = (self.reduced.lb.clone(), self.reduced.ub.clone());
+        let mut st = self.tail_state();
+        for layer in self.chain.iter().rev() {
+            boxes.push((lb.clone(), ub.clone()));
+            if let Some(u) = &layer.undo {
+                st = u.backward(&st, (layer.orig_n, layer.orig_m_eq, layer.orig_m_ineq));
+                lb = st.lb.clone();
+                ub = st.ub.clone();
+            }
+        }
+        boxes.reverse();
         let mut cur = warm.clone();
         let mut rep = ConvexWarmReport::default();
-        for layer in &self.chain {
-            let (next, r) = layer.project_warm_once(&cur)?;
+        for (layer, (lb, ub)) in self.chain.iter().zip(&boxes) {
+            let (next, r) = layer.project_warm_once(&cur, lb, ub)?;
             rep.dropped_eq_l1 += r.dropped_eq_l1;
             rep.dropped_ineq_l1 += r.dropped_ineq_l1;
             rep.x_clamped += r.x_clamped;
@@ -2729,7 +4453,11 @@ impl Presolve {
     fn project_warm_once(
         &self,
         warm: &crate::ipm::QpWarmStart,
+        red_lb: &[f64],
+        red_ub: &[f64],
     ) -> Option<(crate::ipm::QpWarmStart, ConvexWarmReport)> {
+        let red_lb_of = |i: usize| red_lb.get(i).copied().unwrap_or(crate::qp::NEG_INF);
+        let red_ub_of = |i: usize| red_ub.get(i).copied().unwrap_or(crate::qp::POS_INF);
         if warm.x.len() != self.orig_n
             || warm.y.len() != self.orig_m_eq
             || warm.z.len() != self.orig_m_ineq
@@ -2738,44 +4466,48 @@ impl Presolve {
         {
             return None;
         }
-        let mut x = vec![0.0; self.reduced.n];
-        for (newc, &oldc) in self.kept_cols.iter().enumerate() {
+        let mut x = vec![0.0; self.red_dims().0];
+        for (newc, &oldc) in self.kept(0).iter().enumerate() {
             if oldc < warm.x.len() && newc < x.len() {
                 x[newc] = warm.x[oldc];
             }
         }
         let mut x_clamped = 0usize;
         for (i, v) in x.iter_mut().enumerate() {
-            if let Some(c) =
-                pounce_presolve::clamp_seed(*v, self.reduced.lb_of(i), self.reduced.ub_of(i))
-            {
+            if let Some(c) = pounce_presolve::clamp_seed(*v, red_lb_of(i), red_ub_of(i)) {
                 x_clamped += 1;
                 *v = c;
             }
         }
-        let mut y = vec![0.0; self.reduced.m_eq()];
-        for (newr, &oldr) in self.kept_eq.iter().enumerate() {
+        let mut y = vec![0.0; self.red_dims().1];
+        for (newr, &oldr) in self.kept(1).iter().enumerate() {
             if oldr < warm.y.len() && newr < y.len() {
                 y[newr] = warm.y[oldr];
             }
         }
-        let mut z = vec![0.0; self.reduced.m_ineq()];
-        for (newr, &oldr) in self.kept_ineq.iter().enumerate() {
+        let mut z = vec![0.0; self.red_dims().2];
+        for (newr, &oldr) in self.kept(2).iter().enumerate() {
             if oldr < warm.z.len() && newr < z.len() {
                 z[newr] = warm.z[oldr];
             }
         }
-        let mut z_lb = vec![0.0; self.reduced.n];
-        let mut z_ub = vec![0.0; self.reduced.n];
-        for (newc, &oldc) in self.kept_cols.iter().enumerate() {
+        let mut z_lb = vec![0.0; self.red_dims().0];
+        let mut z_ub = vec![0.0; self.red_dims().0];
+        for (newc, &oldc) in self.kept(0).iter().enumerate() {
             if oldc < warm.z_lb.len() && newc < z_lb.len() {
-                z_lb[newc] = warm.z_lb[oldc];
-                z_ub[newc] = warm.z_ub[oldc];
+                // A side the reduced problem does not carry (an implied bound
+                // relaxed away, gh#1246) has no multiplier to seed.
+                if red_lb_of(newc) > -BOUND_INF {
+                    z_lb[newc] = warm.z_lb[oldc];
+                }
+                if red_ub_of(newc) < BOUND_INF {
+                    z_ub[newc] = warm.z_ub[oldc];
+                }
             }
         }
         let kept_eq = {
             let mut kept = vec![false; self.orig_m_eq];
-            for &o in &self.kept_eq {
+            for &o in self.kept(1).iter() {
                 if o < kept.len() {
                     kept[o] = true;
                 }
@@ -2784,7 +4516,7 @@ impl Presolve {
         };
         let kept_ineq = {
             let mut kept = vec![false; self.orig_m_ineq];
-            for &o in &self.kept_ineq {
+            for &o in self.kept(2).iter() {
                 if o < kept.len() {
                     kept[o] = true;
                 }
@@ -2874,8 +4606,12 @@ impl Presolve {
     /// layer. See [`Self::postsolve_farkas`].
     fn drop_objective(&mut self) {
         self.ray = true;
-        self.orig.c.iter_mut().for_each(|c| *c = 0.0);
-        self.orig.p_lower.clear();
+        // A chain layer's input is materialized with the objective dropped
+        // whenever `ray` is set (`Self::postsolve`).
+        if let Orig::Owned(p) = &mut self.orig {
+            p.c.iter_mut().for_each(|c| *c = 0.0);
+            p.p_lower.clear();
+        }
         for r in &mut self.stack {
             if let Reduction::FreeColSingleton { c_col, .. } = r {
                 *c_col = 0.0;
@@ -2891,24 +4627,52 @@ impl Presolve {
     /// folds the per-round postsolves in reverse.
     pub fn postsolve(&self, red: &QpSolution) -> QpSolution {
         if self.chain.is_empty() {
-            return self.postsolve_once(red);
+            return match &self.orig {
+                Orig::Owned(p) => self.postsolve_once(p, red),
+                Orig::Unset => unreachable!("a standalone layer owns its input"),
+            };
         }
+        // Walk back from the final reduced problem, rebuilding each layer's
+        // input from its `Undo` record and materializing one at a time
+        // (gh#1246).
+        let mut st = self.tail_state();
         let mut sol = red.clone();
         for layer in self.chain.iter().rev() {
-            sol = layer.postsolve_once(&sol);
+            let undo = layer
+                .undo
+                .as_ref()
+                .expect("a chain layer keeps its undo record");
+            st = undo.backward(&st, (layer.orig_n, layer.orig_m_eq, layer.orig_m_ineq));
+            let orig = View::materialize(&st, layer.ray);
+            sol = layer.postsolve_once(&orig, &sol);
         }
         sol
     }
 
+    /// The final reduced problem as a [`State`]: where a backward walk starts.
+    fn tail_state(&self) -> State {
+        State {
+            c: self.reduced.c.clone(),
+            b: self.reduced.b.clone(),
+            h: self.reduced.h.clone(),
+            lb: self.reduced.lb.clone(),
+            ub: self.reduced.ub.clone(),
+            view: self
+                .tail
+                .clone()
+                .expect("a fixpoint wrapper keeps its tail view"),
+        }
+    }
+
     /// Expand a single pass's reduced solution back to its original space.
-    fn postsolve_once(&self, red: &QpSolution) -> QpSolution {
+    fn postsolve_once(&self, orig: &QpProblem, red: &QpSolution) -> QpSolution {
         // An aggregation layer is a whole pass in one entry, with its own
         // primal lift and dual sweep; it never shares a layer with the
         // single-elimination catalog.
         let mut out = if let [Reduction::Aggregate { plan }] = self.stack.as_slice() {
-            crate::aggregate::postsolve(&self.orig, plan, red, self.ray)
+            crate::aggregate::postsolve(orig, plan, red, self.ray)
         } else {
-            self.postsolve_catalog(red)
+            self.postsolve_catalog(orig, red)
         };
         // [`QpIterate::objective`] is documented to be in the original
         // problem's coordinates, but the trace comes back from a solve of
@@ -2930,8 +4694,8 @@ impl Presolve {
         // reported on an otherwise converged solve. The box is part of the
         // model; put the value back inside it and let the excursion show up
         // where it belongs, as the row residual it actually is.
-        for i in 0..out.x.len().min(self.orig.n) {
-            out.x[i] = clamp_into_box(out.x[i], self.orig.lb_of(i), self.orig.ub_of(i));
+        for i in 0..out.x.len().min(orig.n) {
+            out.x[i] = clamp_into_box(out.x[i], orig.lb_of(i), orig.ub_of(i));
         }
         // Per layer, not once at the end: a bound can exist in *this* layer's
         // space and not survive outward (an aggregation pins a column to a
@@ -2939,28 +4703,28 @@ impl Presolve {
         // the multiplier it carries is what the next layer out re-attributes
         // to the row that implied it. Repair here and that chain holds;
         // repair only at the end and the leftover has nowhere left to go.
-        polish_bound_multipliers(&self.orig, &mut out);
+        polish_bound_multipliers(orig, &mut out);
         out
     }
 
     /// [`Self::postsolve_once`] for a layer built by [`presolve_once`] —
     /// every reduction in the catalog except the aggregation, which has its
     /// own recovery.
-    fn postsolve_catalog(&self, red: &QpSolution) -> QpSolution {
+    fn postsolve_catalog(&self, orig: &QpProblem, red: &QpSolution) -> QpSolution {
         let mut x = vec![0.0; self.orig_n];
         let mut y = vec![0.0; self.orig_m_eq];
         let mut z = vec![0.0; self.orig_m_ineq];
 
         // Primal: kept columns from the reduced solution.
-        for (newc, &oldc) in self.kept_cols.iter().enumerate() {
+        for (newc, &oldc) in self.kept(0).iter().enumerate() {
             x[oldc] = red.x[newc];
         }
         // Duals: kept rows from the reduced solution. Dropped rows
         // (empty / duplicate) stay 0, which is their correct multiplier.
-        for (newr, &oldr) in self.kept_eq.iter().enumerate() {
+        for (newr, &oldr) in self.kept(1).iter().enumerate() {
             y[oldr] = red.y[newr];
         }
-        for (newr, &oldr) in self.kept_ineq.iter().enumerate() {
+        for (newr, &oldr) in self.kept(2).iter().enumerate() {
             z[oldr] = red.z[newr];
         }
 
@@ -2993,11 +4757,12 @@ impl Presolve {
                     }
                 }
                 Reduction::DominatedColumn { col, value, .. } => x[*col] = *value,
+                Reduction::ConvexDominated { col, value } => x[*col] = *value,
                 // Restored in the second pass (depends on its neighbours).
-                Reduction::FreeColSingleton { .. } => {}
+                Reduction::FreeColSingleton { .. } | Reduction::ImpliedFreeSub { .. } => {}
                 // The variable is kept; only its box changed, so its primal
                 // comes from the reduced solution (already mapped above).
-                Reduction::BoundTightening { .. } => {}
+                Reduction::BoundTightening { .. } | Reduction::RedundantBound { .. } => {}
                 // Unreachable: an aggregation layer returned above, before
                 // any of this. Left as a no-op rather than a panic so the
                 // arm can never be the thing that fails a solve.
@@ -3013,13 +4778,40 @@ impl Presolve {
             } = r
             {
                 // x_col = (b_r − Σ_{j≠col} a_jr x_j) / a_col.
-                let mut acc = self.orig.b[*eq_row];
-                for t in &self.orig.a {
+                let mut acc = orig.b[*eq_row];
+                for t in &orig.a {
                     if t.row == *eq_row && t.col != *col {
                         acc -= t.val * x[t.col];
                     }
                 }
                 x[*col] = acc / a_coef;
+            }
+        }
+        // Implied-free substitutions: the same expression. Their rows are
+        // grouped once, because a layer may hold thousands of them and the
+        // loop above scans every triplet per entry. The pivot rows of one
+        // layer contain no other column it eliminates, so order is free.
+        if self
+            .stack
+            .iter()
+            .any(|r| matches!(r, Reduction::ImpliedFreeSub { .. }))
+        {
+            let rows = group_by_row(&orig.a, orig.m_eq());
+            for r in &self.stack {
+                if let Reduction::ImpliedFreeSub {
+                    col,
+                    eq_row,
+                    a_coef,
+                } = r
+                {
+                    let mut acc = orig.b[*eq_row];
+                    for &(k, v) in &rows[*eq_row] {
+                        if k != *col {
+                            acc -= v * x[k];
+                        }
+                    }
+                    x[*col] = acc / a_coef;
+                }
             }
         }
 
@@ -3044,19 +4836,26 @@ impl Presolve {
         //   ⇒ y_fix = −[(Px)_k + c_k + (Aᵀy)_k + (Gᵀz)_k] / a.
         let n = self.orig_n;
         let mut grad = vec![0.0; n];
-        grad[..n].copy_from_slice(&self.orig.c[..n]);
-        self.orig.p_mul(&x, &mut grad);
-        self.orig.at_mul(&y, &mut grad);
-        self.orig.gt_mul(&z, &mut grad);
+        grad[..n].copy_from_slice(&orig.c[..n]);
+        orig.p_mul(&x, &mut grad);
+        orig.at_mul(&y, &mut grad);
+        orig.gt_mul(&z, &mut grad);
         for r in &self.stack {
-            if let Reduction::FixedVar {
-                col,
-                eq_row,
-                a_coef,
-                ..
-            } = r
-            {
-                y[*eq_row] = -grad[*col] / a_coef;
+            match r {
+                Reduction::FixedVar {
+                    col,
+                    eq_row,
+                    a_coef,
+                    ..
+                }
+                // The consumed row of an implied-free substitution: the
+                // column's stationarity with its bound multipliers at zero.
+                | Reduction::ImpliedFreeSub {
+                    col,
+                    eq_row,
+                    a_coef,
+                } => y[*eq_row] = -grad[*col] / a_coef,
+                _ => {}
             }
         }
 
@@ -3105,7 +4904,7 @@ impl Presolve {
         // multiplier belongs to the row that implied it. Because tightening
         // sources are column-disjoint, these moves are independent.
         let mut col_reduced = vec![usize::MAX; n];
-        for (newc, &oldc) in self.kept_cols.iter().enumerate() {
+        for (newc, &oldc) in self.kept(0).iter().enumerate() {
             col_reduced[oldc] = newc;
         }
         for r in &self.stack {
@@ -3123,14 +4922,14 @@ impl Presolve {
                 }
                 let delta = if *is_upper {
                     let m = red.z_ub.get(newc).copied().unwrap_or(0.0);
-                    if m > 0.0 && (self.ray || x[*col] < self.orig.ub_of(*col) - BOUND_FEAS_TOL) {
+                    if m > 0.0 && (self.ray || x[*col] < orig.ub_of(*col) - BOUND_FEAS_TOL) {
                         m / coef
                     } else {
                         0.0
                     }
                 } else {
                     let m = red.z_lb.get(newc).copied().unwrap_or(0.0);
-                    if m > 0.0 && (self.ray || x[*col] > self.orig.lb_of(*col) + BOUND_FEAS_TOL) {
+                    if m > 0.0 && (self.ray || x[*col] > orig.lb_of(*col) + BOUND_FEAS_TOL) {
                         -m / coef
                     } else {
                         0.0
@@ -3155,15 +4954,15 @@ impl Presolve {
         // variable's bound dual (it sits interior to its real box, the force
         // having moved to the source row above).
         let mut grad = vec![0.0; n];
-        grad[..n].copy_from_slice(&self.orig.c[..n]);
-        self.orig.p_mul(&x, &mut grad);
-        self.orig.at_mul(&y, &mut grad);
-        self.orig.gt_mul(&z, &mut grad);
+        grad[..n].copy_from_slice(&orig.c[..n]);
+        orig.p_mul(&x, &mut grad);
+        orig.at_mul(&y, &mut grad);
+        orig.gt_mul(&z, &mut grad);
         let mut z_lb = vec![0.0; n];
         let mut z_ub = vec![0.0; n];
         for i in 0..n {
-            let lb = self.orig.lb_of(i);
-            let ub = self.orig.ub_of(i);
+            let lb = orig.lb_of(i);
+            let ub = orig.ub_of(i);
             let at_lb = lb > -BOUND_INF && (self.ray || at_bound(x[i], lb));
             let at_ub = ub < BOUND_INF && (self.ray || at_bound(x[i], ub));
             if at_lb && grad[i] > 0.0 {
@@ -3175,10 +4974,10 @@ impl Presolve {
 
         // Objective in the original problem.
         let mut px = vec![0.0; n];
-        self.orig.p_mul(&x, &mut px);
+        orig.p_mul(&x, &mut px);
         let mut obj = 0.0;
         for i in 0..n {
-            obj += 0.5 * x[i] * px[i] + self.orig.c[i] * x[i];
+            obj += 0.5 * x[i] * px[i] + orig.c[i] * x[i];
         }
 
         QpSolution {
@@ -3513,7 +5312,7 @@ mod dedup_memo_tests {
     }
 
     fn reduce(prob: &QpProblem, memo: DedupMemo) -> Option<(String, PresolveStats)> {
-        match presolve_fixpoint(prob, Catalog::Full, memo, None) {
+        match presolve_fixpoint(prob, Catalog::Full, memo, None, ImpliedBounds::Drop) {
             PresolveOutcome::Reduced(ps) => Some((fingerprint(&ps.reduced), ps.stats())),
             _ => None,
         }
@@ -3667,9 +5466,13 @@ mod dedup_memo_tests {
 
         // And the merge really happens, or the comparison above is vacuous:
         // the looser of the two parallel rows must be gone.
-        let PresolveOutcome::Reduced(ps) =
-            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled, None)
-        else {
+        let PresolveOutcome::Reduced(ps) = presolve_fixpoint(
+            &prob,
+            Catalog::Full,
+            DedupMemo::Enabled,
+            None,
+            ImpliedBounds::Drop,
+        ) else {
             panic!("feasible bounded problem");
         };
         let kept: Vec<f64> = ps.reduced.h.clone();
@@ -3712,9 +5515,13 @@ mod dedup_memo_tests {
         assert_same("contracting pair with duplicate rows", &prob);
 
         // And the skip must really be engaging, or the test proves nothing.
-        let PresolveOutcome::Reduced(ps) =
-            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled, None)
-        else {
+        let PresolveOutcome::Reduced(ps) = presolve_fixpoint(
+            &prob,
+            Catalog::Full,
+            DedupMemo::Enabled,
+            None,
+            ImpliedBounds::Drop,
+        ) else {
             panic!("feasible bounded problem");
         };
         assert!(
@@ -3723,5 +5530,123 @@ mod dedup_memo_tests {
              got {} layers",
             ps.stats().rounds
         );
+    }
+}
+
+#[cfg(test)]
+mod chain_memory_tests {
+    //! gh#1246: a fixpoint chain retains what its rounds changed, not a copy
+    //! of the problem per round, and stops at its memory budget.
+    use super::*;
+    use crate::qp::QpStatus;
+
+    /// `blocks` independent chains `x₀ ≥ x₁ ≥ … ≥ x₃₉` with `x₀ ≤ 1`. Bound
+    /// propagation moves one link per round, so the fixpoint runs to its layer
+    /// cap, and each round changes a handful of bounds out of the whole box.
+    fn cascade(blocks: usize) -> QpProblem {
+        let chain = 40;
+        let n = blocks * chain;
+        let (mut g, mut h) = (Vec::new(), Vec::new());
+        for b in 0..blocks {
+            for i in 0..chain - 1 {
+                let r = h.len();
+                g.push(Triplet::new(r, b * chain + i + 1, 1.0));
+                g.push(Triplet::new(r, b * chain + i, -1.0));
+                h.push(0.0);
+            }
+        }
+        let mut ub = vec![f64::INFINITY; n];
+        for b in 0..blocks {
+            ub[b * chain] = 1.0;
+        }
+        QpProblem {
+            n,
+            p_lower: (0..n).map(|j| Triplet::new(j, j, 1.0)).collect(),
+            c: (0..n).map(|j| -1.0 - (j % 3) as f64).collect(),
+            a: vec![],
+            b: vec![],
+            g,
+            h,
+            lb: vec![0.0; n],
+            ub,
+        }
+    }
+
+    fn fixpoint(prob: &QpProblem, budget: usize) -> Presolve {
+        match presolve_fixpoint_within(
+            prob,
+            Catalog::Full,
+            DedupMemo::Enabled,
+            None,
+            ImpliedBounds::Drop,
+            budget,
+        ) {
+            PresolveOutcome::Reduced(ps) => ps,
+            _ => panic!("the cascade is feasible and bounded"),
+        }
+    }
+
+    /// The retained records stay within a small multiple of one copy of the
+    /// problem, whatever the layer count. Before gh#1246 every layer held a
+    /// full copy, so the ratio was the layer count.
+    #[test]
+    fn a_long_chain_retains_its_changes_not_its_copies() {
+        let prob = cascade(200);
+        let ps = fixpoint(&prob, usize::MAX);
+        assert!(
+            ps.chain.len() >= 20,
+            "the cascade must run long: {}",
+            ps.chain.len()
+        );
+        let retained: usize = ps
+            .chain
+            .iter()
+            .map(|l| {
+                l.undo.as_ref().map_or(0, |u| u.bytes())
+                    + l.stack.len() * std::mem::size_of::<Reduction>()
+                    + (l.kept_cols.len() + l.kept_eq.len() + l.kept_ineq.len()) * 8
+            })
+            .sum();
+        let one_copy = problem_bytes(&prob);
+        // Measured: 33 layers retain 1.27 copies' worth here (each round
+        // tightens 200 bounds of 8 000, plus the implied-bound layer's 8 000
+        // dropped sides). The old design retained 33 copies.
+        assert!(
+            retained < 2 * one_copy,
+            "{} layers retain {retained} B against {one_copy} B for one copy",
+            ps.chain.len()
+        );
+        // And the chain still postsolves: the backward walk is exercised.
+        let o = crate::QpOptions::default();
+        let backend = || -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
+            Box::new(pounce_feral::FeralSolverInterface::new())
+        };
+        let plain = crate::solve_qp_ipm(&prob, &o, backend);
+        let red = crate::solve_qp_ipm(&ps.reduced, &o, backend);
+        let sol = ps.postsolve(&red);
+        assert_eq!(plain.status, QpStatus::Optimal);
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!((plain.obj - sol.obj).abs() <= 1e-6 * (1.0 + plain.obj.abs()));
+    }
+
+    /// Past its budget the loop stops with `MemoryCap`, and what it hands back
+    /// is a sound, less reduced problem that still postsolves to the answer.
+    #[test]
+    fn the_budget_stops_the_chain_and_the_reduction_still_holds() {
+        let prob = cascade(50);
+        let full = fixpoint(&prob, usize::MAX);
+        // Room for the base copy and a few rounds, not for 32.
+        let tight = problem_bytes(&prob) + 2_000;
+        let capped = fixpoint(&prob, tight);
+        assert_eq!(capped.stats().exit, FixpointExit::MemoryCap);
+        assert!(capped.chain.len() < full.chain.len());
+        let o = crate::QpOptions::default();
+        let backend = || -> Box<dyn pounce_linsol::SparseSymLinearSolverInterface> {
+            Box::new(pounce_feral::FeralSolverInterface::new())
+        };
+        let plain = crate::solve_qp_ipm(&prob, &o, backend);
+        let sol = capped.postsolve(&crate::solve_qp_ipm(&capped.reduced, &o, backend));
+        assert_eq!(sol.status, QpStatus::Optimal);
+        assert!((plain.obj - sol.obj).abs() <= 1e-6 * (1.0 + plain.obj.abs()));
     }
 }

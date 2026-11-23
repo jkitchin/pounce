@@ -90,7 +90,7 @@ use crate::active_set::{
     is_conclusive, is_solved, solve_qp_active_set_attempt,
 };
 use crate::ipm::QpOptions;
-use crate::presolve::{PresolveOutcome, PresolveStats, presolve};
+use crate::presolve::{ImpliedBounds, PresolveOutcome, PresolveStats, presolve_until_with};
 use crate::qp::{BoxScreen, QpProblem, QpSolution, QpStatus, screen_variable_box};
 
 /// A persistent active-set solve over convex [`QpProblem`]s.
@@ -358,7 +358,10 @@ impl ActiveSetSession {
             self.last_presolve = PresolveNote::Disabled;
             return self.solve_engine(prob, 0.0, allow_reuse);
         }
-        match presolve(prob) {
+        // gh#1246: the passes that drop implied bounds and substitute
+        // implied-free columns are for the interior point; see
+        // `ImpliedBounds::Keep`.
+        match presolve_until_with(prob, None, ImpliedBounds::Keep) {
             PresolveOutcome::Reduced(ps) => {
                 self.last_presolve = PresolveNote::Reduced {
                     stats: ps.stats(),

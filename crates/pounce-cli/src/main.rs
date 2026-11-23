@@ -4083,7 +4083,9 @@ fn run_convex_qp(
     let t0 = std::time::Instant::now();
     use pounce_convex::HessianInertia;
     use pounce_convex::active_set::solve_qp_active_set_inertia;
-    use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve_until};
+    use pounce_convex::presolve::{
+        FixpointExit, ImpliedBounds, PresolveOutcome, presolve_until_with,
+    };
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
     // What the classifier found out about `P`, handed to the engine rather than
@@ -4313,7 +4315,19 @@ fn run_convex_qp(
             // gh#1182: the fixpoint stops between layers once the budget is
             // spent, rather than running every layer before the solver's own
             // deadline scope even opens.
-            presolve_until(&qp, convex_opts.time_limit.and_then(|l| t0.checked_add(l)))
+            // gh#1246: a model the caller widened with `bound_relax_factor`,
+            // or one going to the active-set engine, keeps every bound side
+            // and its rows as written; see `ImpliedBounds::Keep`.
+            let implied = if bound_relax.active() || use_active_set {
+                ImpliedBounds::Keep
+            } else {
+                ImpliedBounds::Drop
+            };
+            presolve_until_with(
+                &qp,
+                convex_opts.time_limit.and_then(|l| t0.checked_add(l)),
+                implied,
+            )
         };
         match outcome {
             PresolveOutcome::Reduced(ps) => {
@@ -4340,7 +4354,9 @@ fn run_convex_qp(
                     });
                 }
                 let st = ps.stats();
-                if st.reduced_anything() {
+                // A model presolve only dropped implied bounds from (gh#1246)
+                // still hands the solver a different problem; say so.
+                if st.reduced_anything() || st.relaxed_bounds > 0 {
                     // Whether the fixpoint converged or the layer cap stopped
                     // it (gh #527), as a suffix rather than a line of its own.
                     // The corpus sweep on #530 measured the cap binding on 46%
@@ -4359,11 +4375,16 @@ fn run_convex_qp(
                         FixpointExit::Deadline => {
                             format!(", stopped by max_wall_time after {} layers", st.rounds)
                         }
+                        // gh#1246: the chain retains its memory budget.
+                        FixpointExit::MemoryCap => {
+                            format!(", stopped at its memory budget after {} layers", st.rounds)
+                        }
                     };
                     presolve_log.push(format!(
                         "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
                          free-fixed {}, substituted {}, aggregated {}, \
-                         forcing {}, dominated {}, tightened {}{})",
+                         forcing {}, dominated {}, convex-dominated {}, \
+                         implied-free {}, tightened {}, implied bounds dropped {}{})",
                         st.orig_vars,
                         st.reduced_vars,
                         st.orig_rows,
@@ -4374,7 +4395,10 @@ fn run_convex_qp(
                         st.aggregated_vars,
                         st.forcing_rows,
                         st.dominated_cols,
+                        st.convex_dominated_cols,
+                        st.implied_free_cols,
                         st.tightened_bounds,
+                        st.relaxed_bounds,
                         exit,
                     ));
                 }

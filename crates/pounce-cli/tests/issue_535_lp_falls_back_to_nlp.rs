@@ -41,8 +41,10 @@
 //! arm's `5.5e-13`), so these runs now report the convex answer — still
 //! exactly once. The "one verdict" and "no trace of the discarded attempt"
 //! contracts are therefore checked on both outcomes: `afiro` at `tol=1e-20`
-//! for a convex win, NETLIB `israel` (`lp_israel.nl`) at `tol=1e-16` for an
-//! NLP win. The ranking
+//! for a convex win, NETLIB `israel` (`lp_israel.nl`) at `tol=1e-18` for an
+//! NLP win. (It was `1e-16` until gh#1246. Once presolve stopped handing the
+//! IPM the bound sides its rows imply, the convex arm certified `israel`
+//! there, and nothing rerouted.) The ranking
 //! itself is tested in `issue_1183_fallback_keeps_the_better_answer.rs`.
 //! The `qp_tau=0.99` numerical-failure run still reports the NLP answer: a
 //! convex `NumericalFailure` never wins the comparison.
@@ -196,7 +198,7 @@ fn a_rerouted_solve_reports_one_status_not_two() {
     for (fixture, args, convex_reports) in [
         (
             "lp_israel.nl",
-            vec!["solver_selection=auto", "tol=1e-16"],
+            vec!["solver_selection=auto", "tol=1e-18"],
             false,
         ),
         (
@@ -236,13 +238,13 @@ fn a_rerouted_solve_reports_one_status_not_two() {
 /// summary is now held back until the convex path is known to be the one that
 /// reports — a rerouted run's stdout is the NLP solve's and nothing else.
 ///
-/// gh #1183: the check runs on `israel` at `tol=1e-16`, where the NLP answer
+/// gh #1183: the check runs on `israel` at `tol=1e-18`, where the NLP answer
 /// reports (and whose presolve reduces the model, so the line would show); on
 /// `afiro` at `tol=1e-20` the convex answer now reports, and its presolve
 /// summary is flushed with it.
 #[test]
 fn a_rerouted_solve_leaves_no_trace_of_the_discarded_attempt() {
-    let (rerouted, stderr, _) = run_on("lp_israel.nl", &["solver_selection=auto", "tol=1e-16"]);
+    let (rerouted, stderr, _) = run_on("lp_israel.nl", &["solver_selection=auto", "tol=1e-18"]);
     assert!(
         stderr.to_lowercase().contains("did not certify"),
         "precondition: this run must reroute; stderr=\n{stderr}"
