@@ -32,6 +32,7 @@ changes.
   `verify`, `check-x0` and `diagnose` accept these files too. `OBJSENSE
   MAX` is now honored, where the QPS reader used to reject it; integer
   markers and `BV`/`LI`/`UI` bounds are still rejected.
+  `.mps.gz` / `.qps.gz` are read compressed (gh#1256).
 
 ### Changed
 - **The CLI no longer parses a `.nl` twice when it routes the model to a
@@ -70,6 +71,30 @@ changes.
   * Details and measurements: `dev-notes/kkt-bound-row-elimination.md`.
 
 ### Fixed
+- **QPS / MPS reader: lines with no set name are read correctly, and fixed-
+  format files with spaces in names are read (gh#1256).** An `RHS` or
+  `RANGES` line with no set name and two (row, value) pairs was misread,
+  and on NETLIB BLEND, whose rows are named by numbers, misread without an
+  error: every right-hand side was dropped and `pounce blend.mps` reported
+  an optimum of 0 instead of −30.8121. The set name is now optional in
+  `RHS`, `RANGES` and `BOUNDS`, every section checks its field count, and a
+  file that fails as free format is read again by fixed column positions,
+  which is how NETLIB FORPLAN's names like `DEDO3 1R` are written. Measured
+  on 247 files (139 Maros-Meszaros, 92 NETLIB, 16 Kennington): 239 parsed
+  before, all 247 now. Every file agrees with HiGHS's reading of it except
+  where HiGHS is the one that differs (it drops coefficients below 1e-9,
+  and misreads DPKLO1, whose RHS set name is also a row name; pounce's
+  reading solves DPKLO1 to its published optimum). The 239 files that
+  already parsed, BLEND aside, come out identical.
+  * Duplicate entries follow HiGHS: a repeated `COLUMNS` coefficient,
+    `RHS` or `RANGES` value keeps the first; repeated `QUADOBJ` entries are
+    summed. Before, `COLUMNS` summed and `RHS` / `RANGES` kept the last.
+  * A negative `UP` bound on a column with no lower bound now gives a lower
+    bound of −∞ (the CPLEX / Gurobi rule) instead of the empty box
+    `[0, u]`. Entries on a second `N` (free) row are dropped instead of
+    refused.
+  * Each of these is reported as a warning on stderr; the parsed model
+    carries them in the new `QpsModel::warnings`.
 - **The `.nl` reader uses much less memory on large models (gh#1248).**
   On a Dual2_5000-shaped QP at one tenth scale (3.3 M variables, 3 M rows,
   12 M Jacobian nonzeros, a 408 MB file), the process peak while parsing
