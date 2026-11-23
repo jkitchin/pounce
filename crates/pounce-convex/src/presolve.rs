@@ -1430,6 +1430,13 @@ pub enum ImpliedBounds {
     /// implied-free substitution ([`implied_free_once`]), which leans on the
     /// same implications.
     ///
+    /// Also for the active-set engine. Both passes exist because every finite
+    /// bound side costs an interior point a barrier term and a KKT row. To an
+    /// active-set method a bound is cheap, and substitution rewrites the rows
+    /// it pivots on. Measured: `convex_qp_qgfrdxpn` under
+    /// `solver_selection=qp-active-set` went from optimal in 6 115 iterations
+    /// to the iteration limit at 37 825 once 10 columns were substituted out.
+    ///
     /// For a problem that has been widened by `bound_relax_factor`. The pass
     /// is exact there too (the proofs run on the widened rows), but it was
     /// measured on the declared model, and on the widened one it changed the

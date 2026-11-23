@@ -54,8 +54,13 @@ changes.
     1.1 s → 0.45 s.
   - **Fixture sweep:** TUFF 24 → 22 iterations, and `issue745` lands closer
     to its zero optimum.
-  - **Widened models.** Skipped under an explicit `bound_relax_factor`, like
-    the implied-bound pass; the widened sweep diffs empty.
+  - **Widened models and the active-set engine.** Skipped under an explicit
+    `bound_relax_factor`, like the implied-bound pass, and the widened sweep
+    diffs empty. Both passes are also skipped for the active-set engine
+    (`solver_selection=qp-active-set` and the active-set session), because
+    they exist to spare the interior point barrier terms, and on
+    `convex_qp_qgfrdxpn` the substitution took that engine from optimal in
+    6,115 iterations to the iteration limit.
   - Recorded as `implied_free_cols`.
 - **Convex presolve removes convex-dominated columns (gh#1246, finding 3).**
   Take three linear columns with the same support that agree in every row but

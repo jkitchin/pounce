@@ -198,17 +198,9 @@ fn a_convex_model_at_the_same_tiny_scale_still_reaches_the_convex_engine() {
 /// Note the routing: at the default `solver_selection=auto` this fixture goes
 /// to the NLP arm, which relaxes and reaches `-1`. A caller has to ask for
 /// `qp-active-set` by name to see the refusal.
-///
-/// Since gh#1246 the engine sees the declared model only with presolve off.
-/// With presolve on, `x1` and `x2` are identical linear columns, so presolve
-/// fixes one of them and solves the rest exactly at the minimum; see
-/// `presolve_reaches_the_minimum_the_engine_cannot` below.
 #[test]
 fn the_declared_model_is_refused_not_certified() {
-    let out = run(
-        "nonconvex_qp_eq.nl",
-        &["solver_selection=qp-active-set", "qp_presolve=no"],
-    );
+    let out = run("nonconvex_qp_eq.nl", &["solver_selection=qp-active-set"]);
     let obj = objective(&out).expect("an objective line");
     assert!(
         obj > -1e-6,
@@ -220,22 +212,4 @@ fn the_declared_model_is_refused_not_certified() {
         !out.contains("Optimal Solution Found"),
         "the saddle must not be certified as optimal (gh #871)\n{out}"
     );
-}
-
-/// gh#1246: with presolve on, the same request reaches the true minimum `-1`.
-///
-/// `x1` and `x2` enter only the equality row, with the same coefficient and
-/// no cost, so they are identical columns. Their upper bounds go first, each
-/// implied by the other's lower bound through the row. Convex dominance then
-/// fixes `x2` at `-1`, which is exact: any `x2 > -1` moves onto `x1` with
-/// every row and the objective unchanged, and the argument needs neither
-/// column in `P`, so it holds on this nonconvex model. That leaves
-/// `x0 + x1 = 1`, which aggregation folds, so the engine is handed a box
-/// and `-x0²` and has no saddle to stop at.
-#[test]
-fn presolve_reaches_the_minimum_the_engine_cannot() {
-    let out = run("nonconvex_qp_eq.nl", &["solver_selection=qp-active-set"]);
-    let obj = objective(&out).expect("an objective line");
-    assert!((obj - (-1.0)).abs() < 1e-9, "expected -1, got {obj}\n{out}");
-    assert!(out.contains("convex-dominated 1"), "{out}");
 }

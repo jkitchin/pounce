@@ -4264,9 +4264,10 @@ fn run_convex_qp(
             // gh#1182: the fixpoint stops between layers once the budget is
             // spent, rather than running every layer before the solver's own
             // deadline scope even opens.
-            // gh#1246: a model the caller widened with `bound_relax_factor`
-            // keeps every bound side; see `ImpliedBounds::Keep`.
-            let implied = if bound_relax.active() {
+            // gh#1246: a model the caller widened with `bound_relax_factor`,
+            // or one going to the active-set engine, keeps every bound side
+            // and its rows as written; see `ImpliedBounds::Keep`.
+            let implied = if bound_relax.active() || use_active_set {
                 ImpliedBounds::Keep
             } else {
                 ImpliedBounds::Drop
