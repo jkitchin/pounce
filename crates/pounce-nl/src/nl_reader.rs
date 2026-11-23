@@ -1232,11 +1232,37 @@ fn append_extension(path: &Path, ext: &str) -> std::path::PathBuf {
 /// must never block a solve. The `.take(expected)` also drops AMPL's
 /// convention of appending the objective name after the constraint names
 /// in `.row`, keeping the result aligned 1:1 with `g`.
+///
+/// Read a line at a time into a vector sized once for `expected` names
+/// (gh#1248). Reading the whole file first held its text beside the names
+/// it was being split into, and collecting from `lines().take(..)`, which
+/// gives no size hint, grew the vector by doubling. The `.row`/`.col` pair
+/// was 0.51 GiB of the reader's 1.19 GiB on `Primal2_1000`.
+///
+/// Split exactly as [`str::lines`] does (`\n`, or `\r\n` with the `\r`
+/// dropped). A name line that is not valid UTF-8 makes the file unreadable,
+/// as before; bytes past the last name needed are no longer read at all.
 fn read_name_file(path: &Path, expected: usize) -> Vec<String> {
-    let Ok(txt) = std::fs::read_to_string(path) else {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
     };
-    let names: Vec<String> = txt.lines().take(expected).map(str::to_owned).collect();
+    let mut reader = std::io::BufReader::new(file);
+    let mut names = Vec::with_capacity(expected);
+    let mut line = String::new();
+    while names.len() < expected {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let l = line
+                    .strip_suffix('\n')
+                    .map_or(line.as_str(), |l| l.strip_suffix('\r').unwrap_or(l));
+                names.push(l.to_owned());
+            }
+            Err(_) => return Vec::new(),
+        }
+    }
     if names.len() == expected {
         names
     } else {
@@ -1443,6 +1469,11 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
                 if row >= m {
                     return Err(format!("J{row} out of range"));
                 }
+                // The header says how many entries follow: size the row once
+                // instead of letting `push` double it (gh#1248). Bounded by
+                // `n`, so a corrupt count cannot ask for an absurd buffer
+                // before the loop below reports the short segment.
+                con_linear[row].reserve_exact(nz.min(n));
                 for _ in 0..nz {
                     let line = p.next_data_line()?;
                     let (var, coef) = parse_var_coef(line)?;
@@ -1649,7 +1680,8 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
     // extra field included.
     let any_recognized =
         obj_nonlinear.quad().is_some() || con_nonlinear.iter().any(|b| b.quad().is_some());
-    let kept_src = any_recognized.then(|| Arc::clone(&src));
+    let kept_src = any_recognized
+        .then(|| keep_recognized_source(&src, &mut obj_nonlinear, &mut con_nonlinear));
 
     // A `d` entry was stored as `-dual` above, which is the engine's
     // multiplier only for a minimize model. A maximize model is solved as
@@ -1691,6 +1723,49 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
         complementarity,
         frontend_dag: false,
     })
+}
+
+/// The source text a parsed problem keeps for its recognized bodies.
+///
+/// Only the recognized bodies' own bytes are ever read again
+/// ([`NlProblem::con_expr`] re-parses `src[q.src]`), and the problem lives
+/// through the whole solve. So when those bytes are a small part of the
+/// file, they are copied into a buffer of their own, each body's range is
+/// remapped into it, and the full text is released. On a QP whose only
+/// recognized body is the objective this keeps the objective's lines instead
+/// of every `J`, `b` and `r` line too: the full text was 3.2 GB on
+/// Mittelmann's `Dual2_5000` (gh#1248).
+///
+/// When the recognized bytes are most of the file, as on a QCQP whose every
+/// row is quadratic, the copy would briefly double the text for little
+/// gain, so the full text is kept as before.
+///
+/// Every body's range starts at a line start and ends at the next line start
+/// (or the end of the text), so the copies keep their line structure. A
+/// newline is appended after a body that ends without one, so the next body
+/// cannot be read as part of its last line.
+fn keep_recognized_source(src: &Arc<String>, obj: &mut NlBody, cons: &mut [NlBody]) -> Arc<String> {
+    let kept: usize = std::iter::once(&*obj)
+        .chain(cons.iter())
+        .filter_map(|b| match b {
+            NlBody::Quad(q) => Some(q.src.len() + 1),
+            NlBody::Tree(_) => None,
+        })
+        .sum();
+    if kept > src.len() / 2 {
+        return Arc::clone(src);
+    }
+    let mut out = String::with_capacity(kept);
+    for body in std::iter::once(obj).chain(cons.iter_mut()) {
+        let NlBody::Quad(q) = body else { continue };
+        let start = out.len();
+        out.push_str(&src[q.src.clone()]);
+        q.src = start..out.len();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    Arc::new(out)
 }
 
 /// Parse a single `S`-segment. Format (Gay 2005, "Hooking Your Solver
@@ -2105,18 +2180,23 @@ impl DiscreteCensus {
 }
 
 struct Parser<'a> {
-    lines: Vec<&'a str>,
-    /// Start address and length of the source text. A recognized body
-    /// records the byte *range* it consumed so it can be re-parsed later
-    /// (see [`QuadBody::src`]), and every line borrows from this buffer, so
-    /// one subtraction per line recovers its offset.
+    /// The whole source text. Lines are found on demand, from [`Self::pos`].
     ///
-    /// Deliberately not a per-line offset table: on a 119 MB generated
-    /// `qcqp500-3c` the file is ~17 M lines, and a `Vec<usize>` beside the
-    /// existing `Vec<&str>` would add 136 MB to the peak this phase exists
-    /// to reduce.
-    txt_base: usize,
-    txt_len: usize,
+    /// This used to be a `Vec<&str>` of every line, collected up front. At
+    /// 16 bytes per line that table outweighed the text it indexed: a `.nl`
+    /// line averages about 8 bytes, so the table was twice the file. And
+    /// `collect` grows it by doubling, so the last reallocation held 1.5×
+    /// the final table on top of the text. On Mittelmann's `Dual2_5000`
+    /// (3.2 GB, about 400 M lines) the table alone reached ~13 GB during the
+    /// parse (gh#1248).
+    src: &'a str,
+    /// Byte offset of the next unread line in [`Self::src`].
+    ///
+    /// Always 0, `src.len()`, or one past a `\n`, i.e. the start of a line.
+    /// Saving and restoring it is how the parser rewinds (a peek, a failed
+    /// quadratic recognition, a Hollerith check). Because it is a byte
+    /// offset, it is also the offset a recognized body records as
+    /// [`QuadBody::src`].
     pos: usize,
     n: usize,
     m: usize,
@@ -2181,6 +2261,16 @@ struct QFrame {
     /// Read this frame's operands in monomial mode — no `+`/`-` may appear
     /// below it. See [`crate::nl_quadratic::is_expanded_quadratic`].
     mono: bool,
+    /// For a [`QOp::Sum`], the running sum of the operands read so far,
+    /// folded as each one completes; `None` for every other operator.
+    ///
+    /// Holding them on the value stack until the sum closes and folding
+    /// then gives the same result, since the fold is `acc = acc + p` from
+    /// `Quad2::default()`, front to back, either way. But it holds every
+    /// operand as a live `Quad2` at once, each with its own map node. On a
+    /// diagonal objective written as one `o54` of `n` squares that is
+    /// roughly 300 bytes per variable, 1 GB for 3.3 M terms (gh#1248).
+    sum: Option<Quad2>,
 }
 
 /// The operators the streaming recognizer accepts. One variant per shape
@@ -2201,11 +2291,8 @@ enum QOp {
 
 impl<'a> Parser<'a> {
     fn new(txt: &'a str, quad_enabled: bool) -> Self {
-        let lines: Vec<&str> = txt.lines().collect();
         Self {
-            lines,
-            txt_base: txt.as_ptr() as usize,
-            txt_len: txt.len(),
+            src: txt,
             pos: 0,
             n: 0,
             m: 0,
@@ -2229,23 +2316,26 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Byte offset in the source text of the start of line `line`, or the
-    /// end of the text when the cursor has run off it.
-    ///
-    /// Pointer arithmetic against the same allocation, never a deref: every
-    /// line in `lines` borrows from the source buffer, so the difference is
-    /// its offset.
-    fn byte_at(&self, line: usize) -> usize {
-        match self.lines.get(line) {
-            Some(l) => l.as_ptr() as usize - self.txt_base,
-            None => self.txt_len,
+    /// The line starting at [`Self::pos`], advancing past it; `None` at the
+    /// end of the text. Splits exactly as [`str::lines`] does: on `\n`, with
+    /// one `\r` stripped from a `\r\n` ending, and no empty line after a
+    /// final newline.
+    fn take_line(&mut self) -> Option<&'a str> {
+        let rest = self.src.get(self.pos..).filter(|r| !r.is_empty())?;
+        match rest.find('\n') {
+            Some(i) => {
+                self.pos += i + 1;
+                Some(rest[..i].strip_suffix('\r').unwrap_or(&rest[..i]))
+            }
+            None => {
+                self.pos = self.src.len();
+                Some(rest)
+            }
         }
     }
 
     fn next_line(&mut self) -> Option<&'a str> {
-        while self.pos < self.lines.len() {
-            let l = self.lines[self.pos];
-            self.pos += 1;
+        while let Some(l) = self.take_line() {
             // Strip comment after '#' for header / data lines (but
             // leave the segment-tag tokens untouched — they are the
             // first token on the line).
@@ -2265,9 +2355,7 @@ impl<'a> Parser<'a> {
     /// lines — 620k of them for a 20k-variable model — and returning an
     /// owned `String` put one heap allocation on every single one.
     fn next_data_line(&mut self) -> Result<&'a str, String> {
-        while self.pos < self.lines.len() {
-            let l = self.lines[self.pos];
-            self.pos += 1;
+        while let Some(l) = self.take_line() {
             let trimmed = strip_comment(l).trim();
             if !trimmed.is_empty() {
                 return Ok(trimmed);
@@ -2400,7 +2488,9 @@ impl<'a> Parser<'a> {
         let saved = self.pos;
         if let Some((form, vars, depth)) = self.parse_expr_quadratic() {
             if !form.quadratic().is_empty() {
-                let src = self.byte_at(saved)..self.byte_at(self.pos);
+                // `pos` is a byte offset at a line start, so the body's bytes
+                // are exactly `saved..pos`.
+                let src = saved..self.pos;
                 return Ok(NlBody::Quad(Box::new(QuadBody {
                     form,
                     vars,
@@ -2573,10 +2663,12 @@ impl<'a> Parser<'a> {
                         note_leaf(&frames, &mut depth, 0);
                         vals.push(Quad2::default());
                     } else {
+                        let sum = matches!(op, QOp::Sum(_)).then(Quad2::default);
                         frames.push(QFrame {
                             op,
                             remaining: arity,
                             mono: child_mono,
+                            sum,
                         });
                         continue;
                     }
@@ -2585,14 +2677,24 @@ impl<'a> Parser<'a> {
                 _ => return None,
             }
 
-            // A value has just been produced. Close every frame it completes.
+            // A value has just been produced, on top of `vals`, as an operand
+            // of `frames.last()`. Close every frame it completes.
             while let Some(f) = frames.last_mut() {
+                if let Some(acc) = f.sum.take() {
+                    // A sum folds each operand in as it completes, in file
+                    // order: the fold `apply_quad_op` would run at the
+                    // close, one step at a time.
+                    f.sum = Some(Quad2::add(acc, vals.pop()?));
+                }
                 f.remaining -= 1;
                 if f.remaining > 0 {
                     break;
                 }
                 let f = frames.pop()?;
-                let combined = apply_quad_op(f.op, &mut vals)?;
+                let combined = match f.sum {
+                    Some(acc) => acc,
+                    None => apply_quad_op(f.op, &mut vals)?,
+                };
                 vals.push(combined);
             }
             if frames.is_empty() {
@@ -10068,6 +10170,21 @@ S1 2 sens_init_constr
     }
 
     #[test]
+    fn read_name_file_handles_crlf_and_a_missing_final_newline() {
+        // gh#1248: the streaming read must split as `str::lines` did.
+        let dir = scratch_dir("crlf_names");
+        let p = dir.join("m.col");
+        std::fs::write(&p, "alpha\r\nbeta\r\ngamma").unwrap();
+        assert_eq!(read_name_file(&p, 3), vec!["alpha", "beta", "gamma"]);
+        let bad = dir.join("bad.col");
+        std::fs::write(&bad, b"ok\n\xff\xfe\n").unwrap();
+        assert!(
+            read_name_file(&bad, 2).is_empty(),
+            "invalid UTF-8 in a name"
+        );
+    }
+
+    #[test]
     fn read_name_file_empty_on_short_or_missing() {
         let dir = scratch_dir("short");
         let short = dir.join("m.col");
@@ -12244,5 +12361,171 @@ G0 3
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod issue1248_parse_memory_tests {
+    //! gh#1248: the byte cursor that replaced the up-front line table, the
+    //! running fold of an `o54` sum, and the compaction of the source a
+    //! problem keeps for its recognized bodies. Each has a branch the
+    //! repository's `.nl` corpus does not necessarily reach, so each branch
+    //! is reached here on purpose.
+    use super::{Expr, NlBody, parse_nl_text_with_quadratic};
+
+    /// `.nl` text for a QP with `m` linear rows over `n` variables and the
+    /// objective `Σ 0.5·x_j²` written as one `o54` of `n` terms. With
+    /// `quad_rows`, every row instead carries a sum of six squares, so the
+    /// recognized bytes are most of the file.
+    fn qp(n: usize, m: usize, quad_rows: bool, objective_last: bool) -> String {
+        let mut l = vec![
+            "g3 1 1 0".to_string(),
+            format!(" {n} {m} 1 0 {m}"),
+            format!(" {} 1", if quad_rows { m } else { 0 }),
+            " 0 0".into(),
+            format!(" {n} {n} {n}"),
+            " 0 0 0 1".into(),
+            " 0 0 0 0 0".into(),
+            format!(" {m} {n}"),
+            " 0 0".into(),
+            " 0 0 0 0 0".into(),
+        ];
+        let objective = |l: &mut Vec<String>| {
+            l.push("O0 0".into());
+            l.push("o54".into());
+            l.push(n.to_string());
+            for j in 0..n {
+                l.extend([
+                    "o2".into(),
+                    "n0.5".into(),
+                    "o5".into(),
+                    format!("v{j}"),
+                    "n2".into(),
+                ]);
+            }
+        };
+        if !objective_last {
+            objective(&mut l);
+        }
+        for i in 0..m {
+            l.push(format!("C{i}"));
+            if quad_rows {
+                // Six squares, so the recognized rows outweigh the `r`, `b`,
+                // `k` and `J` lines and the whole-text branch is taken.
+                l.extend(["o54".into(), "6".into()]);
+                for t in 0..6 {
+                    l.extend(["o5".into(), format!("v{}", (i + t) % n), "n2".into()]);
+                }
+            } else {
+                l.push("n0".into());
+            }
+        }
+        l.push("r".into());
+        l.extend((0..m).map(|i| format!("4 {}", i + 1)));
+        l.push("b".into());
+        l.extend((0..n).map(|_| "2 0".to_string()));
+        l.push(format!("k{}", n - 1));
+        let mut cum = 0;
+        for j in 0..n - 1 {
+            cum += usize::from(j < m);
+            l.push(cum.to_string());
+        }
+        for i in 0..m {
+            l.push(format!("J{i} 1"));
+            l.push(format!("{} 1", i % n));
+        }
+        if objective_last {
+            objective(&mut l);
+        }
+        // No trailing newline: the last body (the objective, when
+        // `objective_last`) then ends at the end of the text.
+        l.join("\n")
+    }
+
+    fn same_bodies(a: &super::NlProblem, b: &super::NlProblem) {
+        assert_eq!(format!("{:?}", a.obj_expr()), format!("{:?}", b.obj_expr()));
+        for k in 0..a.m {
+            assert_eq!(
+                format!("{:?}", a.con_expr(k)),
+                format!("{:?}", b.con_expr(k)),
+                "row {k}"
+            );
+        }
+        assert_eq!(a.con_linear, b.con_linear);
+        assert_eq!(
+            (&a.g_l, &a.g_u, &a.x_l, &a.x_u),
+            (&b.g_l, &b.g_u, &b.x_l, &b.x_u)
+        );
+    }
+
+    /// Compaction branch: only the objective is recognized and its bytes
+    /// are a small part of the file, so the kept source is just those
+    /// bytes, and re-parsing from it gives the tree the plain parse builds.
+    /// Run with the objective first and with it last and unterminated, the
+    /// case the appended newline exists for.
+    #[test]
+    fn a_small_recognized_body_keeps_only_its_own_bytes() {
+        for objective_last in [false, true] {
+            let txt = qp(40, 400, false, objective_last);
+            let q = parse_nl_text_with_quadratic(&txt, true).unwrap();
+            let t = parse_nl_text_with_quadratic(&txt, false).unwrap();
+            let kept = q.src.as_ref().expect("the objective was recognized");
+            assert!(matches!(q.obj_nonlinear, NlBody::Quad(_)));
+            assert!(
+                kept.len() * 4 < txt.len(),
+                "kept {} of {} bytes: the source was not compacted",
+                kept.len(),
+                txt.len()
+            );
+            same_bodies(&q, &t);
+        }
+    }
+
+    /// Keep-whole branch: every row is recognized, so copying the bodies
+    /// out would cost about as much as the text, and the text is kept as is.
+    #[test]
+    fn mostly_recognized_bodies_keep_the_whole_text() {
+        let txt = qp(4, 400, true, false);
+        let q = parse_nl_text_with_quadratic(&txt, true).unwrap();
+        let t = parse_nl_text_with_quadratic(&txt, false).unwrap();
+        assert!(q.con_nonlinear.iter().all(|b| matches!(b, NlBody::Quad(_))));
+        assert_eq!(q.src.as_ref().map(|s| s.len()), Some(txt.len()));
+        same_bodies(&q, &t);
+    }
+
+    /// The byte cursor splits lines as `str::lines` did: `\r\n` endings, a
+    /// final line with no newline, and blank lines all parse to the same
+    /// problem as the plain `\n` text, recognized bodies included.
+    #[test]
+    fn crlf_and_blank_lines_parse_like_plain_newlines() {
+        let plain = qp(10, 30, false, true);
+        let crlf = plain.replace('\n', "\r\n");
+        let blank = plain.replace("\nr\n", "\n\n\nr\n");
+        let p = parse_nl_text_with_quadratic(&plain, true).unwrap();
+        for (what, txt) in [("crlf", &crlf), ("blank", &blank)] {
+            let o =
+                parse_nl_text_with_quadratic(txt, true).unwrap_or_else(|e| panic!("{what}: {e}"));
+            same_bodies(&o, &p);
+        }
+    }
+
+    /// The `o54` running fold: the recognized form of a long sum is the one
+    /// the tree walk computes, including when terms repeat (where the order
+    /// of the additions is observable) and when the sum sits under a
+    /// negation, so the fold closes into an enclosing frame.
+    #[test]
+    fn a_running_sum_fold_matches_the_tree_walk() {
+        use crate::nl_quadratic::recognize_expr;
+        let txt = "g3 1 1 0\n 3 0 1 0 0\n 0 1\n 0 0\n 0 3 0\n 0 0 0 1\n 0 0 0 0 0\n 0 3\n 0 0\n 0 0 0 0 0\n\
+                   O0 0\no16\no54\n5\no2\nn0.1\no5\nv0\nn2\no2\nn0.2\no5\nv0\nn2\no2\no2\nn0.7\nv1\nv2\nn3\no5\nv2\nn2\n\
+                   b\n3\n3\n3\nk2\n0\n0\n";
+        let q = parse_nl_text_with_quadratic(txt, true).unwrap();
+        let t = parse_nl_text_with_quadratic(txt, false).unwrap();
+        let NlBody::Quad(body) = &q.obj_nonlinear else {
+            panic!("the objective should be recognized")
+        };
+        let want = recognize_expr(&t.obj_expr()).expect("tree walk");
+        assert_eq!(format!("{:?}", body.form), format!("{want:?}"));
+        assert!(matches!(*t.obj_expr(), Expr::Unary(..)));
     }
 }

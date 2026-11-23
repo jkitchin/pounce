@@ -231,6 +231,7 @@ fn every_convex_knob_is_registered_core_side() {
         "qp_hsde",
         "qp_equilibrate",
         "qp_crossover",
+        "qp_kkt_row_elim",
         "qp_presolve",
         "qp_certificate",
     ] {

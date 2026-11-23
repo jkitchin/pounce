@@ -38,7 +38,8 @@ use crate::cones::{CompositeCone, Cone};
 use crate::correctors;
 use crate::debug::{ConvexDebugState, fire};
 use crate::ipm::{
-    QpOptions, build_factorization, build_rhs, detect_infeasibility_cone, dot, inf_norm, split_step,
+    KktStructure, QpOptions, build_factorization, build_rhs, detect_infeasibility_cone, dot,
+    inf_norm, split_step,
 };
 use crate::qp::{QpIterate, QpProblem, QpSolution, QpStatus};
 use pounce_common::debug::{Checkpoint, DebugAction, DebugHook};
@@ -445,25 +446,6 @@ fn ray_step(v: f64, dv: f64, tau: f64) -> f64 {
     }
 }
 
-/// Symmetric matvec `y ← M x` for the lower-triangle KKT triplets
-/// (`airn`/`ajcn` are 1-based with `row ≥ col`). Each strictly-lower entry
-/// contributes to both `y[i]` and `y[j]`; the diagonal once. Used to form the
-/// residual `rhs − M u` that drives iterative refinement.
-fn kkt_matvec(airn: &[Index], ajcn: &[Index], vals: &[f64], x: &[f64], y: &mut [f64]) {
-    for v in y.iter_mut() {
-        *v = 0.0;
-    }
-    for k in 0..vals.len() {
-        let i = (airn[k] - 1) as usize;
-        let j = (ajcn[k] - 1) as usize;
-        let v = vals[k];
-        y[i] += v * x[j];
-        if i != j {
-            y[j] += v * x[i];
-        }
-    }
-}
-
 /// Solve `M u = rhs` against the cached factor (overwriting `rhs` with `u`),
 /// applying iterative refinement against the assembled KKT triplets
 /// `(airn, ajcn, vals)`. Recovers digits lost to factorization round-off on
@@ -476,11 +458,15 @@ fn kkt_matvec(airn: &[Index], ajcn: &[Index], vals: &[f64], x: &[f64], y: &mut [
 /// `b`/`r`/`d` are caller-owned scratch of length `dim`. Returns the final
 /// relative residual `‖rhs − M u‖∞ / (1 + ‖rhs‖∞)`, which the caller uses as
 /// the dynamic-regularization trigger.
+///
+/// `kkt` carries out the solve and the residual product: when it eliminated
+/// rows from the factored matrix ([`KktStructure::n_eliminated`]), `fact` is
+/// the reduced factor, every vector here is still full-length, and the
+/// residual is still `rhs − K u` for the **full** `K` (gh#1243).
 #[allow(clippy::too_many_arguments)]
 fn solve_refined(
     fact: &mut Factorization,
-    airn: &[Index],
-    ajcn: &[Index],
+    kkt: &KktStructure,
     vals: &[f64],
     rhs: &mut [f64],
     b: &mut [f64],
@@ -488,11 +474,11 @@ fn solve_refined(
     d: &mut [f64],
 ) -> Result<f64, FactorizationError> {
     b.copy_from_slice(rhs);
-    fact.solve_one(rhs)?;
+    kkt.solve(fact, vals, rhs)?;
     let bnorm = 1.0 + inf_norm(b);
     let mut res = f64::INFINITY;
     for _ in 0..IR_MAX_PASSES {
-        kkt_matvec(airn, ajcn, vals, rhs, r);
+        kkt.matvec(vals, rhs, r);
         for k in 0..r.len() {
             r[k] = b[k] - r[k];
         }
@@ -507,7 +493,7 @@ fn solve_refined(
         }
         res = new_res;
         d.copy_from_slice(r);
-        fact.solve_one(d)?;
+        kkt.solve(fact, vals, d)?;
         for k in 0..rhs.len() {
             rhs[k] += d[k];
         }
@@ -1179,7 +1165,10 @@ where
         // Correct KKT inertia has one negative eigenvalue per equality and per
         // inequality row; the SOC auxiliary variables contribute positives
         // only. Too few negatives ⇒ the factor is an indefinite saddle.
-        let expected_neg = (m_eq + m_ineq) as Index;
+        // Rows eliminated from the factored matrix each take one negative
+        // eigenvalue with them (Haynsworth; see `RowElim`), so the reduced
+        // factor is held to the full count less those (gh#1243).
+        let expected_neg = (m_eq + m_ineq - kkt.n_eliminated()) as Index;
         let mut tries = 0usize;
         let mut factored = false;
         let mut out_of_time = false;
@@ -1204,7 +1193,7 @@ where
             let budget = tries < INERTIA_MAX_TRIES
                 && (delta_c < DELTA_C_MAX || reg_eff < DYN_REG_MAX || delta_w < DELTA_W_MAX);
 
-            match fact.refactor(&kkt_vals) {
+            match kkt.refactor(&mut fact, &mut kkt_vals) {
                 Err(_) => {
                     // Singular factorization: rank-deficient KKT. Escalate.
                     if budget {
@@ -1258,8 +1247,7 @@ where
 
             build_rhs(&prob.c, &neg_b, &neg_h, &zeros_m, n, m_eq, m_ineq, &mut rhs);
             let res_p = match solve_refined(
-                &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r,
-                &mut ir_d,
+                &mut fact, &kkt, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
             ) {
                 Ok(res) => res,
                 Err(_) => break, // factored stays false → breakdown below
@@ -1313,7 +1301,7 @@ where
         cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
         build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
         if solve_refined(
-            &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
+            &mut fact, &kkt, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
         )
         .is_err()
         {
@@ -1368,8 +1356,7 @@ where
             cone.rhs_comp_term(&s, &z, &r_c, &mut comp);
             build_rhs(&rho_x, &rho_y, &rho_z, &comp, n, m_eq, m_ineq, &mut rhs);
             if solve_refined(
-                &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r,
-                &mut ir_d,
+                &mut fact, &kkt, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
             )
             .is_err()
             {
@@ -1464,8 +1451,7 @@ where
                     &zeros_n, &zeros_meq, &zeros_m, &comp, n, m_eq, m_ineq, &mut rhs,
                 );
                 if solve_refined(
-                    &mut fact, &kkt.airn, &kkt.ajcn, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r,
-                    &mut ir_d,
+                    &mut fact, &kkt, &kkt_vals, &mut rhs, &mut ir_b, &mut ir_r, &mut ir_d,
                 )
                 .is_err()
                 {

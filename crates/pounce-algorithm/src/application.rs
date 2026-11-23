@@ -3336,6 +3336,7 @@ impl IpoptApplication {
             "qp_hsde",
             "qp_equilibrate",
             "qp_crossover",
+            "qp_kkt_row_elim",
             "qp_certificate",
         ];
         let name = CONVEX_ONLY.iter().find(|name| {

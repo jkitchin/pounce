@@ -123,6 +123,10 @@ impl QpOptions {
         if explicitly_set {
             parsed.crossover = options.get_bool_value("qp_crossover", "")?.0;
         }
+        let (_, explicitly_set) = options.get_string_value("qp_kkt_row_elim", "")?;
+        if explicitly_set {
+            parsed.kkt_row_elim = options.get_bool_value("qp_kkt_row_elim", "")?.0;
+        }
 
         Ok(parsed)
     }
@@ -199,6 +203,7 @@ mod tests {
         assert_eq!(parsed.equilibrate, defaults.equilibrate);
         assert_eq!(parsed.crossover, defaults.crossover);
         assert_eq!(parsed.gondzio_max_corr, defaults.gondzio_max_corr);
+        assert_eq!(parsed.kkt_row_elim, defaults.kkt_row_elim);
     }
 
     #[test]
@@ -215,6 +220,7 @@ mod tests {
         set_str(&mut options, "qp_hsde", "no");
         set_str(&mut options, "qp_equilibrate", "no");
         set_str(&mut options, "qp_crossover", "yes");
+        set_str(&mut options, "qp_kkt_row_elim", "no");
 
         let parsed = QpOptions::try_from_options_list(&options).unwrap();
         assert_eq!(parsed.max_iter, 0);
@@ -228,6 +234,7 @@ mod tests {
         assert!(!parsed.use_hsde);
         assert!(!parsed.equilibrate);
         assert!(parsed.crossover);
+        assert!(!parsed.kkt_row_elim);
     }
 
     #[test]

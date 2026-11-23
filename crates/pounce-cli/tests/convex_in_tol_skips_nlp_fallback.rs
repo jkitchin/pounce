@@ -25,7 +25,19 @@
 //! to the gap tolerance (the `traininstance6` fix): it declines only in a
 //! narrow window (`1.5e-13`–`6e-13`), and every point there is far inside
 //! `tol` on the relative ruler. Re-measure the window if the convex
-//! trajectory moves. The absolute band, the status arm and the `σ` arm are
+//! trajectory moves.
+//!
+//! It moved in gh#1243, and the window closed. With bound rows folded onto
+//! the KKT diagonal (`qp_kkt_row_elim`, default `yes`), TUFF converges
+//! `Optimal`, at a KKT error of `8e-15` at `tol=3e-13` and below `1e-16` for
+//! every `tol` down to `1e-15`. So it never declines, and the skip is
+//! unreachable on it. No other fixture declines with a comfortable margin
+//! either: ETAMACRO skips only at `tol=2e-12`, with a relative error of
+//! `1.53e-12`, or after the 200-iteration cap. The gate under test is the
+//! CLI's routing decision, which does not depend on how the KKT is
+//! factored. So the skip test pins `qp_kkt_row_elim=no`, which reproduces the
+//! pre-gh#1243 trajectory exactly (empty fixture sweep), and keeps the
+//! window measured above. The absolute band, the status arm and the `σ` arm are
 //! pinned by the unit tests in `main.rs` (`convex_in_tol_tests`).
 
 use std::path::{Path, PathBuf};
@@ -149,7 +161,9 @@ fn an_out_of_tol_convex_answer_still_falls_back() {
 #[test]
 fn an_in_tol_convex_answer_skips_the_fallback() {
     for leg in [&[][..], &[LBFGS][..]] {
-        let mut args = vec!["tol=3e-13", "relative_gap_tol=0"];
+        // The full augmented system: with bound rows folded (gh#1243) TUFF
+        // converges `Optimal` and never reaches the skip. See the module docs.
+        let mut args = vec!["tol=3e-13", "relative_gap_tol=0", "qp_kkt_row_elim=no"];
         args.extend_from_slice(leg);
         let r = run("lp_tuff.nl", &args);
         assert!(

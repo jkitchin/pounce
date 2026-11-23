@@ -106,7 +106,21 @@ def test_qcqp_with_linear_and_quadratic_constraints():
     )
 
     assert _routed_to(res) == "socp"
-    np.testing.assert_allclose(res.x, [0.0, 1.0], atol=1e-5)
+    # What the problem determines at the default tol=1e-8: the objective and
+    # x1 to tol, but x0 only to sqrt(2·tol). On the top of the ball
+    # x0 = sqrt(2·(1 − x1)), so a point whose objective is within ε of −1 can
+    # sit at x0 ≈ sqrt(2ε) — feasible and optimal to tol. gh#1243 measured
+    # it: folding the bound rows onto the KKT diagonal leaves the iterates the
+    # same to ~9 digits, but the solve stops at iteration 20 at x0 = 1.4e-5
+    # (objective gap 1.4e-10, x0² + x1² = 1 − 9e-11) instead of iteration 30
+    # at x0 = 3e-8. The difference is the noise in this model's
+    # primal-residual reading, not the point. The former `atol=1e-5` on x0
+    # was tighter than the model allows.
+    tol = 1e-8
+    assert res.fun == pytest.approx(-1.0, abs=tol)
+    assert res.x[1] == pytest.approx(1.0, abs=tol)
+    assert -tol <= res.x[0] <= np.sqrt(2.0 * tol)
+    assert res.x[0] ** 2 + res.x[1] ** 2 <= 1.0 + tol
 
 
 def test_nonconvex_quadratic_constraint_stays_on_nlp():
