@@ -58,7 +58,6 @@ changes.
   quadratic recognizer still matches the tree walk bit for bit on every
   `.nl` in the repository.
 
-
 - **The convex QP path no longer keeps duplicate copies of the problem and
   of the KKT pattern alive through the first factorization (gh#1243).**
   * Presolve's fixpoint chain held every intermediate problem twice, and
