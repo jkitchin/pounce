@@ -3883,6 +3883,13 @@ pub struct NlTnlp {
     /// case everything below behaves bit for bit as it did before this
     /// existed.
     quad: QuadraticStructure,
+    /// Rows whose `con_linear` entries live in `quad` instead (see
+    /// [`fold_frontend_linear_row`]): the evaluators skip them there, through
+    /// [`row_linear`], so they are not counted twice. Empty when no row is
+    /// folded, which is every parsed `.nl` model. `prob.con_linear` itself is
+    /// left whole for the consumers that want the row as written -- FBBT,
+    /// presolve, diagnostics.
+    lin_folded: Vec<bool>,
     /// Which entries of `h_irow`/`h_jcol` some *tape* can contribute to.
     /// Empty when `quad` is — the pattern is then all tape. The coloring is
     /// built over this subset alone, which is what stops one dense quadratic
@@ -5224,6 +5231,66 @@ impl HessColorIndex {
     }
 }
 
+/// Row `i`'s linear segment as the evaluators should add it: empty when the
+/// row was folded into the constant-structure forms, whole otherwise.
+#[inline]
+fn row_linear<'a>(
+    con_linear: &'a [Vec<(usize, Number)>],
+    lin_folded: &[bool],
+    i: usize,
+) -> &'a [(usize, Number)] {
+    if lin_folded.get(i).copied().unwrap_or(false) {
+        &[]
+    } else {
+        &con_linear[i]
+    }
+}
+
+/// Give a frontend row's linear segment the read-out the same row gets as a
+/// tree, and return the form's id (discopt#2293).
+///
+/// `build_nl_problem(..., con_linear=...)` lets a frontend hand over a row's
+/// linear part as coefficients rather than as `Var`/`c*Var` nodes. Passed as
+/// a tree, an affine row is a flat sum of monomials, which the gate in
+/// [`NlBody::admitted_quad_form`] admits, so it is evaluated from a
+/// constant-structure form: linear terms ascending by variable, summed with
+/// compensation (gh#702), plus the constant. Evaluated as a `.nl` `J`
+/// segment it would be summed naively in the order given. Both are correct,
+/// but they round differently, and the way a row is *passed* should not
+/// change what it evaluates to. So a row whose expression is a constant and
+/// whose linear segment came from a frontend is folded here into exactly the
+/// form the recognizer would have built from its tree.
+///
+/// Only for `frontend_dag` problems: a parsed model's `J` segment keeps the
+/// naive sum it has always had. Only for a constant expression: a row with a
+/// nonlinear part is tree plus segment, as it would be from a `.nl` file.
+/// A repeated column is merged in the order given; a zero coefficient is
+/// dropped from the form like any other (`push_linear`).
+fn fold_frontend_linear_row(
+    quad: &mut QuadraticStructure,
+    prob: &NlProblem,
+    k: usize,
+) -> Option<u32> {
+    if !prob.frontend_dag || prob.con_linear[k].is_empty() {
+        return None;
+    }
+    let c = match prob.con_nonlinear[k].tree()? {
+        Expr::Const(c) => *c,
+        _ => return None,
+    };
+    let mut lin = prob.con_linear[k].clone();
+    lin.sort_by_key(|&(v, _)| v); // stable: repeats merge in the order given
+    let mut merged: Vec<(usize, Number)> = Vec::with_capacity(lin.len());
+    for (v, coef) in lin {
+        match merged.last_mut() {
+            Some((w, acc)) if *w == v => *acc += coef,
+            _ => merged.push((v, coef)),
+        }
+    }
+    // `0.0 +` normalizes `-0.0`, as `quad_form_readout` does.
+    Some(quad.push_form(&BTreeMap::new(), &merged, 0.0 + c))
+}
+
 impl NlTnlp {
     /// Build the TNLP, panicking if AMPL external-function resolution fails.
     ///
@@ -5338,6 +5405,7 @@ impl NlTnlp {
         // quadratic form would touch every model in the corpus to save
         // nothing.
         let mut quad = QuadraticStructure::new(prob.m);
+        let mut lin_folded: Vec<bool> = Vec::new();
         if use_quadratic {
             // `is_expanded_quadratic` is the accuracy gate, not an
             // optimization: it admits only forms whose read-out repeats the
@@ -5359,7 +5427,16 @@ impl NlTnlp {
                 quad.assign_objective(f);
             }
             for k in 0..prob.m {
-                if let Some(f) = push_body_form(&mut quad, &prob.con_nonlinear[k]) {
+                // The fold first: its constant expression on its own is a
+                // (constant-only) form `push_body_form` would admit, which
+                // would leave the linear segment outside the form.
+                if let Some(f) = fold_frontend_linear_row(&mut quad, &prob, k) {
+                    quad.assign_row(k, f);
+                    if lin_folded.is_empty() {
+                        lin_folded = vec![false; prob.m];
+                    }
+                    lin_folded[k] = true;
+                } else if let Some(f) = push_body_form(&mut quad, &prob.con_nonlinear[k]) {
                     quad.assign_row(k, f);
                 }
             }
@@ -5558,7 +5635,11 @@ impl NlTnlp {
             if let Some(f) = quad.row_form(k) {
                 cols.extend(quad.gradient_support(f).iter().map(|&v| v as usize));
             }
-            cols.extend(prob.con_linear[k].iter().map(|(v, _)| *v));
+            cols.extend(
+                row_linear(&prob.con_linear, &lin_folded, k)
+                    .iter()
+                    .map(|(v, _)| *v),
+            );
             cols.sort_unstable();
             cols.dedup();
             jac_nnz += cols.len();
@@ -5801,6 +5882,7 @@ impl NlTnlp {
             con_flat,
             con_hybrid,
             quad,
+            lin_folded,
             h_tape_mask,
             h_irow,
             h_jcol,
@@ -6735,6 +6817,7 @@ impl NlTnlp {
             prob,
             con_tapes,
             quad,
+            lin_folded,
             jac_cols,
             jac_row_off,
             jac_scratch_pool,
@@ -6776,7 +6859,7 @@ impl NlTnlp {
                     if let Some(f) = quad.row_form(i) {
                         quad.add_gradient(f, xs, 1.0, row_grad);
                     }
-                    for &(v, c) in &prob.con_linear[i] {
+                    for &(v, c) in row_linear(&prob.con_linear, lin_folded, i) {
                         row_grad[v] += c;
                     }
                     for &j in jac_cols.row(i) {
@@ -7086,6 +7169,7 @@ impl TNLP for NlTnlp {
         // `Tape::eval_into`.
         let m = self.prob.m;
         let con_linear = &self.prob.con_linear;
+        let lin_folded = &self.lin_folded;
         let quad = &self.quad;
         // The hybrid sweep is serial. Where the flat tapes are kept as well
         // (the Jacobian gate is off) and would be walked in parallel, they
@@ -7116,7 +7200,10 @@ impl TNLP for NlTnlp {
                 if let Some(f) = quad.row_form(i) {
                     nl += quad.value(f, x);
                 }
-                let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
+                let lin: Number = row_linear(con_linear, lin_folded, i)
+                    .iter()
+                    .map(|(j, c)| c * x[*j])
+                    .sum();
                 g[i] = nl + lin;
             }
             return true;
@@ -7140,7 +7227,10 @@ impl TNLP for NlTnlp {
                     if let Some(f) = quad.row_form(i) {
                         nl += quad.value(f, x);
                     }
-                    let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
+                    let lin: Number = row_linear(con_linear, lin_folded, i)
+                        .iter()
+                        .map(|(j, c)| c * x[*j])
+                        .sum();
                     *gi = nl + lin;
                 },
             );
@@ -7158,7 +7248,10 @@ impl TNLP for NlTnlp {
             if let Some(f) = quad.row_form(i) {
                 nl += quad.value(f, x);
             }
-            let lin: Number = con_linear[i].iter().map(|(j, c)| c * x[*j]).sum();
+            let lin: Number = row_linear(con_linear, lin_folded, i)
+                .iter()
+                .map(|(j, c)| c * x[*j])
+                .sum();
             g[i] = nl + lin;
         }
         true
@@ -7205,6 +7298,7 @@ impl TNLP for NlTnlp {
                     con_flat,
                     con_hybrid,
                     quad,
+                    lin_folded,
                     jac_cols,
                     scratch_row_grad,
                     vals_scratch,
@@ -7248,7 +7342,7 @@ impl TNLP for NlTnlp {
                         if let Some(f) = quad.row_form(i) {
                             quad.add_gradient(f, xs, 1.0, scratch_row_grad);
                         }
-                        for &(v, c) in &prob.con_linear[i] {
+                        for &(v, c) in row_linear(&prob.con_linear, lin_folded, i) {
                             scratch_row_grad[v] += c;
                         }
                         for &j in jac_cols.row(i) {
@@ -7276,7 +7370,7 @@ impl TNLP for NlTnlp {
                     if let Some(f) = quad.row_form(i) {
                         quad.add_gradient(f, xs, 1.0, scratch_row_grad);
                     }
-                    for &(v, c) in &prob.con_linear[i] {
+                    for &(v, c) in row_linear(&prob.con_linear, lin_folded, i) {
                         scratch_row_grad[v] += c;
                     }
                     for &j in jac_cols.row(i) {
