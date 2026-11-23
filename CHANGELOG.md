@@ -38,6 +38,26 @@ changes.
   * Details and measurements: `dev-notes/kkt-bound-row-elimination.md`.
 
 ### Fixed
+- **The `.nl` reader uses much less memory on large models (gh#1248).**
+  On a Dual2_5000-shaped QP at one tenth scale (3.3 M variables, 3 M rows,
+  12 M Jacobian nonzeros, a 408 MB file), the process peak while parsing
+  drops from 2.60 to 1.25 GB, and the parse from 7.3 to 5.9 s. What the
+  parsed problem keeps for the rest of the solve drops from 1.15 to
+  0.82 GB. Four changes:
+  * The reader no longer builds a table of every line before parsing. At
+    16 bytes per line it outweighed the file itself, and building it by
+    doubling briefly needed half as much again.
+  * A long `o54` sum in a quadratic body is folded as each term is read,
+    instead of after holding every term at once (~1 GB for 3.3 M terms).
+  * A model whose recognized quadratic bodies are a small part of the file
+    keeps only those bodies' text, not the whole file.
+  * Jacobian rows and `.col`/`.row` names are allocated at their exact size,
+    and name files are read a line at a time.
+
+  Parsed problems are unchanged: the fixture sweep is identical, and the
+  quadratic recognizer still matches the tree walk bit for bit on every
+  `.nl` in the repository.
+
 - **The convex QP path no longer keeps duplicate copies of the problem and
   of the KKT pattern alive through the first factorization (gh#1243).**
   * Presolve's fixpoint chain held every intermediate problem twice, and
