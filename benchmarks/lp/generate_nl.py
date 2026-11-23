@@ -23,8 +23,8 @@ deliberately not a stress test (the hard, multi-million-row Mittelmann
 Both formats yield standard MPS, which is converted to ``.nl`` with
 ``mps_to_nl.convert`` (HiGHS ``highspy`` parse -> Pyomo -> ASL ``.nl`` writer
 -- the proven converter copied verbatim from ``benchmarks/lpopt/``). The
-converter preserves the objective constant/offset so the emitted objective
-matches the published optimum.
+converter preserves the objective constant/offset (``-rhs`` of the objective
+row, the MPS / HiGHS convention), so the ``.nl`` objective includes it.
 
 Convention (matches MPS and HiGHS):
 
@@ -35,6 +35,13 @@ For every converted NETLIB instance we cross-check the solved objective
 against the published optimum from the netlib readme table (parsed and
 embedded below) when ``--validate`` is given; ``generate_nl.py`` prints the
 relative error so a regression in the conversion is caught immediately.
+
+The readme table reports ``c' x`` *without* the objective constant. Only
+``e226`` has one (offset +7.113: published -18.7519, with the constant
+-11.6389), so the check compares against ``published + offset``, with the
+offset read off the MPS at conversion time. A conversion that dropped the
+constant would therefore still be flagged, rather than e226 being flagged
+on every run for a known non-bug.
 
 Usage:
     python3 generate_nl.py                 # fetch + convert all (under cap)
@@ -178,13 +185,21 @@ def expand_emps(emps_bin, compressed_path, mps_path):
         subprocess.run([emps_bin, compressed_path], check=True, stdout=out)
 
 
+# Objective constant of each converted instance, read off its MPS by
+# ``dims`` (``-rhs`` of the objective row). The NETLIB readme optima exclude
+# it, so ``--validate`` adds it back before comparing.
+OBJ_OFFSETS: dict[str, float] = {}
+
+
 def dims(mps_path):
+    """Return (n, m, nnz, objective offset) for a standard-MPS file."""
     import highspy
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     h.readModel(mps_path)
     lp = h.getModel().lp_
-    return lp.num_col_, lp.num_row_, len(list(lp.a_matrix_.value_))
+    return (lp.num_col_, lp.num_row_, len(list(lp.a_matrix_.value_)),
+            float(lp.offset_))
 
 
 def solve_objective(nl_path, timeout=120):
@@ -219,7 +234,8 @@ def solve_objective(nl_path, timeout=120):
 def convert_one(name, mps_path, rows):
     """Size-screen and convert a standard-MPS file to nl/<name>.nl."""
     nl_path = os.path.join(NL_DIR, f"{name}.nl")
-    n, m, nnz = dims(mps_path)
+    n, m, nnz, offset = dims(mps_path)
+    OBJ_OFFSETS[name] = offset
     if n > MAX_VARS or m > MAX_CONS or nnz > MAX_NNZ:
         print(f"DEFER {name}: n={n} m={m} nnz={nnz} exceeds cap "
               f"({MAX_VARS}/{MAX_CONS}/{MAX_NNZ})")
@@ -359,20 +375,25 @@ def main():
 
     # optional published-optima cross-check (NETLIB only)
     if args.validate and netlib_done:
+        # `expected` = published (which omits the objective constant) plus
+        # the constant the MPS declares; see the module docstring.
         print("\n=== NETLIB validation (pounce vs published optimum) ===")
-        print(f"{'instance':16} {'published':>18} {'pounce':>18} "
-              f"{'rel.err':>10}  status")
+        print(f"{'instance':16} {'published':>18} {'offset':>10} "
+              f"{'expected':>18} {'pounce':>18} {'rel.err':>10}  status")
         for name in netlib_done:
             ref = NETLIB_OPTIMA.get(name)
+            offset = OBJ_OFFSETS.get(name, 0.0)
+            expected = None if ref is None else ref + offset
             nl_path = os.path.join(NL_DIR, f"{name}.nl")
             status, obj = solve_objective(nl_path)
-            if ref is None or obj is None:
+            if expected is None or obj is None:
                 rel = float("nan")
             else:
-                denom = max(abs(ref), 1.0)
-                rel = abs(obj - ref) / denom
+                denom = max(abs(expected), 1.0)
+                rel = abs(obj - expected) / denom
             flag = "" if (rel == rel and rel < 1e-4) else "  <-- CHECK"
-            print(f"{name:16} {ref!r:>18} "
+            print(f"{name:16} {ref!r:>18} {offset:>10.6g} "
+                  f"{(f'{expected:.10e}' if expected is not None else 'n/a'):>18} "
                   f"{(f'{obj:.10e}' if obj is not None else 'n/a'):>18} "
                   f"{rel:>10.2e}  {status}{flag}")
 

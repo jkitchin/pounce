@@ -109,6 +109,11 @@ published value. Result of the full sweep:
     −18.7519 + 7.113 = −11.6389. HiGHS solving the same MPS returns the
     identical −11.6389, i.e. POUNCE and HiGHS agree; the readme table
     value omits the constant. The conversion correctly *includes* it.
+    `--validate` therefore compares against *published + offset*, with
+    the offset read off each MPS at conversion time, so `e226` passes
+    (rel.err 1.5e−09) while a conversion that dropped the constant would
+    still be flagged (rel.err 0.61 on `e226`). `e226` is the only NETLIB
+    instance in the table with a nonzero objective constant.
   - `agg`, `agg2`, `degen3` — POUNCE terminates `Solved To Acceptable
     Level` (not full convergence) on these harder/degenerate LPs, so the
     objective is slightly off; not a data error.
