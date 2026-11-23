@@ -330,6 +330,7 @@ Beyond the shared `tol` and `max_iter`, the convex engine takes these:
 | `qp_hsde` | `yes` | Homogeneous self-dual embedding (self-starting, native certificates) vs. the infeasible-start primal–dual method. |
 | `qp_equilibrate` | `yes` | Ruiz-equilibrate the data first. Only when `qp_hsde=no`; HSDE conditions internally. |
 | `qp_crossover` | `no` | Pure LPs only: purify the interior iterate to an exact vertex. Opt-in; slow on large degenerate LPs (#133). |
+| `qp_kkt_row_elim` | `yes` | Fold every single-column orthant row (each finite variable bound) onto its column's `(x, x)` diagonal instead of factoring it as a row. Exact; shrinks the factored KKT by one row per bound (gh#1243). `no` factors the full system. |
 | `qp_gondzio_corr` | `3` | Maximum Gondzio multiple centrality correctors per iteration, on nonnegative-orthant blocks only. Each is one extra back-solve through the factorization already in hand, kept only if it lengthens the step. `0` disables. Both drivers honour it. |
 
 `qp_gondzio_corr` is worth a sentence on where it does and does not

@@ -1040,7 +1040,7 @@ fn presolve_fixpoint(
     let mut declared = DeclaredSides::of(prob);
     let exit;
     loop {
-        let ps = match presolve_once(&current, &[], catalog, &refinements, structure_stable) {
+        let mut ps = match presolve_once(&current, &[], catalog, &refinements, structure_stable) {
             infeasible @ PresolveOutcome::Infeasible(_) => return infeasible,
             PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
             PresolveOutcome::Reduced(ps) => ps,
@@ -1061,7 +1061,7 @@ fn presolve_fixpoint(
             // A catalog layer makes a side finite only by tightening it, and a
             // tightened side is not declared: carry the flags, add nothing.
             declared.remap(&ps.kept_cols, None);
-            current = ps.reduced.clone();
+            current = ps.take_reduced();
             chain.push(ps);
         } else if passthrough.is_none() {
             passthrough = Some(ps);
@@ -1071,14 +1071,14 @@ fn presolve_fixpoint(
         // already shrunk the rows it plans over, and the round that follows
         // gets a crack at whatever the aggregation exposes.
         let aggregated = match aggregate_once(&current) {
-            Some(ps) => {
+            Some(mut ps) => {
                 refinements.remap(&ps.kept_cols);
                 // An aggregation transfers an eliminated column's box onto the
                 // survivor it is folded into; a side that appears that way is
                 // treated as declared (it is kept in preference to a tightened
                 // one, and still removed if the rows imply it).
                 declared.remap(&ps.kept_cols, Some((&current, &ps.reduced)));
-                current = ps.reduced.clone();
+                current = ps.take_reduced();
                 chain.push(ps);
                 true
             }
@@ -1102,8 +1102,10 @@ fn presolve_fixpoint(
     // (gh#1246). Skipped once the deadline has passed, like any further layer.
     if implied == ImpliedBounds::Drop
         && !deadline.is_some_and(|d| std::time::Instant::now() >= d)
-        && let Some(relaxed) = relax_implied_bounds(&current, &declared)
+        && let Some(mut relaxed) = relax_implied_bounds(&current, &declared)
     {
+        // `current` is the last layer's reduced problem from here on (gh#1243).
+        current = relaxed.take_reduced();
         chain.push(relaxed);
     }
     // An empty chain means the first round found nothing, and that breaks as
@@ -1115,14 +1117,16 @@ fn presolve_fixpoint(
             passthrough.expect("a round that changed nothing yields a passthrough layer"),
         );
     }
+    // `current` is the last layer's reduced problem: every push above moved
+    // it out of the layer it came from (gh#1243).
     if chain.len() == 1 {
         let mut only = chain.pop().expect("chain has one layer");
+        only.reduced = current;
         only.exit = exit;
         return PresolveOutcome::Reduced(only);
     }
-    let reduced = chain.last().expect("chain non-empty").reduced.clone();
     PresolveOutcome::Reduced(Presolve {
-        reduced,
+        reduced: current,
         // The wrapper substitutes nothing itself; each layer in `chain`
         // carries its own offset and `Presolve::obj_offset` sums them.
         layer_obj_offset: 0.0,
@@ -1132,13 +1136,34 @@ fn presolve_fixpoint(
         kept_cols: Vec::new(),
         kept_eq: Vec::new(),
         kept_ineq: Vec::new(),
-        orig: prob.clone(),
+        // Never read: with a non-empty `chain` every method that consults
+        // `orig` (postsolve, dual recovery) goes through the layers, and
+        // `chain[0].orig` already holds this problem. A clone here was a full
+        // copy of the original problem kept live through the whole solve
+        // (gh#1243).
+        orig: empty_problem(prob.n),
         stack: Vec::new(),
         chain,
         discarded_infeasibility: None,
         exit,
         ray: false,
     })
+}
+
+/// A problem with `n` columns and no data: the placeholder an iterated
+/// presolve's wrapper carries in `orig`, which it never reads (gh#1243).
+fn empty_problem(n: usize) -> QpProblem {
+    QpProblem {
+        n,
+        p_lower: Vec::new(),
+        c: Vec::new(),
+        a: Vec::new(),
+        b: Vec::new(),
+        g: Vec::new(),
+        h: Vec::new(),
+        lb: Vec::new(),
+        ub: Vec::new(),
+    }
 }
 
 /// One doubleton-equality aggregation layer over `prob`, or `None` when
@@ -2487,8 +2512,10 @@ fn presolve_once(
     };
 
     // --- flatten surviving rows to triplets + kept-row maps ---
+    // Exact capacity: the reduced problem lives through the whole solve, and
+    // a `Vec` grown by doubling can carry up to twice its triplets (gh#1243).
     let mut kept_eq = Vec::with_capacity(eq_rows.len());
-    let mut new_a = Vec::new();
+    let mut new_a = Vec::with_capacity(eq_rows.iter().map(|r| r.coeffs.len()).sum());
     let mut new_b = vec![0.0; eq_rows.len()];
     for (newr, row) in eq_rows.iter().enumerate() {
         kept_eq.push(row.orig);
@@ -2498,7 +2525,7 @@ fn presolve_once(
         }
     }
     let mut kept_ineq = Vec::with_capacity(ineq_rows.len());
-    let mut new_g = Vec::new();
+    let mut new_g = Vec::with_capacity(ineq_rows.iter().map(|r| r.coeffs.len()).sum());
     let mut new_h = vec![0.0; ineq_rows.len()];
     for (newr, row) in ineq_rows.iter().enumerate() {
         kept_ineq.push(row.orig);
@@ -2951,6 +2978,33 @@ impl Presolve {
                 .stack
                 .iter()
                 .all(|r| matches!(r, Reduction::RedundantBound { .. }))
+    }
+
+    /// Move this layer's reduced problem out, leaving a shell that keeps
+    /// what a layer still reads of it once the next layer exists (gh#1243).
+    ///
+    /// In a fixpoint chain the reduced problem of layer `k` is, byte for
+    /// byte, the `orig` of layer `k + 1` (and the last layer's is the
+    /// wrapper's `reduced`), so holding it in both places doubled every
+    /// intermediate problem for the life of the solve. A layer reads its own
+    /// `reduced` only for its dimensions ([`Self::changed`],
+    /// [`Self::stats_once`]) and its box ([`Self::project_warm_once`]);
+    /// postsolve reads `orig`, never `reduced`. The shell keeps `n`, `c`,
+    /// `b`, `h`, `lb`, `ub` — so `m_eq()`, `m_ineq()`, `lb_of` and `ub_of`
+    /// answer as before — and drops the triplet arrays, which are the bulk.
+    fn take_reduced(&mut self) -> QpProblem {
+        let shell = QpProblem {
+            n: self.reduced.n,
+            p_lower: Vec::new(),
+            c: self.reduced.c.clone(),
+            a: Vec::new(),
+            b: self.reduced.b.clone(),
+            g: Vec::new(),
+            h: self.reduced.h.clone(),
+            lb: self.reduced.lb.clone(),
+            ub: self.reduced.ub.clone(),
+        };
+        std::mem::replace(&mut self.reduced, shell)
     }
 
     /// Did this single pass change anything (a reduction, or a dropped

@@ -1766,3 +1766,41 @@ truncated solve that still lands within the loose tolerance band passes the
 tests — and it must leave the Motzkin test's status alone. Then the convex
 arm needs the fixture sweep and `benchmarks/qp` (CLAUDE.md), since every row
 here is small.
+
+---
+
+## LP crossover: NETLIB PILOT spends the full bridge budget on a vertex it keeps declining (gh#1244)
+
+*Measured at the gh#1244 fix against its parent `0c9dacc`, NETLIB `pilot`
+(generated with `benchmarks/lp/generate_nl.py --netlib-only`),
+`solver_selection=lp-ipm qp_crossover=yes`, release build, Linux x86_64.
+Recorded 2026-11-22.*
+
+### What is wrong
+
+The revised simplex reaches a vertex (30 835 pivots) that the never-regress
+gate declines, and the active-set bridge then spends all
+`CROSSOVER_MAX_ITER` = 1000 working-set changes from the interior iterate
+without a rescue, so the interior point is returned. Wall time with crossover
+is 106 s against 4 s without; 63 s of the 106 s is the simplex, the other
+~42 s is the bridge.
+
+### Why it got slower
+
+Before the gh#1244 fix the bridge inherited the convex IPM's static pivoting
+(gh#1193), so its first factorization failed inertia control and it stopped
+after 0 changes: 63 s. Turning static pivoting off on the bridge's backends
+restored vertices on agg, grow15, grow22, nesm and the issue's LP (24–105 s
+down to 0.06–0.7 s each, since the failing bridge used to burn its whole
+budget on them) and moved nothing else among 98 LPs (89 NETLIB, the CLI's 8
+`lp_*` fixtures, the issue's LP), except PILOT, which now runs its bridge to
+the cap. Total sweep time went from 536 s to 395 s. So the +42 s on PILOT is
+the cap working as designed (it is the 0.17.0 behaviour), not a new path.
+
+### How to tell whether a fix works
+
+`pilot` either accepts a vertex (simplex or bridge) or keeps the interior
+point within a few seconds of the simplex's own 63 s, and the five rescues
+above stay `vertex accepted`. A smaller cap or an early bail-out from an
+l1-elastic phase 1 that makes no progress are the obvious candidates; neither
+was tried.

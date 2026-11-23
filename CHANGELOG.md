@@ -9,6 +9,34 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+- **The convex interior point carries variable bounds on the KKT diagonal
+  instead of as rows of the factored matrix (gh#1243).** Every
+  single-column row of a nonnegative-orthant block is now removed from the
+  factorization by an exact Schur complement: each finite bound, and any
+  singleton inequality the user wrote. Its `z/s` term goes onto its
+  column's `(x, x)` entry, which is how Ipopt's augmented system carries
+  bounds. The Newton step, the HSDE's inertia test and its
+  refinement residuals are those of the full system. What shrinks is the
+  matrix factored: on a bounded LP it loses one row per finite bound. A
+  fixed column, or one boxed narrower than `1e-8` relative, keeps its rows,
+  because its two slacks vanish together.
+  * Maros-Meszaros: peak memory drops by up to 45% (`CONT-300` 1.92 → 1.21
+    GB), the suite runs in 397 s instead of 522 s, `BOYD2` now solves inside
+    100 s, and no verdict gets worse.
+  * The fixture sweep moves 6 of 152 fixtures by 1–5 iterations, with no
+    status, engine or objective change.
+  * Covers the symmetric HSDE and the direct driver. The exponential/power-
+    cone HSDE is unchanged. The reusable `QpFactorization` always factors the
+    full system, because it accepts new bound values per solve and fixing
+    one would change which rows fold. `qp_kkt_row_elim=no` (or
+    `QpOptions::kkt_row_elim = false`) factors the full system as before.
+  * This does not fix the largest Mittelmann LPs that exhaust memory. Their
+    peaks are in the presolve fixpoint chain (each layer keeps a full copy of
+    its input), the `.nl` reader and the factorization's fill, which gh#1243
+    tracks separately. On `neos-3025225` the peak drops from 34.7 to 8.7 GB.
+  * Details and measurements: `dev-notes/kkt-bound-row-elimination.md`.
+
 ### Fixed
 - **Convex presolve no longer hands the interior point bound sides its rows
   already imply (gh#1246, findings 1 and 2).** Bound tightening kept every
@@ -31,6 +59,46 @@ changes.
   `convex_qp_qscfxm1` and `convex_qp_qpilotno` from optimal to the iteration
   limit, and the fixture sweep at that setting now diffs empty. Column
   reductions (finding 3) are not part of this change.
+- **The convex QP path no longer keeps duplicate copies of the problem and
+  of the KKT pattern alive through the first factorization (gh#1243).**
+  * Presolve's fixpoint chain held every intermediate problem twice, and
+    the original once more in a field nothing read. It now holds each once,
+    and the reduced problem's triplet vectors are allocated to their exact
+    size.
+  * `Factorization::new` kept its by-value pattern alive through the first
+    numeric factorization. The convex drivers now pass the pattern by
+    reference (`Factorization::with_pattern`).
+  * `pounce-feral` frees its 0-based triplet copy once the triplet → CSC map
+    is recorded (release builds).
+  * On a 400 k-column boxed LP these cut peak memory from 6.24 to 4.97 GB
+    with no change to any iterate. The fixture sweep is byte-identical.
+- **`qp_crossover=yes` returns the optimal vertex again on LPs whose
+  simplex vertex it declines (gh#1244).** Since 0.18.0 the CLI's and
+  Python's convex-IPM backend turns on FERAL static pivoting (gh#1193).
+  Crossover hands that same backend factory to its active-set bridge, which
+  factors indefinite KKT systems and reads their inertia, and a
+  force-accepted pivot falsifies that inertia. On the issue's 3x4
+  transportation LP (a 1e-9 cost tie-break), every bridge solve ended in
+  exhausted inertia control, so crossover returned the interior iterate
+  (`x[R2,T4] = 5.609`, 7 positive flows plus a slack) where 0.16.0 returned
+  the unique optimal vertex (`x[R2,T4] = 10`, KKT error 0). The bridge now
+  turns static pivoting off on its backends, through a new
+  `SparseSymLinearSolverInterface::set_static_pivoting` hook (default no-op;
+  FERAL implements it). The IPM keeps static pivoting, and the caller's
+  solver choice is still inherited. This also overrides an explicit
+  `feral_static_pivoting=yes` for the bridge, on purpose: its answer depends
+  on the inertia. The issue's bisection to b56473e6 (the
+  removed cold retry) does not hold at this commit: with static pivoting on,
+  a cold solve fails the same way, and with it off, the bridge from the
+  interior iterate already finds the vertex. The library-level tests never
+  saw the defect because they gave crossover feral's default backend.
+  Across 98 LPs (89 NETLIB, the CLI's `lp_*` fixtures, the issue's LP) with
+  `qp_crossover=yes`, accepted vertices go from 89 to 94 (agg, grow15,
+  grow22, nesm, the issue's LP) and none are lost. Those rescues are also
+  faster, since the failing bridge used to spend its whole budget: agg
+  24 s → 0.06 s, nesm 105 s → 0.7 s. Total sweep time drops from 536 s to
+  395 s. One cost: PILOT's bridge now runs to its 1000-change cap without a
+  rescue, 63 s → 106 s (`dev-notes/known-limitations.md`).
 - **`pounce.jax.odeint`, `daeint` and `solve_bvp(method="newton")` no longer
   evaluate the user's function eagerly in their host Newton loop
   (gh#1241).** The host solve runs in a `pure_callback`, outside any
