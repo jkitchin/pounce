@@ -45,6 +45,33 @@ changes.
     is recorded (release builds).
   * On a 400 k-column boxed LP these cut peak memory from 6.24 to 4.97 GB
     with no change to any iterate. The fixture sweep is byte-identical.
+- **`qp_crossover=yes` returns the optimal vertex again on LPs whose
+  simplex vertex it declines (gh#1244).** Since 0.18.0 the CLI's and
+  Python's convex-IPM backend turns on FERAL static pivoting (gh#1193).
+  Crossover hands that same backend factory to its active-set bridge, which
+  factors indefinite KKT systems and reads their inertia, and a
+  force-accepted pivot falsifies that inertia. On the issue's 3x4
+  transportation LP (a 1e-9 cost tie-break), every bridge solve ended in
+  exhausted inertia control, so crossover returned the interior iterate
+  (`x[R2,T4] = 5.609`, 7 positive flows plus a slack) where 0.16.0 returned
+  the unique optimal vertex (`x[R2,T4] = 10`, KKT error 0). The bridge now
+  turns static pivoting off on its backends, through a new
+  `SparseSymLinearSolverInterface::set_static_pivoting` hook (default no-op;
+  FERAL implements it). The IPM keeps static pivoting, and the caller's
+  solver choice is still inherited. This also overrides an explicit
+  `feral_static_pivoting=yes` for the bridge, on purpose: its answer depends
+  on the inertia. The issue's bisection to b56473e6 (the
+  removed cold retry) does not hold at this commit: with static pivoting on,
+  a cold solve fails the same way, and with it off, the bridge from the
+  interior iterate already finds the vertex. The library-level tests never
+  saw the defect because they gave crossover feral's default backend.
+  Across 98 LPs (89 NETLIB, the CLI's `lp_*` fixtures, the issue's LP) with
+  `qp_crossover=yes`, accepted vertices go from 89 to 94 (agg, grow15,
+  grow22, nesm, the issue's LP) and none are lost. Those rescues are also
+  faster, since the failing bridge used to spend its whole budget: agg
+  24 s → 0.06 s, nesm 105 s → 0.7 s. Total sweep time drops from 536 s to
+  395 s. One cost: PILOT's bridge now runs to its 1000-change cap without a
+  rescue, 63 s → 106 s (`dev-notes/known-limitations.md`).
 - **`pounce.jax.odeint`, `daeint` and `solve_bvp(method="newton")` no longer
   evaluate the user's function eagerly in their host Newton loop
   (gh#1241).** The host solve runs in a `pure_callback`, outside any
