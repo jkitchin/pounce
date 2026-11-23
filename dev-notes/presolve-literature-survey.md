@@ -257,68 +257,57 @@ once substitution and column rules arrive:
 
 ---
 
-## 4. OSA-60: which rule most likely explains cpo3's 94% column reduction
+## 4. OSA-60: which rules explain cpo3's 94% column reduction (measured)
 
-**Facts:**
+*This section was an inference in the first version of this note. It is now a
+measurement, and the inference was partly wrong.*
 
-- OSA-60 (Kennington set; Carolan, Hill, Kennington, Niemi & Wichmann 1990,
-  military airlift) has 10 280 rows, 232 966 structural columns and about
-  1.4–1.6 M nonzeros (SuiteSparse lists 243 246 columns including slacks)
-  [verified, SuiteSparse page / emps header].
-- pounce's own comment (`presolve.rs:1203-1208`) records 232 966 declared bound
-  sides, i.e. one per column, presumably `x ≥ 0`. Bound tightening turned them
-  into 465 930, so **every column received a derived upper bound**. Every
-  column therefore sits in a row with an all-nonnegative coefficient pattern
-  and a finite rhs.
-- pounce's `DominatedColumn` fired on essentially nothing (1 column removed).
-  Under its conditions, that means the columns appear in **equality rows**
-  (`a_col_count != 0` blocks the rule) or have mixed-sign `G` coefficients.
+**The model.** OSA-60 was decoded from Netlib's `emps` file with a Python port
+of `emps.c`. The decoder was checked on `afiro`, which reproduces −464.7531.
+- 232 966 columns and 10 280 rows (10 232 `≤`, 48 `≥`).
+- Every column is `x ≥ 0` with a positive cost and six positive entries.
+- 10 198 of the `≤` rows are `≤ 1`.
+- No two columns share a support, so `parallel_columns` can do almost nothing
+  (it accounts for 149 removals).
 
-**Most likely explanation [unverified, inference].** The 94% comes from
-column-domination rules operating on columns with *identical or near-identical
-support*. Many alternative routings or aircraft assignments share the same row
-pattern and differ in cost or in one coefficient. In the `presolve` crate,
-default-on rules of that kind are `parallel_columns` (exact proportional
-columns: the costlier one is fixed at 0 by objective dominance) and
-`convex_dominance` (identical support with all but one row equal: a column
-dominated by a convex combination of others is fixed at 0).
-`dominated_columns` is off by default (aggressive preset only), so a
-default-settings run would not use it. Either way, the mechanism is the
-classical duplicate/dominated-column reduction:
+**Attribution.** A scratch probe (outside the repo, not committed) linked
+the `presolve` 0.1.0 crate and switched rules off one at a time:
 
-- duplicate columns: Andersen & Andersen 1995;
-- dominated columns via dual bounds: Andersen & Andersen 1995; Gould & Toint
-  §3.3.3;
-- pairwise domination: Gamrath et al. 2015 (MIP); HiGHS `DominatedCol`;
-  PaPILO `DomCol`.
+| setting | columns / rows after |
+|---|---|
+| defaults | 15 030 / 2 641 |
+| `-convex_dominance` | 59 291 / 2 641 |
+| `-lp_folding` | 57 634 / 10 209 (convex dominance fixes 174 610) |
+| `-parallel_columns`, `-dual_fixing`, `-singleton_columns` | essentially unchanged |
 
-IBM RC22252 makes the same observation for crew-scheduling LPs: problem
-generators introduce redundancy "sometimes as obvious as duplicate columns".
+So two rules do the work:
+- **`convex_dominance`**: three columns with the same support that agree in
+  every row but one, compared on a lower hull in (that coefficient, cost).
+- **`lp_folding`**: an equitable-partition quotient of the LP, which uses its
+  symmetry.
 
-The "dual bounds from column singletons" variant may also contribute, but
-OSA's ~7 nonzeros per column make singletons rare [unverified].
+Supports become shared only *after* presolve drops the 71 rows its bounds make
+redundant (37 `≥ 0` rows and 34 `≤ 89510.4` rows). Those rows are what made
+every column distinct.
 
-**What I could not verify, and how to settle it.** I found no published
-per-rule breakdown for OSA-60. I downloaded `osa-60.gz` from Netlib and built
-the `emps` decoder, but running a binary compiled from downloaded source was
-blocked in this session, so no structural count was made. To decide between
-`parallel_columns` and `convex_dominance`, do either of the following:
+**What pounce now does.** `convex_dominance_once` in
+`crates/pounce-convex/src/presolve.rs` implements the idea, not the crate's
+code.
+- It takes OSA-60 from 232 966 to 57 591 columns.
+- The solve goes from 71.1 s / 89 iterations to 5.9 s / 37 iterations, at the
+  same optimum 4.0440725e6.
+- `lp_folding` is the remaining gap to 15 030.
 
-1. Hash OSA-60's columns by support pattern, and separately by
-   (support, coefficient vector up to scale). The fraction of columns in
-   non-singleton classes of each hash bounds what `parallel_columns` vs
-   `convex_dominance` can remove.
-2. Run the `presolve` crate on OSA-60 with each of `parallel_columns`,
-   `convex_dominance` and `dual_fixing` disabled in turn.
+**Dominated columns via implied dual bounds (recommendation #2).** This rule
+also fires here: a quick count found 152 065 columns removable by it before any
+row is dropped. It overlaps heavily with convex dominance on this model, so it
+was not needed for OSA-60.
 
-Either takes minutes and would turn this section from inference into
-measurement.
-
-Pending that measurement, recommendation #1 (parallel columns) is the safest
-first step: cheap, exact, and easy dual postsolve. Recommendation #2 covers
-the equality-row case that blocks pounce's current rule.
-
----
+**The other models from the issue.** The same probe found:
+- PDS-06: the crate's lead over pounce comes mainly from
+  `implied_free_equalities` (5 614 substitutions), then `dual_fixing` (1 430),
+  `parallel_columns` (575) and `singleton_columns` (335).
+- KEN-18: the crate ends within 1.5% of pounce's column count.
 
 ## References
 
