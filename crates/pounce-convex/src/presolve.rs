@@ -522,6 +522,13 @@ enum Reduction {
     Aggregate {
         plan: Box<pounce_presolve::linear_eq_plan::EliminationPlan>,
     },
+    /// A **convex-dominated column** (gh#1246): fixed at its finite lower
+    /// bound `value` and dropped, because its column is a convex combination
+    /// of two others that cost strictly less. See [`convex_dominance_once`].
+    /// Like [`Reduction::DominatedColumn`], postsolve restores the value and
+    /// the global bound recovery reads its multiplier off the reduced cost,
+    /// which the strict margin makes nonnegative at every dual optimum.
+    ConvexDominated { col: usize, value: f64 },
     /// An **implied bound side removed** (gh#1246): the rows of the problem,
     /// with the box as it stood when this side was examined, already imply
     /// `col`'s upper (`is_upper`) or lower bound, so the reduced problem
@@ -1038,75 +1045,106 @@ fn presolve_fixpoint(
     // [`relax_implied_bounds`]: correctness of what it removes comes from its
     // own proof against the final problem, never from this record.
     let mut declared = DeclaredSides::of(prob);
-    let exit;
-    loop {
-        let mut ps = match presolve_once(&current, &[], catalog, &refinements, structure_stable) {
-            infeasible @ PresolveOutcome::Infeasible(_) => return infeasible,
-            PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
-            PresolveOutcome::Reduced(ps) => ps,
-        };
-        let catalog_changed = ps.changed();
-        // A round that only narrowed boxes leaves every row exactly as the
-        // previous pass deduped it (gh #527).
-        let bounds_only = ps.reduced.n == ps.orig_n
-            && ps.reduced.m_eq() == ps.orig_m_eq
-            && ps.reduced.m_ineq() == ps.orig_m_ineq
-            && ps
-                .stack
-                .iter()
-                .all(|r| matches!(r, Reduction::BoundTightening { .. }));
-        if catalog_changed {
-            refinements.charge(&ps);
-            refinements.remap(&ps.kept_cols);
-            // A catalog layer makes a side finite only by tightening it, and a
-            // tightened side is not declared: carry the flags, add nothing.
-            declared.remap(&ps.kept_cols, None);
-            current = ps.take_reduced();
-            chain.push(ps);
-        } else if passthrough.is_none() {
-            passthrough = Some(ps);
-        }
-        // Doubleton-equality aggregation (gh #494). It runs *after* the
-        // catalog each round, so the cheap single-column reductions have
-        // already shrunk the rows it plans over, and the round that follows
-        // gets a crack at whatever the aggregation exposes.
-        let aggregated = match aggregate_once(&current) {
-            Some(mut ps) => {
+    let mut exit;
+    // Convex-dominance stages run so far (gh#1246); see the end of the loop.
+    let mut dominance_stages = 0usize;
+    'stages: loop {
+        loop {
+            let mut ps = match presolve_once(&current, &[], catalog, &refinements, structure_stable)
+            {
+                infeasible @ PresolveOutcome::Infeasible(_) => return infeasible,
+                PresolveOutcome::Unbounded => return PresolveOutcome::Unbounded,
+                PresolveOutcome::Reduced(ps) => ps,
+            };
+            let catalog_changed = ps.changed();
+            // A round that only narrowed boxes leaves every row exactly as the
+            // previous pass deduped it (gh #527).
+            let bounds_only = ps.reduced.n == ps.orig_n
+                && ps.reduced.m_eq() == ps.orig_m_eq
+                && ps.reduced.m_ineq() == ps.orig_m_ineq
+                && ps
+                    .stack
+                    .iter()
+                    .all(|r| matches!(r, Reduction::BoundTightening { .. }));
+            if catalog_changed {
+                refinements.charge(&ps);
                 refinements.remap(&ps.kept_cols);
-                // An aggregation transfers an eliminated column's box onto the
-                // survivor it is folded into; a side that appears that way is
-                // treated as declared (it is kept in preference to a tightened
-                // one, and still removed if the rows imply it).
-                declared.remap(&ps.kept_cols, Some((&current, &ps.reduced)));
+                // A catalog layer makes a side finite only by tightening it, and a
+                // tightened side is not declared: carry the flags, add nothing.
+                declared.remap(&ps.kept_cols, None);
                 current = ps.take_reduced();
                 chain.push(ps);
-                true
+            } else if passthrough.is_none() {
+                passthrough = Some(ps);
             }
-            None => false,
-        };
-        structure_stable = memo == DedupMemo::Enabled && bounds_only && !aggregated;
-        if !catalog_changed && !aggregated {
-            exit = FixpointExit::Fixpoint; // neither half found anything
-            break;
+            // Doubleton-equality aggregation (gh #494). It runs *after* the
+            // catalog each round, so the cheap single-column reductions have
+            // already shrunk the rows it plans over, and the round that follows
+            // gets a crack at whatever the aggregation exposes.
+            let aggregated = match aggregate_once(&current) {
+                Some(mut ps) => {
+                    refinements.remap(&ps.kept_cols);
+                    // An aggregation transfers an eliminated column's box onto the
+                    // survivor it is folded into; a side that appears that way is
+                    // treated as declared (it is kept in preference to a tightened
+                    // one, and still removed if the rows imply it).
+                    declared.remap(&ps.kept_cols, Some((&current, &ps.reduced)));
+                    current = ps.take_reduced();
+                    chain.push(ps);
+                    true
+                }
+                None => false,
+            };
+            structure_stable = memo == DedupMemo::Enabled && bounds_only && !aggregated;
+            if !catalog_changed && !aggregated {
+                exit = FixpointExit::Fixpoint; // neither half found anything
+                break;
+            }
+            if chain.len() >= MAX_ROUNDS {
+                exit = FixpointExit::RoundCap;
+                break;
+            }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                exit = FixpointExit::Deadline;
+                break;
+            }
         }
-        if chain.len() >= MAX_ROUNDS {
-            exit = FixpointExit::RoundCap;
-            break;
+        // Hand the solver only the bound sides the rows do not already imply
+        // (gh#1246). Skipped once the deadline has passed, like any further layer.
+        let out_of_time = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        if implied == ImpliedBounds::Drop
+            && !out_of_time()
+            && let Some(mut relaxed) = relax_implied_bounds(&current, &declared)
+        {
+            current = relaxed.take_reduced();
+            chain.push(relaxed);
         }
-        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-            exit = FixpointExit::Deadline;
-            break;
+        // Convex dominance (gh#1246) runs on the problem with its implied bounds
+        // gone, because it needs columns unbounded above, and bound tightening
+        // gives every column of a row-bounded model a finite upper side (OSA-60:
+        // all 232 965). When it removes columns, the rows they leave can be
+        // redundant, singleton or forcing, so the fixpoint runs again on what is
+        // left. Only after a genuine fixpoint: a layer-capped or deadline-cut
+        // reduction stops where it is.
+        if exit != FixpointExit::Fixpoint
+            || dominance_stages >= MAX_DOMINANCE_STAGES
+            || out_of_time()
+        {
+            break 'stages;
         }
-    }
-    // Hand the solver only the bound sides the rows do not already imply
-    // (gh#1246). Skipped once the deadline has passed, like any further layer.
-    if implied == ImpliedBounds::Drop
-        && !deadline.is_some_and(|d| std::time::Instant::now() >= d)
-        && let Some(mut relaxed) = relax_implied_bounds(&current, &declared)
-    {
-        // `current` is the last layer's reduced problem from here on (gh#1243).
-        current = relaxed.take_reduced();
-        chain.push(relaxed);
+        match convex_dominance_once(&current) {
+            None => break 'stages,
+            Some(mut dominated) => {
+                current = dominated.take_reduced();
+                chain.push(dominated);
+                dominance_stages += 1;
+                refinements = BoxRefinements::new(current.n);
+                // The box of the problem the next stage starts from is what the
+                // user's model now is; a side tightened from here on is derived.
+                declared = DeclaredSides::of(&current);
+                structure_stable = false;
+            }
+        }
     }
     // An empty chain means the first round found nothing, and that breaks as
     // `Fixpoint` before the layer cap or the deadline is consulted, so the
@@ -1191,6 +1229,303 @@ fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
         stack: vec![Reduction::Aggregate {
             plan: Box::new(plan),
         }],
+        chain: Vec::new(),
+        discarded_infeasibility: None,
+        exit: FixpointExit::Fixpoint,
+        ray: false,
+    })
+}
+
+/// How many times [`presolve_fixpoint`] may run [`convex_dominance_once`] and
+/// iterate again on what it leaves (gh#1246). The second stage catches columns
+/// whose group only forms once the first stage's removals made a row
+/// redundant; past that there is nothing measured to gain, and each stage
+/// costs a fixpoint.
+const MAX_DOMINANCE_STAGES: usize = 3;
+
+/// Columns longer than this are not grouped by [`convex_dominance_once`]: a
+/// column with `k` entries is hashed `k` times at `O(k)` each.
+const DOMINANCE_MAX_COL_LEN: usize = 32;
+
+/// Relative margin by which a column must cost more than the convex
+/// combination that replaces it (gh#1246). See [`convex_dominance_once`].
+const DOMINANCE_COST_MARGIN: f64 = 1e-12;
+
+/// Fix every column that a convex combination of two others replaces at
+/// strictly lower cost (gh#1246, finding 3), returning the layer that does so,
+/// or `None` when there is none.
+///
+/// # The rule
+///
+/// Take linear columns `j`, `k₁`, `k₂` (no entries in `P`) with the same
+/// support, the same coefficient in every row but one row `r`, and
+/// `a_{r,k₁} < a_{r,j} < a_{r,k₂}`. With `λ` the weight that makes
+/// `a_{r,j} = λ·a_{r,k₁} + (1−λ)·a_{r,k₂}`, the column of `j` *is*
+/// `λ·A_{k₁} + (1−λ)·A_{k₂}` in every row. If `k₁` and `k₂` are unbounded
+/// above, any amount `t ≥ 0` of `x_j` above its lower bound can move onto
+/// them, `λt` and `(1−λ)t`, leaving every row activity unchanged and every
+/// box satisfied. If `c_j > λc_{k₁} + (1−λ)c_{k₂}`, the move strictly lowers
+/// the objective, so `x_j` sits at its lower bound at every optimum.
+///
+/// Within each group, the columns are points `(a_{r,·}, c)`. The ones that
+/// survive are on the lower convex hull; everything strictly above it goes.
+/// Columns at the same `a_r`, which are identical columns, keep the cheapest;
+/// an exact tie keeps the lowest index, which every group they share agrees
+/// on.
+///
+/// # Why the whole batch can go at once
+///
+/// At any dual optimum `y` every column's reduced cost `d = c − Aᵀy` is
+/// nonnegative, and `d_j = λd_{k₁} + (1−λ)d_{k₂} + (c_j − mix) > 0` because
+/// the margin is strict. So every removed column is zero at every primal
+/// optimum, whichever other columns are removed with it: two columns can
+/// each anchor the other's hull without that being circular. The same
+/// identity, applied at the reduced solve's dual, makes the multiplier
+/// postsolve recovers for `j` nonnegative. That is why exact ties (a column
+/// on a hull edge) are kept rather than removed: with `d_j` possibly zero,
+/// two removals could rely on each other.
+///
+/// The comparison is made cross-multiplied, `c_j(x₂−x₁)` against
+/// `c₁(x₂−x) + c₂(x−x₁)`, with a margin of [`DOMINANCE_COST_MARGIN`] relative
+/// to the magnitudes involved; a comparison inside the margin keeps the
+/// column. On OSA-60 the margin costs no removal at all (measured at `0`,
+/// `1e-12` and `1e-9`).
+///
+/// # Why it matters
+///
+/// OSA-60 has 232 966 columns of six positive entries in `≤ 1` rows, and no
+/// two share a support until presolve drops its 71 redundant rows. After
+/// that they fall into 15 815 groups that differ in one row, and this rule
+/// removes 175 374 of them. It is the `presolve` crate's `convex_dominance`
+/// idea (that crate reaches 57 634 columns with it and without `lp_folding`);
+/// no code was taken from it.
+fn convex_dominance_once(prob: &QpProblem) -> Option<Presolve> {
+    let n = prob.n;
+    let m_eq = prob.m_eq();
+    let m_ineq = prob.m_ineq();
+    if n < 2 || !prob.has_bounds() {
+        return None;
+    }
+    // Columns: (unified row, coefficient), rows `0..m_eq` equalities and
+    // `m_eq..` inequalities, sorted with duplicates summed and zeros dropped.
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for t in &prob.a {
+        cols[t.col].push((t.row, t.val));
+    }
+    for t in &prob.g {
+        cols[t.col].push((m_eq + t.row, t.val));
+    }
+    let mut in_p = vec![false; n];
+    for t in &prob.p_lower {
+        if t.val != 0.0 {
+            in_p[t.row] = true;
+            in_p[t.col] = true;
+        }
+    }
+    // An anchor must be able to take weight without limit: linear, unbounded
+    // above, finite data, and short enough to hash.
+    let mut anchor = vec![false; n];
+    for j in 0..n {
+        let e = &mut cols[j];
+        e.sort_by_key(|&(r, _)| r);
+        let mut w = 0;
+        for i in 0..e.len() {
+            if w > 0 && e[w - 1].0 == e[i].0 {
+                e[w - 1].1 += e[i].1;
+            } else {
+                e[w] = e[i];
+                w += 1;
+            }
+        }
+        e.truncate(w);
+        e.retain(|&(_, v)| v != 0.0);
+        anchor[j] = !in_p[j]
+            && prob.ub_of(j) >= BOUND_INF
+            && prob.c[j].is_finite()
+            && !e.is_empty()
+            && e.len() <= DOMINANCE_MAX_COL_LEN
+            && e.iter().all(|&(_, v)| v.is_finite());
+    }
+    // Removable: an anchor with a finite lower bound to be fixed at.
+    let removable = |j: usize| anchor[j] && prob.lb_of(j) > -BOUND_INF;
+
+    // Bucket every (column, varying position) by a hash of the row varied and
+    // the rest of the column. Equality is re-checked inside each bucket, so a
+    // hash collision costs a reduction, never correctness.
+    let key = |j: usize, pos: usize| -> u64 {
+        let mut h = DefaultHasher::new();
+        cols[j][pos].0.hash(&mut h);
+        for (i, &(r, v)) in cols[j].iter().enumerate() {
+            if i != pos {
+                r.hash(&mut h);
+                v.to_bits().hash(&mut h);
+            }
+        }
+        h.finish()
+    };
+    let mut buckets: HashMap<u64, Vec<(usize, usize)>> = HashMap::new();
+    for j in 0..n {
+        if !anchor[j] {
+            continue;
+        }
+        for pos in 0..cols[j].len() {
+            buckets.entry(key(j, pos)).or_default().push((j, pos));
+        }
+    }
+    let same_but = |j: usize, pj: usize, k: usize, pk: usize| -> bool {
+        let (a, b) = (&cols[j], &cols[k]);
+        a.len() == b.len()
+            && a[pj].0 == b[pk].0
+            && a.iter()
+                .zip(b.iter())
+                .enumerate()
+                .all(|(i, (x, y))| x.0 == y.0 && (i == pj || x.1.to_bits() == y.1.to_bits()))
+    };
+
+    let mut remove = vec![false; n];
+    for members in buckets.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        let (j0, p0) = members[0];
+        // (coefficient in the varying row, cost, column)
+        let mut pts: Vec<(f64, f64, usize)> = members
+            .iter()
+            .filter(|&&(j, p)| same_but(j0, p0, j, p))
+            .map(|&(j, p)| (cols[j][p].1, prob.c[j], j))
+            .collect();
+        if pts.len() < 2 {
+            continue;
+        }
+        pts.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then(a.1.total_cmp(&b.1))
+                .then(a.2.cmp(&b.2))
+        });
+        // Identical columns (same coefficient): the first is the cheapest,
+        // lowest index; any other that is not cheaper goes.
+        let mut reps: Vec<(f64, f64, usize)> = Vec::with_capacity(pts.len());
+        for &p in &pts {
+            match reps.last() {
+                Some(&(x, _, _)) if x == p.0 => {
+                    if removable(p.2) {
+                        remove[p.2] = true;
+                    }
+                }
+                _ => reps.push(p),
+            }
+        }
+        if reps.len() < 3 {
+            continue;
+        }
+        // Lower convex hull of the distinct coefficients.
+        let mut hull: Vec<usize> = Vec::new(); // indices into reps
+        for i in 0..reps.len() {
+            while hull.len() >= 2 {
+                let (x1, y1, _) = reps[hull[hull.len() - 2]];
+                let (x2, y2, _) = reps[hull[hull.len() - 1]];
+                let (x3, y3, _) = reps[i];
+                if (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1) <= 0.0 {
+                    hull.pop();
+                } else {
+                    break;
+                }
+            }
+            hull.push(i);
+        }
+        let mut on_hull = vec![false; reps.len()];
+        for &i in &hull {
+            on_hull[i] = true;
+        }
+        let mut seg = 0;
+        for (i, &(x, c, j)) in reps.iter().enumerate() {
+            while seg + 1 < hull.len() && hull[seg + 1] < i {
+                seg += 1;
+            }
+            if on_hull[i] || seg + 1 >= hull.len() || !removable(j) {
+                continue;
+            }
+            let (x1, c1, _) = reps[hull[seg]];
+            let (x2, c2, _) = reps[hull[seg + 1]];
+            let lhs = c * (x2 - x1);
+            let rhs = c1 * (x2 - x) + c2 * (x - x1);
+            let scale = (c.abs() + c1.abs() + c2.abs()) * (x1.abs() + x2.abs() + x.abs());
+            if lhs - rhs > DOMINANCE_COST_MARGIN * scale {
+                remove[j] = true;
+            }
+        }
+    }
+    if !remove.contains(&true) {
+        return None;
+    }
+
+    // The reduced problem: drop each removed column at its lower bound.
+    let mut kept_cols = Vec::new();
+    let mut col_new = vec![usize::MAX; n];
+    let mut stack = Vec::new();
+    let mut offset = 0.0;
+    let mut b = prob.b.clone();
+    let mut h = prob.h.clone();
+    for j in 0..n {
+        if remove[j] {
+            let v = prob.lb_of(j);
+            stack.push(Reduction::ConvexDominated { col: j, value: v });
+            if v != 0.0 {
+                offset += prob.c[j] * v;
+                for &(r, a) in &cols[j] {
+                    if r < m_eq {
+                        b[r] -= a * v;
+                    } else {
+                        h[r - m_eq] -= a * v;
+                    }
+                }
+            }
+        } else {
+            col_new[j] = kept_cols.len();
+            kept_cols.push(j);
+        }
+    }
+    let remap = |ts: &[Triplet]| -> Vec<Triplet> {
+        ts.iter()
+            .filter(|t| col_new[t.col] != usize::MAX)
+            .map(|t| Triplet::new(t.row, col_new[t.col], t.val))
+            .collect()
+    };
+    let p_lower = prob
+        .p_lower
+        .iter()
+        .filter(|t| col_new[t.row] != usize::MAX && col_new[t.col] != usize::MAX)
+        .map(|t| Triplet::new(col_new[t.row], col_new[t.col], t.val))
+        .collect();
+    let pick = |v: &[f64]| -> Vec<f64> {
+        if v.is_empty() {
+            Vec::new()
+        } else {
+            kept_cols.iter().map(|&j| v[j]).collect()
+        }
+    };
+    let reduced = QpProblem {
+        n: kept_cols.len(),
+        p_lower,
+        c: kept_cols.iter().map(|&j| prob.c[j]).collect(),
+        a: remap(&prob.a),
+        b,
+        g: remap(&prob.g),
+        h,
+        lb: pick(&prob.lb),
+        ub: pick(&prob.ub),
+    };
+    Some(Presolve {
+        reduced,
+        layer_obj_offset: offset,
+        orig_n: n,
+        orig_m_eq: m_eq,
+        orig_m_ineq: m_ineq,
+        kept_cols,
+        kept_eq: (0..m_eq).collect(),
+        kept_ineq: (0..m_ineq).collect(),
+        orig: prob.clone(),
+        stack,
         chain: Vec::new(),
         discarded_infeasibility: None,
         exit: FixpointExit::Fixpoint,
@@ -2883,6 +3218,9 @@ pub struct PresolveStats {
     pub forcing_rows: usize,
     /// Dominated columns fixed to a bound and dropped.
     pub dominated_cols: usize,
+    /// Columns fixed at their lower bound because a convex combination of
+    /// two others with the same support costs strictly less (gh#1246).
+    pub convex_dominated_cols: usize,
     /// Variable bounds tightened by domain propagation.
     pub tightened_bounds: usize,
     /// Finite bound sides removed from the problem handed to the solver
@@ -3037,6 +3375,7 @@ impl Presolve {
             s.free_col_singletons += ls.free_col_singletons;
             s.forcing_rows += ls.forcing_rows;
             s.dominated_cols += ls.dominated_cols;
+            s.convex_dominated_cols += ls.convex_dominated_cols;
             s.tightened_bounds += ls.tightened_bounds;
             s.relaxed_bounds += ls.relaxed_bounds;
             s.aggregated_vars += ls.aggregated_vars;
@@ -3068,6 +3407,7 @@ impl Presolve {
                 Reduction::FreeColSingleton { .. } => s.free_col_singletons += 1,
                 Reduction::ForcingRow { .. } => s.forcing_rows += 1,
                 Reduction::DominatedColumn { .. } => s.dominated_cols += 1,
+                Reduction::ConvexDominated { .. } => s.convex_dominated_cols += 1,
                 Reduction::BoundTightening { .. } => s.tightened_bounds += 1,
                 Reduction::RedundantBound { .. } => s.relaxed_bounds += 1,
                 // A whole pass in one entry: report what its plan achieved.
@@ -3402,6 +3742,7 @@ impl Presolve {
                     }
                 }
                 Reduction::DominatedColumn { col, value, .. } => x[*col] = *value,
+                Reduction::ConvexDominated { col, value } => x[*col] = *value,
                 // Restored in the second pass (depends on its neighbours).
                 Reduction::FreeColSingleton { .. } => {}
                 // The variable is kept; only its box changed, so its primal

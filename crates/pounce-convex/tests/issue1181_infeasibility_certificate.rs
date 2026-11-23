@@ -338,8 +338,8 @@ fn feasible_sliver_is_optimal_with_no_certificate() {
 /// The lift itself, on a model where it is the only ray that checks.
 ///
 /// `x₀ + x₁ − x₂ ≥ 1` (row 0) against `x₀ + x₁ − x₂ ≤ −1.5` (row 1, written
-/// doubled) is infeasible by itself; row 2 and the box give presolve bounds
-/// to tighten, a free column to fix and a dominated column to fix, and
+/// doubled) is infeasible by itself; rows 2 and 3 and the box give presolve
+/// bounds to tighten and dominated columns to fix, and
 /// nothing to prove infeasible, so the IPM reaches the verdict on the reduced
 /// problem. The ordinary postsolve reconstructs the removed multipliers from
 /// stationarity *with* `c` and decides bound activity from the lifted `x`,
@@ -350,16 +350,19 @@ fn feasible_sliver_is_optimal_with_no_certificate() {
 /// `ceria3d`, `forest6`, `klein3`, `mondou2`, `pang`, `qual`, `refinery` and
 /// `vol1` are the same case at scale.
 ///
-/// Re-searched for gh#1246. The model this used to be stopped reaching the
+/// Re-searched twice for gh#1246. The original model stopped reaching the
 /// case once presolve stopped handing the solver the bounds its rows imply:
-/// with those sides gone the plain postsolve's ray checks on it, which is the
-/// improvement, but it left this test pinning nothing.
+/// with those sides gone, the plain postsolve's ray checks on it. That is the
+/// improvement, but it left this test pinning nothing. The second model
+/// stopped reaching it when convex dominance arrived. Its full catalog then
+/// proved the model infeasible, the confirming re-derivation could not, and
+/// the reduction it fell back to has no dominated column.
 #[test]
 fn objective_free_lift_is_a_certificate_where_the_plain_postsolve_is_not() {
     let p = QpProblem {
         n: 5,
         p_lower: vec![],
-        c: vec![0.0, 1.0, 1.0, 1.0, -1.0],
+        c: vec![-1.0, 0.0, -1.0, 0.0, 0.0],
         a: vec![],
         b: vec![],
         g: vec![
@@ -369,12 +372,14 @@ fn objective_free_lift_is_a_certificate_where_the_plain_postsolve_is_not() {
             Triplet::new(1, 0, 2.0),
             Triplet::new(1, 1, 2.0),
             Triplet::new(1, 2, -2.0),
-            Triplet::new(2, 2, 1.0),
-            Triplet::new(2, 4, -1.0),
+            Triplet::new(2, 0, -1.0),
+            Triplet::new(2, 1, 1.0),
+            Triplet::new(2, 4, 2.0),
+            Triplet::new(3, 3, -1.0),
         ],
-        h: vec![-1.0, -3.0, 1.0],
+        h: vec![-1.0, -3.0, 2.0, 0.0],
         lb: vec![0.0; 5],
-        ub: vec![10.0, 10.0, INF, INF, 10.0],
+        ub: vec![10.0, INF, INF, 10.0, 10.0],
     };
     let o = QpOptions::default();
     let (sol, report, lift) =

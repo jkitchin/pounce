@@ -4327,8 +4327,8 @@ fn run_convex_qp(
                     presolve_log.push(format!(
                         "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
                          free-fixed {}, substituted {}, aggregated {}, \
-                         forcing {}, dominated {}, tightened {}, \
-                         implied bounds dropped {}{})",
+                         forcing {}, dominated {}, convex-dominated {}, \
+                         tightened {}, implied bounds dropped {}{})",
                         st.orig_vars,
                         st.reduced_vars,
                         st.orig_rows,
@@ -4339,6 +4339,7 @@ fn run_convex_qp(
                         st.aggregated_vars,
                         st.forcing_rows,
                         st.dominated_cols,
+                        st.convex_dominated_cols,
                         st.tightened_bounds,
                         st.relaxed_bounds,
                         exit,

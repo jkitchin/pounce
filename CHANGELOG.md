@@ -9,6 +9,26 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **Convex presolve removes convex-dominated columns (gh#1246, finding 3).**
+  Take three linear columns with the same support that agree in every row but
+  one. If one of them lies between the other two in that row and costs
+  strictly more than the matching mix of them, its weight can always move
+  onto them, so it is zero at every optimum. Presolve fixes it at its lower
+  bound. The test is a lower convex hull over (coefficient, cost) per group,
+  compared cross-multiplied with a strict margin. With the margin, every
+  removed column has a strictly positive reduced cost at every dual optimum,
+  so a whole batch can go at once. Columns exactly on a hull edge are kept.
+  The rule runs after the implied-bound pass, because it needs columns
+  unbounded above, and if it removes anything the fixpoint runs again.
+  - Measured with the `presolve` crate, this rule and `lp_folding` account for
+    nearly all of cpo3's OSA-60 reduction.
+  - On OSA-60, columns go 232,966 → 57,591, and the solve goes from 71.1 s /
+    89 iterations on main to 5.9 s / 37 iterations at the same optimum.
+  - On OSA-30, the solve goes from 18.2 s to 1.7 s.
+  - KEN-18 and PDS-06 are unchanged by it.
+  - Recorded as `convex_dominated_cols`.
+
 ### Changed
 - **The convex interior point carries variable bounds on the KKT diagonal
   instead of as rows of the factored matrix (gh#1243).** Every
