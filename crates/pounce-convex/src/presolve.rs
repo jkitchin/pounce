@@ -881,13 +881,44 @@ pub fn presolve(prob: &QpProblem) -> PresolveOutcome {
 /// [`presolve`]); a re-derivation that the deadline cuts short returns the
 /// partial reduction, which is the conservative answer.
 pub fn presolve_until(prob: &QpProblem, deadline: Option<std::time::Instant>) -> PresolveOutcome {
-    match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled, deadline) {
+    presolve_until_with(prob, deadline, ImpliedBounds::Drop)
+}
+
+/// Whether presolve removes the bound sides the rows imply before handing
+/// the problem to the solver (gh#1246). See [`relax_implied_bounds`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImpliedBounds {
+    /// Remove them: the default, since every finite side is a barrier term
+    /// and a KKT row the solver gains nothing from.
+    Drop,
+    /// Hand the solver every bound side the fixpoint produced.
+    ///
+    /// For a problem that has been widened by `bound_relax_factor`. The pass
+    /// is exact there too (the proofs run on the widened rows), but it was
+    /// measured on the declared model, and on the widened one it changed the
+    /// trajectory for the worse. Fixture sweep at `bound_relax_factor=1e-8`:
+    /// `convex_qp_qscfxm1` went from optimal in 136 iterations to the
+    /// iteration limit, `convex_qp_qpilotno` from 50 to the iteration limit,
+    /// and both fell through to the NLP arm on both legs. Widening is opt-in
+    /// on the convex arm and documented as the slower and less accurate
+    /// model, so it keeps the solver problem it had.
+    Keep,
+}
+
+/// [`presolve_until`] with the implied-bound pass chosen by the caller.
+pub fn presolve_until_with(
+    prob: &QpProblem,
+    deadline: Option<std::time::Instant>,
+    implied: ImpliedBounds,
+) -> PresolveOutcome {
+    match presolve_fixpoint(prob, Catalog::Full, DedupMemo::Enabled, deadline, implied) {
         PresolveOutcome::Infeasible(trigger) => {
             match presolve_fixpoint(
                 prob,
                 Catalog::NoSpeculativeFixings,
                 DedupMemo::Enabled,
                 deadline,
+                implied,
             ) {
                 // Confirmed without the speculative fixings: the problem
                 // really is infeasible, and this is the trigger that shows it.
@@ -974,6 +1005,7 @@ fn presolve_fixpoint(
     catalog: Catalog,
     memo: DedupMemo,
     deadline: Option<std::time::Instant>,
+    implied: ImpliedBounds,
 ) -> PresolveOutcome {
     // Cap layers defensively. A round can contribute two (the catalog pass
     // and an aggregation), so this is a bound on layers, not on rounds.
@@ -1068,7 +1100,8 @@ fn presolve_fixpoint(
     }
     // Hand the solver only the bound sides the rows do not already imply
     // (gh#1246). Skipped once the deadline has passed, like any further layer.
-    if !deadline.is_some_and(|d| std::time::Instant::now() >= d)
+    if implied == ImpliedBounds::Drop
+        && !deadline.is_some_and(|d| std::time::Instant::now() >= d)
         && let Some(relaxed) = relax_implied_bounds(&current, &declared)
     {
         chain.push(relaxed);
@@ -3835,7 +3868,7 @@ mod dedup_memo_tests {
     }
 
     fn reduce(prob: &QpProblem, memo: DedupMemo) -> Option<(String, PresolveStats)> {
-        match presolve_fixpoint(prob, Catalog::Full, memo, None) {
+        match presolve_fixpoint(prob, Catalog::Full, memo, None, ImpliedBounds::Drop) {
             PresolveOutcome::Reduced(ps) => Some((fingerprint(&ps.reduced), ps.stats())),
             _ => None,
         }
@@ -3989,9 +4022,13 @@ mod dedup_memo_tests {
 
         // And the merge really happens, or the comparison above is vacuous:
         // the looser of the two parallel rows must be gone.
-        let PresolveOutcome::Reduced(ps) =
-            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled, None)
-        else {
+        let PresolveOutcome::Reduced(ps) = presolve_fixpoint(
+            &prob,
+            Catalog::Full,
+            DedupMemo::Enabled,
+            None,
+            ImpliedBounds::Drop,
+        ) else {
             panic!("feasible bounded problem");
         };
         let kept: Vec<f64> = ps.reduced.h.clone();
@@ -4034,9 +4071,13 @@ mod dedup_memo_tests {
         assert_same("contracting pair with duplicate rows", &prob);
 
         // And the skip must really be engaging, or the test proves nothing.
-        let PresolveOutcome::Reduced(ps) =
-            presolve_fixpoint(&prob, Catalog::Full, DedupMemo::Enabled, None)
-        else {
+        let PresolveOutcome::Reduced(ps) = presolve_fixpoint(
+            &prob,
+            Catalog::Full,
+            DedupMemo::Enabled,
+            None,
+            ImpliedBounds::Drop,
+        ) else {
             panic!("feasible bounded problem");
         };
         assert!(

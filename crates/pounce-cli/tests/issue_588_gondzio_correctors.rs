@@ -19,9 +19,10 @@
 //!    same sweep with `qp_gondzio_corr=0` diffed empty again — which is what
 //!    says those five belong to the correctors and to nothing else.
 //!
-//! `lp_afiro` is the witness for (1) and (2). It is NETLIB `afiro`, a small
-//! degenerate LP of exactly the family Gondzio's paper is about, and it is the
-//! only fixture in the corpus whose iteration count moves by more than one.
+//! `lp_afiro` is the witness for (2). It is NETLIB `afiro`, a small
+//! degenerate LP of exactly the family Gondzio's paper is about. Since gh#1246
+//! it no longer separates the two settings on the direct driver, so
+//! `lp_share1b` is the witness for (1).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -107,10 +108,15 @@ fn iters(r: &SolveReport) -> usize {
 /// to the tolerance asserted below, but the old claim that the shorter
 /// trajectory also lands at a sharper point is not true on this model after
 /// #689, so it is not made.
+///
+/// The witness moved from `afiro` to NETLIB `share1b` in gh#1246. Once presolve
+/// stopped handing the IPM the bound sides its rows imply, `afiro` took 10
+/// iterations either way, so the knob was still wired but this test could not
+/// tell. On `share1b` it is 25 iterations off and 22 on.
 #[test]
 fn the_direct_driver_runs_the_correctors() {
-    let off = solve("lp_afiro", &["qp_hsde=no", "qp_gondzio_corr=0"]);
-    let on = solve("lp_afiro", &["qp_hsde=no"]);
+    let off = solve("lp_share1b", &["qp_hsde=no", "qp_gondzio_corr=0"]);
+    let on = solve("lp_share1b", &["qp_hsde=no"]);
     assert_ne!(
         iters(&off),
         iters(&on),
@@ -119,7 +125,7 @@ fn the_direct_driver_runs_the_correctors() {
     );
     assert!(
         iters(&on) < iters(&off),
-        "the correctors cost the direct driver iterations on afiro: {} -> {}",
+        "the correctors cost the direct driver iterations on share1b: {} -> {}",
         iters(&off),
         iters(&on),
     );

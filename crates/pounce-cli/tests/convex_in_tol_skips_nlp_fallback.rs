@@ -19,12 +19,14 @@
 //! |---|---|---|
 //! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable (`σ`-demoted) | fallback, NLP wins |
 //! | `issue745_netlib_problem.nl` at `tol=1e-12`, `relative_gap_tol=0` | `3.5e-8` (`1.2e-8` L-BFGS), acceptable | fallback |
-//! | `lp_tuff.nl` at `tol=3e-13`, `relative_gap_tol=0` | `1.2e-14`, acceptable; stopping error `2.8e-13` | skip |
+//! | `convex_qp_qgfrdxpn.nl` at `tol=1e-13`, `relative_gap_tol=0` | `7.1e-15`, acceptable; stopping error `1.4e-12` | skip |
 //!
-//! TUFF reaches the skip because the HSDE stop holds the complementarity sum
-//! to the gap tolerance (the `traininstance6` fix): it declines only in a
-//! narrow window (`1.5e-13`–`6e-13`), and every point there is far inside
-//! `tol` on the relative ruler. Re-measure the window if the convex
+//! The skip witness was `lp_tuff.nl` at `tol=3e-13` until gh#1246. Once
+//! presolve stopped handing the IPM implied bound sides, TUFF converged fully
+//! at every `tol` down to `3e-14`, so it no longer reached this branch.
+//! QGFRDXPN (Maros–Mészáros) declines on both legs across `3e-14`–`3e-13`, and
+//! every point there is far inside `tol` on the relative ruler, because the
+//! objective's unit is `8.2e4`. Re-measure the window if the convex
 //! trajectory moves. The absolute band, the status arm and the `σ` arm are
 //! pinned by the unit tests in `main.rs` (`convex_in_tol_tests`).
 
@@ -149,9 +151,9 @@ fn an_out_of_tol_convex_answer_still_falls_back() {
 #[test]
 fn an_in_tol_convex_answer_skips_the_fallback() {
     for leg in [&[][..], &[LBFGS][..]] {
-        let mut args = vec!["tol=3e-13", "relative_gap_tol=0"];
+        let mut args = vec!["tol=1e-13", "relative_gap_tol=0"];
         args.extend_from_slice(leg);
-        let r = run("lp_tuff.nl", &args);
+        let r = run("convex_qp_qgfrdxpn.nl", &args);
         assert!(
             r.stderr.contains(SKIP_NOTE),
             "{leg:?}: stderr=\n{}",
@@ -165,10 +167,10 @@ fn an_in_tol_convex_answer_skips_the_fallback() {
             ApplicationReturnStatus::SolvedToAcceptableLevel,
             "{leg:?}"
         );
-        // NETLIB TUFF's published optimum.
+        // QGFRDXPN's published optimum (Maros–Mészáros DOC 97/6).
         let obj = r.report.solution.objective;
         assert!(
-            ((obj - 0.29214776509) / 0.29214776509).abs() < 1e-6,
+            ((obj - 1.0079059e11) / 1.0079059e11).abs() < 1e-6,
             "{leg:?}: objective {obj}"
         );
     }

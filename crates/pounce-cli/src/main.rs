@@ -4032,7 +4032,9 @@ fn run_convex_qp(
     let t0 = std::time::Instant::now();
     use pounce_convex::HessianInertia;
     use pounce_convex::active_set::solve_qp_active_set_inertia;
-    use pounce_convex::presolve::{FixpointExit, PresolveOutcome, presolve_until};
+    use pounce_convex::presolve::{
+        FixpointExit, ImpliedBounds, PresolveOutcome, presolve_until_with,
+    };
     use pounce_convex::{QpOptions, QpStatus, solve_qp_ipm, solve_qp_ipm_debug};
 
     // What the classifier found out about `P`, handed to the engine rather than
@@ -4262,7 +4264,18 @@ fn run_convex_qp(
             // gh#1182: the fixpoint stops between layers once the budget is
             // spent, rather than running every layer before the solver's own
             // deadline scope even opens.
-            presolve_until(&qp, convex_opts.time_limit.and_then(|l| t0.checked_add(l)))
+            // gh#1246: a model the caller widened with `bound_relax_factor`
+            // keeps every bound side; see `ImpliedBounds::Keep`.
+            let implied = if bound_relax.active() {
+                ImpliedBounds::Keep
+            } else {
+                ImpliedBounds::Drop
+            };
+            presolve_until_with(
+                &qp,
+                convex_opts.time_limit.and_then(|l| t0.checked_add(l)),
+                implied,
+            )
         };
         match outcome {
             PresolveOutcome::Reduced(ps) => {

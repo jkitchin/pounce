@@ -25,7 +25,11 @@ changes.
   same statuses and total iterations 2660 → 2648. Wall time on the 60 models
   over 0.2 s fell from 285 s to 202 s; CVXQP1_L went from 79.8 s to 35.9 s,
   CONT-300 from 37.1 s to 19.2 s. The count is reported as `relaxed_bounds` in
-  the presolve stats and as "implied bounds dropped" in the CLI log. Column
+  the presolve stats and as "implied bounds dropped" in the CLI log. A model
+  widened by an explicit `bound_relax_factor` keeps every bound side
+  (`ImpliedBounds::Keep`). On the widened model the pass sent
+  `convex_qp_qscfxm1` and `convex_qp_qpilotno` from optimal to the iteration
+  limit, and the fixture sweep at that setting now diffs empty. Column
   reductions (finding 3) are not part of this change.
 - **`pounce.jax.odeint`, `daeint` and `solve_bvp(method="newton")` no longer
   evaluate the user's function eagerly in their host Newton loop
