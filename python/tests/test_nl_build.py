@@ -1140,3 +1140,144 @@ def test_rows_sharing_a_subexpression_evaluate_as_if_each_had_its_own_copy():
             ),
         ]:
             assert np.max(np.abs(a - b)) <= 1e-13 * np.max(np.abs(b))
+
+
+# --- con_linear: each row's linear part as a CSR triple (discopt#2293) -----
+
+
+def _linear_split_pair():
+    """The same rows built twice: linear terms taped, and passed as CSR.
+
+    Row 0 mixes a nonlinear summand with linear ones, row 1 is linear outright
+    (expression ``0.0``), row 2 repeats a column across the two parts, and rows
+    3 and 4 are affine with a constant -- four or more terms, which is where a
+    naive left-to-right sum and the compensated constant-structure read-out a
+    taped affine row gets first round differently.
+    """
+    x = pounce.NlExpr.vars(4)
+    obj = (x[0] - 1) ** 2 + x[1] * x[3]
+    taped = [
+        x[2].exp() + 2.0 * x[0] - x[3],
+        x[1] - 0.5 * x[2] + 3.0 * x[3],
+        x[0] * x[1] + 1.5 * x[1],
+        pounce.NlExpr.sum([x[0], x[1], x[2], x[3], pounce.NlExpr.const_(-1.0)]),
+        pounce.NlExpr.sum([0.1 * x[3], x[1], -0.7 * x[0], x[2], pounce.NlExpr.const_(3.0)]),
+    ]
+    split = [x[2].exp(), 0.0, x[0] * x[1], -1.0, 3.0]
+    csr = (
+        [0, 2, 5, 6, 10, 14],
+        [0, 3, 1, 2, 3, 1, 0, 1, 2, 3, 3, 1, 0, 2],
+        [2.0, -1.0, 1.0, -0.5, 3.0, 1.5, 1.0, 1.0, 1.0, 1.0, 0.1, 1.0, -0.7, 1.0],
+    )
+    kw = dict(n=4, objective=obj, g_l=[0.0] * 3 + [-10.0] * 2, g_u=[1.0] * 3 + [10.0] * 2)
+    a = pounce.build_nl_problem(constraints=taped, **kw)
+    b = pounce.build_nl_problem(constraints=split, con_linear=csr, **kw)
+    return a, b
+
+
+def _dense_jac(p, x):
+    r, c = p.jacobian_structure()
+    out = np.zeros((p.m, p.n))
+    np.add.at(out, (np.asarray(r), np.asarray(c)), p.jacobian(x))
+    return out
+
+
+def test_con_linear_matches_the_taped_linear_terms():
+    a, b = _linear_split_pair()
+    rng = np.random.default_rng(2293)
+    checked = 0
+    for _ in range(200):
+        x = rng.uniform(-2, 2, 4)
+        lam = rng.uniform(-1, 1, 5)
+        ga, gb = a.constraints(x), b.constraints(x)
+        # Rows 0 and 2 are tree plus segment, summed in a different order
+        # from the taped row; the rest must agree to the last bit.
+        np.testing.assert_allclose(gb[[0, 2]], ga[[0, 2]], rtol=1e-14, atol=1e-14)
+        assert np.array_equal(gb[[1, 3, 4]], ga[[1, 3, 4]])
+        assert np.array_equal(_dense_jac(b, x), _dense_jac(a, x))
+        assert np.array_equal(_dense_hessian(b, x, lam), _dense_hessian(a, x, lam))
+        assert b.objective(x) == a.objective(x)
+        checked += 1
+    assert checked == 200
+    # The linear terms are in the segment, not in a tape: the Jacobian
+    # pattern is the same, and an all-linear row has one entry per term.
+    assert b.nnz_jac == a.nnz_jac == 16
+
+
+def test_con_linear_affine_row_is_not_the_naive_sum():
+    """The fold is what makes rows 3/4 exact: a naive sum would differ.
+
+    Guards the test above against passing because the two orders happen to
+    agree: on these points the plain left-to-right sum of row 3 does differ
+    from what both problems return.
+    """
+    a, b = _linear_split_pair()
+    rng = np.random.default_rng(2293)
+    differs = 0
+    for _ in range(200):
+        x = rng.uniform(-2, 2, 4)
+        naive = (((x[0] + x[1]) + x[2]) + x[3]) - 1.0
+        differs += naive != b.constraints(x)[3]
+    assert differs > 0
+
+
+def test_con_linear_solves_to_the_same_point():
+    a, b = _linear_split_pair()
+    (xa, ia), (xb, ib) = pounce.solve_nlp_batch([a, b])
+    assert ia["status_msg"] == ib["status_msg"] == "Solve_Succeeded"
+    np.testing.assert_allclose(xb, xa, rtol=1e-6, atol=1e-8)
+
+
+def test_con_linear_accepts_numpy_arrays():
+    x = pounce.NlExpr.vars(2)
+    p = pounce.build_nl_problem(
+        n=2,
+        objective=x[0] ** 2,
+        constraints=[0.0],
+        con_linear=(np.array([0, 2]), np.array([0, 1], dtype=np.int32), np.array([1.0, -1.0])),
+    )
+    assert p.constraints(np.array([3.0, 1.0]))[0] == 2.0
+
+
+@pytest.mark.parametrize(
+    "csr, match",
+    [
+        (([0, 1], [0], [1.0]), "indptr has length"),
+        (([0, 1, 1], [0], [1.0, 2.0]), "lengths"),
+        (([0, 1, 2], [0, 5], [1.0, 1.0]), "references variable 5"),
+        (([0, 1, 2], [0, -1], [1.0, 1.0]), "references variable -1"),
+        (([0, 2, 1, 2], [0, 1], [1.0, 1.0]), "decreases"),
+        # A later decrease must be seen before an earlier row reads past the
+        # end of `indices` (that was a PanicException, not a ValueError).
+        (([0, 5, 2], [0, 1], [1.0, 1.0]), "decreases"),
+        (([1, 1, 2], [0, 1], [1.0, 1.0]), "must run from 0"),
+        (([0, 1, 2], [0, 1], [1.0, float("nan")]), "non-finite"),
+        (([0, 1, 2], [0, 1], [1.0, float("inf")]), "non-finite"),
+    ],
+)
+def test_con_linear_rejects_malformed_input(csr, match):
+    x = pounce.NlExpr.vars(2)
+    rows = [0.0] * (len(csr[0]) - 1) if match == "decreases" else [0.0, 0.0]
+    with pytest.raises(ValueError, match=match):
+        pounce.build_nl_problem(n=2, objective=x[0], constraints=rows, con_linear=csr)
+
+
+def test_con_linear_rejects_a_non_triple():
+    x = pounce.NlExpr.vars(2)
+    with pytest.raises(TypeError, match="CSR triple"):
+        pounce.build_nl_problem(n=2, objective=x[0], constraints=[0.0], con_linear=[1.0, 2.0])
+
+
+@pytest.mark.parametrize(
+    "csr",
+    [
+        ([0, 1], [True], [1.0]),
+        ([0, 1], np.array([True]), [1.0]),
+        ([False, True], [0], [1.0]),
+    ],
+)
+def test_con_linear_rejects_boolean_indices(csr):
+    """A boolean mask passed for indices must not become columns 0 and 1."""
+    x = pounce.NlExpr.vars(2)
+    with pytest.raises(TypeError, match="booleans"):
+        pounce.build_nl_problem(n=2, objective=x[0], constraints=[0.0], con_linear=csr)

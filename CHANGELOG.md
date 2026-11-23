@@ -10,6 +10,21 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`build_nl_problem(..., con_linear=(indptr, indices, data))`: a row's
+  linear part as coefficients (discopt#2293).** A frontend that knows which
+  terms of a row are linear can pass them as a CSR triple instead of
+  `Var` / `c*Var` nodes. They are stored in the problem's linear segment
+  (the `.nl` `J` segment's slot), with no expression tree, no AD tape and no
+  transient `NlExpr` nodes. Pass `0.0` as the expression of an all-linear row.
+  Such a row (constant expression plus segment) is folded into the same
+  constant-structure form the quadratic recognizer builds for an affine tree,
+  so it evaluates **bit-identically** to passing the row as a tree:
+  compensated sum over ascending variables, constant added last. Measured on
+  200,000 three-term rows: 597 → 268 B/row in the problem, and 600 → 72 B/row
+  of transient input. Parsed `.nl` models and calls without `con_linear` are
+  untouched: the fold applies only to `build_nl_problem` problems, whose
+  linear segment was always empty before. Indices out of range, non-finite
+  coefficients and malformed `indptr` are refused.
 - **The CLI reads QPS / MPS files directly (gh#1251).** `pounce model.mps`
   and `pounce model.qps` (extension in any case) load an LP or QP with no
   `.nl` conversion. The model is routed like a `.nl` input: an LP or convex

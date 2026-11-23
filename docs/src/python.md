@@ -364,6 +364,28 @@ p.gradient(p.x0)           # ndarray[n]
 (x_star, info), = pounce.solve_nlp_batch([p])
 ```
 
+**Linear parts, passed as coefficients.** `con_linear=(indptr, indices,
+data)` gives each row's linear part as a CSR triple over the rows: row `i`
+is `constraints[i](x) + Σ data[k] · x[indices[k]]` for `k` in
+`indptr[i]:indptr[i+1]`. It is the `.nl` file's `J` segment by another name
+and is treated the same way — no expression tree, no AD tape, a constant
+Jacobian entry. Pass `0.0` as the expression of a row that is linear
+outright. For a model whose rows are mostly linear terms (a time- or
+space-discretized ODE, a network balance) this is most of the memory: a
+three-term linear row costs ~590 B in the problem plus ~490 B of transient
+`NlExpr` nodes when taped, ~250 B passed here.
+
+```python
+x = pounce.NlExpr.vars(3)
+p = pounce.build_nl_problem(
+    n=3, objective=x[0] ** 2,
+    constraints=[x[2].exp(), 0.0],          # row 1 is linear outright
+    con_linear=([0, 1, 3], [0, 1, 2], [2.0, 1.0, -0.5]),
+    g_l=[0.0, 0.0], g_u=[0.0, 0.0],
+)
+# row 0: exp(x2) + 2 x0      row 1: x1 - 0.5 x2
+```
+
 Bounds default to unbounded (`±1e19`, the `.nl` sentinel) and `x0` to
 zeros. `minimize=False` maximizes; as with a parsed `maximize` model, the
 returned objective/gradient/Hessian are negated so that minimizing them
