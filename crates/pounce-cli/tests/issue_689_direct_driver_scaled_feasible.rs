@@ -184,9 +184,10 @@ fn the_direct_driver_on_the_presolved_model_still_reaches_the_optimum() {
 /// assertion is now the property that check enforces: a success here must
 /// carry a point that is one.
 ///
-/// Since gh#1246 the default route converges on `scaled_feasible_a` in 24
-/// iterations rather than running to the cap: presolve no longer hands it the
-/// bound sides the rows imply. The assertion is unchanged; it holds either way.
+/// Since gh#1246 (on top of gh#1243) the convex arm stops at the cap here
+/// without certifying, and the gh#535 fallback's NLP answer, the more
+/// accurate one, reports. The assertion is on the point, so it holds either
+/// way. `dev-notes/known-limitations.md` has the measurements.
 ///
 /// Kept separate from the `qp_hsde=no` test above because the two are fixed by
 /// different changes and can regress independently.

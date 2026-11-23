@@ -1819,12 +1819,20 @@ trajectory is sensitive to which of the two constraints it carries:
 
 | route | `main` | this branch |
 |---|---|---|
-| default (HSDE) | 200 iterations (to the cap) | **24** |
+| default (HSDE), convex arm alone (`solver_selection=qp-ipm`) | `Optimal` at 200, exactly the cap | **iteration limit at 200** (KKT `1.85e-13` relative, uncertified) |
+| default, `qp_kkt_row_elim=no` | `Optimal` at 200 | `Optimal` at 179 |
+| default `auto` route, as reported | `cvx-qp`, 200 | **`nlp`, 24 / 23** (gh#535 fallback; NLP answer `6.1e-17` against convex `3.0e-13`) |
 | `qp_hsde=no` (direct) | 24 | **98** |
 | `qp_hsde=no`, `qp_kkt_row_elim=no` | 24 | 24 |
 | `qp_hsde=no`, `qp_presolve=no` | 24 | 24 |
 
-All four reach the optimum `0`. Three things identify the trigger:
+Every reported answer is at the optimum `0`. On the default route the convex
+arm now stops at the cap without certifying, and the fallback's NLP answer
+reports. That answer is the more accurate of the two, but the total cost is
+the convex attempt plus the NLP solve, and the sweep's engine column moves
+`cvx-qp` → `nlp` on both legs. On `main` this model already certified with
+no iterations to spare (gh#689's `the_default_route_reaches_the_same_optimum`
+notes it needs about 3 596 as declared). Three things identify the trigger:
 - It needs the declared pass. With only derived sides dropped, the direct
   driver takes 24 iterations.
 - It needs gh#1243's bound-row folding, which is on by default; with folding
@@ -1838,12 +1846,16 @@ exists for:
 - Requiring a declared side to be *strictly* implied would also exclude the
   canonical case, `x ≤ 1` under `Σx = 1`, where the two likewise coincide.
 
-The opt-in direct driver gets slower on one deliberately pathological model.
-On the same model the default route goes from the iteration cap to 24
-iterations.
+So one deliberately pathological model costs more:
+- the opt-in direct driver takes 98 iterations instead of 24;
+- the default convex arm gives up at the cap and hands the model to the NLP
+  arm, where `main` certified at the cap.
+
+The reported answer is the optimum either way.
 
 **How to tell whether a fix works.** `issue_689_direct_driver_scaled_feasible.rs`
 asserts the direct driver's 60-iteration budget with `qp_presolve=no`. To
 check a fix, run `scaled_feasible_a` at `qp_hsde=no` with presolve on, and
-expect about 24 iterations. Then confirm with `scripts/sweep-fixtures.sh` on
-both legs that the default route stays at 24.
+expect about 24 iterations. Then check that `solver_selection=qp-ipm` at
+defaults certifies again (`Optimal`, at most 200 iterations). The sweep should
+then show `scaled_feasible_a` back on `cvx-qp` on both legs.
