@@ -108,3 +108,36 @@ verdict-and-objective check alone could not have caught this.
     `SolveSucceeded` at a final KKT error of `0` (`extreme_row` was `3.8e-11`
     without elimination). `feasible_x0_wide_scale`, the same family at `1e8`,
     does not move.
+* Maros-Meszaros (`benchmarks/qp`, all 138, `.nl` from `generate_nl.py`),
+  `RAYON_NUM_THREADS=1`, `max_wall_time=100`, `main` versus this change. Both
+  binaries ran side by side on a 4-core Linux x86_64 container:
+  * Verdicts: no problem gets worse. `BOYD2` goes `MaximumWallTimeExceeded`
+    (43 iterations, 102 s) → `SolveSucceeded` (77 iterations, 86 s). `BOYD1`
+    still hits the wall, after 28 iterations instead of 9. No engine or other
+    objective moves.
+  * Iterations: 126 unchanged. `QSHIP12S` −2; `HUES-MOD`, `HUESTIS`,
+    `QADLITTL`, `QFFFFF80`, `QPILOTNO` and `QSIERRA` −1; `AUG2DCQP`,
+    `PRIMALC1` and `QSHIP04S` +1.
+  * Peak RSS: down by up to 45%. `CVXQP1_L` 401 → 221 MB, `CVXQP3_L`
+    519 → 296 MB, `CONT-300` 1.92 → 1.21 GB, `BOYD1` 1.07 → 0.73 GB. It is
+    never up by more than 0.5% (13 MB problems, which is noise).
+  * Suite wall time: 522 → 397 s.
+* A synthetic boxed LP (400 k columns, 208 k rows, 1.6 M nonzeros; banded,
+  with every 50th column pinned by a singleton row), solved with the default
+  convex HSDE and single-threaded. All three runs take 20 iterations to the
+  same objective (to `3e-11` relative):
+
+  | binary | peak RSS | wall |
+  |---|---|---|
+  | `main` | 6.24 GB | 100 s |
+  | this change, `qp_kkt_row_elim=no` (the copy fixes only) | 4.97 GB | 100 s |
+  | this change | 3.94 GB | 69 s |
+
+## What is still open from gh#1243
+
+* Items 3 and 4 (the `permute_pattern` copies in FERAL's symbolic phase, and
+  MC64 on LP-shaped KKTs) are in the `feral` crate, not here.
+* `expand_bounds` still builds the expanded `QpProblem` (a copy of `G` plus
+  one triplet per bound) beside the problem it came from. The factored KKT
+  no longer carries those rows, but the problem copy remains.
+* The `.nl` row/column names (0.51 GiB on `Primal2_1000`) are read up front.
