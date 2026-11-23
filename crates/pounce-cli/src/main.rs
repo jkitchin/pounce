@@ -4323,6 +4323,10 @@ fn run_convex_qp(
                         FixpointExit::Deadline => {
                             format!(", stopped by max_wall_time after {} layers", st.rounds)
                         }
+                        // gh#1246: the chain retains its memory budget.
+                        FixpointExit::MemoryCap => {
+                            format!(", stopped at its memory budget after {} layers", st.rounds)
+                        }
                     };
                     presolve_log.push(format!(
                         "Presolve: {} → {} vars, {} → {} rows (fixed {}, \

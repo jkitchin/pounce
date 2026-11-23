@@ -9,6 +9,27 @@ changes.
 
 ## [Unreleased]
 
+### Fixed
+- **Convex presolve no longer keeps a full copy of the problem per fixpoint
+  layer (gh#1246).** Each of up to 32 layers held `orig`, a clone of the
+  problem it reduced, so presolve itself ran the Mittelmann LPs `dlr1`,
+  `dlr2`, `thk_48` and `thk_63` out of memory.
+  - **What a layer keeps now.** A chain layer keeps an undo record: the rows
+    and columns it dropped, and the entries it changed. Postsolve walks the
+    chain backward from the final reduced problem, rebuilding one layer's
+    input at a time.
+  - **Matrices.** A layer's matrices are a restriction of a base shared along
+    the chain, which only an aggregation replaces.
+  - **Backstop.** A memory budget stops the loop with
+    `FixpointExit::MemoryCap` ("stopped at its memory budget" in the CLI log)
+    if the chain still grows past three times the input.
+  - **Measured.** On a synthetic LP with 4 M nonzeros, 32 layers deep, peak
+    presolve memory goes 5.4 GB → 1.2 GB, with the same reduction. At 9.9 M
+    nonzeros the peak is 3.2 GB.
+  - **Checks.** The fixture sweep diffs empty on both legs, default and
+    widened. Debug builds check at every layer that the record rebuilds its
+    input exactly.
+
 ### Added
 - **Convex presolve removes convex-dominated columns (gh#1246, finding 3).**
   Take three linear columns with the same support that agree in every row but
