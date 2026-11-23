@@ -1247,6 +1247,9 @@ def test_con_linear_accepts_numpy_arrays():
         (([0, 1, 2], [0, 5], [1.0, 1.0]), "references variable 5"),
         (([0, 1, 2], [0, -1], [1.0, 1.0]), "references variable -1"),
         (([0, 2, 1, 2], [0, 1], [1.0, 1.0]), "decreases"),
+        # A later decrease must be seen before an earlier row reads past the
+        # end of `indices` (that was a PanicException, not a ValueError).
+        (([0, 5, 2], [0, 1], [1.0, 1.0]), "decreases"),
         (([1, 1, 2], [0, 1], [1.0, 1.0]), "must run from 0"),
         (([0, 1, 2], [0, 1], [1.0, float("nan")]), "non-finite"),
         (([0, 1, 2], [0, 1], [1.0, float("inf")]), "non-finite"),
@@ -1254,7 +1257,7 @@ def test_con_linear_accepts_numpy_arrays():
 )
 def test_con_linear_rejects_malformed_input(csr, match):
     x = pounce.NlExpr.vars(2)
-    rows = [0.0] * 3 if match == "decreases" else [0.0, 0.0]
+    rows = [0.0] * (len(csr[0]) - 1) if match == "decreases" else [0.0, 0.0]
     with pytest.raises(ValueError, match=match):
         pounce.build_nl_problem(n=2, objective=x[0], constraints=rows, con_linear=csr)
 
@@ -1263,3 +1266,18 @@ def test_con_linear_rejects_a_non_triple():
     x = pounce.NlExpr.vars(2)
     with pytest.raises(TypeError, match="CSR triple"):
         pounce.build_nl_problem(n=2, objective=x[0], constraints=[0.0], con_linear=[1.0, 2.0])
+
+
+@pytest.mark.parametrize(
+    "csr",
+    [
+        ([0, 1], [True], [1.0]),
+        ([0, 1], np.array([True]), [1.0]),
+        ([False, True], [0], [1.0]),
+    ],
+)
+def test_con_linear_rejects_boolean_indices(csr):
+    """A boolean mask passed for indices must not become columns 0 and 1."""
+    x = pounce.NlExpr.vars(2)
+    with pytest.raises(TypeError, match="booleans"):
+        pounce.build_nl_problem(n=2, objective=x[0], constraints=[0.0], con_linear=csr)

@@ -33,7 +33,7 @@
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyString;
+use pyo3::types::{PyBool, PyString};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1401,11 +1401,36 @@ fn csr_linear(
         return Ok(None);
     };
     let err = |msg: String| PyValueError::new_err(format!("build_nl_problem: con_linear {msg}"));
-    let (indptr, indices, data): (Vec<i64>, Vec<i64>, Vec<Number>) = v.extract().map_err(|_| {
+    let not_triple = || {
         PyTypeError::new_err(
             "build_nl_problem: con_linear must be a CSR triple (indptr, indices, data)",
         )
-    })?;
+    };
+    let (py_indptr, py_indices, py_data): (Bound<'_, PyAny>, Bound<'_, PyAny>, Bound<'_, PyAny>) =
+        v.extract().map_err(|_| not_triple())?;
+    // A boolean extracts as an integer, so a mask passed where indices belong
+    // would silently become columns 0 and 1. Refuse it, for a NumPy bool
+    // array (dtype kind 'b') and for a sequence holding Python bools.
+    for (what, obj) in [("indptr", &py_indptr), ("indices", &py_indices)] {
+        let bool_dtype = obj
+            .getattr("dtype")
+            .and_then(|d| d.getattr("kind"))
+            .and_then(|k| k.extract::<String>())
+            .is_ok_and(|k| k == "b");
+        let bool_item = !bool_dtype
+            && obj.downcast::<pyo3::types::PySequence>().is_ok()
+            && obj
+                .iter()?
+                .any(|x| x.is_ok_and(|x| x.is_instance_of::<PyBool>()));
+        if bool_dtype || bool_item {
+            return Err(PyTypeError::new_err(format!(
+                "build_nl_problem: con_linear {what} must be integers, got booleans"
+            )));
+        }
+    }
+    let indptr: Vec<i64> = py_indptr.extract().map_err(|_| not_triple())?;
+    let indices: Vec<i64> = py_indices.extract().map_err(|_| not_triple())?;
+    let data: Vec<Number> = py_data.extract().map_err(|_| not_triple())?;
     if indptr.len() != m + 1 {
         return Err(err(format!(
             "indptr has length {}, expected len(constraints) + 1 = {}",
@@ -1420,6 +1445,13 @@ fn csr_linear(
             data.len()
         )));
     }
+    // Monotonicity first, over the whole of `indptr`: checked row by row
+    // inside the loop below, a later decrease let an earlier row run past
+    // the end of `indices` before it was seen (`[0, 5, 2]` with two indices
+    // read `indices[2]`), a panic rather than this error.
+    if let Some(i) = indptr.windows(2).position(|w| w[1] < w[0]) {
+        return Err(err(format!("indptr decreases at row {i}")));
+    }
     if indptr[0] != 0 || indptr[m] != indices.len() as i64 {
         return Err(err(format!(
             "indptr must run from 0 to len(indices) = {}, got {}..{}",
@@ -1430,10 +1462,8 @@ fn csr_linear(
     }
     let mut rows = Vec::with_capacity(m);
     for i in 0..m {
+        // In range by the two checks above: 0 = indptr[0] <= a <= b <= indptr[m].
         let (a, b) = (indptr[i], indptr[i + 1]);
-        if b < a {
-            return Err(err(format!("indptr decreases at row {i}")));
-        }
         let mut row = Vec::with_capacity((b - a) as usize);
         for k in a as usize..b as usize {
             let (j, c) = (indices[k], data[k]);
