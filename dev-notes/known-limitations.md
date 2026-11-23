@@ -12,6 +12,46 @@ merges.
 
 ---
 
+## Convex IPM: the largest Mittelmann LPs still need more memory than the factor (gh#1249)
+
+gh#1249 found five Mittelmann LPs (`L1_sixm250obs`, `L1_sixm1000obs`,
+`fhnw-binschedule1`, `Primal2_1000`, `L2CTA3D`) exhausting a 38.6 GB cap inside
+FERAL before the first iteration. The ordering half is fixed: the convex
+backend races the orderings at KKT order >= 1M (`CONVEX_AUTO_RACE_MIN_DIM`),
+because feral's `Auto` picks AMF on fhnw (whose symbolic phase alone passes
+11 GB) and AMD on Primal2 (4x the fill of METIS). That rule belongs in feral
+and is jkitchin/feral#246; drop the pounce override when it ships.
+
+What is left, measured on a 15 GB / 4-core container with an RSS watchdog:
+
+| model | ordering | result |
+|---|---|---|
+| `Primal2_1000` | race -> METIS (predicted peak 2.2 GB) | 37 iterations in 2400 s, peak RSS 12.4 GB, `Maximum_WallTime_Exceeded` |
+| `Primal2_1000` | AMD (the old `Auto`, predicted 8.3 GB) | over 13.7 GB at 86 s, in the first numeric factor |
+| `fhnw-binschedule1` | race -> AMD (predicted peak 6.8 GB) | symbolic done in 466 s (the race), then over 13.5 GB at 993 s in the numeric factor |
+
+* **Memory outside the factor.** Primal2_1000 sits at ~6.5 GB RSS before its
+  numeric factor whatever the ordering (measured with every factorization
+  refused), against a predicted 2.2 GB factor. The candidates are the ones
+  `dev-notes/kkt-bound-row-elimination.md` lists: `expand_bounds`' problem
+  copy, the `.nl` names (0.5 GB on this model), presolve layers. fhnw's
+  6.8 GB factor on top of the same kind of baseline did not fit in 13.5 GB;
+  whether it fits in 38.6 GB is unmeasured.
+* **Analysis time.** The race costs one analysis per candidate: 466-476 s on
+  fhnw (AMD alone: 318 s), 120-130 s on Primal2 (AMD alone: 24 s).
+* **Not measured:** `L1_sixm250obs` and `L1_sixm1000obs` are netlib-compressed
+  MPS and need netlib's `emps` to expand; `L2CTA3D`'s `.nl` conversion did not
+  fit the container.
+
+How to measure (from `benchmarks/lpopt/mps_to_nl.py` output): run with
+`POUNCE_FERAL_REPORT_SYMBOLIC=1` for the prediction, and with
+`POUNCE_FERAL_MAX_FACTOR_BYTES=1` to stop before the numeric factor, which
+isolates the memory spent before it. A fix to the baseline shows as a lower
+RSS at the refusal; a fix in feral#246 shows as the same orderings chosen
+without `CONVEX_AUTO_RACE_MIN_DIM`.
+
+---
+
 ## Convex IPM: default static pivoting ends ns1116954 acceptable, and switching to delayed pivoting on demand costs other models
 
 *Measured on `integrate-0.18-fixes` (parent `22ae155e`), MIPLIB ns1116954's
