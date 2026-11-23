@@ -304,10 +304,11 @@ pub struct QpOptions {
     /// on a bounded LP loses one row per finite bound. Default `true`;
     /// `false` factors the full augmented system, as before gh#1243.
     ///
-    /// Read by the drivers that assemble the shared KKT assembly: the
-    /// symmetric HSDE and the direct interior-point loop, including the
-    /// reusable [`QpFactorization`]. The nonsymmetric-cone HSDE assembles its
-    /// own KKT and does not eliminate.
+    /// Read by the drivers that use the shared KKT assembly: the symmetric
+    /// HSDE and the direct interior-point loop. The nonsymmetric-cone HSDE
+    /// assembles its own KKT and does not eliminate. The reusable
+    /// [`QpFactorization`] ignores this and always factors the full system;
+    /// see its docs for why.
     pub kkt_row_elim: bool,
 }
 
@@ -5409,6 +5410,15 @@ fn run_ipm(
 /// does not match the captured structure returns
 /// [`QpStatus::NumericalFailure`] rather than silently producing a wrong
 /// answer; use the one-shot [`solve_qp_ipm`] for heterogeneous problems.
+///
+/// The handle always factors the full bound-expanded system and ignores
+/// [`QpOptions::kkt_row_elim`] (gh#1243). Which bound rows the elimination
+/// folds depends on the bound *values*: a fixed or sub-tolerance box keeps
+/// its rows. So a handle that eliminated would change its factored pattern
+/// when a later solve fixed or released a bound, which the contract above
+/// allows, and would then refuse that solve. Freezing the set chosen at
+/// `build` instead would fold a box that later became fixed, the one case
+/// the elimination leaves alone because it loses accuracy there.
 pub struct QpFactorization {
     fact: Factorization,
     opts: QpOptions,
@@ -5436,14 +5446,19 @@ impl QpFactorization {
             base.clone()
         };
         let cone = CompositeCone::single_nonneg(expanded.m_ineq());
-        let (kkt, fact) = build_factorization(&expanded, &cone, opts, &mut make_backend).ok()?;
+        // The full system, whatever the caller asked for: see the type docs.
+        let opts = QpOptions {
+            kkt_row_elim: false,
+            ..*opts
+        };
+        let (kkt, fact) = build_factorization(&expanded, &cone, &opts, &mut make_backend).ok()?;
         Some(QpFactorization {
             airn: kkt.airn,
             ajcn: kkt.ajcn,
             n: base.n,
             fact,
             cone,
-            opts: *opts,
+            opts,
         })
     }
 
@@ -6326,9 +6341,13 @@ impl KktStructure {
     /// underflowed, say — or makes a fold overflow, the reduced system is not
     /// a faithful Schur complement, so this reports the factorization
     /// singular instead of factoring it. The drivers already answer a
-    /// singular factor: the HSDE raises the `(z, z)` regularization, which
-    /// moves every `v` further from zero; the direct driver stops with
-    /// `NumericalFailure`.
+    /// singular factor. The HSDE's staged ladder raises `δ_w` first, which
+    /// does not change any `v`. Only once `δ_w` saturates does it raise the
+    /// `(z, z)` regularization, which moves every `v` further from zero, and
+    /// if its retry budget runs out first it stops with `NumericalFailure`.
+    /// The direct driver stops with `NumericalFailure` at once. With the
+    /// default `qp_reg > 0` every `v ≤ −δ < 0`, so this is practically
+    /// unreachable.
     pub(crate) fn refactor(
         &self,
         fact: &mut Factorization,

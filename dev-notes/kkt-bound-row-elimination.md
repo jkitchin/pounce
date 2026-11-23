@@ -37,11 +37,15 @@ The drivers do not see the difference:
   and restores the `(x, x)` entries bit for bit. Later updates and the matvec
   therefore see the full KKT's own values.
 * **Guard.** If an eliminated `v` is not a finite negative number, or a fold
-  overflows, `refactor` reports `Singular`. The HSDE answers that by raising
-  the `(z, z)` regularization, which moves every `v` away from zero.
+  overflows, `refactor` reports `Singular`. The HSDE's staged ladder raises
+  `δ_w` first, which cannot fix `v`. It reaches the `(z, z)` regularization,
+  which moves every `v` away from zero, only once `δ_w` saturates. With the
+  default `qp_reg > 0`, every `v ≤ −δ < 0`, so this is practically
+  unreachable.
 
-Paths covered: the symmetric HSDE (`hsde.rs`), the direct driver (`run_ipm`)
-and the reusable `QpFactorization`. The nonsymmetric-cone HSDE
+Paths covered: the symmetric HSDE (`hsde.rs`) and the direct driver
+(`run_ipm`). The reusable `QpFactorization` always factors the full system
+(see below). The nonsymmetric-cone HSDE
 (`hsde_nonsym.rs`, exponential and power cones) assembles its own KKT and
 still factors bound rows. `assemble_kkt_for_bench` builds the full system on
 purpose.
@@ -133,7 +137,48 @@ verdict-and-objective check alone could not have caught this.
   | this change, `qp_kkt_row_elim=no` (the copy fixes only) | 4.97 GB | 100 s |
   | this change | 3.94 GB | 69 s |
 
+## Why `QpFactorization` does not eliminate
+
+The handle builds once and lets a later solve change bound *values*. The
+elimination chooses its rows from those values, because a fixed or
+sub-`NARROW_BOX` box keeps its rows. Fixing a bound on a later solve then
+changed the factored pattern, the handle's pattern check refused it, and the
+solve returned `NumericalFailure` (found in review). Freezing the set chosen
+at build time would instead fold a box that has since become fixed, the one
+case left out of the elimination because it loses accuracy. So the handle
+passes `eliminate = false`, and `QpOptions::kkt_row_elim` does not reach it.
+`issue1243_bound_row_elimination.rs::a_reused_factorization_accepts_a_bound_being_fixed_or_released`
+pins both directions (wide → fixed and fixed → wide) against a fresh
+one-shot solve.
+
 ## What is still open from gh#1243
+
+This change does not fix the Mittelmann models that exhaust memory. The
+review measured the 11 that reach 20 GB or more on `main`, each solo, single
+threaded, with a 38.6 GB cap and a 300 s limit:
+
+* None of them solves with this change.
+* `neos-3025225`'s peak drops from 34.7 to 8.7 GB.
+* `Primal2_1000`'s drops from 22.9 to 20.3 GB.
+* `L2CTA3D` now gets through FERAL's ordering and hits the cap in the
+  numeric factorization, where `main` timed out still ordering.
+
+Stack samples near the cap put the memory in three places this change does
+not touch:
+
+* **The convex presolve fixpoint** (`dlr1`, `dlr2`, `thk_48`, `thk_63`).
+  Every layer keeps `orig`, a full copy of its input, for postsolve, and
+  there can be up to 32 layers (about 0.7 GB each on `dlr1`). A fix would
+  keep in each layer only what its postsolve reads, and cap the chain by
+  memory as well as by layer count.
+* **The `.nl` reader** (`Dual2_5000`): about 215 B per nonzero while
+  parsing.
+* **The factorization** (`L1_sixm*`, `fhnw-binschedule1`, `Primal2_1000`,
+  `L2CTA3D`): the ordering changes how fast memory grows, but no ordering
+  reached a first iteration. FERAL's `factor_nnz_estimate` and
+  `peak_contrib_bytes` are not yet surfaced before the numeric factor.
+
+The earlier items also remain:
 
 * Items 3 and 4 (the `permute_pattern` copies in FERAL's symbolic phase, and
   MC64 on LP-shaped KKTs) are in the `feral` crate, not here.

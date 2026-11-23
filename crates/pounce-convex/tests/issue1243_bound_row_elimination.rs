@@ -323,3 +323,52 @@ fn a_boxed_socp_agrees() {
         assert!(max_abs_diff(&on.x, &off.x) <= 1e-5, "hsde={hsde}");
     }
 }
+
+/// `QpFactorization` promises that bound *values* may change between solves
+/// on one handle (gh#1243 review). Which rows the elimination folds depends
+/// on those values (a fixed or sub-`NARROW_BOX` box keeps its rows), so a
+/// handle that eliminated would change its factored pattern when a bound
+/// was fixed or released, and answer `NumericalFailure`. Both directions
+/// are exercised: built on a wide box then solved with it fixed, and built
+/// fixed then solved wide. Each is held to what a fresh one-shot solve of
+/// the same instance returns.
+#[test]
+fn a_reused_factorization_accepts_a_bound_being_fixed_or_released() {
+    use pounce_convex::QpFactorization;
+    // min ½‖x − (0.7, 0.2)‖² over a box, with x₀ + x₁ ≤ 1.5.
+    let base = |lb1: f64, ub1: f64| QpProblem {
+        n: 2,
+        p_lower: vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+        c: vec![-0.7, -0.2],
+        a: Vec::new(),
+        b: Vec::new(),
+        g: vec![Triplet::new(0, 0, 1.0), Triplet::new(0, 1, 1.0)],
+        h: vec![1.5],
+        lb: vec![0.0, lb1],
+        ub: vec![1.0, ub1],
+    };
+    let wide = base(0.0, 1.0);
+    let fixed = base(0.3, 0.3);
+    for (built_on, then) in [(&wide, &fixed), (&fixed, &wide)] {
+        for elim in [true, false] {
+            let o = opts(false, elim);
+            let mut handle = QpFactorization::build(built_on, &o, backend).expect("builds");
+            for prob in [built_on, then] {
+                let reused = handle.solve(prob);
+                let fresh = solve_qp_ipm(prob, &o, backend);
+                let what = format!(
+                    "built on x1 ∈ [{}, {}], solving x1 ∈ [{}, {}], kkt_row_elim={elim}",
+                    built_on.lb[1], built_on.ub[1], prob.lb[1], prob.ub[1]
+                );
+                assert_eq!(reused.status, QpStatus::Optimal, "{what}");
+                assert_eq!(fresh.status, QpStatus::Optimal, "{what}: fresh");
+                assert!(
+                    max_abs_diff(&reused.x, &fresh.x) <= 1e-6,
+                    "{what}: {:?} vs {:?}",
+                    reused.x,
+                    fresh.x
+                );
+            }
+        }
+    }
+}

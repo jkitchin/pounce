@@ -26,9 +26,15 @@ changes.
     100 s, and no verdict gets worse.
   * The fixture sweep moves 6 of 152 fixtures by 1–5 iterations, with no
     status, engine or objective change.
-  * Covers the symmetric HSDE, the direct driver and `QpFactorization`; the
-    exponential/power-cone HSDE is unchanged. `qp_kkt_row_elim=no` (or
+  * Covers the symmetric HSDE and the direct driver. The exponential/power-
+    cone HSDE is unchanged. The reusable `QpFactorization` always factors the
+    full system, because it accepts new bound values per solve and fixing
+    one would change which rows fold. `qp_kkt_row_elim=no` (or
     `QpOptions::kkt_row_elim = false`) factors the full system as before.
+  * This does not fix the largest Mittelmann LPs that exhaust memory. Their
+    peaks are in the presolve fixpoint chain (each layer keeps a full copy of
+    its input), the `.nl` reader and the factorization's fill, which gh#1243
+    tracks separately. On `neos-3025225` the peak drops from 34.7 to 8.7 GB.
   * Details and measurements: `dev-notes/kkt-bound-row-elimination.md`.
 
 ### Fixed
