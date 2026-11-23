@@ -24,17 +24,6 @@ changes.
   with `TimeLimit`. Both are off by default because the symbolic phase
   then runs twice per pattern; the factor is unchanged.
 
-### Changed
-- **The convex interior point races FERAL's orderings on KKTs of a million
-  rows or more (gh#1249).** FERAL's default ordering picks badly at this
-  size: on `fhnw-binschedule1` it chooses AMF, whose symbolic analysis alone
-  exhausts memory; on `Primal2_1000` it chooses AMD, predicting 4× the
-  memory and 8× the work of METIS or SCOTCH. Above that size the convex
-  backend now uses `auto_race`, which keeps the ordering with the least
-  predicted fill. It costs one extra analysis per pattern (minutes at this
-  size). `POUNCE_FERAL_ORDERING` still wins, and nothing in the benchmark
-  corpora is large enough to be affected. A stopgap until FERAL's default
-  is fixed (jkitchin/feral#246).
 - **`build_nl_problem(..., con_linear=(indptr, indices, data))`: a row's
   linear part as coefficients (discopt#2293).** A frontend that knows which
   terms of a row are linear can pass them as a CSR triple instead of
@@ -59,6 +48,16 @@ changes.
   markers and `BV`/`LI`/`UI` bounds are still rejected.
 
 ### Changed
+- **The convex interior point races FERAL's orderings on KKTs of a million
+  rows or more (gh#1249).** FERAL's default ordering picks badly at this
+  size: on `fhnw-binschedule1` it chooses AMF, whose symbolic analysis alone
+  exhausts memory; on `Primal2_1000` it chooses AMD, predicting 4× the
+  memory and 8× the work of METIS or SCOTCH. Above that size the convex
+  backend now uses `auto_race`, which keeps the ordering with the least
+  predicted fill. It costs one extra analysis per pattern (minutes at this
+  size). `POUNCE_FERAL_ORDERING` still wins, and nothing in the benchmark
+  corpora is large enough to be affected. A stopgap until FERAL's default
+  is fixed (jkitchin/feral#246).
 - **The CLI no longer parses a `.nl` twice when it routes the model to a
   convex engine (gh#1255).** An LP, convex QP or SOCP used to be read a
   second time for the convex solver while the first copy and its evaluation

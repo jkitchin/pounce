@@ -22,7 +22,9 @@ because feral's `Auto` picks AMF on fhnw (whose symbolic phase alone passes
 11 GB) and AMD on Primal2 (4x the fill of METIS). That rule belongs in feral
 and is jkitchin/feral#246; drop the pounce override when it ships.
 
-What is left, measured on a 15 GB / 4-core container with an RSS watchdog:
+What is left, measured on a 15 GB / 4-core container with an RSS watchdog,
+on a build based on `913be16` (after gh#1243's duplicate-copy fixes, before
+gh#1248's `.nl` reader changes, so the baseline below may now be lower):
 
 | model | ordering | result |
 |---|---|---|
