@@ -528,6 +528,19 @@ enum Reduction {
     Aggregate {
         plan: Box<pounce_presolve::linear_eq_plan::EliminationPlan>,
     },
+    /// An **implied-free column substituted out** (gh#1246): `col` appears in
+    /// the equality row `eq_row` (coefficient `a_coef`), and that row, with
+    /// the other columns' bounds, implies `col`'s own bounds, so the column is
+    /// free in effect. It was replaced by `(b_r − Σ_{k≠col} a_rk x_k)/a_coef`
+    /// in the objective and every other row, and the row consumed. Postsolve
+    /// evaluates that expression and recovers the row's multiplier from the
+    /// column's stationarity, exactly as for [`Reduction::FixedVar`]; the
+    /// column's bound multipliers are then zero. See [`implied_free_once`].
+    ImpliedFreeSub {
+        col: usize,
+        eq_row: usize,
+        a_coef: f64,
+    },
     /// A **convex-dominated column** (gh#1246): fixed at its finite lower
     /// bound `value` and dropped, because its column is a convex combination
     /// of two others that cost strictly less. See [`convex_dominance_once`].
@@ -1413,7 +1426,9 @@ pub enum ImpliedBounds {
     /// Remove them: the default, since every finite side is a barrier term
     /// and a KKT row the solver gains nothing from.
     Drop,
-    /// Hand the solver every bound side the fixpoint produced.
+    /// Hand the solver every bound side the fixpoint produced, and skip
+    /// implied-free substitution ([`implied_free_once`]), which leans on the
+    /// same implications.
     ///
     /// For a problem that has been widened by `bound_relax_factor`. The pass
     /// is exact there too (the proofs run on the widened rows), but it was
@@ -1421,9 +1436,12 @@ pub enum ImpliedBounds {
     /// trajectory for the worse. Fixture sweep at `bound_relax_factor=1e-8`:
     /// `convex_qp_qscfxm1` went from optimal in 136 iterations to the
     /// iteration limit, `convex_qp_qpilotno` from 50 to the iteration limit,
-    /// and both fell through to the NLP arm on both legs. Widening is opt-in
-    /// on the convex arm and documented as the slower and less accurate
-    /// model, so it keeps the solver problem it had.
+    /// and both fell through to the NLP arm on both legs. Implied-free
+    /// substitution did the same kind of thing there: it moved
+    /// `convex_qp_qforplan` from the NLP arm's `Solve_Succeeded` to the convex
+    /// arm's `Solved_To_Acceptable_Level`. Widening is opt-in on the convex arm
+    /// and documented as the slower and less accurate model, so it keeps the
+    /// solver problem it had.
     Keep,
 }
 
@@ -1578,8 +1596,10 @@ fn presolve_fixpoint_within(
     // own proof against the final problem, never from this record.
     let mut declared = DeclaredSides::of(prob);
     let mut exit;
-    // Convex-dominance stages run so far (gh#1246); see the end of the loop.
+    // Convex-dominance stages and implied-free substitution layers run so far
+    // (gh#1246).
     let mut dominance_stages = 0usize;
+    let mut substitution_layers = 0usize;
     'stages: loop {
         loop {
             let mut ps = match presolve_once(&current, &[], catalog, &refinements, structure_stable)
@@ -1633,8 +1653,28 @@ fn presolve_fixpoint_within(
                 None => false,
             };
             structure_stable = memo == DedupMemo::Enabled && bounds_only && !aggregated;
-            if !catalog_changed && !aggregated {
-                exit = FixpointExit::Fixpoint; // neither half found anything
+            // Implied-free substitution (gh#1246), every round after the
+            // aggregation. Waiting for a round in which nothing else fires
+            // starves it: on PDS-06 bound tightening keeps finding work until
+            // the layer cap, and the substitution ran twice (993 columns)
+            // where running it each round removes 4 365.
+            let mut substituted = false;
+            if implied == ImpliedBounds::Drop
+                && substitution_layers < MAX_SUBSTITUTION_LAYERS
+                && let Some(mut ps) = implied_free_once(&current)
+            {
+                refinements.remap(&ps.kept_cols);
+                declared.remap(&ps.kept_cols, None);
+                let next = ps.take_reduced();
+                track.adopt(&mut ps, &current, &next, true);
+                current = next;
+                chain.push(ps);
+                substitution_layers += 1;
+                structure_stable = false;
+                substituted = true;
+            }
+            if !catalog_changed && !aggregated && !substituted {
+                exit = FixpointExit::Fixpoint; // nothing found anything
                 break;
             }
             if chain.len() >= MAX_ROUNDS {
@@ -1774,6 +1814,327 @@ fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
         ray: false,
     })
 }
+
+/// Largest Markowitz count `(column entries − 1)·(row entries − 1)` an
+/// implied-free substitution may have (gh#1246): an upper bound on the
+/// nonzeros it adds. PaPILO and HiGHS cap substitution fill at about ten.
+const IMPLIED_FREE_MAX_MARKOWITZ: usize = 12;
+
+/// Smallest `|a_rj| / max_k |a_rk|` a pivot may have, so that dividing the
+/// row by it does not amplify the row's rounding error (gh#1246).
+const IMPLIED_FREE_PIVOT_RATIO: f64 = 1e-2;
+
+/// Substitute out every column an equality row makes free in effect
+/// (gh#1246, finding 3), returning the layer that does so, or `None`.
+///
+/// # The rule
+///
+/// Column `j` appears in the equality row `r`: `a_rj·x_j + Σ_{k≠j} a_rk x_k
+/// = b_r`. Over the other columns' boxes the sum ranges over an interval, so
+/// the row alone keeps `x_j` inside `[(b_r − max)/a_rj, (b_r − min)/a_rj]`
+/// (ends swapped for `a_rj < 0`). When that interval lies inside `j`'s own
+/// box, the box can never bind: `x_j` is *implied free*. Then
+/// `x_j = (b_r − Σ_{k≠j} a_rk x_k)/a_rj` can be substituted into the
+/// objective and every other row, removing both the column and the row.
+/// pounce already did this for columns declared free in exactly one row
+/// ([`Reduction::FreeColSingleton`]); this is the general case, which is
+/// most of the `presolve` crate's lead over pounce on PDS-06
+/// (`implied_free_equalities`, 5 614 substitutions).
+///
+/// # Why the duals are exact
+///
+/// Substituting into row `i` replaces it by `a_i − (a_ij/a_rj)·a_r`, and the
+/// cost by `c − (c_j/a_rj)·a_r`. Take the reduced problem's multipliers `y_i`
+/// on the rewritten rows and set `y_r = −(c_j + Σ_{i≠r} a_ij y_i)/a_rj`:
+/// column `j`'s stationarity then holds with zero bound multipliers, and
+/// every other column's original stationarity expands, term by term, into
+/// its reduced one. So the reduced multipliers are valid for the original
+/// rows unchanged, and postsolve only adds `y_r` and `x_j`.
+///
+/// # What is required
+///
+/// - `j` is absent from `P`: the substitution would otherwise rewrite `P`,
+///   and the `presolve` crate's own default forbids Hessian growth too.
+/// - The pivot is at least [`IMPLIED_FREE_PIVOT_RATIO`] of the row's largest
+///   coefficient, and the substitution's Markowitz count is at most
+///   [`IMPLIED_FREE_MAX_MARKOWITZ`].
+/// - Within one layer the substitutions are independent: no pivot column
+///   appears in another pivot's row. Then no rewrite touches another pivot
+///   row, every implied-free test stays valid while the others are applied,
+///   and postsolve can evaluate each `x_j` from columns that survive.
+/// - A row of two entries is left to the doubleton aggregation, which has
+///   no implied-free requirement at all.
+///
+/// The implied interval may exceed the box by [`BOUND_FEAS_TOL`] relative,
+/// the slack the rest of presolve allows a box; postsolve puts `x_j` back in
+/// its box.
+fn implied_free_once(prob: &QpProblem) -> Option<Presolve> {
+    let n = prob.n;
+    let m_eq = prob.m_eq();
+    let m_ineq = prob.m_ineq();
+    if m_eq == 0 || n == 0 {
+        return None;
+    }
+    let norm = |v: f64| {
+        if v <= -BOUND_INF {
+            f64::NEG_INFINITY
+        } else if v >= BOUND_INF {
+            f64::INFINITY
+        } else {
+            v
+        }
+    };
+    let lb: Vec<f64> = (0..n).map(|j| norm(prob.lb_of(j))).collect();
+    let ub: Vec<f64> = (0..n).map(|j| norm(prob.ub_of(j))).collect();
+    let mut in_p = vec![false; n];
+    for t in &prob.p_lower {
+        if t.val != 0.0 {
+            in_p[t.row] = true;
+            in_p[t.col] = true;
+        }
+    }
+    let eq_rows: Vec<Vec<(usize, f64)>> = {
+        let mut r = group_by_row(&prob.a, m_eq);
+        for row in &mut r {
+            merge_sort_coeffs(row);
+        }
+        r
+    };
+    let g_rows: Vec<Vec<(usize, f64)>> = {
+        let mut r = group_by_row(&prob.g, m_ineq);
+        for row in &mut r {
+            merge_sort_coeffs(row);
+        }
+        r
+    };
+    // Rows of each column: (unified row, coefficient), equalities first.
+    let mut col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for (r, row) in eq_rows.iter().enumerate() {
+        for &(c, v) in row {
+            col_rows[c].push((r, v));
+        }
+    }
+    for (r, row) in g_rows.iter().enumerate() {
+        for &(c, v) in row {
+            col_rows[c].push((m_eq + r, v));
+        }
+    }
+
+    // Candidates (Markowitz count, row, column, coefficient).
+    let mut cand: Vec<(usize, usize, usize, f64)> = Vec::new();
+    for (r, row) in eq_rows.iter().enumerate() {
+        if row.len() < 3 || !prob.b[r].is_finite() {
+            continue;
+        }
+        let amax = row.iter().fold(0.0_f64, |m, &(_, v)| m.max(v.abs()));
+        // Activity of the row as finite part plus a count of infinite terms.
+        let (mut min_f, mut max_f, mut min_i, mut max_i) = (0.0_f64, 0.0_f64, 0usize, 0usize);
+        let contrib = |c: usize, a: f64| {
+            if a > 0.0 {
+                (a * lb[c], a * ub[c])
+            } else {
+                (a * ub[c], a * lb[c])
+            }
+        };
+        for &(c, a) in row {
+            let (lo, hi) = contrib(c, a);
+            if lo.is_finite() {
+                min_f += lo;
+            } else {
+                min_i += 1;
+            }
+            if hi.is_finite() {
+                max_f += hi;
+            } else {
+                max_i += 1;
+            }
+        }
+        for &(j, a) in row {
+            if in_p[j] || a.abs() < IMPLIED_FREE_PIVOT_RATIO * amax {
+                continue;
+            }
+            let markowitz = (col_rows[j].len() - 1) * (row.len() - 1);
+            if markowitz > IMPLIED_FREE_MAX_MARKOWITZ {
+                continue;
+            }
+            // Activity of the rest of the row.
+            let (lo_j, hi_j) = contrib(j, a);
+            let rest_min = if min_i > usize::from(!lo_j.is_finite()) {
+                f64::NEG_INFINITY
+            } else {
+                min_f - if lo_j.is_finite() { lo_j } else { 0.0 }
+            };
+            let rest_max = if max_i > usize::from(!hi_j.is_finite()) {
+                f64::INFINITY
+            } else {
+                max_f - if hi_j.is_finite() { hi_j } else { 0.0 }
+            };
+            let b = prob.b[r];
+            let (imp_lo, imp_hi) = if a > 0.0 {
+                ((b - rest_max) / a, (b - rest_min) / a)
+            } else {
+                ((b - rest_min) / a, (b - rest_max) / a)
+            };
+            let lo_ok = !lb[j].is_finite()
+                || (imp_lo.is_finite() && imp_lo >= lb[j] - BOUND_FEAS_TOL * (1.0 + lb[j].abs()));
+            let hi_ok = !ub[j].is_finite()
+                || (imp_hi.is_finite() && imp_hi <= ub[j] + BOUND_FEAS_TOL * (1.0 + ub[j].abs()));
+            if lo_ok && hi_ok {
+                cand.push((markowitz, r, j, a));
+            }
+        }
+    }
+    if cand.is_empty() {
+        return None;
+    }
+    cand.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+
+    // Greedy independent set: no pivot column inside another pivot's row.
+    let mut row_used = vec![false; m_eq];
+    let mut col_pivot = vec![false; n]; // eliminated here
+    let mut col_in_pivot_row = vec![false; n]; // appears in a chosen pivot row
+    let mut chosen: Vec<(usize, usize, f64)> = Vec::new();
+    for &(_, r, j, a) in &cand {
+        if row_used[r] || col_pivot[j] || col_in_pivot_row[j] {
+            continue;
+        }
+        if eq_rows[r].iter().any(|&(k, _)| col_pivot[k]) {
+            continue;
+        }
+        row_used[r] = true;
+        col_pivot[j] = true;
+        for &(k, _) in &eq_rows[r] {
+            col_in_pivot_row[k] = true;
+        }
+        chosen.push((r, j, a));
+    }
+
+    // Rewrite: every other row containing a pivot column gets that pivot row,
+    // scaled, and the cost likewise.
+    let mut eq_new = eq_rows.clone();
+    let mut g_new = g_rows.clone();
+    let mut b = prob.b.clone();
+    let mut h = prob.h.clone();
+    let mut c = prob.c.clone();
+    let mut offset = 0.0;
+    let mut stack = Vec::with_capacity(chosen.len());
+    for &(r, j, a) in &chosen {
+        let pivot_row = &eq_rows[r];
+        let br = prob.b[r];
+        for &(i, aij) in &col_rows[j] {
+            if i == r {
+                continue;
+            }
+            let f = aij / a;
+            let (row, rhs) = if i < m_eq {
+                (&mut eq_new[i], &mut b[i])
+            } else {
+                (&mut g_new[i - m_eq], &mut h[i - m_eq])
+            };
+            for &(k, v) in pivot_row {
+                row.push((k, -f * v));
+            }
+            *rhs -= f * br;
+        }
+        let cj = prob.c[j];
+        if cj != 0.0 {
+            let f = cj / a;
+            for &(k, v) in pivot_row {
+                if k != j {
+                    c[k] -= f * v;
+                }
+            }
+            offset += f * br;
+        }
+        stack.push(Reduction::ImpliedFreeSub {
+            col: j,
+            eq_row: r,
+            a_coef: a,
+        });
+    }
+    // Merge, drop the eliminated column (its coefficient cancels to zero in
+    // every rewritten row; it is dropped exactly rather than trusted to
+    // cancel) and exact zeros.
+    let mut kept_cols = Vec::with_capacity(n - chosen.len());
+    let mut col_new = vec![usize::MAX; n];
+    for j in 0..n {
+        if !col_pivot[j] {
+            col_new[j] = kept_cols.len();
+            kept_cols.push(j);
+        }
+    }
+    let flatten = |rows: Vec<Vec<(usize, f64)>>,
+                   keep: &dyn Fn(usize) -> bool|
+     -> (Vec<Triplet>, Vec<usize>) {
+        let mut ts = Vec::new();
+        let mut kept = Vec::new();
+        for (i, mut row) in rows.into_iter().enumerate() {
+            if !keep(i) {
+                continue;
+            }
+            merge_sort_coeffs(&mut row);
+            let newr = kept.len();
+            kept.push(i);
+            for (k, v) in row {
+                if v != 0.0 && col_new[k] != usize::MAX {
+                    ts.push(Triplet::new(newr, col_new[k], v));
+                }
+            }
+        }
+        (ts, kept)
+    };
+    let (a_new, kept_eq) = flatten(eq_new, &|i| !row_used[i]);
+    let (g_trip, kept_ineq) = flatten(g_new, &|_| true);
+    let pick = |v: &[f64]| -> Vec<f64> {
+        if v.is_empty() {
+            Vec::new()
+        } else {
+            kept_cols.iter().map(|&j| v[j]).collect()
+        }
+    };
+    let reduced = QpProblem {
+        n: kept_cols.len(),
+        p_lower: prob
+            .p_lower
+            .iter()
+            .filter(|t| col_new[t.row] != usize::MAX && col_new[t.col] != usize::MAX)
+            .map(|t| Triplet::new(col_new[t.row], col_new[t.col], t.val))
+            .collect(),
+        c: kept_cols.iter().map(|&j| c[j]).collect(),
+        a: a_new,
+        b: kept_eq.iter().map(|&i| b[i]).collect(),
+        g: g_trip,
+        h: kept_ineq.iter().map(|&i| h[i]).collect(),
+        lb: pick(&prob.lb),
+        ub: pick(&prob.ub),
+    };
+    Some(Presolve {
+        reduced,
+        layer_obj_offset: offset,
+        orig_n: n,
+        orig_m_eq: m_eq,
+        orig_m_ineq: m_ineq,
+        kept_cols,
+        kept_eq,
+        kept_ineq,
+        undo: None,
+        tail: None,
+        orig: Orig::Unset,
+        red_shape: None,
+        stack,
+        chain: Vec::new(),
+        discarded_infeasibility: None,
+        exit: FixpointExit::Fixpoint,
+        ray: false,
+    })
+}
+
+/// How many [`implied_free_once`] layers one fixpoint may take (gh#1246).
+/// Each rewrites rows and so starts a new matrix base, a full copy the chain
+/// keeps, which the memory budget bounds. On PDS-06, 4 layers remove 1 728
+/// columns, 8 remove 1 825, and 16 remove 4 365, the same as 32. Raising the
+/// Markowitz limit from 12 to 64 adds one.
+const MAX_SUBSTITUTION_LAYERS: usize = 16;
 
 /// How many times [`presolve_fixpoint`] may run [`convex_dominance_once`] and
 /// iterate again on what it leaves (gh#1246). The second stage catches columns
@@ -3782,6 +4143,9 @@ pub struct PresolveStats {
     /// Columns fixed at their lower bound because a convex combination of
     /// two others with the same support costs strictly less (gh#1246).
     pub convex_dominated_cols: usize,
+    /// Implied-free columns substituted out of an equality row, each also
+    /// removing that row (gh#1246).
+    pub implied_free_cols: usize,
     /// Variable bounds tightened by domain propagation.
     pub tightened_bounds: usize,
     /// Finite bound sides removed from the problem handed to the solver
@@ -3968,6 +4332,7 @@ impl Presolve {
             s.forcing_rows += ls.forcing_rows;
             s.dominated_cols += ls.dominated_cols;
             s.convex_dominated_cols += ls.convex_dominated_cols;
+            s.implied_free_cols += ls.implied_free_cols;
             s.tightened_bounds += ls.tightened_bounds;
             s.relaxed_bounds += ls.relaxed_bounds;
             s.aggregated_vars += ls.aggregated_vars;
@@ -4000,6 +4365,7 @@ impl Presolve {
                 Reduction::ForcingRow { .. } => s.forcing_rows += 1,
                 Reduction::DominatedColumn { .. } => s.dominated_cols += 1,
                 Reduction::ConvexDominated { .. } => s.convex_dominated_cols += 1,
+                Reduction::ImpliedFreeSub { .. } => s.implied_free_cols += 1,
                 Reduction::BoundTightening { .. } => s.tightened_bounds += 1,
                 Reduction::RedundantBound { .. } => s.relaxed_bounds += 1,
                 // A whole pass in one entry: report what its plan achieved.
@@ -4386,7 +4752,7 @@ impl Presolve {
                 Reduction::DominatedColumn { col, value, .. } => x[*col] = *value,
                 Reduction::ConvexDominated { col, value } => x[*col] = *value,
                 // Restored in the second pass (depends on its neighbours).
-                Reduction::FreeColSingleton { .. } => {}
+                Reduction::FreeColSingleton { .. } | Reduction::ImpliedFreeSub { .. } => {}
                 // The variable is kept; only its box changed, so its primal
                 // comes from the reduced solution (already mapped above).
                 Reduction::BoundTightening { .. } | Reduction::RedundantBound { .. } => {}
@@ -4412,6 +4778,33 @@ impl Presolve {
                     }
                 }
                 x[*col] = acc / a_coef;
+            }
+        }
+        // Implied-free substitutions: the same expression. Their rows are
+        // grouped once, because a layer may hold thousands of them and the
+        // loop above scans every triplet per entry. The pivot rows of one
+        // layer contain no other column it eliminates, so order is free.
+        if self
+            .stack
+            .iter()
+            .any(|r| matches!(r, Reduction::ImpliedFreeSub { .. }))
+        {
+            let rows = group_by_row(&orig.a, orig.m_eq());
+            for r in &self.stack {
+                if let Reduction::ImpliedFreeSub {
+                    col,
+                    eq_row,
+                    a_coef,
+                } = r
+                {
+                    let mut acc = orig.b[*eq_row];
+                    for &(k, v) in &rows[*eq_row] {
+                        if k != *col {
+                            acc -= v * x[k];
+                        }
+                    }
+                    x[*col] = acc / a_coef;
+                }
             }
         }
 
@@ -4441,14 +4834,21 @@ impl Presolve {
         orig.at_mul(&y, &mut grad);
         orig.gt_mul(&z, &mut grad);
         for r in &self.stack {
-            if let Reduction::FixedVar {
-                col,
-                eq_row,
-                a_coef,
-                ..
-            } = r
-            {
-                y[*eq_row] = -grad[*col] / a_coef;
+            match r {
+                Reduction::FixedVar {
+                    col,
+                    eq_row,
+                    a_coef,
+                    ..
+                }
+                // The consumed row of an implied-free substitution: the
+                // column's stationarity with its bound multipliers at zero.
+                | Reduction::ImpliedFreeSub {
+                    col,
+                    eq_row,
+                    a_coef,
+                } => y[*eq_row] = -grad[*col] / a_coef,
+                _ => {}
             }
         }
 

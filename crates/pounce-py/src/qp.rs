@@ -619,6 +619,7 @@ fn attach_engine_reports(
                 pd.set_item("forcing_rows", st.forcing_rows)?;
                 pd.set_item("dominated_cols", st.dominated_cols)?;
                 pd.set_item("convex_dominated_cols", st.convex_dominated_cols)?;
+                pd.set_item("implied_free_cols", st.implied_free_cols)?;
                 pd.set_item("tightened_bounds", st.tightened_bounds)?;
                 pd.set_item("relaxed_bounds", st.relaxed_bounds)?;
                 pd.set_item("rounds", st.rounds)?;

@@ -31,6 +31,32 @@ changes.
     input exactly.
 
 ### Added
+- **Convex presolve substitutes implied-free columns out of equality rows
+  (gh#1246, finding 3).**
+  - **The rule.** A column in an equality row is implied free when the row,
+    over the other columns' boxes, already keeps the column inside its own
+    box. It is then replaced by the row's expression in the objective and
+    every other row, and both the column and the row go.
+  - **Postsolve** evaluates the expression and recovers the row's multiplier
+    from the column's stationarity. That is exact, because the reduced
+    problem's multipliers on the rewritten rows are valid for the original
+    rows.
+  - **Limits.** The column must not be in `P`, the pivot must be at least 1%
+    of the row's largest coefficient, and fill is capped by a Markowitz count
+    of 12. Substitutions in one layer must not touch each other's pivot rows.
+  - **Placement.** It runs every round, at most 16 layers. Run only when
+    nothing else fired, it was starved and removed 993 columns on PDS-06.
+  - **PDS-06:** 26,928 → 19,708 columns and 8,156 → 3,595 rows; the
+    `presolve` crate reaches 19,369 columns. The solve takes 12.1 s → 6.6 s,
+    with the same optimum.
+  - **Maros–Mészáros:** it fires on 33 models, all 137 still solve, with
+    unchanged objectives. CONT-300 goes 23.8 s → 16.6 s and UBH1
+    1.1 s → 0.45 s.
+  - **Fixture sweep:** TUFF 24 → 22 iterations, and `issue745` lands closer
+    to its zero optimum.
+  - **Widened models.** Skipped under an explicit `bound_relax_factor`, like
+    the implied-bound pass; the widened sweep diffs empty.
+  - Recorded as `implied_free_cols`.
 - **Convex presolve removes convex-dominated columns (gh#1246, finding 3).**
   Take three linear columns with the same support that agree in every row but
   one. If one of them lies between the other two in that row and costs
