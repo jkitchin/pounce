@@ -1804,3 +1804,46 @@ point within a few seconds of the simplex's own 63 s, and the five rescues
 above stay `vertex accepted`. A smaller cap or an early bail-out from an
 l1-elastic phase 1 that makes no progress are the obvious candidates; neither
 was tried.
+
+## Convex presolve: dropping a degenerate declared bound slows the direct driver on `scaled_feasible_a` (gh#1246)
+
+*Measured on `claude/busy-hypatia-jb79o6` after merging `main` at
+`913be167` (gh#1243). Recorded 2026-11-23.*
+
+**What moves.** The implied-bound pass (`relax_implied_bounds`, gh#1246
+finding 2) drops one declared side of `scaled_feasible_a`: `ub = 5.0e5` on
+column 1. Row 0 (`1e8·x₁ + … ≤ 5.3e8`, the rest of its activity at `−5e13`)
+implies exactly that value. The proof holds to `1.4e-8`. The bound and the row
+coincide, though, so the vertex is degenerate, and the direct driver's
+trajectory is sensitive to which of the two constraints it carries:
+
+| route | `main` | this branch |
+|---|---|---|
+| default (HSDE) | 200 iterations (to the cap) | **24** |
+| `qp_hsde=no` (direct) | 24 | **98** |
+| `qp_hsde=no`, `qp_kkt_row_elim=no` | 24 | 24 |
+| `qp_hsde=no`, `qp_presolve=no` | 24 | 24 |
+
+All four reach the optimum `0`. Three things identify the trigger:
+- It needs the declared pass. With only derived sides dropped, the direct
+  driver takes 24 iterations.
+- It needs gh#1243's bound-row folding, which is on by default; with folding
+  off the count is 24 again.
+- `scaled_feasible_b` does not move (29 iterations).
+
+**Why it is not fixed.** No guard separates this case from the ones the pass
+exists for:
+- In x-units the implying row's scale is about the bound's own size
+  (`5e13 / 1e8 = 5e5`), so a row-scale guard would not exclude it.
+- Requiring a declared side to be *strictly* implied would also exclude the
+  canonical case, `x ≤ 1` under `Σx = 1`, where the two likewise coincide.
+
+The opt-in direct driver gets slower on one deliberately pathological model.
+On the same model the default route goes from the iteration cap to 24
+iterations.
+
+**How to tell whether a fix works.** `issue_689_direct_driver_scaled_feasible.rs`
+asserts the direct driver's 60-iteration budget with `qp_presolve=no`. To
+check a fix, run `scaled_feasible_a` at `qp_hsde=no` with presolve on, and
+expect about 24 iterations. Then confirm with `scripts/sweep-fixtures.sh` on
+both legs that the default route stays at 24.

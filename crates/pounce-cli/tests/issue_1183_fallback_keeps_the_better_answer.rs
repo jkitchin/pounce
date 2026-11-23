@@ -17,7 +17,7 @@
 //! |---|---|---|---|---|
 //! | `lp_etamacro.nl` (NETLIB ETAMACRO) at `tol=5e-13`, `relative_gap_tol=0` | `1.5e-12`, acceptable | `4.2e-11`, succeeded (`8.6e-11`–`1.0e-10`, acceptable, under L-BFGS) | convex | accuracy |
 //! | `issue880_sigma_uncertified.nl` | `1.6e-15`, acceptable | `1.5e-16`, succeeded | NLP | accuracy |
-//! | `lp_israel.nl` at `tol=1e-16` | `2.0e-16`, iteration limit | `5.2e-14`, acceptable | NLP | the status guard |
+//! | `lp_israel.nl` at `tol=1e-18` | `3.9e-16`, iteration limit | `5.2e-14`, acceptable | NLP | the status guard |
 //! | `lp_afiro.nl` at `tol=1e-20` | `2.4e-16`, iteration limit | `5.5e-13`, search direction too small | convex, its own failing status | accuracy |
 //!
 //! The `lp_israel` row is the gh #535 shape — a convex failure against an NLP
@@ -249,7 +249,10 @@ fn a_more_accurate_nlp_answer_still_reports() {
 #[test]
 fn a_failed_convex_answer_never_displaces_an_nlp_success() {
     for leg in [&[][..], &[LBFGS][..]] {
-        let mut args = vec!["tol=1e-16"];
+        // `1e-18`, not `1e-16`: since gh#1246 the convex arm certifies
+        // `israel` at `1e-16` (presolve no longer hands it the bound sides
+        // the rows imply), so nothing fell back there.
+        let mut args = vec!["tol=1e-18"];
         args.extend_from_slice(leg);
         let r = run("lp_israel.nl", &args);
         let fb = r
