@@ -41,9 +41,26 @@ gh#1248's `.nl` reader changes, so the baseline below may now be lower):
   whether it fits in 38.6 GB is unmeasured.
 * **Analysis time.** The race costs one analysis per candidate: 466-476 s on
   fhnw (AMD alone: 318 s), 120-130 s on Primal2 (AMD alone: 24 s).
-* **Not measured:** `L1_sixm250obs` and `L1_sixm1000obs` are netlib-compressed
-  MPS and need netlib's `emps` to expand; `L2CTA3D`'s `.nl` conversion did not
-  fit the container.
+* **The other three models**, measured in the gh#1250 review on a larger
+  machine (single-threaded, `auto` unless stated):
+  * `L1_sixm250obs` (order 1.03M) predicts 371 GB under `auto` (AMF), 544 GB
+    under AMD, 187 GB under METIS and 158 GB under SCOTCH. It is out of reach
+    under every ordering, so the race cannot rescue it. This is genuine fill,
+    or at least fill no available ordering avoids.
+  * `L1_sixm1000obs` (order 3.30M): the symbolic phase itself sits near 19 GB
+    for 2.5 min, then jumps to 52.5 GB within ~3 s inside FERAL's
+    `finish_and_copy`, before any prediction exists.
+  * `L2CTA3D` (order 14.2M) predicts 265 GB under `auto` (AMF), and its
+    analysis peaks near 25 GB. Under AMD it predicts nnz(L) 1.12G (~9 GB of
+    factor) with a largest front of 10 100 rows, but 811 GB of contribution
+    blocks. That figure is the postorder high-water mark (feral's
+    `compute_peak_contrib` frees each child's block after allocating its
+    parent's), not a sum, so it implies very many large sibling blocks
+    pending at once. Whether that is real is unverified.
+
+  The symbolic phase's own memory on these two (`finish_and_copy`,
+  `compute_static_row_indices`) is FERAL's to fix; the pre-analysis cannot
+  protect against it, because no prediction exists until the phase ends.
 
 How to measure (from `benchmarks/lpopt/mps_to_nl.py` output): run with
 `POUNCE_FERAL_REPORT_SYMBOLIC=1` for the prediction, and with

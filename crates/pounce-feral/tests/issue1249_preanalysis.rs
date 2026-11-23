@@ -124,7 +124,11 @@ fn over_budget_is_refused_for_the_whole_pattern() {
     // not go on into the factor the budget refused.
     assert_eq!(resolve_again(&mut s, n), ESymSolverStatus::FatalError);
     assert!(s.summary().last_nnz_l.is_none());
-    // A new pattern is judged afresh: this one fits.
+    // Within the same solve a new pattern is refused too (the refusal is
+    // latched for the thread); once the next solve clears the latch, a new
+    // pattern is judged afresh: this one fits.
+    assert_eq!(solve(&mut s, 4), ESymSolverStatus::FatalError);
+    pounce_feral::clear_budget_refusal();
     assert_eq!(solve(&mut s, 4), ESymSolverStatus::Success);
 }
 
@@ -185,4 +189,43 @@ fn the_convex_backend_races_orderings_on_a_large_kkt() {
     let mut plain = FeralSolverInterface::with_config(FeralConfig::default());
     plain.initialize_structure(n as Index, n as Index, &big, &big);
     assert_eq!(plain.ordering(), &OrderingMethod::Auto);
+}
+
+/// gh#1250 review: an over-budget refusal is terminal for the solve. While it
+/// is latched, a *different* backend on the same thread (the convex fallback
+/// driver, the NLP arm, restoration) refuses at once, without paying for its
+/// own symbolic analysis; clearing the latch (a new top-level solve) lets the
+/// next one through.
+#[test]
+fn a_refusal_is_terminal_until_cleared() {
+    use pounce_feral::{budget_refusal, clear_budget_refusal};
+    clear_budget_refusal();
+    let budgeted = |bytes| {
+        FeralSolverInterface::with_config(FeralConfig {
+            max_factor_bytes: Some(bytes),
+            ..FeralConfig::default()
+        })
+    };
+    let mut first = budgeted(1_000);
+    assert_eq!(solve(&mut first, 400), ESymSolverStatus::FatalError);
+    let r = budget_refusal().expect("the refusal is latched");
+    assert_eq!(r.budget, 1_000);
+    assert!(r.peak_bytes > 1_000);
+
+    // A second backend whose own pattern would fit: refused without analysis.
+    let mut second = budgeted(u64::MAX);
+    assert_eq!(solve(&mut second, 4), ESymSolverStatus::FatalError);
+    assert!(
+        second.symbolic_report().is_none(),
+        "no analysis was paid for"
+    );
+
+    // A backend without a budget is not governed by the latch.
+    let mut plain = FeralSolverInterface::with_config(FeralConfig::default());
+    assert_eq!(solve(&mut plain, 4), ESymSolverStatus::Success);
+
+    clear_budget_refusal();
+    let mut third = budgeted(u64::MAX);
+    assert_eq!(solve(&mut third, 4), ESymSolverStatus::Success);
+    assert!(budget_refusal().is_none());
 }

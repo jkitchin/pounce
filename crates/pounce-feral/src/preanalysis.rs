@@ -45,6 +45,46 @@ use feral::symbolic::{
 thread_local! {
     /// The deadline the FERAL pre-analysis honours on this thread, if any.
     static FACTOR_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// The over-budget refusal latched on this thread, if any. See
+    /// [`budget_refusal`].
+    static BUDGET_REFUSAL: Cell<Option<BudgetRefusal>> = const { Cell::new(None) };
+}
+
+/// A factorization refused because FERAL predicted a peak above
+/// `max_factor_bytes` (gh#1249).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetRefusal {
+    /// The predicted peak, `factor_bytes + peak_contrib_bytes`.
+    pub peak_bytes: usize,
+    /// The budget it exceeded.
+    pub budget: u64,
+}
+
+/// The over-budget refusal latched on this thread since the last
+/// [`clear_budget_refusal`], if any.
+///
+/// A refusal is terminal for the solve, not for one factorization: while it is
+/// latched, every backend on this thread that has a budget refuses at once,
+/// without running another symbolic analysis. Without the latch a refusal fell
+/// through to the next thing that factors — the convex driver's fallback
+/// driver, the CLI's LP → NLP fallback, the NLP arm's restoration phase — and
+/// each paid a fresh symbolic pass on its own pattern (gh#1250 review: on
+/// `fhnw-binschedule1`, four analyses and a run past `max_wall_time`). Callers
+/// that would reroute on a failure read this to report the refusal instead.
+///
+/// Cleared when a top-level solve starts: the convex drivers' outermost
+/// deadline scope and the NLP application's `optimize_tnlp` both do.
+pub fn budget_refusal() -> Option<BudgetRefusal> {
+    BUDGET_REFUSAL.with(Cell::get)
+}
+
+/// Forget any latched [`budget_refusal`] on this thread.
+pub fn clear_budget_refusal() {
+    BUDGET_REFUSAL.with(|r| r.set(None));
+}
+
+pub(crate) fn latch_budget_refusal(r: BudgetRefusal) {
+    BUDGET_REFUSAL.with(|c| c.set(Some(r)));
 }
 
 /// Restores the previous factor deadline when dropped. See

@@ -12,6 +12,11 @@ pub(crate) fn with_deadline<T>(limit: Option<Duration>, f: impl FnOnce() -> T) -
         if slot.get().is_some() {
             return f();
         }
+        // The outermost scope is the start of a top-level convex solve: a
+        // FERAL budget refusal latched by an earlier solve on this thread is
+        // not this solve's (gh#1249). Nested scopes keep it, so a refusal
+        // stays terminal for the solve that hit it.
+        pounce_feral::clear_budget_refusal();
         let now = Instant::now();
         let deadline = limit.and_then(|d| now.checked_add(d));
         slot.set(deadline);

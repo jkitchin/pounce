@@ -48,7 +48,10 @@ use pounce_linsol::summary::{FactorRecord, LinearSolverSummary};
 use pounce_linsol::{
     EMatrixFormat, ESymSolverStatus, FactorPattern, SparseSymLinearSolverInterface,
 };
-pub use preanalysis::{FactorDeadline, SymbolicReport, factor_deadline, factor_deadline_passed};
+pub use preanalysis::{
+    BudgetRefusal, FactorDeadline, SymbolicReport, budget_refusal, clear_budget_refusal,
+    factor_deadline, factor_deadline_passed,
+};
 
 /// Largest `nrhs` at which feral's blocked back-substitution is still
 /// **bit-identical** to looping one column at a time — the ceiling
@@ -1451,6 +1454,20 @@ impl FeralSolverInterface {
             PreanalysisState::Refused => return Some(ESymSolverStatus::FatalError),
             PreanalysisState::Pending => {}
         }
+        // A refusal earlier in this solve is terminal for all of it: refuse
+        // this pattern too, without paying for its analysis.
+        if pre.max_factor_bytes.is_some() {
+            if let Some(r) = preanalysis::budget_refusal() {
+                tracing::debug!(
+                    target: "pounce::linsol",
+                    dim = self.dim, peak_bytes = r.peak_bytes, budget = r.budget,
+                    "FERAL factorization refused: an earlier factorization in this solve \
+                     was over max_factor_bytes"
+                );
+                pre.state = PreanalysisState::Refused;
+                return Some(ESymSolverStatus::FatalError);
+            }
+        }
         let matrix = self.matrix.as_ref()?;
         // A non-finite value is rejected by `factor` itself, with its own
         // message; MC64 preprocessing should not see one first.
@@ -1470,7 +1487,11 @@ impl FeralSolverInterface {
                 pre.state = PreanalysisState::Done;
                 None
             }
-            preanalysis::Verdict::OverBudget { .. } => {
+            preanalysis::Verdict::OverBudget { peak_bytes, budget } => {
+                preanalysis::latch_budget_refusal(preanalysis::BudgetRefusal {
+                    peak_bytes,
+                    budget,
+                });
                 pre.state = PreanalysisState::Refused;
                 Some(ESymSolverStatus::FatalError)
             }

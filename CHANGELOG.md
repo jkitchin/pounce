@@ -18,8 +18,12 @@ changes.
   only after a factorization succeeded, so a KKT that exhausted memory
   inside FERAL (five large Mittelmann LPs on the convex HSDE) reported
   nothing. `POUNCE_FERAL_MAX_FACTOR_BYTES=<bytes>` refuses a factorization
-  whose predicted peak exceeds the budget, with a message, instead of
-  running into an out-of-memory kill. With either set, the convex solvers
+  whose predicted peak exceeds the budget, instead of running into an
+  out-of-memory kill. The refusal ends the solve with `Insufficient_Memory`:
+  no LP → NLP fallback, restoration or second-opinion re-solve follows it,
+  and nothing else in the solve runs another analysis. The prediction covers
+  the factor only, so leave headroom for the rest of the process (5–6 GB on
+  the gh#1249 models). With either set, the convex solvers
   check `max_wall_time` between the symbolic and numeric phases and end
   with `TimeLimit`. Both are off by default because the symbolic phase
   then runs twice per pattern; the factor is unchanged.
