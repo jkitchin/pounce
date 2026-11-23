@@ -3476,19 +3476,6 @@ enum ConvexNext {
     Report(pounce_convex::QpStatus),
 }
 
-/// The convex driver's whole post-solve decision, as one pure function, so
-/// every branch of it is unit-testable without having to land a real solve on
-/// a deadline (gh#1182 review).
-///
-/// * Budget left: [`lp_declines_to_nlp`] decides, and a solve it keeps reports
-///   its own status.
-/// * Budget spent: never reroute — the NLP arm would get no time — and report
-///   the status [`timed_out_unless_verdict`] assigns. The issue's own case is
-///   the first row of the second group: an `OptimalInaccurate` returned past
-///   the deadline used to reroute and now reports.
-///
-/// `limit` is the driver's `time_limit` and `elapsed` is measured from the
-/// instant that limit is charged against; see [`convex_budget_spent`].
 /// `qp_status_to_ars`, except that a `NumericalFailure` caused by a FERAL
 /// budget refusal (`POUNCE_FERAL_MAX_FACTOR_BYTES`, gh#1249) reports Ipopt's
 /// `Insufficient_Memory`: the solve stopped because the factorization was
@@ -3521,6 +3508,19 @@ fn budget_refusal_stops_reroute() -> bool {
     true
 }
 
+/// The convex driver's whole post-solve decision, as one pure function, so
+/// every branch of it is unit-testable without having to land a real solve on
+/// a deadline (gh#1182 review).
+///
+/// * Budget left: [`lp_declines_to_nlp`] decides, and a solve it keeps reports
+///   its own status.
+/// * Budget spent: never reroute — the NLP arm would get no time — and report
+///   the status [`timed_out_unless_verdict`] assigns. The issue's own case is
+///   the first row of the second group: an `OptimalInaccurate` returned past
+///   the deadline used to reroute and now reports.
+///
+/// `limit` is the driver's `time_limit` and `elapsed` is measured from the
+/// instant that limit is charged against; see [`convex_budget_spent`].
 fn convex_qp_next_step(
     class: pounce_cli::dispatch::ProblemClass,
     status: pounce_convex::QpStatus,

@@ -39,8 +39,23 @@ gh#1248's `.nl` reader changes, so the baseline below may now be lower):
   copy, the `.nl` names (0.5 GB on this model), presolve layers. fhnw's
   6.8 GB factor on top of the same kind of baseline did not fit in 13.5 GB;
   whether it fits in 38.6 GB is unmeasured.
-* **Analysis time.** The race costs one analysis per candidate: 466-476 s on
-  fhnw (AMD alone: 318 s), 120-130 s on Primal2 (AMD alone: 24 s).
+* **The race's cost and reach.** feral 0.24's `AutoRace` runs
+  `RACE_CANDIDATES = {Amd, MetisND}` one after the other and ranks them on
+  `factor_nnz_estimate`; neither the race nor a candidate checks
+  `max_wall_time` (pounce's `factor_deadline` is checked only after the
+  whole analysis).
+  * Time: 466-476 s on fhnw (AMD alone: 318 s; over the cpo3 corpus's 300 s
+    limit), 120-130 s on Primal2 (AMD alone: 24 s).
+  * `L2CTA3D` (order 14.2M) is **worse** under the race. METIS ran past the
+    reviewer's timeout in the ordering sweep, while AMF (the old `auto`)
+    finished its analysis and let the budget refuse the factor. Under the race
+    every run on it waits out the METIS ordering before it can report or
+    refuse anything. Opt out with `POUNCE_FERAL_ORDERING=auto` or `amf`.
+  * `L1_sixm250obs`: the race picks METIS (187 GB predicted) over AMD
+    (544 GB), but SCOTCH (158 GB) is not a candidate. Out of reach under every
+    ordering anyway.
+  * The fix wants a deadline check between candidates, or inside an ordering,
+    in feral (feral#246).
 * **The other three models**, measured in the gh#1250 review on a larger
   machine (single-threaded, `auto` unless stated):
   * `L1_sixm250obs` (order 1.03M) predicts 371 GB under `auto` (AMF), 544 GB

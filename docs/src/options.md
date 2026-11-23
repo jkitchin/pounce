@@ -2450,10 +2450,18 @@ is set (gh#1249). At that size the default's per-matrix rule picks
 orderings that do not fit: on the Mittelmann LP `fhnw-binschedule1` it
 picks AMF, whose symbolic analysis alone exhausts memory, and on
 `Primal2_1000` it picks AMD, predicting 8.3 GB and 2.5e12 flops per
-factorization against METIS's 2.2 GB and 3.2e11. The race keeps the ordering
-with the least predicted fill, which on both is one that fits, at the price
-of analysing each candidate once per pattern (minutes at this size). It is a
+factorization against METIS's 2.2 GB and 3.2e11. The race keeps whichever of
+AMD and METIS predicts less fill, which on both is one that fits, at the
+price of analysing each candidate once per pattern (minutes at this size). It is a
 stopgap until FERAL's own default is fixed (jkitchin/feral#246).
+
+The race tries only AMD and METIS (FERAL's `RACE_CANDIDATES`), so SCOTCH,
+which predicts least on `L1_sixm250obs`, is not considered. `max_wall_time`
+cannot interrupt a candidate's analysis: on `L2CTA3D` (order 14.2M) the
+METIS candidate ran past a timeout that AMF's analysis met. The pick also
+changes the trajectory of every convex solve this large. Set
+`POUNCE_FERAL_ORDERING=auto` to keep FERAL's default (`auto` set explicitly
+disables the race), or name the ordering you want.
 
 #### Collocation, optimal-control and PDE-in-time models: set `metis`
 

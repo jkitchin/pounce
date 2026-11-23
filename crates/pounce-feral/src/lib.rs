@@ -1059,9 +1059,16 @@ pub fn convex_ipm_static_pivoting(
 ///   8.3 GB peak and 2.5e12 flops per factorization. METIS and SCOTCH
 ///   predict 2.2 GB and 3.2e11.
 ///
-/// The race runs every concrete candidate's ordering prefix once per pattern
-/// and keeps the one with the least predicted fill, so it costs analysis
-/// time (minutes at this size) that the default does not. The threshold
+/// The race (feral's `RACE_CANDIDATES`: AMD and METIS only) runs each
+/// candidate's ordering prefix once per pattern and keeps the one with the
+/// least predicted fill, so it costs analysis time (minutes at this size)
+/// that the default does not. SCOTCH and AMF are not candidates, and
+/// `max_wall_time` cannot interrupt a candidate: on `L2CTA3D` (order 14.2M)
+/// METIS ran past the gh#1250 reviewer's timeout, where AMF had finished
+/// (see `dev-notes/known-limitations.md`). The pick also changes the
+/// trajectory of every solve this large (orderings differ in the inertia
+/// they read on near-singular KKTs, feral#208); `POUNCE_FERAL_ORDERING=auto`
+/// restores feral's default. The threshold
 /// keeps every model in the repository's corpora below it: the fixture
 /// sweep's largest model is 813 columns and `benchmarks/qp`'s 93 263, so
 /// none of them is affected. Feral's own default is the real fix
