@@ -23,7 +23,9 @@ changes.
   turns static pivoting off on its backends, through a new
   `SparseSymLinearSolverInterface::set_static_pivoting` hook (default no-op;
   FERAL implements it). The IPM keeps static pivoting, and the caller's
-  solver choice is still inherited. The issue's bisection to b56473e6 (the
+  solver choice is still inherited. This also overrides an explicit
+  `feral_static_pivoting=yes` for the bridge, on purpose: its answer depends
+  on the inertia. The issue's bisection to b56473e6 (the
   removed cold retry) does not hold at this commit: with static pivoting on,
   a cold solve fails the same way, and with it off, the bridge from the
   interior iterate already finds the vertex. The library-level tests never
