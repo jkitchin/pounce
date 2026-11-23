@@ -9,6 +9,15 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **The CLI reads QPS / MPS files directly (gh#1251).** `pounce model.mps`
+  and `pounce model.qps` (extension in any case) load an LP or QP with no
+  `.nl` conversion. The model is routed like a `.nl` input: an LP or convex
+  QP reaches the convex interior point, and a sibling `.sol` is written.
+  `verify`, `check-x0` and `diagnose` accept these files too. `OBJSENSE
+  MAX` is now honored, where the QPS reader used to reject it; integer
+  markers and `BV`/`LI`/`UI` bounds are still rejected.
+
 ### Changed
 - **The convex interior point carries variable bounds on the KKT diagonal
   instead of as rows of the factored matrix (gh#1243).** Every
