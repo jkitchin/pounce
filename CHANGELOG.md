@@ -25,8 +25,8 @@ changes.
   tapes were still in memory. Both the convex solve and the convex-answer
   replay after an NLP fallback (gh#1183) now reuse the problem that was
   already loaded. On `Dual2_5000` (3.2 GB `.nl`) the re-read added about
-  1.2 GB of peak memory and about 8 s. The `Parsed …` line now reports the
-  model build time separately, as `(model build Xs)`.
+  1.2 GB of peak memory and about 12 s. The `Parsed …` line now reports the
+  model build time separately: `in Xs (read) + Ys (model build)`.
 - **The convex interior point carries variable bounds on the KKT diagonal
   instead of as rows of the factored matrix (gh#1243).** Every
   single-column row of a nonnegative-orthant block is now removed from the

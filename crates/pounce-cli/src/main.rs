@@ -762,7 +762,7 @@ fn real_main() -> ExitCode {
                         if !json_dbg {
                             println!(
                                 "Parsed {} vars, {} cons, jac_nnz={}, h_nnz={} in {:.2}s \
-                                 (model build {:.2}s)",
+                                 (read) + {:.2}s (model build)",
                                 info.n,
                                 info.m,
                                 info.nnz_jac_g,
@@ -1616,6 +1616,19 @@ fn real_main() -> ExitCode {
                         );
                     }
                 }
+            } else if let ProblemSource::NlFile(path) = &args.problem {
+                // Every `NlFile` load sets `nl_tnlp_handle`, so this is
+                // unreachable today. It is here so a future load path that
+                // forgets to set it fails loudly, as the old re-read did on
+                // a parse failure, rather than silently rerouting a convex
+                // model to the NLP arm.
+                eprintln!(
+                    "pounce: internal error: {} classified as {} but its parsed \
+                     problem is not available to the convex solver",
+                    path.display(),
+                    class.name()
+                );
+                return ExitCode::from(2);
             }
             // Builtins never classify as convex; fall through to NLP.
         }
