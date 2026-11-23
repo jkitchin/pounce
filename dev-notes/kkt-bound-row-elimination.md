@@ -141,3 +141,31 @@ verdict-and-objective check alone could not have caught this.
   one triplet per bound) beside the problem it came from. The factored KKT
   no longer carries those rows, but the problem copy remains.
 * The `.nl` row/column names (0.51 GiB on `Primal2_1000`) are read up front.
+
+## Tests that moved, and why
+
+Four downstream tests needed attention. None of them caught a regression:
+each had a precondition at the edge of floating-point precision that the new
+factorization no longer meets.
+
+* `pounce-convex/tests/lp_crossover_bridge_rescue.rs` (seed 311) found the
+  fixed-column defect described above. The fix was in the elimination rule;
+  the test itself is unchanged.
+* `pounce-cli/tests/convex_in_tol_skips_nlp_fallback.rs`: TUFF now converges
+  `Optimal` (KKT error `8e-15` at `tol=3e-13`), so the skip branch is
+  unreachable on it. The skip test pins `qp_kkt_row_elim=no`, which
+  reproduces `main` exactly. The gate it tests is CLI routing, which does not
+  depend on how the KKT is factored.
+* `pounce-cli/tests/declared_optimum_sentinel.rs`: the declared violation is
+  `2^-8`, exactly one ulp of the model's `2.65e13` row bound (`0.0` before).
+  The threshold is now 8 ulps of that bound instead of an absolute `1e-6`.
+* `pounce-cinterface/tests/common/qp_python.json`: the bit-exact reference is
+  regenerated. Statuses and iteration counts are identical, and values move
+  at roundoff level (`≤ 2e-14` relative on optimal objectives and points).
+* `python/tests/test_minimize_socp_autoroute.py::test_qcqp_with_linear_and_quadratic_constraints`:
+  the iterates agree to about 9 digits through iteration 20. There, the
+  eliminated run's (noisy) primal-residual reading was `6.3e-9` against
+  `8.2e-7`, so it stopped 10 iterations earlier, at `x0 = 1.4e-5`. On the top
+  of the ball `x0` is determined only to `sqrt(2·tol)`. The test now asserts
+  what the model determines: the objective and `x1` to `tol`, `x0` to
+  `sqrt(2·tol)`, and feasibility. It passes on `main`'s extension too.
