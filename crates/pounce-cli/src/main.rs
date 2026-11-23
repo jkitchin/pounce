@@ -618,7 +618,7 @@ fn real_main() -> ExitCode {
                 println!("Reading {}...", path.display());
             }
             let t0 = std::time::Instant::now();
-            match nl_reader::read_nl_file(path) {
+            match pounce_cli::problem_file::read_problem_file(path) {
                 Ok(prob) => {
                     nl_suffixes = Some(prob.suffixes.clone());
                     nl_dims = Some((prob.n, prob.m));
@@ -1349,7 +1349,7 @@ fn real_main() -> ExitCode {
                 // reads the `scaling_factor` suffixes through the TNLP scaling
                 // callback.
             } else if let ProblemSource::NlFile(path) = &args.problem {
-                let prob = match nl_reader::read_nl_file(path) {
+                let prob = match pounce_cli::problem_file::read_problem_file(path) {
                     Ok(p) => p,
                     Err(e) => {
                         eprintln!(
@@ -2855,17 +2855,19 @@ fn real_main() -> ExitCode {
         // committed. If that fails — the file changed or vanished during the
         // NLP solve — the NLP answer, already in hand, reports instead.
         let replay_prob = match (&args.problem, convex_wins) {
-            (ProblemSource::NlFile(path), true) => match nl_reader::read_nl_file(path) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    eprintln!(
-                        "pounce: warning: could not re-read {} to report the convex \
+            (ProblemSource::NlFile(path), true) => {
+                match pounce_cli::problem_file::read_problem_file(path) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        eprintln!(
+                            "pounce: warning: could not re-read {} to report the convex \
                          answer ({e}); reporting the NLP answer instead.",
-                        path.display()
-                    );
-                    None
+                            path.display()
+                        );
+                        None
+                    }
                 }
-            },
+            }
             _ => None,
         };
         let convex_wins = replay_prob.is_some();

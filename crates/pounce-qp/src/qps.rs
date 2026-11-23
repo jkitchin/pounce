@@ -21,8 +21,13 @@
 //!   E row, r < 0:    bl = rhs + r,   bu = rhs
 //!   E row, r = 0:    bl = bu = rhs   (no-op)
 //!
+//! * `OBJSENSE` with `MIN` / `MAX` (or `MINIMIZE` / `MAXIMIZE`),
+//!   either on the header line (free MPS) or on the indented line
+//!   after it (fixed MPS). Recorded in [`QpsModel::minimize`]; the
+//!   data is stored as written, so a maximize model's consumer must
+//!   negate the objective itself.
+//!
 //! Not yet supported (rejected with a clear error):
-//! * `OBJSENSE` (assumes minimization).
 //! * MIP markers / `INTORG` / `INTEND` / binary variables.
 //!
 //! These cover the basic QPS profile; loading a real MM instance
@@ -39,6 +44,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct QpsModel {
     pub name: String,
+    /// `false` when an `OBJSENSE` section asked for `MAX`. The objective
+    /// data (`g`, `obj_constant`, the Hessian) is the file's, unnegated:
+    /// the model is `max ½xᵀHx + gᵀx + c` in that case.
+    pub minimize: bool,
     pub n: usize,
     pub m: usize,
     pub var_names: Vec<String>,
@@ -71,6 +80,7 @@ enum Section {
     Ranges,
     Bounds,
     Quadobj,
+    Objsense,
     Endata,
 }
 
@@ -85,6 +95,17 @@ enum RowSense {
 pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
     let mut name = String::new();
     let mut section = Section::None;
+    let mut minimize = true;
+    let parse_sense = |tok: &str, line_no: usize| -> Result<bool, String> {
+        match tok.to_ascii_uppercase().as_str() {
+            "MIN" | "MINIMIZE" => Ok(true),
+            "MAX" | "MAXIMIZE" => Ok(false),
+            other => Err(format!(
+                "line {}: OBJSENSE `{other}` not recognized (need MIN or MAX)",
+                line_no + 1
+            )),
+        }
+    };
     // Whether the active quadratic section uses the *full-matrix*
     // convention (`QMATRIX`, both triangles listed) versus the
     // *single-triangle* convention (`QUADOBJ` / `QSECTION`). For a
@@ -152,10 +173,14 @@ pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
                     break;
                 }
                 Some("OBJSENSE") => {
-                    return Err(format!(
-                        "line {}: OBJSENSE not yet supported (parser assumes MIN)",
-                        line_no + 1
-                    ));
+                    // Free MPS puts the sense on the header line; fixed
+                    // MPS on the indented line that follows.
+                    if let Some(tok) = tokens.next() {
+                        minimize = parse_sense(tok, line_no)?;
+                        section = Section::None;
+                    } else {
+                        section = Section::Objsense;
+                    }
                 }
                 Some(other) => {
                     return Err(format!(
@@ -396,6 +421,9 @@ pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
                 }
                 h_entries.push((i_col, j_col, val));
             }
+            Section::Objsense => {
+                minimize = parse_sense(tokens[0], line_no)?;
+            }
             Section::None | Section::Endata => continue,
         }
     }
@@ -482,6 +510,7 @@ pub fn parse_qps(text: &str) -> Result<QpsModel, String> {
 
     Ok(QpsModel {
         name,
+        minimize,
         n,
         m,
         var_names,

@@ -53,7 +53,7 @@ mod phase2_tests;
 use crate::check_x0::{
     CheckX0Args, CheckX0Outcome, check_tnlp_with_quadratics, clamp_to_interior, quad_row_coefs,
 };
-use crate::nl_reader::{self, NlProblem, NlTnlp};
+use crate::nl_reader::{NlProblem, NlTnlp};
 use crate::verify::{name_at, sha256};
 use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::tnlp::{SparsityRequest, StartingPoint, TNLP};
@@ -319,7 +319,7 @@ pub fn run(args: &DiagnoseArgs) -> ExitCode {
 pub fn diagnose_file(args: &DiagnoseArgs) -> Result<Report, String> {
     let path = args.nl.as_ref().ok_or("expected a <problem.nl> argument")?;
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let prob = nl_reader::read_nl_file(path)?;
+    let prob = crate::problem_file::read_problem_file(path)?;
     if !prob.complementarity.is_empty() {
         return Err(format!(
             "{} declares {} complementarity pair(s), which diagnose does not model",
