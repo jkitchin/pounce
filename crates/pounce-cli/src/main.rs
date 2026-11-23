@@ -4289,7 +4289,9 @@ fn run_convex_qp(
                     });
                 }
                 let st = ps.stats();
-                if st.reduced_anything() {
+                // A model presolve only dropped implied bounds from (gh#1246)
+                // still hands the solver a different problem; say so.
+                if st.reduced_anything() || st.relaxed_bounds > 0 {
                     // Whether the fixpoint converged or the layer cap stopped
                     // it (gh #527), as a suffix rather than a line of its own.
                     // The corpus sweep on #530 measured the cap binding on 46%
@@ -4312,7 +4314,8 @@ fn run_convex_qp(
                     presolve_log.push(format!(
                         "Presolve: {} → {} vars, {} → {} rows (fixed {}, \
                          free-fixed {}, substituted {}, aggregated {}, \
-                         forcing {}, dominated {}, tightened {}{})",
+                         forcing {}, dominated {}, tightened {}, \
+                         implied bounds dropped {}{})",
                         st.orig_vars,
                         st.reduced_vars,
                         st.orig_rows,
@@ -4324,6 +4327,7 @@ fn run_convex_qp(
                         st.forcing_rows,
                         st.dominated_cols,
                         st.tightened_bounds,
+                        st.relaxed_bounds,
                         exit,
                     ));
                 }

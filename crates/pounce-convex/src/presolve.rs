@@ -522,6 +522,17 @@ enum Reduction {
     Aggregate {
         plan: Box<pounce_presolve::linear_eq_plan::EliminationPlan>,
     },
+    /// An **implied bound side removed** (gh#1246): the rows of the problem,
+    /// with the box as it stood when this side was examined, already imply
+    /// `col`'s upper (`is_upper`) or lower bound, so the reduced problem
+    /// carries it as infinite. Only ever produced by [`relax_implied_bounds`],
+    /// in a layer of its own whose stack holds nothing else. The column and
+    /// every row are kept, so postsolve is the identity on `x`, `y`, `z`, and
+    /// the global bound recovery re-derives the bound multipliers against the
+    /// box with the side restored. The fields name the side for anyone
+    /// inspecting a stack in a debugger; postsolve needs neither.
+    #[allow(dead_code)]
+    RedundantBound { col: usize, is_upper: bool },
 }
 
 /// What [`Presolve::project_warm`] did to a seed.
@@ -990,6 +1001,11 @@ fn presolve_fixpoint(
     // only narrowed boxes), which lets the next pass skip the duplicate-row
     // hashing. False on the first round: nothing has been deduped yet.
     let mut structure_stable = false;
+    // Which finite bound sides of `current` the user declared, as opposed to
+    // ones bound tightening derived (gh#1246). Only an ordering preference for
+    // [`relax_implied_bounds`]: correctness of what it removes comes from its
+    // own proof against the final problem, never from this record.
+    let mut declared = DeclaredSides::of(prob);
     let exit;
     loop {
         let ps = match presolve_once(&current, &[], catalog, &refinements, structure_stable) {
@@ -1010,6 +1026,9 @@ fn presolve_fixpoint(
         if catalog_changed {
             refinements.charge(&ps);
             refinements.remap(&ps.kept_cols);
+            // A catalog layer makes a side finite only by tightening it, and a
+            // tightened side is not declared: carry the flags, add nothing.
+            declared.remap(&ps.kept_cols, None);
             current = ps.reduced.clone();
             chain.push(ps);
         } else if passthrough.is_none() {
@@ -1022,6 +1041,11 @@ fn presolve_fixpoint(
         let aggregated = match aggregate_once(&current) {
             Some(ps) => {
                 refinements.remap(&ps.kept_cols);
+                // An aggregation transfers an eliminated column's box onto the
+                // survivor it is folded into; a side that appears that way is
+                // treated as declared (it is kept in preference to a tightened
+                // one, and still removed if the rows imply it).
+                declared.remap(&ps.kept_cols, Some((&current, &ps.reduced)));
                 current = ps.reduced.clone();
                 chain.push(ps);
                 true
@@ -1041,6 +1065,13 @@ fn presolve_fixpoint(
             exit = FixpointExit::Deadline;
             break;
         }
+    }
+    // Hand the solver only the bound sides the rows do not already imply
+    // (gh#1246). Skipped once the deadline has passed, like any further layer.
+    if !deadline.is_some_and(|d| std::time::Instant::now() >= d)
+        && let Some(relaxed) = relax_implied_bounds(&current, &declared)
+    {
+        chain.push(relaxed);
     }
     // An empty chain means the first round found nothing, and that breaks as
     // `Fixpoint` before the layer cap or the deadline is consulted, so the
@@ -1102,6 +1133,322 @@ fn aggregate_once(prob: &QpProblem) -> Option<Presolve> {
         stack: vec![Reduction::Aggregate {
             plan: Box::new(plan),
         }],
+        chain: Vec::new(),
+        discarded_infeasibility: None,
+        exit: FixpointExit::Fixpoint,
+        ray: false,
+    })
+}
+
+/// Which finite bound sides of the current fixpoint problem were declared by
+/// the user rather than derived by bound tightening (gh#1246).
+struct DeclaredSides {
+    lb: Vec<bool>,
+    ub: Vec<bool>,
+}
+
+impl DeclaredSides {
+    fn of(prob: &QpProblem) -> Self {
+        DeclaredSides {
+            lb: (0..prob.n).map(|c| prob.lb_of(c) > -BOUND_INF).collect(),
+            ub: (0..prob.n).map(|c| prob.ub_of(c) < BOUND_INF).collect(),
+        }
+    }
+
+    /// Renumber onto a layer's surviving columns (`kept_cols[new] = old`).
+    /// With `transfer = Some((input, reduced))` (an aggregation layer), a side
+    /// that was infinite in `input` and is finite in `reduced` came from the
+    /// box of a column folded into this one, and is marked declared.
+    fn remap(&mut self, kept_cols: &[usize], transfer: Option<(&QpProblem, &QpProblem)>) {
+        let mut lb: Vec<bool> = kept_cols.iter().map(|&c| self.lb[c]).collect();
+        let mut ub: Vec<bool> = kept_cols.iter().map(|&c| self.ub[c]).collect();
+        if let Some((input, reduced)) = transfer {
+            for (newc, &oldc) in kept_cols.iter().enumerate() {
+                if input.lb_of(oldc) <= -BOUND_INF && reduced.lb_of(newc) > -BOUND_INF {
+                    lb[newc] = true;
+                }
+                if input.ub_of(oldc) >= BOUND_INF && reduced.ub_of(newc) < BOUND_INF {
+                    ub[newc] = true;
+                }
+            }
+        }
+        self.lb = lb;
+        self.ub = ub;
+    }
+}
+
+/// Smallest `|a_k| / max_j |a_j|` a row coefficient may have for that row to
+/// prove a bound on `x_k` redundant (gh#1246).
+///
+/// The implied bound is `(rhs − activity₋ₖ) / a_k`, so a row satisfied to the
+/// solver's tolerance `ε` only keeps `x_k` within `ε / |a_k|` of it. Removing a
+/// declared bound on the strength of a tiny coefficient would let the solver
+/// return a point that violates the user's box by far more than it violates any
+/// row. Bounding the ratio keeps that excursion within a few orders of the row
+/// residual; PaPILO applies the same kind of guard to its bound deductions.
+const RELAX_MIN_COEF_RATIO: f64 = 1e-3;
+
+/// Remove every finite bound side of `prob` that its rows already imply
+/// (gh#1246), returning the layer that does so, or `None` when there is none.
+///
+/// # Why
+///
+/// The convex interior point turns every finite bound side into a barrier
+/// term, a complementarity pair and a row of its KKT system. Bound tightening
+/// keeps each side it derives as a real bound, so on a model whose variables
+/// are bounded only through its rows presolve *grew* the KKT system: OSA-60
+/// went from 232 966 bound sides to 465 930, case_ACTIVSg10k from 3 876 to
+/// 14 365, and the latter from 3.0 s to 12.1 s. Those sides are implied by
+/// rows that are still in the problem, so the solver gains nothing from
+/// them. The same holds for declared bounds the rows imply — `0 ≤ x ≤ 1`
+/// under `Σ x = 1` — which is what `cpo3`'s `redundant_bounds` removes.
+///
+/// # Why the result is exact
+///
+/// Sides are examined one at a time, each against the box *as it stands at
+/// that moment*: a side is removed only if some row, with every other bound
+/// side still present, implies it. Removing an implied side leaves the
+/// feasible set unchanged, so by induction the final box and the rows
+/// describe exactly the set the input did. No proof uses a side that has
+/// already been removed, so none is circular — two rows cannot each excuse
+/// the other's bound. The leave-one-out activity excludes `x_k` itself, so a
+/// side never proves itself either.
+///
+/// Tightened sides — infinite where the user wrote the model — are examined
+/// first, then declared ones, so that given a choice the bound the user wrote
+/// is the one the solver keeps.
+///
+/// A row emptied of all other finite activity proves nothing, a singleton
+/// row that *became* a bound (and was then dropped as redundant) has no row
+/// left to imply it, and a fixed column (`lb = ub`) is left alone.
+///
+/// # Postsolve
+///
+/// The identity on `x` and on every row multiplier, with the bound
+/// multipliers re-derived by the catalog's global recovery against the box
+/// with the removed sides restored. A removed side carries no multiplier in
+/// the reduced solve; if `x` lands on it, the row that implied it is active
+/// and carries the force, so a zero bound multiplier is a valid one.
+fn relax_implied_bounds(prob: &QpProblem, declared: &DeclaredSides) -> Option<Presolve> {
+    let n = prob.n;
+    if n == 0 || !prob.has_bounds() {
+        return None;
+    }
+    let m_eq = prob.m_eq();
+    let m = m_eq + prob.m_ineq();
+    // Rows as `lo ≤ Σ a_j x_j ≤ hi`: equalities `b ≤ · ≤ b`, inequalities
+    // `−∞ ≤ · ≤ h`.
+    let a_rows = group_by_row(&prob.a, m_eq);
+    let g_rows = group_by_row(&prob.g, prob.m_ineq());
+    let rows: Vec<&[(usize, f64)]> = a_rows
+        .iter()
+        .chain(g_rows.iter())
+        .map(Vec::as_slice)
+        .collect();
+    let lo = |r: usize| {
+        if r < m_eq {
+            prob.b[r]
+        } else {
+            f64::NEG_INFINITY
+        }
+    };
+    let hi = |r: usize| {
+        if r < m_eq {
+            prob.b[r]
+        } else {
+            prob.h[r - m_eq]
+        }
+    };
+
+    let norm = |v: f64| {
+        if v <= -BOUND_INF {
+            f64::NEG_INFINITY
+        } else if v >= BOUND_INF {
+            f64::INFINITY
+        } else {
+            v
+        }
+    };
+    let mut lb: Vec<f64> = (0..n).map(|c| norm(prob.lb_of(c))).collect();
+    let mut ub: Vec<f64> = (0..n).map(|c| norm(prob.ub_of(c))).collect();
+
+    // Column → (row, coefficient), and per row its largest |coefficient|.
+    let mut col_rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    let mut row_max = vec![0.0_f64; m];
+    for (r, entries) in rows.iter().enumerate() {
+        for &(c, a) in entries.iter() {
+            if a != 0.0 && c < n {
+                col_rows[c].push((r, a));
+                row_max[r] = row_max[r].max(a.abs());
+            }
+        }
+    }
+
+    // Row activity as a finite part plus a count of infinite terms, for the
+    // minimum and the maximum, and the magnitude of the finite terms the sums
+    // were accumulated from (the scale of their rounding error).
+    let mut min_fin = vec![0.0_f64; m];
+    let mut max_fin = vec![0.0_f64; m];
+    let mut min_inf = vec![0usize; m];
+    let mut max_inf = vec![0usize; m];
+    let mut scale = vec![0.0_f64; m];
+    let contrib = |a: f64, l: f64, u: f64| {
+        if a > 0.0 {
+            (a * l, a * u)
+        } else {
+            (a * u, a * l)
+        }
+    };
+    for (r, entries) in rows.iter().enumerate() {
+        for &(c, a) in entries.iter() {
+            if a == 0.0 || c >= n {
+                continue;
+            }
+            let (cmin, cmax) = contrib(a, lb[c], ub[c]);
+            if cmin.is_finite() {
+                min_fin[r] += cmin;
+                scale[r] += cmin.abs();
+            } else {
+                min_inf[r] += 1;
+            }
+            if cmax.is_finite() {
+                max_fin[r] += cmax;
+                scale[r] += cmax.abs();
+            } else {
+                max_inf[r] += 1;
+            }
+        }
+    }
+
+    // Does some row imply `x_k ≤ ub[k]` (`is_upper`) or `x_k ≥ lb[k]`?
+    let implied = |k: usize,
+                   is_upper: bool,
+                   lb: &[f64],
+                   ub: &[f64],
+                   min_fin: &[f64],
+                   max_fin: &[f64],
+                   min_inf: &[usize],
+                   max_inf: &[usize]|
+     -> bool {
+        let bound = if is_upper { ub[k] } else { lb[k] };
+        let tol = BOUND_FEAS_TOL * (1.0 + bound.abs());
+        for &(r, a) in &col_rows[k] {
+            if a.abs() < RELAX_MIN_COEF_RATIO * row_max[r] {
+                continue;
+            }
+            let (cmin, cmax) = contrib(a, lb[k], ub[k]);
+            // `a·x_k ≤ hi − min₋ₖ` and `a·x_k ≥ lo − max₋ₖ`. Upper bound on
+            // `x_k` from the first when `a > 0`, from the second when `a < 0`.
+            let (rhs, act) = if (a > 0.0) == is_upper {
+                let h = hi(r);
+                let rest = if min_inf[r] > usize::from(!cmin.is_finite()) {
+                    continue;
+                } else {
+                    min_fin[r] - if cmin.is_finite() { cmin } else { 0.0 }
+                };
+                (h, rest)
+            } else {
+                let l = lo(r);
+                let rest = if max_inf[r] > usize::from(!cmax.is_finite()) {
+                    continue;
+                } else {
+                    max_fin[r] - if cmax.is_finite() { cmax } else { 0.0 }
+                };
+                (l, rest)
+            };
+            if !rhs.is_finite() {
+                continue;
+            }
+            let val = (rhs - act) / a;
+            // Rounding in the activity sum, carried through the division.
+            let err = 64.0 * f64::EPSILON * (scale[r] + rhs.abs()) / a.abs();
+            if !val.is_finite() || !err.is_finite() {
+                continue;
+            }
+            let ok = if is_upper {
+                val + err <= bound + tol
+            } else {
+                val - err >= bound - tol
+            };
+            if ok {
+                return true;
+            }
+        }
+        false
+    };
+
+    let mut stack = Vec::new();
+    for want_declared in [false, true] {
+        for k in 0..n {
+            for is_upper in [true, false] {
+                let (bound, is_declared) = if is_upper {
+                    (ub[k], declared.ub.get(k).copied().unwrap_or(true))
+                } else {
+                    (lb[k], declared.lb.get(k).copied().unwrap_or(true))
+                };
+                if !bound.is_finite() || is_declared != want_declared {
+                    continue;
+                }
+                // A fixed (or hairline-crossed) column keeps its box.
+                if lb[k].is_finite()
+                    && ub[k].is_finite()
+                    && ub[k] - lb[k] <= BOUND_FEAS_TOL * (1.0 + lb[k].abs())
+                {
+                    continue;
+                }
+                if !implied(
+                    k, is_upper, &lb, &ub, &min_fin, &max_fin, &min_inf, &max_inf,
+                ) {
+                    continue;
+                }
+                // Remove the side, and move its term in every row it enters
+                // from the finite part of the activity to the infinite count.
+                for &(r, a) in &col_rows[k] {
+                    let term = a * bound;
+                    // The upper side feeds the max activity when `a > 0`, the
+                    // min when `a < 0`; the lower side the other way round.
+                    if (a > 0.0) == is_upper {
+                        max_fin[r] -= term;
+                        max_inf[r] += 1;
+                    } else {
+                        min_fin[r] -= term;
+                        min_inf[r] += 1;
+                    }
+                }
+                if is_upper {
+                    ub[k] = f64::INFINITY;
+                } else {
+                    lb[k] = f64::NEG_INFINITY;
+                }
+                stack.push(Reduction::RedundantBound { col: k, is_upper });
+            }
+        }
+    }
+    if stack.is_empty() {
+        return None;
+    }
+    let mut reduced = prob.clone();
+    reduced.lb = if lb.iter().all(|v| !v.is_finite()) && ub.iter().all(|v| !v.is_finite()) {
+        Vec::new()
+    } else {
+        lb
+    };
+    reduced.ub = if reduced.lb.is_empty() {
+        Vec::new()
+    } else {
+        ub
+    };
+    Some(Presolve {
+        reduced,
+        layer_obj_offset: 0.0,
+        orig_n: n,
+        orig_m_eq: m_eq,
+        orig_m_ineq: prob.m_ineq(),
+        kept_cols: (0..n).collect(),
+        kept_eq: (0..m_eq).collect(),
+        kept_ineq: (0..prob.m_ineq()).collect(),
+        orig: prob.clone(),
+        stack,
         chain: Vec::new(),
         discarded_infeasibility: None,
         exit: FixpointExit::Fixpoint,
@@ -2478,6 +2825,10 @@ pub struct PresolveStats {
     pub dominated_cols: usize,
     /// Variable bounds tightened by domain propagation.
     pub tightened_bounds: usize,
+    /// Finite bound sides removed from the problem handed to the solver
+    /// because the remaining rows imply them (gh#1246). Counts both tightened
+    /// sides presolve derived itself and declared ones.
+    pub relaxed_bounds: usize,
     /// Variables folded onto another by a two-variable equality row
     /// (doubleton aggregation). Each also consumes its row.
     pub aggregated_vars: usize,
@@ -2560,6 +2911,15 @@ impl Presolve {
         out
     }
 
+    /// Is this the implied-bound layer [`relax_implied_bounds`] builds?
+    fn is_relax_layer(&self) -> bool {
+        !self.stack.is_empty()
+            && self
+                .stack
+                .iter()
+                .all(|r| matches!(r, Reduction::RedundantBound { .. }))
+    }
+
     /// Did this single pass change anything (a reduction, or a dropped
     /// row)? Used by [`presolve`] to detect the fixpoint.
     fn changed(&self) -> bool {
@@ -2591,8 +2951,15 @@ impl Presolve {
             s.forcing_rows += ls.forcing_rows;
             s.dominated_cols += ls.dominated_cols;
             s.tightened_bounds += ls.tightened_bounds;
+            s.relaxed_bounds += ls.relaxed_bounds;
             s.aggregated_vars += ls.aggregated_vars;
         }
+        // The implied-bound pass is a layer of the chain but not a round of
+        // the fixpoint: `rounds` is what the `cap-truncated after N layers`
+        // and deadline messages report, and it should not move by one
+        // because a bound was found redundant at the end.
+        let relax = self.chain.iter().filter(|l| l.is_relax_layer()).count();
+        s.rounds = (self.chain.len() - relax).max(1);
         s
     }
 
@@ -2615,6 +2982,7 @@ impl Presolve {
                 Reduction::ForcingRow { .. } => s.forcing_rows += 1,
                 Reduction::DominatedColumn { .. } => s.dominated_cols += 1,
                 Reduction::BoundTightening { .. } => s.tightened_bounds += 1,
+                Reduction::RedundantBound { .. } => s.relaxed_bounds += 1,
                 // A whole pass in one entry: report what its plan achieved.
                 Reduction::Aggregate { plan } => {
                     s.aggregated_vars += plan.report.n_aggregated_vars;
@@ -2717,8 +3085,14 @@ impl Presolve {
         let mut z_ub = vec![0.0; self.reduced.n];
         for (newc, &oldc) in self.kept_cols.iter().enumerate() {
             if oldc < warm.z_lb.len() && newc < z_lb.len() {
-                z_lb[newc] = warm.z_lb[oldc];
-                z_ub[newc] = warm.z_ub[oldc];
+                // A side the reduced problem does not carry (an implied bound
+                // relaxed away, gh#1246) has no multiplier to seed.
+                if self.reduced.lb_of(newc) > -BOUND_INF {
+                    z_lb[newc] = warm.z_lb[oldc];
+                }
+                if self.reduced.ub_of(newc) < BOUND_INF {
+                    z_ub[newc] = warm.z_ub[oldc];
+                }
             }
         }
         let kept_eq = {
@@ -2945,7 +3319,7 @@ impl Presolve {
                 Reduction::FreeColSingleton { .. } => {}
                 // The variable is kept; only its box changed, so its primal
                 // comes from the reduced solution (already mapped above).
-                Reduction::BoundTightening { .. } => {}
+                Reduction::BoundTightening { .. } | Reduction::RedundantBound { .. } => {}
                 // Unreachable: an aggregation layer returned above, before
                 // any of this. Left as a no-op rather than a panic so the
                 // arm can never be the thing that fails a solve.

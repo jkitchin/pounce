@@ -10,6 +10,23 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **Convex presolve no longer hands the interior point bound sides its rows
+  already imply (gh#1246, findings 1 and 2).** Bound tightening kept every
+  side it derived as a real bound. The convex IPM turns each finite side into
+  a barrier term and a KKT row, so on models bounded only through their rows,
+  presolve made the KKT system larger: OSA-60 went from 232,966 bound sides to
+  465,930. A new final presolve pass removes each side that a row still
+  implies. Sides are proved one at a time against the box as it stands, so no
+  proof is circular. Derived sides are removed first, then declared ones
+  (cpo3's `redundant_bounds`, e.g. `x ≤ 1` under `Σx = 1`). A coefficient
+  below `1e-3` of its row's largest never removes a bound. Postsolve is the
+  identity, with bound multipliers re-derived against the restored box. On
+  Maros–Mészáros, all 136 models that solved before still solve, with the
+  same statuses and total iterations 2660 → 2648. Wall time on the 60 models
+  over 0.2 s fell from 285 s to 202 s; CVXQP1_L went from 79.8 s to 35.9 s,
+  CONT-300 from 37.1 s to 19.2 s. The count is reported as `relaxed_bounds` in
+  the presolve stats and as "implied bounds dropped" in the CLI log. Column
+  reductions (finding 3) are not part of this change.
 - **`pounce.jax.odeint`, `daeint` and `solve_bvp(method="newton")` no longer
   evaluate the user's function eagerly in their host Newton loop
   (gh#1241).** The host solve runs in a `pure_callback`, outside any
