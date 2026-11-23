@@ -1305,10 +1305,10 @@ where
     {
         return failed(prob);
     }
-    let mut fact = match Factorization::new(
+    let mut fact = match Factorization::with_pattern(
         dim as Index,
-        kkt.airn.clone(),
-        kkt.ajcn.clone(),
+        &kkt.airn,
+        &kkt.ajcn,
         seed_vals,
         make_backend(),
     ) {

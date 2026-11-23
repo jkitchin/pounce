@@ -91,6 +91,50 @@ impl Factorization {
         values: Vec<Number>,
         backend: Box<dyn SparseSymLinearSolverInterface>,
     ) -> Result<Self, FactorizationError> {
+        let mut me = Self::structure(dim, &airn, &ajcn, values, backend)?;
+        // Released before the numeric factorization rather than at return:
+        // the driver holds its own copy of the pattern, and the first factor
+        // is the solve's memory peak (gh#1243).
+        drop(airn);
+        drop(ajcn);
+        me.do_factor()?;
+        Ok(me)
+    }
+
+    /// [`Self::new`] with the pattern borrowed rather than moved in.
+    ///
+    /// The pattern is read only by the structure phase — the driver keeps its
+    /// own copy — so a caller that holds the pattern anyway (every KKT
+    /// assembler does, for its residual products) should pass it here instead
+    /// of cloning it into [`Self::new`]. The clone was not only a copy: as a
+    /// by-value argument it stayed alive through the first numeric
+    /// factorization, the solve's memory peak (gh#1243).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn with_pattern(
+        dim: Index,
+        airn: &[Index],
+        ajcn: &[Index],
+        values: Vec<Number>,
+        backend: Box<dyn SparseSymLinearSolverInterface>,
+    ) -> Result<Self, FactorizationError> {
+        let mut me = Self::structure(dim, airn, ajcn, values, backend)?;
+        me.do_factor()?;
+        Ok(me)
+    }
+
+    /// The structure phase shared by [`Self::new`] and
+    /// [`Self::with_pattern`]: everything up to, not including, the initial
+    /// numeric factorization.
+    fn structure(
+        dim: Index,
+        airn: &[Index],
+        ajcn: &[Index],
+        values: Vec<Number>,
+        backend: Box<dyn SparseSymLinearSolverInterface>,
+    ) -> Result<Self, FactorizationError> {
         assert_eq!(
             airn.len(),
             ajcn.len(),
@@ -105,25 +149,23 @@ impl Factorization {
         // feral defers its ordering, so this row reads near zero for it, the
         // same way it does in the NLP path's report.
         let structure = time_linear_system(LinearSystemPhase::SymbolicFactorization, || {
-            inner.initialize_structure(dim, &airn, &ajcn)
+            inner.initialize_structure(dim, airn, ajcn)
         });
         FactorizationError::from_status(structure)?;
 
-        let mut me = Self {
+        // The caller runs the initial factor next ([`Self::do_factor`]). It
+        // issues a no-op back-solve (nrhs=1 with a zero RHS we then discard)
+        // because the trait does not expose a factor-only entry point —
+        // every multi_solve also runs back substitution. The cost is one
+        // triangular solve per construction, which is negligible relative to
+        // the factor.
+        Ok(Self {
             inner,
             dim,
             nnz,
             values,
             inertia_known: false,
-        };
-
-        // Initial factor. We issue a no-op back-solve (nrhs=1 with a
-        // zero RHS we then discard) because the trait does not expose
-        // a factor-only entry point — every multi_solve also runs back
-        // substitution. The cost is one triangular solve per
-        // construction, which is negligible relative to the factor.
-        me.do_factor()?;
-        Ok(me)
+        })
     }
 
     /// Back-substitute against the cached factor. `rhs` packs `nrhs`

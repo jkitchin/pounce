@@ -190,8 +190,17 @@ fn a_declining_convex_solve_is_rerouted_rather_than_relaxed() {
     );
     // The point of the name: nothing was widened to get there.
     let d = r.statistics.final_declared_constr_viol;
+    // "~0" on the scale the model can represent. The largest row bound is
+    // `2.65e13`, whose ulp is `2^-8 = 3.9e-3`, and the violation of a
+    // converged, unwidened solve is a few ulps of that row at most: `0.0`
+    // before gh#1243, exactly `2^-8` with bound rows folded onto the KKT
+    // diagonal. A widened answer reads about 2679, five orders above this
+    // bound, and that is the distinction the test exists to draw. The
+    // earlier absolute `1e-6` sat below one ulp of the data it measured.
+    const LARGEST_ROW_BOUND: f64 = 2.65e13;
+    let few_ulps = 8.0 * f64::EPSILON * LARGEST_ROW_BOUND;
     assert!(
-        d.is_nan() || d < 1e-6,
+        d.is_nan() || d < few_ulps,
         "the rerouted solve must answer the DECLARED model — \
          final_declared_constr_viol should be ~0 (no widening applied), got \
          {d:e}. If this reads about 2679, the fallback is handing the model \

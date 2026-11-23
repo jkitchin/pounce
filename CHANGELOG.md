@@ -9,7 +9,48 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+- **The convex interior point carries variable bounds on the KKT diagonal
+  instead of as rows of the factored matrix (gh#1243).** Every
+  single-column row of a nonnegative-orthant block is now removed from the
+  factorization by an exact Schur complement: each finite bound, and any
+  singleton inequality the user wrote. Its `z/s` term goes onto its
+  column's `(x, x)` entry, which is how Ipopt's augmented system carries
+  bounds. The Newton step, the HSDE's inertia test and its
+  refinement residuals are those of the full system. What shrinks is the
+  matrix factored: on a bounded LP it loses one row per finite bound. A
+  fixed column, or one boxed narrower than `1e-8` relative, keeps its rows,
+  because its two slacks vanish together.
+  * Maros-Meszaros: peak memory drops by up to 45% (`CONT-300` 1.92 → 1.21
+    GB), the suite runs in 397 s instead of 522 s, `BOYD2` now solves inside
+    100 s, and no verdict gets worse.
+  * The fixture sweep moves 6 of 152 fixtures by 1–5 iterations, with no
+    status, engine or objective change.
+  * Covers the symmetric HSDE and the direct driver. The exponential/power-
+    cone HSDE is unchanged. The reusable `QpFactorization` always factors the
+    full system, because it accepts new bound values per solve and fixing
+    one would change which rows fold. `qp_kkt_row_elim=no` (or
+    `QpOptions::kkt_row_elim = false`) factors the full system as before.
+  * This does not fix the largest Mittelmann LPs that exhaust memory. Their
+    peaks are in the presolve fixpoint chain (each layer keeps a full copy of
+    its input), the `.nl` reader and the factorization's fill, which gh#1243
+    tracks separately. On `neos-3025225` the peak drops from 34.7 to 8.7 GB.
+  * Details and measurements: `dev-notes/kkt-bound-row-elimination.md`.
+
 ### Fixed
+- **The convex QP path no longer keeps duplicate copies of the problem and
+  of the KKT pattern alive through the first factorization (gh#1243).**
+  * Presolve's fixpoint chain held every intermediate problem twice, and
+    the original once more in a field nothing read. It now holds each once,
+    and the reduced problem's triplet vectors are allocated to their exact
+    size.
+  * `Factorization::new` kept its by-value pattern alive through the first
+    numeric factorization. The convex drivers now pass the pattern by
+    reference (`Factorization::with_pattern`).
+  * `pounce-feral` frees its 0-based triplet copy once the triplet → CSC map
+    is recorded (release builds).
+  * On a 400 k-column boxed LP these cut peak memory from 6.24 to 4.97 GB
+    with no change to any iterate. The fixture sweep is byte-identical.
 - **`qp_crossover=yes` returns the optimal vertex again on LPs whose
   simplex vertex it declines (gh#1244).** Since 0.18.0 the CLI's and
   Python's convex-IPM backend turns on FERAL static pivoting (gh#1193).

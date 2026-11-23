@@ -108,7 +108,8 @@ pub struct FeralSolverInterface {
     dim: Index,
     nonzeros: Index,
 
-    /// 0-based row indices, fixed by `initialize_structure`.
+    /// 0-based row indices, fixed by `initialize_structure`. Released in
+    /// release builds once `slot` is recorded (gh#1243).
     rows_0: Vec<usize>,
     /// 0-based column indices, fixed by `initialize_structure`.
     cols_0: Vec<usize>,
@@ -1388,6 +1389,18 @@ impl FeralSolverInterface {
         };
         self.slot = slot_map(&matrix, &self.rows_0, &self.cols_0);
         self.matrix = Some(matrix);
+        // gh#1243: once the slot permutation exists, nothing in a release
+        // build reads the 0-based triplets again: the fast path above scatters
+        // through `slot`, and the pattern can only change through
+        // `initialize_structure`, which rebuilds them. They are two `usize`
+        // per KKT nonzero (≈ 0.3 GB on an 8.8 M-row LP KKT), held for the
+        // whole solve. Debug builds keep them for
+        // `assert_refill_matches_rebuild`, and unit tests read them.
+        #[cfg(not(any(debug_assertions, test)))]
+        if self.slot.is_some() {
+            self.rows_0 = Vec::new();
+            self.cols_0 = Vec::new();
+        }
         true
     }
 
