@@ -35,6 +35,38 @@ changes.
   size). `POUNCE_FERAL_ORDERING` still wins, and nothing in the benchmark
   corpora is large enough to be affected. A stopgap until FERAL's default
   is fixed (jkitchin/feral#246).
+- **`build_nl_problem(..., con_linear=(indptr, indices, data))`: a row's
+  linear part as coefficients (discopt#2293).** A frontend that knows which
+  terms of a row are linear can pass them as a CSR triple instead of
+  `Var` / `c*Var` nodes. They are stored in the problem's linear segment
+  (the `.nl` `J` segment's slot), with no expression tree, no AD tape and no
+  transient `NlExpr` nodes. Pass `0.0` as the expression of an all-linear row.
+  Such a row (constant expression plus segment) is folded into the same
+  constant-structure form the quadratic recognizer builds for an affine tree,
+  so it evaluates **bit-identically** to passing the row as a tree:
+  compensated sum over ascending variables, constant added last. Measured on
+  200,000 three-term rows: 597 → 268 B/row in the problem, and 600 → 72 B/row
+  of transient input. Parsed `.nl` models and calls without `con_linear` are
+  untouched: the fold applies only to `build_nl_problem` problems, whose
+  linear segment was always empty before. Indices out of range, non-finite
+  coefficients and malformed `indptr` are refused.
+- **The CLI reads QPS / MPS files directly (gh#1251).** `pounce model.mps`
+  and `pounce model.qps` (extension in any case) load an LP or QP with no
+  `.nl` conversion. The model is routed like a `.nl` input: an LP or convex
+  QP reaches the convex interior point, and a sibling `.sol` is written.
+  `verify`, `check-x0` and `diagnose` accept these files too. `OBJSENSE
+  MAX` is now honored, where the QPS reader used to reject it; integer
+  markers and `BV`/`LI`/`UI` bounds are still rejected.
+
+### Changed
+- **The CLI no longer parses a `.nl` twice when it routes the model to a
+  convex engine (gh#1255).** An LP, convex QP or SOCP used to be read a
+  second time for the convex solver while the first copy and its evaluation
+  tapes were still in memory. Both the convex solve and the convex-answer
+  replay after an NLP fallback (gh#1183) now reuse the problem that was
+  already loaded. On `Dual2_5000` (3.2 GB `.nl`) the re-read added about
+  1.2 GB of peak memory and about 12 s. The `Parsed …` line now reports the
+  model build time separately: `in Xs (read) + Ys (model build)`.
 - **The convex interior point carries variable bounds on the KKT diagonal
   instead of as rows of the factored matrix (gh#1243).** Every
   single-column row of a nonnegative-orthant block is now removed from the
@@ -63,6 +95,26 @@ changes.
   * Details and measurements: `dev-notes/kkt-bound-row-elimination.md`.
 
 ### Fixed
+- **The `.nl` reader uses much less memory on large models (gh#1248).**
+  On a Dual2_5000-shaped QP at one tenth scale (3.3 M variables, 3 M rows,
+  12 M Jacobian nonzeros, a 408 MB file), the process peak while parsing
+  drops from 2.60 to 1.25 GB, and the parse from 7.3 to 5.9 s. What the
+  parsed problem keeps for the rest of the solve drops from 1.15 to
+  0.82 GB. Four changes:
+  * The reader no longer builds a table of every line before parsing. At
+    16 bytes per line it outweighed the file itself, and building it by
+    doubling briefly needed half as much again.
+  * A long `o54` sum in a quadratic body is folded as each term is read,
+    instead of after holding every term at once (~1 GB for 3.3 M terms).
+  * A model whose recognized quadratic bodies are a small part of the file
+    keeps only those bodies' text, not the whole file.
+  * Jacobian rows and `.col`/`.row` names are allocated at their exact size,
+    and name files are read a line at a time.
+
+  Parsed problems are unchanged: the fixture sweep is identical, and the
+  quadratic recognizer still matches the tree walk bit for bit on every
+  `.nl` in the repository.
+
 - **The convex QP path no longer keeps duplicate copies of the problem and
   of the KKT pattern alive through the first factorization (gh#1243).**
   * Presolve's fixpoint chain held every intermediate problem twice, and

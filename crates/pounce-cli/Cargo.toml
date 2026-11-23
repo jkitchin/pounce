@@ -51,6 +51,9 @@ pounce-observability.workspace = true
 # Specialized convex LP/QP interior-point solver, dispatched to for
 # classified LP / convex-QP `.nl` inputs.
 pounce-convex.workspace = true
+# QPS / MPS reader: `pounce model.qps` / `pounce model.mps` load through
+# `problem_file::read_problem_file` with no `.nl` conversion (gh#1251).
+pounce-qp.workspace = true
 # Dense SVD for `pounce diagnose`'s numerical rank and minimal
 # dependent-row search (gh#1160).
 faer.workspace = true

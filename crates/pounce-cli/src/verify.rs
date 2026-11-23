@@ -457,7 +457,7 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     let sol_sha256 = sha256::hex(&sol_bytes);
 
     // --- canonical problem ---
-    let prob = nl_reader::read_nl_file(&args.nl)?;
+    let prob = crate::problem_file::read_problem_file(&args.nl)?;
     if !prob.complementarity.is_empty() {
         // Verification checks the rows and bounds; a complementarity pair is
         // neither, so a point violating it would pass.

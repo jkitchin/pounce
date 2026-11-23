@@ -170,6 +170,8 @@ impl Args {
 Usage: pounce [OPTIONS] [PATH] [SOL] [KEY=VALUE ...]
 
 PATH is an AMPL .nl file (positional). Equivalent: --nl-file <path>.
+A PATH ending in .qps or .mps (any case) is read as a QPS / MPS LP or
+QP instead, with no .nl conversion; its .sol is written the same way.
 An extensionless AMPL stub is accepted: if PATH is missing but PATH.nl
 exists, PATH.nl is read (the `pounce mystub -AMPL` invocation convention).
 SOL is an optional second positional naming the .sol output file
