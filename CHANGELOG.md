@@ -11,21 +11,25 @@ changes.
 
 ### Fixed
 - **Convex presolve no longer keeps a full copy of the problem per fixpoint
-  layer (gh#1246).** Each of up to 32 layers held `orig`, a clone of the
-  problem it reduced, so presolve itself ran the Mittelmann LPs `dlr1`,
-  `dlr2`, `thk_48` and `thk_63` out of memory.
+  layer (gh#1246). This improves presolve memory; it does not close the
+  problem for the largest Mittelmann LPs.** Each of up to 32 layers held
+  `orig`, a clone of the problem it reduced.
   - **What a layer keeps now.** A chain layer keeps an undo record: the rows
     and columns it dropped, and the entries it changed. Postsolve walks the
     chain backward from the final reduced problem, rebuilding one layer's
     input at a time.
   - **Matrices.** A layer's matrices are a restriction of a base shared along
-    the chain, which only an aggregation replaces.
-  - **Backstop.** A memory budget stops the loop with
-    `FixpointExit::MemoryCap` ("stopped at its memory budget" in the CLI log)
-    if the chain still grows past three times the input.
+    the chain, which only a coefficient-rewriting layer replaces.
+  - **Backstop.** `FixpointExit::MemoryCap` ("stopped at its memory budget"
+    in the CLI log) stops the loop if the *retained chain* passes three times
+    the input. It does not count the round in progress: the problem being
+    reduced, the problem being built, and the pass's scratch arrays, each
+    about one matrix's worth.
   - **Measured.** On a synthetic LP with 4 M nonzeros, 32 layers deep, peak
-    presolve memory goes 5.4 GB → 1.2 GB, with the same reduction. At 9.9 M
-    nonzeros the peak is 3.2 GB.
+    presolve memory goes 5.4 GB → 1.2 GB, with the same reduction.
+  - **Not measured.** Not measured on `dlr1`, `dlr2`, `thk_48` or `thk_63`.
+    On `Dual2_5000` (93 M nonzeros) presolve still passes 24 GB, about 10 GB
+    of it on top of the 14.5 GB parse, mostly that working set.
   - **Checks.** The fixture sweep diffs empty on both legs, default and
     widened. Debug builds check at every layer that the record rebuilds its
     input exactly.
