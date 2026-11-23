@@ -2442,6 +2442,27 @@ curvature scale.
 When in doubt: leave `feral_ordering` at the default, with one
 exception.
 
+#### Convex KKTs of a million rows or more race the orderings
+
+On the convex (LP/QP/conic) path, a KKT of order 1 000 000 or more is
+analysed with `auto_race` rather than `auto` unless `POUNCE_FERAL_ORDERING`
+is set (gh#1249). At that size the default's per-matrix rule picks
+orderings that do not fit: on the Mittelmann LP `fhnw-binschedule1` it
+picks AMF, whose symbolic analysis alone exhausts memory, and on
+`Primal2_1000` it picks AMD, predicting 8.3 GB and 2.5e12 flops per
+factorization against METIS's 2.2 GB and 3.2e11. The race keeps whichever of
+AMD and METIS predicts less fill, which on both is one that fits, at the
+price of analysing each candidate once per pattern (minutes at this size). It is a
+stopgap until FERAL's own default is fixed (jkitchin/feral#246).
+
+The race tries only AMD and METIS (FERAL's `RACE_CANDIDATES`), so SCOTCH,
+which predicts least on `L1_sixm250obs`, is not considered. `max_wall_time`
+cannot interrupt a candidate's analysis: on `L2CTA3D` (order 14.2M) the
+METIS candidate ran past a timeout that AMF's analysis met. The pick also
+changes the trajectory of every convex solve this large. Set
+`POUNCE_FERAL_ORDERING=auto` to keep FERAL's default (`auto` set explicitly
+disables the race), or name the ordering you want.
+
 #### Collocation, optimal-control and PDE-in-time models: set `metis`
 
 A model transcribed on a mesh — direct collocation of an ODE/DAE, a
@@ -2735,6 +2756,64 @@ only override available to CLI, Python and NL callers on a host where
 that autodetection is wrong (feral falls back to sequential when the
 rayon pool fails to build); the first-class per-backend lever,
 `FeralConfig.parallel`, is the Rust solver API, not an option.
+
+### FERAL fill prediction and factor memory budget
+
+FERAL runs its symbolic analysis and its numeric factorization in one call,
+and the factor's size (`factor_nnz` on the `linear_solve` span) is recorded
+only after the factorization succeeds. A KKT whose factor does not fit in
+memory therefore reports nothing before the process is killed. Two
+environment variables run the symbolic analysis on its own first, before the
+numeric factor, for each new sparsity pattern (gh#1249). They are
+environment-only by design for now: diagnostics for large models, not
+options an `.opt` file, Python or `pounce-rs` can set.
+
+| Variable | Value | Effect |
+|---|---|---|
+| `POUNCE_FERAL_REPORT_SYMBOLIC` | `1`/`on`/`true`/`yes` | Logs, at `info` on `pounce::linsol` (shown by default), one line as the analysis starts and one when it ends: the ordering it resolved to, the predicted `nnz(L)`, the factor and contribution-block bytes and their sum (the predicted peak), the largest front, and the time the analysis took. A run killed after only the first line died in the symbolic phase; one killed after the second died in the numeric factor, whose predicted size the second line gives. |
+| `POUNCE_FERAL_MAX_FACTOR_BYTES` | bytes, e.g. `3e10` | Refuses a factorization whose predicted peak exceeds this many bytes, with a warning naming the ordering and the prediction, instead of running into an out-of-memory kill. Logs nothing more unless `POUNCE_FERAL_REPORT_SYMBOLIC` is also set. |
+
+**A refusal ends the solve.** It reports `Insufficient_Memory`, on the convex
+and the NLP path alike. Nothing else that would factor gets a turn: not the
+convex driver's fallback driver, not the LP → NLP fallback (whose KKT is
+larger), not restoration, not the second-opinion ladder. Once one
+factorization is refused, every later one in the same solve is refused at
+once, without another analysis. The note on stderr suggests the two ways
+forward: another `POUNCE_FERAL_ORDERING` (the report prints each one's
+prediction), or a larger budget.
+
+**The predicted peak is FERAL's a-priori figure for the factor, not for the
+process.** It is the factor's allocation plus the high-water mark of the
+contribution blocks, simulated over the elimination tree in postorder with
+each child's block freed once its parent is assembled. It is not a sum over
+the tree, but it can be very large when many big sibling blocks wait for one
+ancestor. Read it as a guide with error in both directions:
+
+* **It leaves out everything outside the factor**: the model, presolve, the
+  KKT matrix and the solver's vectors. On `Primal2_1000` and
+  `fhnw-binschedule1` that was 5–6 GB on top of the prediction. Leave
+  headroom: a budget set to the machine's free memory will let through
+  solves that still run out.
+* **Delayed pivots can make the factor larger than predicted**, by moving
+  work into larger parent fronts.
+* **It counts contribution blocks square**, the classic assembly scheme
+  FERAL's parallel driver uses. The sequential drivers store them packed,
+  about half the size, and `feral_early_assembly=wide_parents` bounds them
+  further, so for those it overstates.
+
+With either variable set, the convex solvers' `max_wall_time`
+(`time_limit`) is also checked between the two phases: a symbolic analysis
+that ran past the deadline does not start the numeric factor, and the solve
+ends with `TimeLimit`.
+
+**The price is a second symbolic pass per pattern**, because feral's solver
+cannot take an analysis computed outside it. On the gh#1249 models that is
+5–130 s per pattern, and up to 480 s for an ordering race. The factor itself
+is unchanged. Both variables are off by default, and neither interrupts a
+phase partway: a symbolic analysis that on its own exhausts memory or time
+still does so. That was observed on `L1_sixm1000obs`, whose analysis jumps
+from 19 to 52 GB inside FERAL's `finish_and_copy` before any prediction
+exists, and on `L2CTA3D`, whose analysis peaks near 25 GB.
 
 ### Debug and diagnostic gates
 

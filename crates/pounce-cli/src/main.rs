@@ -3476,6 +3476,38 @@ enum ConvexNext {
     Report(pounce_convex::QpStatus),
 }
 
+/// `qp_status_to_ars`, except that a `NumericalFailure` caused by a FERAL
+/// budget refusal (`POUNCE_FERAL_MAX_FACTOR_BYTES`, gh#1249) reports Ipopt's
+/// `Insufficient_Memory`: the solve stopped because the factorization was
+/// predicted not to fit, not because the linear algebra broke down.
+fn convex_ars(status: pounce_convex::QpStatus) -> ApplicationReturnStatus {
+    if status == pounce_convex::QpStatus::NumericalFailure
+        && pounce_feral::budget_refusal().is_some()
+    {
+        ApplicationReturnStatus::InsufficientMemory
+    } else {
+        qp_status_to_ars(status)
+    }
+}
+
+/// Whether a latched FERAL budget refusal (gh#1249) holds back the convex
+/// path's reroute to the NLP arm. Prints why when it does.
+fn budget_refusal_stops_reroute() -> bool {
+    let Some(r) = pounce_feral::budget_refusal() else {
+        return false;
+    };
+    eprintln!(
+        "pounce: note: the factorization was refused before it started: FERAL \
+         predicted a peak of {} against POUNCE_FERAL_MAX_FACTOR_BYTES = {} \
+         (gh#1249). Not re-solving on the NLP path, whose KKT is larger. Try \
+         another POUNCE_FERAL_ORDERING (POUNCE_FERAL_REPORT_SYMBOLIC=1 prints \
+         each ordering's prediction), or raise the budget.",
+        pounce_feral::preanalysis::human_bytes(r.peak_bytes),
+        pounce_feral::preanalysis::human_bytes(r.budget.min(usize::MAX as u64) as usize),
+    );
+    true
+}
+
 /// The convex driver's whole post-solve decision, as one pure function, so
 /// every branch of it is unit-testable without having to land a real solve on
 /// a deadline (gh#1182 review).
@@ -3817,7 +3849,7 @@ fn print_convex_verdict(
     // onto the NLP-side enumerator, which is what `status_message` phrases
     // and what `upstream_name` spells the way CUTEst tables and the
     // reference JSONs do.
-    let ars = qp_status_to_ars(status);
+    let ars = convex_ars(status);
     // The same quantity the NLP path prints on this line: the driver's own
     // `OverallAlgorithm` total, not the solve-only figure the one-line result
     // above already carries.
@@ -4523,6 +4555,12 @@ fn run_convex_qp(
             t0.elapsed(),
         )
     };
+    // gh#1249: a FERAL budget refusal is terminal. The NLP arm would factor
+    // a larger KKT of the same model, and be refused in turn; report the
+    // refusal instead of paying for the reroute.
+    if next == ConvexNext::Reroute && budget_refusal_stops_reroute() {
+        next = ConvexNext::Report(sol.status);
+    }
 
     // The model as the caller declared it — without the `bound_relax_factor`
     // widening this solve was handed — when it differs from `qp`. Both the
@@ -4981,7 +5019,7 @@ fn run_convex_qp(
             "cvx-qp"
         }
         .to_string();
-        builder.solution.status = qp_status_to_ars(sol.status);
+        builder.solution.status = convex_ars(sol.status);
         builder.solution.solve_result_num = srn;
         builder.solution.objective = reported_obj;
         builder.solution.x = sol.x.clone();
@@ -5283,6 +5321,7 @@ fn run_convex_socp(
     if allow_nlp_fallback
         && !budget_spent
         && matches!(sol.status, pounce_convex::QpStatus::NumericalFailure)
+        && !budget_refusal_stops_reroute()
     {
         let res = sol.kkt_residuals_conic(&qp, &cones);
         eprintln!(
@@ -5472,7 +5511,7 @@ fn run_convex_socp(
         builder.problem.n_objectives = 1;
         builder.problem.minimize = prob.minimize;
         builder.solution.engine = "cvx-qcqp".to_string();
-        builder.solution.status = qp_status_to_ars(sol.status);
+        builder.solution.status = convex_ars(sol.status);
         builder.solution.solve_result_num = srn;
         builder.solution.objective = reported_obj;
         builder.solution.x = sol.x.clone();

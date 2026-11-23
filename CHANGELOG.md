@@ -10,6 +10,24 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **FERAL's predicted fill can be reported before the numeric factor
+  (gh#1249).** `POUNCE_FERAL_REPORT_SYMBOLIC=1` runs the symbolic analysis
+  on its own for each new KKT pattern and logs the resolved ordering,
+  predicted `nnz(L)`, factor and contribution-block bytes, and largest
+  front, before any numeric work. Until now the factor size was recorded
+  only after a factorization succeeded, so a KKT that exhausted memory
+  inside FERAL (five large Mittelmann LPs on the convex HSDE) reported
+  nothing. `POUNCE_FERAL_MAX_FACTOR_BYTES=<bytes>` refuses a factorization
+  whose predicted peak exceeds the budget, instead of running into an
+  out-of-memory kill. The refusal ends the solve with `Insufficient_Memory`:
+  no LP → NLP fallback, restoration or second-opinion re-solve follows it,
+  and nothing else in the solve runs another analysis. The prediction covers
+  the factor only, so leave headroom for the rest of the process (5–6 GB on
+  the gh#1249 models). With either set, the convex solvers
+  check `max_wall_time` between the symbolic and numeric phases and end
+  with `TimeLimit`. Both are off by default because the symbolic phase
+  then runs twice per pattern; the factor is unchanged.
+
 - **`build_nl_problem(..., con_linear=(indptr, indices, data))`: a row's
   linear part as coefficients (discopt#2293).** A frontend that knows which
   terms of a row are linear can pass them as a CSR triple instead of
@@ -35,6 +53,20 @@ changes.
   `.mps.gz` / `.qps.gz` are read compressed (gh#1256).
 
 ### Changed
+- **Behaviour change: the convex interior point races FERAL's orderings on
+  KKTs of a million rows or more (gh#1249).** FERAL's default ordering picks
+  badly at this size: on `fhnw-binschedule1` it chooses AMF, whose symbolic
+  analysis alone exhausts memory; on `Primal2_1000` it chooses AMD,
+  predicting 4× the memory and 8× the work of METIS. Above that size the
+  convex backend now uses `auto_race`, which tries AMD and METIS and keeps
+  the one with less predicted fill. This changes the ordering, and so the
+  trajectory, of every convex solve that large, not only the models that
+  failed. It costs extra analysis time per pattern (minutes at this size),
+  and `max_wall_time` cannot interrupt it: on `L2CTA3D` the METIS candidate
+  runs far longer than AMF did. Set `POUNCE_FERAL_ORDERING=auto` to keep
+  FERAL's default, or name a concrete ordering. Nothing in the benchmark
+  corpora is large enough to be affected. A stopgap until FERAL's default is
+  fixed (jkitchin/feral#246).
 - **The CLI no longer parses a `.nl` twice when it routes the model to a
   convex engine (gh#1255).** An LP, convex QP or SOCP used to be read a
   second time for the convex solver while the first copy and its evaluation

@@ -12,6 +12,80 @@ merges.
 
 ---
 
+## Convex IPM: the largest Mittelmann LPs still need more memory than the factor (gh#1249)
+
+gh#1249 found five Mittelmann LPs (`L1_sixm250obs`, `L1_sixm1000obs`,
+`fhnw-binschedule1`, `Primal2_1000`, `L2CTA3D`) exhausting a 38.6 GB cap inside
+FERAL before the first iteration. The ordering half is fixed: the convex
+backend races the orderings at KKT order >= 1M (`CONVEX_AUTO_RACE_MIN_DIM`),
+because feral's `Auto` picks AMF on fhnw (whose symbolic phase alone passes
+11 GB) and AMD on Primal2 (4x the fill of METIS). That rule belongs in feral
+and is jkitchin/feral#246; drop the pounce override when it ships.
+
+What is left, measured on a 15 GB / 4-core container with an RSS watchdog,
+on a build based on `913be16` (after gh#1243's duplicate-copy fixes, before
+gh#1248's `.nl` reader changes, so the baseline below may now be lower):
+
+| model | ordering | result |
+|---|---|---|
+| `Primal2_1000` | race -> METIS (predicted peak 2.2 GB) | 37 iterations in 2400 s, peak RSS 12.4 GB, `Maximum_WallTime_Exceeded` |
+| `Primal2_1000` | AMD (the old `Auto`, predicted 8.3 GB) | over 13.7 GB at 86 s, in the first numeric factor |
+| `fhnw-binschedule1` | race -> AMD (predicted peak 6.8 GB) | symbolic done in 466 s (the race), then over 13.5 GB at 993 s in the numeric factor |
+
+* **Memory outside the factor.** Primal2_1000 sits at ~6.5 GB RSS before its
+  numeric factor whatever the ordering (measured with every factorization
+  refused), against a predicted 2.2 GB factor. The candidates are the ones
+  `dev-notes/kkt-bound-row-elimination.md` lists: `expand_bounds`' problem
+  copy, the `.nl` names (0.5 GB on this model), presolve layers. fhnw's
+  6.8 GB factor on top of the same kind of baseline did not fit in 13.5 GB;
+  whether it fits in 38.6 GB is unmeasured.
+* **The race's cost and reach.** feral 0.24's `AutoRace` runs
+  `RACE_CANDIDATES = {Amd, MetisND}` one after the other and ranks them on
+  `factor_nnz_estimate`; neither the race nor a candidate checks
+  `max_wall_time` (pounce's `factor_deadline` is checked only after the
+  whole analysis).
+  * Time: 466-476 s on fhnw (AMD alone: 318 s; over the cpo3 corpus's 300 s
+    limit), 120-130 s on Primal2 (AMD alone: 24 s).
+  * `L2CTA3D` (order 14.2M) is **worse** under the race. METIS ran past the
+    reviewer's timeout in the ordering sweep, while AMF (the old `auto`)
+    finished its analysis and let the budget refuse the factor. Under the race
+    every run on it waits out the METIS ordering before it can report or
+    refuse anything. Opt out with `POUNCE_FERAL_ORDERING=auto` or `amf`.
+  * `L1_sixm250obs`: the race picks METIS (187 GB predicted) over AMD
+    (544 GB), but SCOTCH (158 GB) is not a candidate. Out of reach under every
+    ordering anyway.
+  * The fix wants a deadline check between candidates, or inside an ordering,
+    in feral (feral#246).
+* **The other three models**, measured in the gh#1250 review on a larger
+  machine (single-threaded, `auto` unless stated):
+  * `L1_sixm250obs` (order 1.03M) predicts 371 GB under `auto` (AMF), 544 GB
+    under AMD, 187 GB under METIS and 158 GB under SCOTCH. It is out of reach
+    under every ordering, so the race cannot rescue it. This is genuine fill,
+    or at least fill no available ordering avoids.
+  * `L1_sixm1000obs` (order 3.30M): the symbolic phase itself sits near 19 GB
+    for 2.5 min, then jumps to 52.5 GB within ~3 s inside FERAL's
+    `finish_and_copy`, before any prediction exists.
+  * `L2CTA3D` (order 14.2M) predicts 265 GB under `auto` (AMF), and its
+    analysis peaks near 25 GB. Under AMD it predicts nnz(L) 1.12G (~9 GB of
+    factor) with a largest front of 10 100 rows, but 811 GB of contribution
+    blocks. That figure is the postorder high-water mark (feral's
+    `compute_peak_contrib` frees each child's block after allocating its
+    parent's), not a sum, so it implies very many large sibling blocks
+    pending at once. Whether that is real is unverified.
+
+  The symbolic phase's own memory on these two (`finish_and_copy`,
+  `compute_static_row_indices`) is FERAL's to fix; the pre-analysis cannot
+  protect against it, because no prediction exists until the phase ends.
+
+How to measure (from `benchmarks/lpopt/mps_to_nl.py` output): run with
+`POUNCE_FERAL_REPORT_SYMBOLIC=1` for the prediction, and with
+`POUNCE_FERAL_MAX_FACTOR_BYTES=1` to stop before the numeric factor, which
+isolates the memory spent before it. A fix to the baseline shows as a lower
+RSS at the refusal; a fix in feral#246 shows as the same orderings chosen
+without `CONVEX_AUTO_RACE_MIN_DIM`.
+
+---
+
 ## Convex IPM: default static pivoting ends ns1116954 acceptable, and switching to delayed pivoting on demand costs other models
 
 *Measured on `integrate-0.18-fixes` (parent `22ae155e`), MIPLIB ns1116954's

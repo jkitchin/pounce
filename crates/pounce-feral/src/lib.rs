@@ -38,6 +38,7 @@ pub use feral::symbolic::OrderingPreprocess;
 pub mod block;
 pub use block::FeralBlockSolver;
 pub mod dependent_rows;
+pub mod preanalysis;
 pub use dependent_rows::{
     DEFAULT_PROBE_MAX_WORK, DependentRowsBudget, ProbeBailout, RankProbeDeadline,
     default_max_active_bytes, last_probe_bailout, rank_probe_deadline,
@@ -46,6 +47,10 @@ use pounce_common::types::{Index, Number};
 use pounce_linsol::summary::{FactorRecord, LinearSolverSummary};
 use pounce_linsol::{
     EMatrixFormat, ESymSolverStatus, FactorPattern, SparseSymLinearSolverInterface,
+};
+pub use preanalysis::{
+    BudgetRefusal, FactorDeadline, SymbolicReport, budget_refusal, clear_budget_refusal,
+    factor_deadline, factor_deadline_passed,
 };
 
 /// Largest `nrhs` at which feral's blocked back-substitution is still
@@ -157,6 +162,16 @@ pub struct FeralSolverInterface {
     /// (pounce#71).
     ordering: OrderingMethod,
 
+    /// gh#1249: when `Some(min)`, a pattern of order `>= min` whose
+    /// configured ordering is [`OrderingMethod::Auto`] is analysed under
+    /// [`OrderingMethod::AutoRace`] instead. Set by
+    /// [`Self::for_convex_ipm_with`] (see [`CONVEX_AUTO_RACE_MIN_DIM`]);
+    /// `None` everywhere else.
+    auto_race_min_dim: Option<usize>,
+    /// The ordering configured at construction, which `ordering` returns to
+    /// when a later pattern falls below `auto_race_min_dim`.
+    base_ordering: OrderingMethod,
+
     /// Absolute near-singularity floor; see
     /// [`FeralConfig::singular_pivot_floor`].
     singular_pivot_floor: f64,
@@ -179,6 +194,31 @@ pub struct FeralSolverInterface {
     /// [`Self::with_summary_sink`] and reads it after
     /// `optimize_tnlp` returns.
     sink: Option<Arc<Mutex<LinearSolverSummary>>>,
+
+    /// gh#1249: the symbolic pre-analysis ([`crate::preanalysis`]). `None`
+    /// when neither [`FeralConfig::report_symbolic`] nor
+    /// [`FeralConfig::max_factor_bytes`] asks for it.
+    preanalysis: Option<Preanalysis>,
+}
+
+/// Configuration and per-pattern state of the gh#1249 pre-analysis.
+struct Preanalysis {
+    params: SupernodeParams,
+    report: bool,
+    max_factor_bytes: Option<u64>,
+    state: PreanalysisState,
+    last: Option<SymbolicReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreanalysisState {
+    /// The current pattern has not been analysed yet.
+    Pending,
+    /// Analysed; the factorization goes ahead.
+    Done,
+    /// Analysed and over the byte budget: every factorization of this
+    /// pattern is refused until `initialize_structure` sets a new one.
+    Refused,
 }
 
 /// Construction-time configuration for [`FeralSolverInterface`].
@@ -714,6 +754,25 @@ pub struct FeralConfig {
     /// The empirical motivation is pounce#254 (emfl050's ~44 s single
     /// factorization); see `dev-notes/feral-factor-interrupt.md`.
     pub static_pivoting: Option<bool>,
+    /// Log FERAL's predicted fill before the numeric factor (gh#1249).
+    ///
+    /// On each new sparsity pattern, run the symbolic analysis on its own
+    /// first ([`crate::preanalysis`]) and log, at `info` on the
+    /// `pounce::linsol` target, one line as it starts and one with the
+    /// resolved ordering, the predicted `nnz(L)`, the factor and
+    /// contribution-block bytes and the largest front as it ends. The
+    /// symbolic phase then runs twice per pattern, so it is off by default.
+    /// Environment: `POUNCE_FERAL_REPORT_SYMBOLIC`.
+    pub report_symbolic: bool,
+    /// Refuse a factorization FERAL predicts will need more than this many
+    /// bytes at its peak (`factor_bytes + peak_contrib_bytes`, from the
+    /// symbolic analysis), reporting `FatalError` with a message instead of
+    /// running into an out-of-memory kill (gh#1249). Setting it turns the
+    /// pre-analysis of [`Self::report_symbolic`] on, without the log lines.
+    /// `None` (the default) never refuses. Environment:
+    /// `POUNCE_FERAL_MAX_FACTOR_BYTES` (scientific notation accepted,
+    /// e.g. `3e10`).
+    pub max_factor_bytes: Option<u64>,
 }
 
 impl Default for FeralConfig {
@@ -751,6 +810,8 @@ impl Default for FeralConfig {
             parallel: None,
             min_par_flops: None,
             static_pivoting: None,
+            report_symbolic: false,
+            max_factor_bytes: None,
         }
     }
 }
@@ -888,6 +949,13 @@ impl FeralConfig {
                     .ok()
                     .as_deref(),
             ),
+            report_symbolic: parse_bool_env(
+                std::env::var("POUNCE_FERAL_REPORT_SYMBOLIC")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or(false),
+            max_factor_bytes: feral::env::u64_var("POUNCE_FERAL_MAX_FACTOR_BYTES"),
         }
     }
 }
@@ -976,6 +1044,37 @@ pub fn convex_ipm_static_pivoting(
     })
 }
 
+/// KKT order from which the convex interior point's FERAL backend
+/// ([`FeralSolverInterface::for_convex_ipm_with`]) races the fill-reducing
+/// orderings ([`OrderingMethod::AutoRace`]) instead of taking feral's
+/// size-and-shape default ([`OrderingMethod::Auto`]), gh#1249.
+///
+/// On the two large Mittelmann LPs measured for gh#1249 the default picks
+/// badly in opposite directions, and the race picks well on both:
+///
+/// * `fhnw-binschedule1` (order 1.91M): `Auto` resolves to AMF, whose
+///   symbolic phase alone passes 11 GB and aborts under a 13 GB cap. AMD
+///   predicts a 6.8 GB peak; the race picks it (476 s of analysis).
+/// * `Primal2_1000` (order 5.10M): `Auto` resolves to AMD, predicting an
+///   8.3 GB peak and 2.5e12 flops per factorization. METIS and SCOTCH
+///   predict 2.2 GB and 3.2e11.
+///
+/// The race (feral's `RACE_CANDIDATES`: AMD and METIS only) runs each
+/// candidate's ordering prefix once per pattern and keeps the one with the
+/// least predicted fill, so it costs analysis time (minutes at this size)
+/// that the default does not. SCOTCH and AMF are not candidates, and
+/// `max_wall_time` cannot interrupt a candidate: on `L2CTA3D` (order 14.2M)
+/// METIS ran past the gh#1250 reviewer's timeout, where AMF had finished
+/// (see `dev-notes/known-limitations.md`). The pick also changes the
+/// trajectory of every solve this large (orderings differ in the inertia
+/// they read on near-singular KKTs, feral#208); `POUNCE_FERAL_ORDERING=auto`
+/// restores feral's default. The threshold
+/// keeps every model in the repository's corpora below it: the fixture
+/// sweep's largest model is 813 columns and `benchmarks/qp`'s 93 263, so
+/// none of them is affected. Feral's own default is the real fix
+/// (jkitchin/feral#246); this is the stopgap until it ships.
+pub const CONVEX_AUTO_RACE_MIN_DIM: usize = 1_000_000;
+
 /// Everything POUNCE records about one successful factorization. Shared
 /// by the monolithic backend and the Schur backend's eliminated block.
 /// Every read is `O(n)` or cheaper — negligible next to the factor.
@@ -1018,6 +1117,11 @@ pub(crate) fn factor_record(
     }
 }
 
+/// Whether any value is NaN or infinite.
+fn has_non_finite(values: &[f64]) -> bool {
+    values.iter().any(|v| !v.is_finite())
+}
+
 /// Parse a `feral_ordering_preprocess` tag. `None` for an unrecognized one.
 pub fn parse_ordering_preprocess(s: &str) -> Option<OrderingPreprocess> {
     match s.trim().to_ascii_lowercase().as_str() {
@@ -1034,6 +1138,16 @@ pub fn parse_early_assembly(s: &str) -> Option<EarlyAssembly> {
         "off" => Some(EarlyAssembly::Off),
         "wide_parents" | "wide-parents" => Some(EarlyAssembly::WideParents),
         _ => None,
+    }
+}
+
+/// The symbolic-phase parameters [`configure_solver`] hands feral, shared
+/// with the pre-analysis (gh#1249) so its prediction is of the analysis the
+/// solver will actually compute.
+pub(crate) fn supernode_params(cfg: &FeralConfig) -> SupernodeParams {
+    SupernodeParams {
+        preprocess: cfg.ordering_preprocess,
+        ..SupernodeParams::default()
     }
 }
 
@@ -1076,11 +1190,7 @@ pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
             np.cascade_break_eps = None;
         }
     }
-    let sn = SupernodeParams {
-        preprocess: cfg.ordering_preprocess,
-        ..SupernodeParams::default()
-    };
-    let mut solver = Solver::with_params(np, sn);
+    let mut solver = Solver::with_params(np, supernode_params(cfg));
     // Internal-parallelism toggle. Explicit `cfg.parallel` is the primary
     // per-backend lever; when unset, fall back to the legacy process-wide
     // `FERAL_PARALLEL` env var. The env var is bidirectional and uses the
@@ -1235,7 +1345,18 @@ impl FeralSolverInterface {
         let mut cfg = FeralConfig::from_env();
         let explicit = static_pivoting.or(cfg.static_pivoting);
         cfg.static_pivoting = convex_ipm_static_pivoting(explicit, tol, free_fraction);
-        Self::with_config(cfg)
+        // gh#1249: race the orderings on very large KKTs, unless the caller
+        // chose one. See `CONVEX_AUTO_RACE_MIN_DIM`.
+        let ordering_chosen = std::env::var("POUNCE_FERAL_ORDERING")
+            .ok()
+            .as_deref()
+            .and_then(parse_ordering_method)
+            .is_some();
+        let mut me = Self::with_config(cfg);
+        if !ordering_chosen {
+            me.auto_race_min_dim = Some(CONVEX_AUTO_RACE_MIN_DIM);
+        }
+        me
     }
 
     /// Construct with explicit configuration. Cascade-break
@@ -1254,6 +1375,14 @@ impl FeralSolverInterface {
     /// [`FeralConfig::cascade_break`] for the tri-state semantics.
     pub fn with_config(cfg: FeralConfig) -> Self {
         let solver = configure_solver(&cfg);
+        let preanalysis =
+            (cfg.report_symbolic || cfg.max_factor_bytes.is_some()).then(|| Preanalysis {
+                params: supernode_params(&cfg),
+                report: cfg.report_symbolic,
+                max_factor_bytes: cfg.max_factor_bytes,
+                state: PreanalysisState::Pending,
+                last: None,
+            });
         Self {
             solver,
             initialized: false,
@@ -1275,7 +1404,9 @@ impl FeralSolverInterface {
             negevals: 0,
             last_singular_certified: false,
             reused_scaling_zero_pivot_recheck: true,
+            base_ordering: cfg.ordering.clone(),
             ordering: cfg.ordering,
+            auto_race_min_dim: None,
             singular_pivot_floor: cfg.singular_pivot_floor,
             inertia_pivot_floor: cfg.inertia_pivot_floor,
             summary: LinearSolverSummary {
@@ -1283,6 +1414,100 @@ impl FeralSolverInterface {
                 ..Default::default()
             },
             sink: None,
+            preanalysis,
+        }
+    }
+
+    /// The fill-reducing ordering this backend will analyse the current
+    /// pattern with: the configured one, or [`OrderingMethod::AutoRace`] for a
+    /// large convex KKT (see [`CONVEX_AUTO_RACE_MIN_DIM`]).
+    pub fn ordering(&self) -> &OrderingMethod {
+        &self.ordering
+    }
+
+    /// gh#1249: pick the ordering for the pattern `initialize_structure` just
+    /// set. Only a backend built with `auto_race_min_dim` and an `Auto`
+    /// ordering is touched.
+    fn apply_size_ordering(&mut self) {
+        let Some(min) = self.auto_race_min_dim else {
+            return;
+        };
+        if self.base_ordering != OrderingMethod::Auto {
+            return;
+        }
+        let want = if self.dim as usize >= min {
+            OrderingMethod::AutoRace
+        } else {
+            OrderingMethod::Auto
+        };
+        if want != self.ordering {
+            self.solver = std::mem::take(&mut self.solver).with_ordering(want.clone());
+            self.ordering = want;
+        }
+    }
+
+    /// What the gh#1249 pre-analysis predicted for the current pattern, if
+    /// it is enabled and has run.
+    pub fn symbolic_report(&self) -> Option<&SymbolicReport> {
+        self.preanalysis.as_ref().and_then(|p| p.last.as_ref())
+    }
+
+    /// Run the gh#1249 pre-analysis if the current pattern needs one.
+    /// `Some(status)` stops the factorization with that status.
+    fn run_preanalysis(&mut self) -> Option<ESymSolverStatus> {
+        let pre = self.preanalysis.as_mut()?;
+        match pre.state {
+            PreanalysisState::Done => return None,
+            PreanalysisState::Refused => return Some(ESymSolverStatus::FatalError),
+            PreanalysisState::Pending => {}
+        }
+        // A refusal earlier in this solve is terminal for all of it: refuse
+        // this pattern too, without paying for its analysis.
+        if pre.max_factor_bytes.is_some() {
+            if let Some(r) = preanalysis::budget_refusal() {
+                tracing::debug!(
+                    target: "pounce::linsol",
+                    dim = self.dim, peak_bytes = r.peak_bytes, budget = r.budget,
+                    "FERAL factorization refused: an earlier factorization in this solve \
+                     was over max_factor_bytes"
+                );
+                pre.state = PreanalysisState::Refused;
+                return Some(ESymSolverStatus::FatalError);
+            }
+        }
+        let matrix = self.matrix.as_ref()?;
+        // A non-finite value is rejected by `factor` itself, with its own
+        // message; MC64 preprocessing should not see one first.
+        if has_non_finite(&matrix.values) {
+            return None;
+        }
+        let (report, verdict) = preanalysis::preanalyze(
+            matrix,
+            &pre.params,
+            &self.ordering,
+            pre.report,
+            pre.max_factor_bytes,
+        );
+        pre.last = report;
+        match verdict {
+            preanalysis::Verdict::Proceed | preanalysis::Verdict::AnalysisFailed => {
+                pre.state = PreanalysisState::Done;
+                None
+            }
+            preanalysis::Verdict::OverBudget { peak_bytes, budget } => {
+                preanalysis::latch_budget_refusal(preanalysis::BudgetRefusal {
+                    peak_bytes,
+                    budget,
+                });
+                pre.state = PreanalysisState::Refused;
+                Some(ESymSolverStatus::FatalError)
+            }
+            // Not latched: the analysis is known, and a later call (in a
+            // later deadline scope) factors without repeating it.
+            preanalysis::Verdict::DeadlinePassed => {
+                pre.state = PreanalysisState::Done;
+                Some(ESymSolverStatus::FatalError)
+            }
         }
     }
 
@@ -1454,6 +1679,11 @@ impl FeralSolverInterface {
         // regardless of the factor outcome.
         if !self.refresh_matrix() {
             return ESymSolverStatus::FatalError;
+        }
+        // gh#1249: FERAL's prediction for a new pattern, before the numeric
+        // factor (off unless `report_symbolic` / `max_factor_bytes` is set).
+        if let Some(status) = self.run_preanalysis() {
+            return status;
         }
         let matrix = self.matrix.as_ref().expect("refresh_matrix stored one");
 
@@ -2048,6 +2278,10 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
         // rebuilds both from scratch. gh#562.
         self.slot = None;
         self.matrix = None;
+        if let Some(pre) = self.preanalysis.as_mut() {
+            pre.state = PreanalysisState::Pending;
+            pre.last = None;
+        }
 
         // Convert 1-based MA57-style indices to 0-based for FERAL, and
         // canonicalize each entry to the lower triangle. MA57 accepts
@@ -2072,6 +2306,7 @@ impl SparseSymLinearSolverInterface for FeralSolverInterface {
             }
         }
 
+        self.apply_size_ordering();
         self.initialized = true;
         ESymSolverStatus::Success
     }
