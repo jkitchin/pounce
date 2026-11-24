@@ -1336,3 +1336,162 @@ def test_keep_expressions_false_variant_still_evaluates():
     v = dropped.variant(x0=[0.5] * 4)
     x = np.array([0.3, -0.2, 0.7, 1.1])
     assert np.array_equal(v.jacobian(x), kept.jacobian(x))
+
+
+# --- NlProblemBuilder: rows a chunk at a time (gh#1261) --------------------
+
+
+def _kinetics(steps, states=6):
+    """Rows whose sharing follows the steps: each step's rates are shared by
+    its own rows, and the four ``exp(p)`` by every row. Returns ``n`` and a
+    list of per-step chunks ``(rows, g_l, g_u, con_linear, names)``."""
+    nx = (steps + 1) * states
+    n = nx + 4
+    x = pounce.NlExpr.vars(n)
+    ep = [x[nx + j].exp() for j in range(4)]
+    chunks = []
+    for k in range(steps):
+        y = lambda s: x[(k + 1) * states + s % states]
+        r = [ep[j] * y(j) * y(j + 1) - ep[(j + 1) % 4] * y(j + 2) for j in range(3)]
+        rows = [0.01 * (r[s % 3] - r[(s + 1) % 3] + 2 * r[(s + 2) % 3]) for s in range(states)]
+        indptr = [2 * s for s in range(states + 1)]
+        indices = [c for s in range(states) for c in ((k + 1) * states + s, k * states + s)]
+        data = [1.0, -1.0] * states
+        names = [f"bal[{k},{s}]" for s in range(states)]
+        chunks.append((rows, [0.0] * states, [0.0] * states, (indptr, indices, data), names))
+    return n, chunks
+
+
+def _whole(n, chunks, **kw):
+    """The same model through ``build_nl_problem``, every chunk concatenated."""
+    rows, g_l, g_u, names, ip, ix, dv = [], [], [], [], [0], [], []
+    for r, lo, hi, (p, i, d), nm in chunks:
+        rows += r
+        g_l += lo
+        g_u += hi
+        names += nm
+        ip += [v + ip[-1] for v in p[1:]]
+        ix += i
+        dv += d
+    return pounce.build_nl_problem(
+        n, 0.0, rows, g_l=g_l, g_u=g_u, con_names=names, con_linear=(ip, ix, dv), **kw
+    )
+
+
+def _built(n, chunks, per_call, keep_expressions=True):
+    b = pounce.NlProblemBuilder(n)
+    for k in range(0, len(chunks), per_call):
+        part = chunks[k : k + per_call]
+        rows, g_l, g_u, names, ip, ix, dv = [], [], [], [], [0], [], []
+        for r, lo, hi, (p, i, d), nm in part:
+            rows += r
+            g_l += lo
+            g_u += hi
+            names += nm
+            ip += [v + ip[-1] for v in p[1:]]
+            ix += i
+            dv += d
+        b.add_constraints(rows, g_l=g_l, g_u=g_u, con_linear=(ip, ix, dv), con_names=names)
+    assert b.m == sum(len(c[0]) for c in chunks)
+    return b.build(0.0, keep_expressions=keep_expressions)
+
+
+def _assert_bit_for_bit(a, b, m):
+    assert (a.n, a.m, a.nnz_jac, a.nnz_hess) == (b.n, b.m, b.nnz_jac, b.nnz_hess)
+    assert a.con_names == b.con_names
+    for u, v in [
+        (a.jacobian_structure(), b.jacobian_structure()),
+        (a.hessian_structure(), b.hessian_structure()),
+    ]:
+        assert all(np.array_equal(s, t) for s, t in zip(u, v))
+    rng = np.random.default_rng(1261)
+    for _ in range(20):
+        x = rng.uniform(0.1, 1.5, a.n)
+        lam = rng.uniform(-1, 1, m)
+        assert np.array_equal(a.constraints(x), b.constraints(x))
+        assert np.array_equal(a.jacobian(x), b.jacobian(x))
+        assert np.array_equal(a.hessian(x, lam, 0.7), b.hessian(x, lam, 0.7))
+
+
+@pytest.mark.parametrize("per_call", [1, 3, 12])
+@pytest.mark.parametrize("keep", [True, False])
+def test_builder_by_step_is_build_nl_problem_bit_for_bit(per_call, keep):
+    """Chunks along the model's sharing build what one call does."""
+    n, chunks = _kinetics(12)
+    whole = _whole(n, chunks, keep_expressions=keep)
+    built = _built(n, chunks, per_call, keep_expressions=keep)
+    _assert_bit_for_bit(built, whole, whole.m)
+
+
+def test_builder_solves_like_build_nl_problem():
+    n, chunks = _kinetics(4)
+    whole = _whole(n, chunks)
+    built = _built(n, chunks, 1)
+    (xa, ia), (xb, ib) = pounce.solve_nlp_batch([whole, built], parallel=False)
+    assert ia["status_msg"] == ib["status_msg"]
+    assert ia["iter_count"] == ib["iter_count"]
+    assert np.array_equal(xa, xb)
+
+
+def test_builder_mixes_chunks_with_and_without_a_linear_part():
+    x = pounce.NlExpr.vars(3)
+    b = pounce.NlProblemBuilder(3, x0=[0.5, 0.5, 0.5])
+    b.add_constraints([x[0] * x[1]])
+    b.add_constraints([x[2].exp(), 0.0], con_linear=([0, 1, 3], [0, 1, 2], [2.0, 1.0, -1.0]))
+    p = b.build(x[0] ** 2 + x[2], minimize=False, obj_constant=1.5)
+    ref = pounce.build_nl_problem(
+        3,
+        x[0] ** 2 + x[2],
+        [x[0] * x[1], x[2].exp(), 0.0],
+        x0=[0.5, 0.5, 0.5],
+        minimize=False,
+        obj_constant=1.5,
+        con_linear=([0, 0, 1, 3], [0, 1, 2], [2.0, 1.0, -1.0]),
+    )
+    xv = np.array([0.3, -0.7, 1.2])
+    assert p.objective(xv) == ref.objective(xv)
+    assert np.array_equal(p.gradient(xv), ref.gradient(xv))
+    assert np.array_equal(p.constraints(xv), ref.constraints(xv))
+    assert np.array_equal(p.jacobian(xv), ref.jacobian(xv))
+    assert np.array_equal(_dense_hessian(p, xv, [1.0, -2.0, 0.5]), _dense_hessian(ref, xv, [1.0, -2.0, 0.5]))
+
+
+def test_builder_validates_each_chunk_and_leaves_the_builder_usable():
+    x = pounce.NlExpr.vars(2)
+    b = pounce.NlProblemBuilder(2)
+    with pytest.raises(ValueError, match="NlProblemBuilder.add_constraints: g_l has length 1"):
+        b.add_constraints([x[0], x[1]], g_l=[0.0])
+    with pytest.raises(ValueError, match="NlProblemBuilder.add_constraints: con_linear row 0"):
+        b.add_constraints([x[0]], con_linear=([0, 1], [5], [1.0]))
+    with pytest.raises(ValueError, match="con_names has length 2"):
+        b.add_constraints([x[0]], con_names=["a", "b"])
+    assert b.m == 0  # nothing a refused chunk carried was kept
+    b.add_constraints([x[0]], con_names=["a"])
+    with pytest.raises(ValueError, match="every chunk or for none"):
+        b.add_constraints([x[1]])
+    b.add_constraints([])  # an empty chunk says nothing about names
+    b.add_constraints([x[1]], con_names=["b"])
+    p = b.build(x[0] + x[1])
+    assert p.con_names == ["a", "b"]
+    for call in (lambda: b.add_constraints([x[0]]), lambda: b.build(0.0), lambda: b.m):
+        with pytest.raises(ValueError, match="already been built"):
+            call()
+
+
+def test_builder_refuses_an_out_of_range_variable_when_it_is_added():
+    """A bad index in some chunk is refused by that chunk's add, not by
+    ``build`` after every earlier chunk was dropped; the builder carries on."""
+    x = pounce.NlExpr.vars(5)
+    b = pounce.NlProblemBuilder(2)
+    b.add_constraints([x[0]])
+    with pytest.raises(ValueError, match=r"row 1 of this chunk \(constraint 2\) references Var\(4\)"):
+        b.add_constraints([x[1], x[0] * x[4]])
+    assert b.m == 1
+    b.add_constraints([x[1]])
+    # A bad objective is refused before the builder is consumed, so it can
+    # be retried.
+    with pytest.raises(ValueError, match=r"NlProblemBuilder.build: objective references Var\(4\)"):
+        b.build(x[4])
+    assert b.m == 2
+    p = b.build(x[0] + x[1])
+    assert p.m == 2

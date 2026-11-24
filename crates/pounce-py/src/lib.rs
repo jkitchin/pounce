@@ -40,7 +40,7 @@ mod sparse_lu;
 mod tnlp_bridge;
 mod warm_start;
 
-pub use nl_expr::{PyNlExpr, build_nl_problem};
+pub use nl_expr::{PyNlExpr, PyNlProblemBuilder, build_nl_problem};
 pub use nl_problem::{PyNlProblem, parse_nl_text, read_nl};
 pub use problem::PyProblem;
 pub use qp::{PyQpFactorization, PyQpProblem, PyQpSensitivity};
@@ -107,6 +107,7 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // file, and an expression builder that bypasses `.nl` entirely.
     m.add_function(wrap_pyfunction!(parse_nl_text, m)?)?;
     m.add_function(wrap_pyfunction!(build_nl_problem, m)?)?;
+    m.add_class::<PyNlProblemBuilder>()?;
     // Banner for the Python in-process tee (#206); the engine emits the rest
     // of the log (stats / iteration table / summary) itself at print_level>=1.
     m.add_function(wrap_pyfunction!(print_banner, m)?)?;
