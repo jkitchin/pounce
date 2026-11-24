@@ -38,9 +38,9 @@
  * Version
  * ----------------------------------------------------------------- */
 #define POUNCE_VERSION_MAJOR 0
-#define POUNCE_VERSION_MINOR 18
+#define POUNCE_VERSION_MINOR 19
 #define POUNCE_VERSION_PATCH 0
-#define POUNCE_VERSION "0.18.0"
+#define POUNCE_VERSION "0.19.0"
 
 /* -----------------------------------------------------------------
  * Error codes: one namespace for every POUNCE extension

@@ -35,12 +35,12 @@ libraries; do not rebuild a loaded library in a running Julia process.
 `Pounce.library_path()` identifies the loaded file;
 `Pounce.GetIpoptVersion()` reports the POUNCE version compiled into it.
 The C entry-point names retain the Ipopt spelling used in `pounce.h`.
-Pounce.jl 0.1 accepts native POUNCE 0.15.x through 0.18.x and verifies all required C symbols
+Pounce.jl 0.1 accepts native POUNCE 0.15.x through 0.19.x and verifies all required C symbols
 before exposing the library. A new native minor version requires a wrapper ABI
 review; an arbitrary Ipopt library is not compatible with POUNCE's callback ABI.
 
-Native 0.17 and 0.18 compatibility covers the existing NLP bindings and diagnostics.
-0.18's C additions (the `SetPounce*MetaData` calls and the custom linear
+Native 0.17, 0.18 and 0.19 compatibility covers the existing NLP bindings and diagnostics.
+0.18's C additions (unchanged in 0.19) (the `SetPounce*MetaData` calls and the custom linear
 solver table) are not bound and not required at import.
 Native complementarity is supported when the optional finalized C API is available;
 `Pounce.supports_complementarity()` detects it. Convex/conic entry points are not

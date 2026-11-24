@@ -9,60 +9,7 @@ changes.
 
 ## [Unreleased]
 
-### Changed
-- **Convex KKTs of order 1 000 000 or more no longer race the orderings
-  (gh#1265).** They take feral's default (`auto`) like every other size. The
-  race was gh#1249's stopgap for feral 0.24's `auto` picking badly at this
-  size; feral 0.25 fixed that. Re-measured under 0.25, `auto` picks the same
-  ordering as the race, with the same prediction, on `fhnw-binschedule1`
-  (149 s of analysis against 394 s) and `Primal2_1000` (5.8 s against 74 s).
-  On `L2CTA3D`, which fits under no ordering, `auto` reports its 427 GB
-  prediction in 71 s, where the race had not finished after 45 minutes.
-  `CONVEX_AUTO_RACE_MIN_DIM` is removed. `feral_ordering=auto_race` still
-  runs the race on request.
-- **FERAL's analysis now enforces pounce's memory budget and wall-clock
-  deadline itself (gh#1265).** Both use features new in FERAL 0.25.
-  - **Budget.** `POUNCE_FERAL_MAX_FACTOR_BYTES` is handed to FERAL
-    (`Solver::with_max_factor_bytes`). It no longer costs a second symbolic
-    pass per pattern. FERAL refuses on the factor alone before the supernodal
-    finish, which is where `L1_sixm1000obs` jumped from 19 to 52 GB. In an
-    ordering race it skips arms over budget, and it runs the sequential
-    driver when only the parallel driver's peak is over. A refusal still
-    ends the solve with `Insufficient_Memory`; `BudgetRefusal` gains a
-    `stage` field naming the check that fired.
-  - **Deadline.** The convex solvers' `max_wall_time` reaches FERAL's symbolic
-    analysis as an `Interrupt`, with or without the gh#1249 variables, and
-    stops it at its next safe point. Before, it was checked only between the
-    phases and only with a variable set, so a long ordering or race ran to
-    completion past the deadline. A numeric factor already under way still
-    runs to completion.
-  - `POUNCE_FERAL_REPORT_SYMBOLIC` still runs its own pass, now under the
-    same budget and deadline.
-
-### Fixed
-- **Convex presolve no longer keeps a full copy of the problem per fixpoint
-  layer (gh#1246). This improves presolve memory; it does not close the
-  problem for the largest Mittelmann LPs.** Each of up to 32 layers held
-  `orig`, a clone of the problem it reduced.
-  - **What a layer keeps now.** A chain layer keeps an undo record: the rows
-    and columns it dropped, and the entries it changed. Postsolve walks the
-    chain backward from the final reduced problem, rebuilding one layer's
-    input at a time.
-  - **Matrices.** A layer's matrices are a restriction of a base shared along
-    the chain, which only a coefficient-rewriting layer replaces.
-  - **Backstop.** `FixpointExit::MemoryCap` ("stopped at its memory budget"
-    in the CLI log) stops the loop if the *retained chain* passes three times
-    the input. It does not count the round in progress: the problem being
-    reduced, the problem being built, and the pass's scratch arrays, each
-    about one matrix's worth.
-  - **Measured.** On a synthetic LP with 4 M nonzeros, 32 layers deep, peak
-    presolve memory goes 5.4 GB → 1.2 GB, with the same reduction.
-  - **Not measured.** Not measured on `dlr1`, `dlr2`, `thk_48` or `thk_63`.
-    On `Dual2_5000` (93 M nonzeros) presolve still passes 24 GB, about 10 GB
-    of it on top of the 14.5 GB parse, mostly that working set.
-  - **Checks.** The fixture sweep diffs empty on both legs, default and
-    widened. Debug builds check at every layer that the record rebuilds its
-    input exactly.
+## [0.19.0] - 2026-11-24
 
 ### Added
 - **`build_nl_problem(..., keep_expressions=False)` frees each row's
@@ -170,7 +117,6 @@ changes.
   - On OSA-30, the solve goes from 18.2 s to 1.7 s.
   - KEN-18 and PDS-06 are unchanged by it.
   - Recorded as `convex_dominated_cols`.
-### Added
 - **FERAL's predicted fill can be reported before the numeric factor
   (gh#1249).** `POUNCE_FERAL_REPORT_SYMBOLIC=1` runs the symbolic analysis
   on its own for each new KKT pattern and logs the resolved ordering,
@@ -214,18 +160,41 @@ changes.
   `.mps.gz` / `.qps.gz` are read compressed (gh#1256).
 
 ### Changed
+- **Pounce.jl accepts native POUNCE 0.19.** The C API is unchanged since
+  0.18, so the existing bindings are unaffected. Julia CI now also checks the
+  v0.18.0 native library.
+- **FERAL's analysis now enforces pounce's memory budget and wall-clock
+  deadline itself (gh#1265).** Both use features new in FERAL 0.25.
+  - **Budget.** `POUNCE_FERAL_MAX_FACTOR_BYTES` is handed to FERAL
+    (`Solver::with_max_factor_bytes`). It no longer costs a second symbolic
+    pass per pattern. FERAL refuses on the factor alone before the supernodal
+    finish, which is where `L1_sixm1000obs` jumped from 19 to 52 GB. In an
+    ordering race it skips arms over budget, and it runs the sequential
+    driver when only the parallel driver's peak is over. A refusal still
+    ends the solve with `Insufficient_Memory`; `BudgetRefusal` gains a
+    `stage` field naming the check that fired.
+  - **Deadline.** The convex solvers' `max_wall_time` reaches FERAL's symbolic
+    analysis as an `Interrupt`, with or without the gh#1249 variables, and
+    stops it at its next safe point. Before, it was checked only between the
+    phases and only with a variable set, so a long ordering or race ran to
+    completion past the deadline. A numeric factor already under way still
+    runs to completion.
+  - `POUNCE_FERAL_REPORT_SYMBOLIC` still runs its own pass, now under the
+    same budget and deadline.
 - **FERAL 0.24.0 → 0.25.0.** The fixture sweep moves 0 of 304 fixture-legs
   (both legs), since every fixture is far below the sizes the changes act on.
   What reaches pounce:
   - **Ordering at scale.** FERAL's `auto` now picks AMF, not AMD, for KKTs
     with more than 100 000 rows and average degree below 5, and AMF's fill
     no longer inverts at large n (jkitchin/feral#246). Solves that large may
-    take a different trajectory.
+    take a different trajectory. On the Mittelmann LPs that exhausted memory
+    in gh#1249 it now picks what racing the orderings would, in a fraction of
+    the analysis time: AMF on `fhnw-binschedule1` (149 s of analysis against
+    the race's 394 s) and `Primal2_1000` (5.8 s against 74 s). `L2CTA3D` fits
+    under no ordering; `auto` reports its 427 GB prediction in 71 s, where the
+    race had not finished after 45 minutes (gh#1265).
   - **`auto_race` at order ≥ 1M tries four orderings** (AMD, METIS, SCOTCH,
-    AMF) instead of two. The convex backend's gh#1249 race (below) therefore
-    spends longer in analysis: about 1 007 s on `fhnw-binschedule1` against
-    476 s (FERAL's measurement). That race is a stopgap for the default FERAL
-    has now fixed; it stays until it is re-measured.
+    AMF) instead of two, when `feral_ordering=auto_race` is set.
   - **The predicted peak behind `POUNCE_FERAL_MAX_FACTOR_BYTES` is larger**,
     1.4–2.6× on large KKTs, because FERAL now counts what its solver really
     holds: the cached analysis, its workspace and the numeric phase's
@@ -233,20 +202,6 @@ changes.
     that admitted a solve before may now refuse it. The
     `POUNCE_FERAL_REPORT_SYMBOLIC` line shows the new breakdown (factor,
     numeric phase, analysis, workspace).
-- **Behaviour change: the convex interior point races FERAL's orderings on
-  KKTs of a million rows or more (gh#1249).** FERAL's default ordering picks
-  badly at this size: on `fhnw-binschedule1` it chooses AMF, whose symbolic
-  analysis alone exhausts memory; on `Primal2_1000` it chooses AMD,
-  predicting 4× the memory and 8× the work of METIS. Above that size the
-  convex backend now uses `auto_race`, which tries AMD and METIS and keeps
-  the one with less predicted fill. This changes the ordering, and so the
-  trajectory, of every convex solve that large, not only the models that
-  failed. It costs extra analysis time per pattern (minutes at this size),
-  and `max_wall_time` cannot interrupt it: on `L2CTA3D` the METIS candidate
-  runs far longer than AMF did. Set `POUNCE_FERAL_ORDERING=auto` to keep
-  FERAL's default, or name a concrete ordering. Nothing in the benchmark
-  corpora is large enough to be affected. A stopgap until FERAL's default is
-  fixed (jkitchin/feral#246).
 - **The CLI no longer parses a `.nl` twice when it routes the model to a
   convex engine (gh#1255).** An LP, convex QP or SOCP used to be read a
   second time for the convex solver while the first copy and its evaluation
@@ -283,6 +238,29 @@ changes.
   * Details and measurements: `dev-notes/kkt-bound-row-elimination.md`.
 
 ### Fixed
+- **Convex presolve no longer keeps a full copy of the problem per fixpoint
+  layer (gh#1246). This improves presolve memory; it does not close the
+  problem for the largest Mittelmann LPs.** Each of up to 32 layers held
+  `orig`, a clone of the problem it reduced.
+  - **What a layer keeps now.** A chain layer keeps an undo record: the rows
+    and columns it dropped, and the entries it changed. Postsolve walks the
+    chain backward from the final reduced problem, rebuilding one layer's
+    input at a time.
+  - **Matrices.** A layer's matrices are a restriction of a base shared along
+    the chain, which only a coefficient-rewriting layer replaces.
+  - **Backstop.** `FixpointExit::MemoryCap` ("stopped at its memory budget"
+    in the CLI log) stops the loop if the *retained chain* passes three times
+    the input. It does not count the round in progress: the problem being
+    reduced, the problem being built, and the pass's scratch arrays, each
+    about one matrix's worth.
+  - **Measured.** On a synthetic LP with 4 M nonzeros, 32 layers deep, peak
+    presolve memory goes 5.4 GB → 1.2 GB, with the same reduction.
+  - **Not measured.** Not measured on `dlr1`, `dlr2`, `thk_48` or `thk_63`.
+    On `Dual2_5000` (93 M nonzeros) presolve still passes 24 GB, about 10 GB
+    of it on top of the 14.5 GB parse, mostly that working set.
+  - **Checks.** The fixture sweep diffs empty on both legs, default and
+    widened. Debug builds check at every layer that the record rebuilds its
+    input exactly.
 - **Convex presolve no longer hands the interior point bound sides its rows
   already imply (gh#1246, findings 1 and 2).** Bound tightening kept every
   side it derived as a real bound. The convex IPM turns each finite side into
@@ -27224,7 +27202,8 @@ release.
 - Zenodo metadata (`.zenodo.json`) and `CITATION.cff` for
   archival on every GitHub Release.
 
-[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/jkitchin/pounce/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/jkitchin/pounce/releases/tag/v0.19.0
 [0.18.0]: https://github.com/jkitchin/pounce/releases/tag/v0.18.0
 [0.17.0]: https://github.com/jkitchin/pounce/releases/tag/v0.17.0
 [0.16.0]: https://github.com/jkitchin/pounce/releases/tag/v0.16.0
