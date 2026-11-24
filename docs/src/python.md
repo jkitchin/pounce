@@ -396,6 +396,36 @@ Measured on a discretized kinetics model, the trees were the largest single
 item of a nonlinear row, 544–700 B in 14 small allocations
 ([gh#1261](https://github.com/jkitchin/pounce/issues/1261)).
 
+**Large models, a chunk at a time.** `build_nl_problem` needs every row's
+`NlExpr` alive for the whole build, and on a large model that input is as
+big as the problem it builds. `pounce.NlProblemBuilder` takes the rows in
+chunks instead. Each chunk is copied into the problem's own compact form
+when it is added, so the caller can drop it before building the next:
+
+```python
+b = pounce.NlProblemBuilder(n, x_l=x_l, x_u=x_u, x0=x0)
+for k in range(steps):
+    rows, lo, hi, lin = rows_of_step(k)          # this step's NlExpr
+    b.add_constraints(rows, g_l=lo, g_u=hi, con_linear=lin)
+    del rows                                     # freed now
+p = b.build(objective, keep_expressions=False)
+```
+
+`add_constraints` takes `build_nl_problem`'s row arguments (`g_l`, `g_u`,
+`con_linear`, `con_names`) over the chunk's rows alone. `con_names` must be
+passed for every chunk or for none. `build` takes the objective and the
+remaining options, and consumes the builder. On discretized kinetics rows,
+one time step per chunk cut peak RSS by a third to a half and left half as
+much heap stranded after the build.
+
+Values, Jacobians and sparsity are the same wherever the chunks fall. What
+chunking decides is sharing. A subexpression that some chunk reaches twice
+is shared from then on, by later chunks too. One that each chunk reaches only
+once is inlined into every row that reaches it, which costs memory, and the
+shared-subexpression Hessian path can then differ in the last bits. Chunking
+along the model's own sharing, a time step's rows together, builds exactly
+what one call does.
+
 Bounds default to unbounded (`±1e19`, the `.nl` sentinel) and `x0` to
 zeros. `minimize=False` maximizes; as with a parsed `maximize` model, the
 returned objective/gradient/Hessian are negated so that minimizing them

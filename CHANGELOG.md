@@ -52,6 +52,37 @@ changes.
     body whose tree was freed. That is deliberate, as with `NlBody::Quad`:
     reading a missing tree as "this row is linear" would be a silent wrong
     answer.
+- **`pounce.NlProblemBuilder` builds a problem from rows handed over a
+  chunk at a time (gh#1261).** `build_nl_problem` needs every row's `NlExpr`
+  alive for the whole build. The builder copies each chunk into the
+  problem's compact form as it arrives, so the caller can drop that chunk's
+  `NlExpr` before building the next. Call `add_constraints(rows, g_l=, g_u=,
+  con_linear=, con_names=)` once per chunk, then `build(objective, ...)`.
+  - **Measured.** discopt#2293's reproducer shapes, N = 2048 and 8192 steps,
+    linear parts via `con_linear`, `keep_expressions=False`, one step (28
+    rows) or 28 steps per chunk (they agree to within 1%), against
+    `build_nl_problem` with every row:
+
+    | | peak RSS | heap held after | stranded after |
+    |---|---:|---:|---:|
+    | nonlinear rows | 2.3 → 1.3 KiB/row | 2.2 → 1.3 KiB/row | 1.4 → 0.5 KiB/row |
+    | shared kinetics rows | 3.0 → 2.0 KiB/row | 2.9 → 2.1 KiB/row | 1.6 → 0.8 KiB/row |
+
+    Heap in use after the build is the same either way (~770 and ~1280
+    B/row). "Stranded" is heap glibc holds but nothing uses.
+  - **Unchanged.** One `add_constraints` with every row builds what
+    `build_nl_problem` builds, except that the objective's sharing with the
+    rows is decided after the rows'. Over several chunks, values, Jacobians and
+    both sparsity patterns are bit-identical wherever the chunks fall.
+  - **Where chunk boundaries matter.** A body that some chunk reaches twice
+    is shared from then on, including with later chunks. A body that each
+    chunk reaches only once is inlined into every row that reaches it, which
+    costs memory. It also keeps the body out of the shared-CSE Hessian
+    prelude, so that Hessian can move in the last bits. Chunks that follow
+    the model's own sharing (a time step's rows together) change nothing.
+  - **Nothing to adopt for existing callers.** `build_nl_problem` is
+    unchanged. discopt gets the saving only once it builds its rows a chunk
+    at a time.
 - **The NLP Hessian coloring no longer stores a dense seed vector per color
   (gh#1261).** The seed is read from the variable's color instead. That is
   8 bytes per variable per color, about 96 B/row at 13 colors (computed, not

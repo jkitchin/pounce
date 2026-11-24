@@ -915,7 +915,7 @@ impl PyNlExpr {}
 fn materialize(root: &Expr) -> Expr {
     let mut refs: HashMap<*const Expr, usize> = HashMap::new();
     count_refs(root, &mut refs);
-    let mut shared: HashMap<*const Expr, Arc<Expr>> = HashMap::new();
+    let mut shared = SharedMap::new();
     rebuild(root, &refs, &mut shared)
 }
 
@@ -957,11 +957,22 @@ fn count_refs(e: &Expr, refs: &mut HashMap<*const Expr, usize>) {
     }
 }
 
-fn rebuild(
-    e: &Expr,
-    refs: &HashMap<*const Expr, usize>,
-    shared: &mut HashMap<*const Expr, Arc<Expr>>,
-) -> Expr {
+/// The bodies a materialization has already copied once, keyed by the
+/// address of the caller's node they were copied from.
+///
+/// Each entry holds a [`Weak`] on the caller's `Arc` next to the copy. That
+/// keeps the key sound across calls without keeping the caller's DAG alive:
+/// a `Weak` lets the body itself be dropped when the caller lets go of it,
+/// but holds the allocation, so no later node can be allocated at the same
+/// address and be mistaken for it. That is what lets [`Materializer`] carry
+/// the map from one chunk of rows to the next (gh#1261). Within one call the
+/// caller holds every node anyway, and the map behaves as a plain
+/// pointer-keyed cache.
+///
+/// [`Weak`]: std::sync::Weak
+type SharedMap = HashMap<usize, (std::sync::Weak<Expr>, Arc<Expr>)>;
+
+fn rebuild(e: &Expr, refs: &HashMap<*const Expr, usize>, shared: &mut SharedMap) -> Expr {
     match e {
         Expr::Const(_) | Expr::Var(_) => e.clone(),
         Expr::Binary(op, a, b) => Expr::Binary(
@@ -1008,15 +1019,21 @@ fn rebuild(
         },
         Expr::Cse(body) => {
             let key = Arc::as_ptr(body);
+            // A body already copied is reused before its count is asked:
+            // within one call it was copied only because it counted two
+            // references, so the order of the two tests changes nothing, and
+            // across a [`Materializer`]'s calls this is what lets a body an
+            // earlier chunk shared be shared by a later one that reaches it
+            // only once.
+            if let Some((_, done)) = shared.get(&(key as usize)) {
+                return Expr::Cse(Arc::clone(done));
+            }
             if refs.get(&key).copied().unwrap_or(0) < 2 {
                 // One reference: this is an operand hand-off, not sharing.
                 return rebuild(body, refs, shared);
             }
-            if let Some(done) = shared.get(&key) {
-                return Expr::Cse(Arc::clone(done));
-            }
             let built = Arc::new(rebuild(body, refs, shared));
-            shared.insert(key, Arc::clone(&built));
+            shared.insert(key as usize, (Arc::downgrade(body), Arc::clone(&built)));
             Expr::Cse(built)
         }
     }
@@ -1068,56 +1085,126 @@ fn rebuild(
 /// copy-per-row build this replaced, on every evaluator, the hybrid ones
 /// included (`stored_rows_evaluate_exactly_as_the_copied_rows_did`).
 fn materialize_model(roots: &[&Expr]) -> Vec<Expr> {
-    // Pass 1: which rows keep their per-row tree; reference counts over the
-    // summand leaves of every other row; how often each leaf is reached.
-    let mut global: HashMap<*const Expr, usize> = HashMap::new();
-    let mut leaf_refs: HashMap<*const Expr, usize> = HashMap::new();
-    let mut keep_tree: Vec<bool> = Vec::with_capacity(roots.len());
-    for root in roots {
-        let mut row = HashMap::new();
-        count_refs(root, &mut row);
-        let keep = polynomial_ops_only(root) && quadratic_row(root, &row);
-        if !keep {
-            spine(root, &row, &mut |leaf: &Expr, _| {
-                count_refs(leaf, &mut global);
-                *leaf_refs.entry(leaf as *const Expr).or_insert(0) += 1;
-                Expr::Const(0.0)
-            });
+    Materializer::default().add(roots)
+}
+
+/// [`materialize_model`] a chunk of rows at a time, for
+/// [`PyNlProblemBuilder`] (gh#1261).
+///
+/// A chunk is materialized exactly as [`materialize_model`] would
+/// materialize it alone, with one difference: a body or summand leaf that an
+/// earlier chunk already copied is reused rather than copied again, however
+/// often this chunk reaches it. Since that is the only state carried from
+/// one chunk to the next, one `add` over every root is [`materialize_model`]
+/// itself, and chunking changes which bodies are shared only where a body's
+/// references straddle chunks *and* no single chunk reaches it twice: such a
+/// body is inlined into each row that reaches it, as a model with that body
+/// referenced once would have it. A row evaluates the same either way —
+/// `Tape::build` emits a `Cse` body as the ops an inlined copy gets — but
+/// the hybrid tape, which promotes bodies several summands reach into its
+/// shared prelude, sees fewer of them, so its Hessian can move in the last
+/// bits.
+///
+/// Holds no reference into the caller's DAG between calls (see
+/// [`SharedMap`]), so a caller that drops a chunk's expressions after
+/// handing it over frees them.
+#[derive(Default)]
+struct Materializer {
+    shared: SharedMap,
+    leaves: SharedMap,
+    /// Entries left after the last [`Materializer::prune`] that scanned.
+    kept: usize,
+}
+
+impl Materializer {
+    /// Forget every entry whose caller-side body has been dropped: no later
+    /// chunk can reach it, and its `Weak` is holding that allocation.
+    ///
+    /// Scans only once the maps have doubled since the last scan, so a
+    /// caller adding one row at a time pays amortized `O(1)` per entry, not
+    /// a pass over every live entry per row. A dead entry left in the
+    /// meantime is never hit -- its `Weak` keeps its address from being
+    /// reused -- and costs only its allocation until the next scan.
+    fn prune(&mut self) {
+        let len = self.shared.len() + self.leaves.len();
+        if len < 2 * self.kept.max(32) {
+            return;
         }
-        keep_tree.push(keep);
+        self.shared.retain(|_, (w, _)| w.strong_count() > 0);
+        self.leaves.retain(|_, (w, _)| w.strong_count() > 0);
+        self.kept = self.shared.len() + self.leaves.len();
     }
-    // Pass 2: copy each row's spine, each body shared across the model once,
-    // and each leaf reached more than once once.
-    let mut shared: HashMap<*const Expr, Arc<Expr>> = HashMap::new();
-    let mut leaves: HashMap<*const Expr, Arc<Expr>> = HashMap::new();
-    roots
-        .iter()
-        .zip(keep_tree)
-        .map(|(root, keep)| {
+
+    fn add(&mut self, roots: &[&Expr]) -> Vec<Expr> {
+        // Pass 1: which rows keep their per-row tree; reference counts over
+        // the summand leaves of every other row; how often each leaf is
+        // reached.
+        let mut global: HashMap<*const Expr, usize> = HashMap::new();
+        let mut leaf_refs: HashMap<*const Expr, usize> = HashMap::new();
+        let mut keep_tree: Vec<bool> = Vec::with_capacity(roots.len());
+        for root in roots {
             let mut row = HashMap::new();
             count_refs(root, &mut row);
-            if keep {
-                let mut private = HashMap::new();
-                return rebuild(root, &row, &mut private);
+            let keep = polynomial_ops_only(root) && quadratic_row(root, &row);
+            if !keep {
+                spine(root, &row, &mut |leaf: &Expr, _| {
+                    count_refs(leaf, &mut global);
+                    *leaf_refs.entry(leaf as *const Expr).or_insert(0) += 1;
+                    Expr::Const(0.0)
+                });
             }
-            spine(root, &row, &mut |leaf: &Expr, reached: &Expr| {
-                let key = leaf as *const Expr;
-                // Only a leaf the spine reached through a hand-off can be
-                // wrapped in one: `frontend_dag` looks through a `Cse` only,
-                // and a leaf the row references twice is a `Cse` already.
-                let handoff = matches!(reached, Expr::Cse(_)) && !matches!(leaf, Expr::Cse(_));
-                if !handoff || leaf_refs.get(&key).copied().unwrap_or(0) < 2 {
-                    return rebuild(leaf, &global, &mut shared);
+            keep_tree.push(keep);
+        }
+        // Pass 2: copy each row's spine, each body shared across the model
+        // once, and each leaf reached more than once once.
+        let Materializer { shared, leaves, .. } = self;
+        roots
+            .iter()
+            .zip(keep_tree)
+            .map(|(root, keep)| {
+                let mut row = HashMap::new();
+                count_refs(root, &mut row);
+                if keep {
+                    let mut private = SharedMap::new();
+                    return rebuild(root, &row, &mut private);
                 }
-                if let Some(done) = leaves.get(&key) {
-                    return Expr::Cse(Arc::clone(done));
-                }
-                let copy = Arc::new(rebuild(leaf, &global, &mut shared));
-                leaves.insert(key, Arc::clone(&copy));
-                Expr::Cse(copy)
+                spine(root, &row, &mut |leaf: &Expr, reached: &Expr| {
+                    let key = leaf as *const Expr;
+                    // Only a leaf the spine reached through a hand-off can be
+                    // wrapped in one: `frontend_dag` looks through a `Cse`
+                    // only, and a leaf the row references twice is a `Cse`
+                    // already.
+                    let handoff = matches!(reached, Expr::Cse(_)) && !matches!(leaf, Expr::Cse(_));
+                    if handoff {
+                        if let Some((_, done)) = leaves.get(&(key as usize)) {
+                            return Expr::Cse(Arc::clone(done));
+                        }
+                    }
+                    if !handoff || leaf_refs.get(&key).copied().unwrap_or(0) < 2 {
+                        return rebuild(leaf, &global, shared);
+                    }
+                    let copy = Arc::new(rebuild(leaf, &global, shared));
+                    let owner = handoff_owner(reached, leaf);
+                    leaves.insert(key as usize, (Arc::downgrade(owner), Arc::clone(&copy)));
+                    Expr::Cse(copy)
+                })
             })
-        })
-        .collect()
+            .collect()
+    }
+}
+
+/// The `Arc` whose payload is `leaf`, on the chain of `Cse` hand-offs that
+/// `reached` is the head of — what a [`SharedMap`] entry for `leaf` holds
+/// its `Weak` on.
+fn handoff_owner<'a>(reached: &'a Expr, leaf: &Expr) -> &'a Arc<Expr> {
+    let mut e = reached;
+    loop {
+        match e {
+            Expr::Cse(body) if std::ptr::eq(Arc::as_ptr(body), leaf) => return body,
+            Expr::Cse(body) => e = body,
+            _ => unreachable!("a hand-off leaf is the payload of a `Cse` on its chain"),
+        }
+    }
 }
 
 /// Whether `e` reaches only the operations a quadratic form can be read out
@@ -1240,7 +1327,7 @@ fn materialize_model_copied(roots: &[&Expr]) -> Vec<Expr> {
     // on any path is one referenced from two places, which is exactly where
     // the deep copy kept a `Cse`. A leaf that arrived bare is rebuilt as
     // before, one `Arc` per body shared across the model.
-    let mut shared: HashMap<*const Expr, Arc<Expr>> = HashMap::new();
+    let mut shared = SharedMap::new();
     roots
         .iter()
         .zip(keep_tree)
@@ -1248,7 +1335,7 @@ fn materialize_model_copied(roots: &[&Expr]) -> Vec<Expr> {
             let mut row = HashMap::new();
             count_refs(root, &mut row);
             if keep {
-                let mut private = HashMap::new();
+                let mut private = SharedMap::new();
                 rebuild(root, &row, &mut private)
             } else {
                 spine(root, &row, &mut |leaf: &Expr, orig: &Expr| match orig {
@@ -1265,7 +1352,7 @@ fn materialize_model_copied(roots: &[&Expr]) -> Vec<Expr> {
 /// that the recognizer sees exactly what it saw before gh#1232. Built and
 /// dropped here, one row at a time.
 fn quadratic_row(root: &Expr, row: &HashMap<*const Expr, usize>) -> bool {
-    let mut private = HashMap::new();
+    let mut private = SharedMap::new();
     let body = NlBody::Tree(rebuild(root, row, &mut private));
     body.admitted_quad_form().is_some() || body.admitted_factored_form().is_some()
 }
@@ -1363,6 +1450,7 @@ fn opt_vec(
     len: usize,
     default: Number,
     what: &str,
+    ctx: &str,
 ) -> PyResult<Vec<Number>> {
     match v {
         None => Ok(vec![default; len]),
@@ -1373,7 +1461,7 @@ fn opt_vec(
             }
             if out.len() != len {
                 return Err(PyValueError::new_err(format!(
-                    "build_nl_problem: {what} has length {}, expected {len}",
+                    "{ctx}: {what} has length {}, expected {len}",
                     out.len()
                 )));
             }
@@ -1396,15 +1484,16 @@ fn csr_linear(
     v: Option<&Bound<'_, PyAny>>,
     m: usize,
     n: usize,
+    ctx: &str,
 ) -> PyResult<Option<Vec<Vec<(usize, Number)>>>> {
     let Some(v) = v else {
         return Ok(None);
     };
-    let err = |msg: String| PyValueError::new_err(format!("build_nl_problem: con_linear {msg}"));
+    let err = |msg: String| PyValueError::new_err(format!("{ctx}: con_linear {msg}"));
     let not_triple = || {
-        PyTypeError::new_err(
-            "build_nl_problem: con_linear must be a CSR triple (indptr, indices, data)",
-        )
+        PyTypeError::new_err(format!(
+            "{ctx}: con_linear must be a CSR triple (indptr, indices, data)"
+        ))
     };
     let (py_indptr, py_indices, py_data): (Bound<'_, PyAny>, Bound<'_, PyAny>, Bound<'_, PyAny>) =
         v.extract().map_err(|_| not_triple())?;
@@ -1424,7 +1513,7 @@ fn csr_linear(
                 .any(|x| x.is_ok_and(|x| x.is_instance_of::<PyBool>()));
         if bool_dtype || bool_item {
             return Err(PyTypeError::new_err(format!(
-                "build_nl_problem: con_linear {what} must be integers, got booleans"
+                "{ctx}: con_linear {what} must be integers, got booleans"
             )));
         }
     }
@@ -1478,6 +1567,31 @@ fn csr_linear(
         rows.push(row);
     }
     Ok(Some(rows))
+}
+
+/// The part of a build after the rows are materialized, shared by
+/// [`build_nl_problem`] and [`PyNlProblemBuilder::build`]. Runs on the deep
+/// stack: it tapes every row, and may drop every tree.
+fn assemble_problem(
+    parts: NlProblemParts,
+    con_linear: Option<Vec<Vec<(usize, Number)>>>,
+    keep_expressions: bool,
+) -> Result<NlTnlp, String> {
+    let mut prob = NlProblem::from_expressions(parts)?;
+    // The rows are the caller's DAG, hand-offs and all.
+    prob.frontend_dag = true;
+    // Set after `from_expressions`, which builds every row's linear part
+    // empty: every evaluator, the Jacobian structure and presolve already
+    // read `con_linear`, because a parsed `.nl` model fills it.
+    if let Some(lin) = con_linear {
+        prob.con_linear = lin;
+    }
+    let mut tnlp = NlTnlp::try_new(prob)?;
+    if !keep_expressions {
+        // Dropped here, on the deep stack, like the build's own walks.
+        drop(tnlp.drop_expression_trees());
+    }
+    Ok(tnlp)
 }
 
 /// Build an evaluable [`crate::PyNlProblem`] from expressions, with no `.nl`
@@ -1550,7 +1664,7 @@ pub fn build_nl_problem(
         Some(c) => coerce_all(c, "build_nl_problem: constraints")?,
     };
     let m = constraints.len();
-    let con_linear = csr_linear(con_linear, m, n)?;
+    let con_linear = csr_linear(con_linear, m, n, "build_nl_problem")?;
     // Assembly walks every expression recursively — materialization, the
     // variable-index validation, the top-level sum split, and one tape
     // build per summand — so it runs under the depth guard the query
@@ -1563,11 +1677,11 @@ pub fn build_nl_problem(
         objective,
         obj_constant,
         constraints,
-        x_l: opt_vec(x_l, n, -INF, "x_l")?,
-        x_u: opt_vec(x_u, n, INF, "x_u")?,
-        x0: opt_vec(x0, n, 0.0, "x0")?,
-        g_l: opt_vec(g_l, m, -INF, "g_l")?,
-        g_u: opt_vec(g_u, m, INF, "g_u")?,
+        x_l: opt_vec(x_l, n, -INF, "x_l", "build_nl_problem")?,
+        x_u: opt_vec(x_u, n, INF, "x_u", "build_nl_problem")?,
+        x0: opt_vec(x0, n, 0.0, "x0", "build_nl_problem")?,
+        g_l: opt_vec(g_l, m, -INF, "g_l", "build_nl_problem")?,
+        g_u: opt_vec(g_u, m, INF, "g_u", "build_nl_problem")?,
         var_names: var_names.unwrap_or_default(),
         con_names: con_names.unwrap_or_default(),
     };
@@ -1587,21 +1701,7 @@ pub fn build_nl_problem(
         .into_iter();
         parts.objective = built.next().expect("one materialized root per input root");
         parts.constraints = built.collect();
-        let mut prob = NlProblem::from_expressions(parts)?;
-        // The rows are the caller's DAG, hand-offs and all.
-        prob.frontend_dag = true;
-        // Set after `from_expressions`, which builds every row's linear part
-        // empty: every evaluator, the Jacobian structure and presolve already
-        // read `con_linear`, because a parsed `.nl` model fills it.
-        if let Some(lin) = con_linear {
-            prob.con_linear = lin;
-        }
-        let mut tnlp = NlTnlp::try_new(prob)?;
-        if !keep_expressions {
-            // Dropped here, on the deep stack, like the build's own walks.
-            drop(tnlp.drop_expression_trees());
-        }
-        Ok::<_, String>(tnlp)
+        assemble_problem(parts, con_linear, keep_expressions)
     })
     .map_err(|e| PyValueError::new_err(format!("build_nl_problem: {e}")))?;
     // A problem that keeps the expression trees it taped inherits their
@@ -1609,6 +1709,262 @@ pub fn build_nl_problem(
     // most a trivially-zero `Const` per body, depth 1.
     let depth = if keep_expressions { depth } else { 1 };
     PyNlProblem::from_tnlp(tnlp, "build_nl_problem", depth)
+}
+
+/// [`build_nl_problem`] a chunk of rows at a time (gh#1261).
+///
+/// `build_nl_problem` needs every row's `NlExpr` alive at once, held by the
+/// caller for the whole build: on discopt#2293's nonlinear rows that input
+/// was as large as the problem it built (1362 against 1663 B a row), it set
+/// the peak, and on glibc it stayed behind as free-but-unreturnable heap once
+/// the caller dropped it. A builder takes the rows in chunks instead and
+/// copies each chunk into the problem's own compact form as it arrives, so a
+/// caller that builds a chunk, hands it over and drops it holds one chunk of
+/// `NlExpr` at a time, and each chunk's freed heap is there for the next one
+/// to reuse:
+///
+/// ```python
+/// b = pounce.NlProblemBuilder(n, x_l=xl, x_u=xu, x0=x0)
+/// for rows, lo, hi, lin in chunks():
+///     b.add_constraints(rows, g_l=lo, g_u=hi, con_linear=lin)
+///     del rows                       # this chunk's NlExpr can go now
+/// p = b.build(objective, keep_expressions=False)
+/// ```
+///
+/// One `add_constraints` with every row builds what `build_nl_problem` does,
+/// except for the objective. `build_nl_problem` counts the objective's
+/// references together with the rows', and here it is materialized last.
+/// Over several chunks, what is shared is decided chunk by chunk
+/// ([`Materializer`]). A body a chunk reaches twice is shared from then on,
+/// by every later chunk too. A body whose references all fall in different
+/// chunks, one per chunk, is inlined into each row instead. Values,
+/// Jacobians and both sparsity patterns are unchanged by where the chunks
+/// fall. The shared-prelude Hessian can move in the last bits, since it sums
+/// adjoints over the bodies it promotes. Chunks that follow the model's own
+/// sharing (a time step's rows together, say) change nothing.
+///
+/// `con_linear` and `con_names` are per chunk. `con_names` must be passed
+/// for every chunk or for none. A chunk without `con_linear` has no linear
+/// part. A refused chunk leaves the builder as it was. `build` consumes the
+/// builder, whether or not it succeeds, and any later call on it raises.
+#[pyclass(module = "pounce", name = "NlProblemBuilder")]
+pub struct PyNlProblemBuilder {
+    state: Option<BuilderState>,
+}
+
+struct BuilderState {
+    n: usize,
+    x_l: Vec<Number>,
+    x_u: Vec<Number>,
+    x0: Vec<Number>,
+    var_names: Vec<String>,
+    constraints: Vec<Expr>,
+    g_l: Vec<Number>,
+    g_u: Vec<Number>,
+    /// `None` until the first non-empty chunk says whether it has names.
+    with_names: Option<bool>,
+    con_names: Vec<String>,
+    /// One entry per row so far, empty for a row of a chunk that passed no
+    /// `con_linear`; handed on only if some chunk passed one.
+    con_linear: Vec<Vec<(usize, Number)>>,
+    any_linear: bool,
+    /// Deepest operand handed over so far, for the walks that touch the
+    /// stored rows: every later chunk's, the build, and the teardown.
+    depth: u32,
+    mat: Materializer,
+}
+
+impl PyNlProblemBuilder {
+    fn state(&mut self, what: &str) -> PyResult<&mut BuilderState> {
+        self.state.as_mut().ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "NlProblemBuilder.{what}: this builder has already been built"
+            ))
+        })
+    }
+}
+
+/// The stored rows are as deep as the operands that built them, so the
+/// teardown goes to the deep stack the way [`PyNlExpr`]'s does.
+impl Drop for PyNlProblemBuilder {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            on_deep_stack(state.depth, move || drop(state));
+        }
+    }
+}
+
+#[pymethods]
+impl PyNlProblemBuilder {
+    #[new]
+    #[pyo3(signature = (n, x_l=None, x_u=None, x0=None, var_names=None))]
+    fn new(
+        n: usize,
+        x_l: Option<&Bound<'_, PyAny>>,
+        x_u: Option<&Bound<'_, PyAny>>,
+        x0: Option<&Bound<'_, PyAny>>,
+        var_names: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let ctx = "NlProblemBuilder";
+        Ok(PyNlProblemBuilder {
+            state: Some(BuilderState {
+                n,
+                x_l: opt_vec(x_l, n, -INF, "x_l", ctx)?,
+                x_u: opt_vec(x_u, n, INF, "x_u", ctx)?,
+                x0: opt_vec(x0, n, 0.0, "x0", ctx)?,
+                var_names: var_names.unwrap_or_default(),
+                constraints: Vec::new(),
+                g_l: Vec::new(),
+                g_u: Vec::new(),
+                with_names: None,
+                con_names: Vec::new(),
+                con_linear: Vec::new(),
+                any_linear: false,
+                depth: 1,
+                mat: Materializer::default(),
+            }),
+        })
+    }
+
+    /// Append a chunk of constraint rows, copying them into the problem now
+    /// so that the caller may drop them as soon as this returns. Arguments
+    /// are those of `build_nl_problem`, over this chunk's rows only.
+    #[pyo3(signature = (constraints, g_l=None, g_u=None, con_linear=None, con_names=None))]
+    fn add_constraints(
+        &mut self,
+        constraints: &Bound<'_, PyAny>,
+        g_l: Option<&Bound<'_, PyAny>>,
+        g_u: Option<&Bound<'_, PyAny>>,
+        con_linear: Option<&Bound<'_, PyAny>>,
+        con_names: Option<Vec<String>>,
+    ) -> PyResult<()> {
+        let ctx = "NlProblemBuilder.add_constraints";
+        let st = self.state("add_constraints")?;
+        let (rows, depth) = coerce_all(constraints, ctx)?;
+        let k = rows.len();
+        // Everything is validated before anything is stored, so a refused
+        // chunk leaves the builder as it was.
+        let g_l = opt_vec(g_l, k, -INF, "g_l", ctx)?;
+        let g_u = opt_vec(g_u, k, INF, "g_u", ctx)?;
+        let lin = csr_linear(con_linear, k, st.n, ctx)?;
+        if let Some(names) = &con_names {
+            if names.len() != k {
+                return Err(PyValueError::new_err(format!(
+                    "{ctx}: con_names has length {}, expected len(constraints) = {k}",
+                    names.len()
+                )));
+            }
+        }
+        if k == 0 {
+            return Ok(());
+        }
+        match st.with_names {
+            Some(w) if w != con_names.is_some() => {
+                return Err(PyValueError::new_err(format!(
+                    "{ctx}: con_names must be passed for every chunk or for none"
+                )));
+            }
+            _ => st.with_names = Some(con_names.is_some()),
+        }
+        st.depth = st.depth.max(depth);
+        st.mat.prune();
+        let mat = &mut st.mat;
+        let built = on_deep_stack(st.depth, move || {
+            let refs: Vec<&Expr> = rows.iter().collect();
+            let built = mat.add(&refs);
+            // The caller's operands go here, on the deep stack, too.
+            drop(refs);
+            drop(rows);
+            built
+        });
+        st.constraints.extend(built);
+        st.g_l.extend(g_l);
+        st.g_u.extend(g_u);
+        st.con_names.extend(con_names.unwrap_or_default());
+        match lin {
+            Some(lin) => {
+                st.any_linear = true;
+                st.con_linear.extend(lin);
+            }
+            None => st
+                .con_linear
+                .extend(std::iter::repeat_with(Vec::new).take(k)),
+        }
+        Ok(())
+    }
+
+    /// Rows added so far.
+    #[getter]
+    fn m(&mut self) -> PyResult<usize> {
+        Ok(self.state("m")?.constraints.len())
+    }
+
+    /// Build the problem from the rows added so far, with `objective`.
+    /// The remaining arguments are those of `build_nl_problem`. Consumes
+    /// the builder, even when the build fails: by then its rows have been
+    /// handed to the problem being built.
+    #[pyo3(signature = (objective, minimize=true, obj_constant=0.0, keep_expressions=true))]
+    fn build(
+        &mut self,
+        objective: &Bound<'_, PyAny>,
+        minimize: bool,
+        obj_constant: Number,
+        keep_expressions: bool,
+    ) -> PyResult<PyNlProblem> {
+        let ctx = "NlProblemBuilder.build";
+        self.state("build")?;
+        let objective = coerce(objective, ctx)?;
+        let mut st = self.state.take().expect("checked above");
+        let depth = st.depth.max(objective.depth);
+        // Grown a chunk at a time, so up to twice their length: the vectors
+        // the problem keeps as they are would keep the slack too.
+        st.constraints.shrink_to_fit();
+        st.g_l.shrink_to_fit();
+        st.g_u.shrink_to_fit();
+        st.con_names.shrink_to_fit();
+        st.con_linear.shrink_to_fit();
+        let BuilderState {
+            n: _,
+            x_l,
+            x_u,
+            x0,
+            var_names,
+            constraints,
+            g_l,
+            g_u,
+            with_names: _,
+            con_names,
+            con_linear,
+            any_linear,
+            depth: _,
+            ref mut mat,
+        } = st;
+        let tnlp = on_deep_stack(depth, move || {
+            let obj = objective.expr;
+            let objective = mat.add(&[&obj]).pop().expect("one root in, one out");
+            drop(obj);
+            let parts = NlProblemParts {
+                minimize,
+                objective,
+                obj_constant,
+                constraints,
+                x_l,
+                x_u,
+                x0,
+                g_l,
+                g_u,
+                var_names,
+                con_names,
+            };
+            assemble_problem(parts, any_linear.then_some(con_linear), keep_expressions)
+        });
+        // The copies `mat` still holds are of bodies the problem's trees now
+        // share or dropped, and can be as deep.
+        on_deep_stack(depth, move || drop(st.mat));
+        let tnlp = tnlp.map_err(|e| PyValueError::new_err(format!("{ctx}: {e}")))?;
+        let depth = if keep_expressions { depth } else { 1 };
+        PyNlProblem::from_tnlp(tnlp, ctx, depth)
+    }
 }
 
 #[cfg(test)]
@@ -2282,6 +2638,210 @@ mod tests {
         let mut refs = HashMap::new();
         count_refs(e, &mut refs);
         out.extend(refs.into_keys());
+    }
+
+    /// [`Materializer`] over `roots`, `chunk` rows a call, as
+    /// [`PyNlProblemBuilder::add_constraints`] drives it.
+    fn materialize_in_chunks(roots: &[Expr], chunk: usize) -> Vec<Expr> {
+        let mut mat = Materializer::default();
+        let mut out = Vec::new();
+        for c in roots.chunks(chunk) {
+            mat.prune();
+            let refs: Vec<&Expr> = c.iter().collect();
+            out.extend(mat.add(&refs));
+        }
+        out
+    }
+
+    /// `g`, the Jacobian and both sparsity patterns bit for bit, and the
+    /// Lagrangian Hessian to roundoff: what chunking promises when it
+    /// changes which bodies are shared.
+    fn assert_values_alike(a: &mut NlTnlp, b: &mut NlTnlp, what: &str) {
+        use pounce_nlp::tnlp::{SparsityRequest, TNLP};
+        let (ia, ib) = (a.get_nlp_info().unwrap(), b.get_nlp_info().unwrap());
+        assert_eq!(
+            (ia.n, ia.m, ia.nnz_jac_g, ia.nnz_h_lag),
+            (ib.n, ib.m, ib.nnz_jac_g, ib.nnz_h_lag),
+            "{what}: sizes"
+        );
+        let (n, m) = (ia.n as usize, ia.m as usize);
+        let (nj, nh) = (ia.nnz_jac_g as usize, ia.nnz_h_lag as usize);
+        let structure = |t: &mut NlTnlp| {
+            let (mut jr, mut jc) = (vec![0; nj], vec![0; nj]);
+            let (mut hr, mut hc) = (vec![0; nh], vec![0; nh]);
+            t.eval_jac_g(
+                None,
+                true,
+                SparsityRequest::Structure {
+                    irow: &mut jr,
+                    jcol: &mut jc,
+                },
+            );
+            t.eval_h(
+                None,
+                true,
+                1.0,
+                None,
+                true,
+                SparsityRequest::Structure {
+                    irow: &mut hr,
+                    jcol: &mut hc,
+                },
+            );
+            (jr, jc, hr, hc)
+        };
+        assert_eq!(structure(a), structure(b), "{what}: sparsity");
+        let bits = |v: &[Number]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let x: Vec<Number> = (0..n)
+            .map(|j| 0.2 + 0.6 * ((j * 7919) % 1000) as Number / 1000.0)
+            .collect();
+        let lam: Vec<Number> = (0..m).map(|i| 0.5 - (i % 7) as Number * 0.13).collect();
+        let run = |t: &mut NlTnlp| {
+            let mut g = vec![0.0; m];
+            let mut jv = vec![0.0; nj];
+            let mut hv = vec![0.0; nh];
+            assert!(t.eval_g(&x, true, &mut g));
+            assert!(t.eval_jac_g(Some(&x), true, SparsityRequest::Values { values: &mut jv }));
+            assert!(t.eval_h(
+                Some(&x),
+                true,
+                0.7,
+                Some(&lam),
+                true,
+                SparsityRequest::Values { values: &mut hv }
+            ));
+            (g, jv, hv)
+        };
+        let (ra, rb) = (run(a), run(b));
+        assert_eq!(bits(&ra.0), bits(&rb.0), "{what}: eval_g");
+        assert_eq!(bits(&ra.1), bits(&rb.1), "{what}: eval_jac_g");
+        let scale = ra.2.iter().fold(1.0f64, |s, v| s.max(v.abs()));
+        for (k, (p, q)) in ra.2.iter().zip(&rb.2).enumerate() {
+            assert!(
+                (p - q).abs() <= 1e-13 * scale,
+                "{what}: eval_h[{k}] {p} vs {q}"
+            );
+        }
+    }
+
+    /// Chunks that follow the model's sharing (a kinetics step's rows
+    /// together; any chunk of the deep model, which reaches each of its
+    /// three bodies at least twice) build exactly what one call does, down
+    /// to the shared-CSE tape. One row a chunk splits the deep model's
+    /// sharing — no chunk reaches a body twice, so each is inlined per row
+    /// and the hybrid tape goes — and still evaluates alike to roundoff,
+    /// `g` and the Jacobian exactly.
+    #[test]
+    fn chunked_rows_build_what_one_call_does() {
+        for (what, (n, rows), chunk) in [
+            ("kinetics by step", kinetics_rows(12), 6),
+            ("kinetics by two steps", kinetics_rows(12), 12),
+            ("deep by seven", deep_shared_rows(), 7),
+            ("spine by three", spine_shape_rows(), 3),
+        ] {
+            let roots = roots(&rows);
+            let refs: Vec<&Expr> = roots.iter().collect();
+            let mut whole = assemble(n, materialize_model(&refs), true);
+            let mut chunked = assemble(n, materialize_in_chunks(&roots, chunk), true);
+            assert_evaluate_alike(&mut chunked, &mut whole, what);
+        }
+
+        let (n, rows) = deep_shared_rows();
+        let roots = roots(&rows);
+        let refs: Vec<&Expr> = roots.iter().collect();
+        let mut whole = assemble(n, materialize_model(&refs), true);
+        let mut single = assemble(n, materialize_in_chunks(&roots, 1), true);
+        // The branch this half exists for: the split sharing really changed
+        // the build, and not only in its values.
+        assert!(whole.has_shared_cse_tape());
+        assert!(
+            !single.has_shared_cse_tape(),
+            "one row a chunk shares nothing"
+        );
+        assert_values_alike(&mut single, &mut whole, "deep, one row a chunk");
+    }
+
+    /// The two ways chunking decides sharing, one fixture each. A body (and,
+    /// separately, a summand leaf) that one chunk reaches twice is shared
+    /// with every later chunk that reaches it, even once. A body that each
+    /// chunk reaches once is never shared, and is inlined into each row.
+    #[test]
+    fn sharing_carries_across_chunks_only_once_established() {
+        let b = unary(UnaryOp::Exp, v(0).operand()).unwrap();
+        let times = |i: usize| binary(BinOp::Mul, b.operand(), v(i).operand()).unwrap();
+        let plus = |i: usize| binary(BinOp::Add, b.operand(), v(i).operand()).unwrap();
+        let cses = |rows: &[Expr]| {
+            let mut out = std::collections::HashSet::new();
+            for r in rows {
+                arcs(r, &mut out);
+            }
+            out
+        };
+        // `b` inside a product leaf goes through `rebuild`'s `shared`; `b` as
+        // a whole summand goes through the spine's `leaves`.
+        for (what, row) in [
+            ("body", &times as &dyn Fn(usize) -> PyNlExpr),
+            ("leaf", &plus),
+        ] {
+            let mut mat = Materializer::default();
+            let first = mat.add(&roots(&[row(1), row(2)]).iter().collect::<Vec<_>>());
+            let later = mat.add(&roots(&[row(3)]).iter().collect::<Vec<_>>());
+            let shared = cses(&first);
+            assert_eq!(
+                shared.len(),
+                1,
+                "{what}: one copy of `b` in the first chunk"
+            );
+            assert_eq!(cses(&later), shared, "{what}: the later chunk reuses it");
+
+            let mut mat = Materializer::default();
+            let first = mat.add(&roots(&[row(1)]).iter().collect::<Vec<_>>());
+            let later = mat.add(&roots(&[row(2)]).iter().collect::<Vec<_>>());
+            assert!(
+                cses(&first).is_empty() && cses(&later).is_empty(),
+                "{what}: reached once a chunk, `b` is inlined into each row"
+            );
+        }
+    }
+
+    /// What the builder carries between chunks pins none of the caller's
+    /// expressions: once the caller drops a chunk, its nodes are freed, and
+    /// `prune` forgets them.
+    #[test]
+    fn the_materializer_keeps_no_caller_node_alive() {
+        let mut mat = Materializer::default();
+        let watch;
+        {
+            let b = unary(UnaryOp::Exp, v(0).operand()).unwrap();
+            watch = Arc::downgrade(&b.inner);
+            let rows = [
+                // Two products reach `b` inside a leaf (`shared`), two sums
+                // reach it as the leaf itself (`leaves`).
+                binary(BinOp::Mul, b.operand(), v(1).operand()).unwrap(),
+                binary(BinOp::Mul, b.operand(), v(2).operand()).unwrap(),
+                binary(BinOp::Add, b.operand(), v(3).operand()).unwrap(),
+                binary(BinOp::Add, b.operand(), v(4).operand()).unwrap(),
+            ];
+            let roots = roots(&rows);
+            let built = mat.add(&roots.iter().collect::<Vec<_>>());
+            assert_eq!(built.len(), 4);
+            assert!(!mat.shared.is_empty() && !mat.leaves.is_empty());
+        }
+        assert!(
+            watch.upgrade().is_none(),
+            "the caller's body outlived the caller"
+        );
+        // Below the scan threshold `prune` leaves the dead entries alone;
+        // past it, it forgets every one, including the caller's.
+        mat.prune();
+        assert!(!mat.shared.is_empty());
+        for k in 0..64 {
+            let dead = std::sync::Weak::new();
+            mat.shared
+                .insert(usize::MAX - k, (dead, Arc::new(Expr::Const(0.0))));
+        }
+        mat.prune();
+        assert!(mat.shared.is_empty() && mat.leaves.is_empty());
     }
 
     /// The problem keeps a copy, not the caller's nodes: once the caller
