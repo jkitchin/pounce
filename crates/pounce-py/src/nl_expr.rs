@@ -41,7 +41,7 @@ use std::sync::Arc;
 use pounce_common::types::Number;
 use pounce_nl::nl_reader::{
     BinOp, CmpOp, Expr, FuncallArg, NlBody, NlProblem, NlProblemParts, NlTnlp, UnaryOp,
-    render_expression,
+    render_expression, validate_expression,
 };
 use pounce_nl::nl_tape::Tape;
 
@@ -1745,7 +1745,8 @@ pub fn build_nl_problem(
 ///
 /// `con_linear` and `con_names` are per chunk. `con_names` must be passed
 /// for every chunk or for none. A chunk without `con_linear` has no linear
-/// part. A refused chunk leaves the builder as it was. `build` consumes the
+/// part. A chunk is checked in full when it is added, its variable indices
+/// included, and a refused chunk leaves the builder as it was. `build` consumes the
 /// builder, whether or not it succeeds, and any later call on it raises.
 #[pyclass(module = "pounce", name = "NlProblemBuilder")]
 pub struct PyNlProblemBuilder {
@@ -1866,6 +1867,22 @@ impl PyNlProblemBuilder {
             }
             _ => st.with_names = Some(con_names.is_some()),
         }
+        // Checked here, not left to `build`: by the time `build` runs, the
+        // caller has dropped every earlier chunk, and a bad index in one of
+        // them could only be fixed by starting over.
+        let (n, first) = (st.n, st.constraints.len());
+        let checked = on_deep_stack(depth, || {
+            let mut seen = std::collections::HashSet::new();
+            rows.iter().enumerate().try_for_each(|(i, r)| {
+                validate_expression(r, n, &mut seen).map_err(|e| {
+                    format!(
+                        "{ctx}: row {i} of this chunk (constraint {}) {e}",
+                        first + i
+                    )
+                })
+            })
+        });
+        checked.map_err(PyValueError::new_err)?;
         st.depth = st.depth.max(depth);
         st.mat.prune();
         let mat = &mut st.mat;
@@ -1912,8 +1929,13 @@ impl PyNlProblemBuilder {
         keep_expressions: bool,
     ) -> PyResult<PyNlProblem> {
         let ctx = "NlProblemBuilder.build";
-        self.state("build")?;
+        let n = self.state("build")?.n;
         let objective = coerce(objective, ctx)?;
+        // Before the builder is consumed, so a bad objective can be retried.
+        on_deep_stack(objective.depth, || {
+            validate_expression(&objective.expr, n, &mut std::collections::HashSet::new())
+        })
+        .map_err(|e| PyValueError::new_err(format!("{ctx}: objective {e}")))?;
         let mut st = self.state.take().expect("checked above");
         let depth = st.depth.max(objective.depth);
         // Grown a chunk at a time, so up to twice their length: the vectors

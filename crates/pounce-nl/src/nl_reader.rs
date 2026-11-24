@@ -1120,6 +1120,21 @@ impl NlProblem {
 /// distinct DAG nodes rather than exponential in sharing depth. Skipping a
 /// repeat visit is sound because the caller aborts on the first violation:
 /// reaching a body a second time proves the first visit found none.
+/// [`validate_expr`] for a caller that assembles a problem in pieces
+/// (`pounce.NlProblemBuilder`, gh#1261), so that a bad row is refused when
+/// it is handed over rather than when the whole problem is built. The same
+/// check [`NlProblem::from_expressions`] applies to every body, with the
+/// same message; `seen` may be shared across calls on one DAG.
+///
+/// Recursive: a caller holding a deep expression runs it on a deep stack.
+pub fn validate_expression(
+    e: &Expr,
+    n: usize,
+    seen: &mut std::collections::HashSet<*const Expr>,
+) -> Result<(), String> {
+    validate_expr(e, n, seen)
+}
+
 fn validate_expr(
     e: &Expr,
     n: usize,

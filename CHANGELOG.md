@@ -58,6 +58,10 @@ changes.
   problem's compact form as it arrives, so the caller can drop that chunk's
   `NlExpr` before building the next. Call `add_constraints(rows, g_l=, g_u=,
   con_linear=, con_names=)` once per chunk, then `build(objective, ...)`.
+  Each chunk is checked in full when it is added, variable indices
+  included, so a bad row is refused before any earlier chunk has to be
+  rebuilt. A refused chunk leaves the builder as it was, and so does a bad
+  objective passed to `build`.
   - **Measured.** discopt#2293's reproducer shapes, N = 2048 and 8192 steps,
     linear parts via `con_linear`, `keep_expressions=False`, one step (28
     rows) or 28 steps per chunk (they agree to within 1%), against

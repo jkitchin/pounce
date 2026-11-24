@@ -411,8 +411,14 @@ for k in range(steps):
 p = b.build(objective, keep_expressions=False)
 ```
 
+**Put every row that shares a subexpression in the same chunk**, a time
+step's rows together for instance; the last paragraph of this section says
+why.
+
 `add_constraints` takes `build_nl_problem`'s row arguments (`g_l`, `g_u`,
-`con_linear`, `con_names`) over the chunk's rows alone. `con_names` must be
+`con_linear`, `con_names`) over the chunk's rows alone, and checks them,
+variable indices included, before it keeps anything: a refused chunk leaves
+the builder as it was. `con_names` must be
 passed for every chunk or for none. `build` takes the objective and the
 remaining options, and consumes the builder. On discretized kinetics rows,
 one time step per chunk cut peak RSS by a third to a half and left half as

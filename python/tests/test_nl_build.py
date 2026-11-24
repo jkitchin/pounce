@@ -1478,9 +1478,20 @@ def test_builder_validates_each_chunk_and_leaves_the_builder_usable():
             call()
 
 
-def test_builder_reports_an_out_of_range_variable_at_build():
+def test_builder_refuses_an_out_of_range_variable_when_it_is_added():
+    """A bad index in some chunk is refused by that chunk's add, not by
+    ``build`` after every earlier chunk was dropped; the builder carries on."""
     x = pounce.NlExpr.vars(5)
     b = pounce.NlProblemBuilder(2)
-    b.add_constraints([x[4]])
-    with pytest.raises(ValueError, match="NlProblemBuilder.build"):
-        b.build(0.0)
+    b.add_constraints([x[0]])
+    with pytest.raises(ValueError, match=r"row 1 of this chunk \(constraint 2\) references Var\(4\)"):
+        b.add_constraints([x[1], x[0] * x[4]])
+    assert b.m == 1
+    b.add_constraints([x[1]])
+    # A bad objective is refused before the builder is consumed, so it can
+    # be retried.
+    with pytest.raises(ValueError, match=r"NlProblemBuilder.build: objective references Var\(4\)"):
+        b.build(x[4])
+    assert b.m == 2
+    p = b.build(x[0] + x[1])
+    assert p.m == 2
