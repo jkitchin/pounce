@@ -1,16 +1,16 @@
-//! gh#1249: the convex deadline reaches FERAL's pre-analysis.
+//! gh#1249 / gh#1265: the convex deadline reaches FERAL's analysis.
 //!
-//! With `report_symbolic` (or `max_factor_bytes`) on, FERAL's symbolic
-//! analysis runs on its own before the numeric factor, and the convex
-//! deadline scope (`deadline::with_deadline`) is checked between the two
-//! through `pounce_feral::factor_deadline`. A deadline that has passed by then
-//! means the numeric factor is never started.
+//! The convex deadline scope (`deadline::with_deadline`) installs
+//! `pounce_feral::factor_deadline`, which FERAL's symbolic analysis polls as a
+//! `feral::Interrupt` (feral >= 0.25). A deadline that has passed by then
+//! stops the analysis, so the numeric factor is never started — with or
+//! without the `report_symbolic` pre-analysis. (Before gh#1265 only the
+//! pre-analysis checked it, between the phases; without it the factor ran.)
 //!
 //! The backend factory sleeps past the limit, so the deadline is crossed
-//! after the drivers' own pre-factorization check and before the pre-analysis
-//! finishes. A summary sink shows whether a numeric factorization ran: none
-//! with the pre-analysis on, one without it (the control, which is the
-//! behaviour before gh#1249 whatever the setting). Both legs end `TimeLimit`.
+//! after the drivers' own pre-factorization check and before FERAL's
+//! analysis starts. A summary sink shows whether a numeric factorization ran.
+//! Every leg ends `TimeLimit`.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -61,7 +61,7 @@ fn a_deadline_crossed_during_the_analysis_skips_the_numeric_factor() {
             let ctx = format!("use_hsde = {use_hsde}, report_symbolic = {report}");
             assert_eq!(sol.status, QpStatus::TimeLimit, "{ctx}");
             let factored = sink.lock().unwrap().last_nnz_l.is_some();
-            assert_eq!(factored, !report, "{ctx}: numeric factor ran = {factored}");
+            assert!(!factored, "{ctx}: a numeric factor ran");
         }
     }
 }
