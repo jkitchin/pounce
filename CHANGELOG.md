@@ -184,6 +184,25 @@ changes.
   `.mps.gz` / `.qps.gz` are read compressed (gh#1256).
 
 ### Changed
+- **FERAL 0.24.0 → 0.25.0.** The fixture sweep moves 0 of 304 fixture-legs
+  (both legs), since every fixture is far below the sizes the changes act on.
+  What reaches pounce:
+  - **Ordering at scale.** FERAL's `auto` now picks AMF, not AMD, for KKTs
+    with more than 100 000 rows and average degree below 5, and AMF's fill
+    no longer inverts at large n (jkitchin/feral#246). Solves that large may
+    take a different trajectory.
+  - **`auto_race` at order ≥ 1M tries four orderings** (AMD, METIS, SCOTCH,
+    AMF) instead of two. The convex backend's gh#1249 race (below) therefore
+    spends longer in analysis: about 1 007 s on `fhnw-binschedule1` against
+    476 s (FERAL's measurement). That race is a stopgap for the default FERAL
+    has now fixed; it stays until it is re-measured.
+  - **The predicted peak behind `POUNCE_FERAL_MAX_FACTOR_BYTES` is larger**,
+    1.4–2.6× on large KKTs, because FERAL now counts what its solver really
+    holds: the cached analysis, its workspace and the numeric phase's
+    high-water. It tracks measured memory far more closely, but a budget
+    that admitted a solve before may now refuse it. The
+    `POUNCE_FERAL_REPORT_SYMBOLIC` line shows the new breakdown (factor,
+    numeric phase, analysis, workspace).
 - **Behaviour change: the convex interior point races FERAL's orderings on
   KKTs of a million rows or more (gh#1249).** FERAL's default ordering picks
   badly at this size: on `fhnw-binschedule1` it chooses AMF, whose symbolic

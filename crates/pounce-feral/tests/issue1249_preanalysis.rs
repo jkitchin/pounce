@@ -108,9 +108,13 @@ fn off_by_default_and_the_factor_is_unchanged_when_on() {
 
 #[test]
 fn over_budget_is_refused_for_the_whole_pattern() {
+    // feral >= 0.25 counts the analysis and the workspace in the predicted
+    // peak: n = 400 predicts ~235 KB and n = 4 ~9.4 KB, so 50 KB refuses the
+    // first and admits the second with ~5x margin each way. (Under 0.24 the
+    // budget was 1 000 bytes, which n = 4 no longer fits.)
     let n = 400;
     let mut s = FeralSolverInterface::with_config(FeralConfig {
-        max_factor_bytes: Some(1_000),
+        max_factor_bytes: Some(50_000),
         ..FeralConfig::default()
     });
     assert_eq!(solve(&mut s, n), ESymSolverStatus::FatalError);
@@ -118,7 +122,7 @@ fn over_budget_is_refused_for_the_whole_pattern() {
         .symbolic_report()
         .expect("a refusal still reports")
         .clone();
-    assert!(rep.work.peak_bytes > 1_000);
+    assert!(rep.work.peak_bytes > 50_000);
     assert!(s.summary().last_nnz_l.is_none(), "no numeric factor ran");
     // Latched: a retry on the same pattern (e.g. after a perturbation) does
     // not go on into the factor the budget refused.

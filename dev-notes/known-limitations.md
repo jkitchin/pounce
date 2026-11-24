@@ -20,7 +20,11 @@ FERAL before the first iteration. The ordering half is fixed: the convex
 backend races the orderings at KKT order >= 1M (`CONVEX_AUTO_RACE_MIN_DIM`),
 because feral's `Auto` picks AMF on fhnw (whose symbolic phase alone passes
 11 GB) and AMD on Primal2 (4x the fill of METIS). That rule belongs in feral
-and is jkitchin/feral#246; drop the pounce override when it ships.
+and is jkitchin/feral#246, which shipped in feral 0.25 (monotone AMF scoring:
+AMF's nnz(L) on fhnw 1.39e10 -> 1.84e8; `Auto` sends n > 100 000 with average
+degree < 5 to AMF). The pounce override is still in place: re-measure fhnw,
+Primal2 and L2CTA3D under feral's `Auto` and drop it. The measurements below
+predate 0.25.
 
 What is left, measured on a 15 GB / 4-core container with an RSS watchdog,
 on a build based on `913be16` (after gh#1243's duplicate-copy fixes, before
@@ -39,11 +43,13 @@ gh#1248's `.nl` reader changes, so the baseline below may now be lower):
   copy, the `.nl` names (0.5 GB on this model), presolve layers. fhnw's
   6.8 GB factor on top of the same kind of baseline did not fit in 13.5 GB;
   whether it fits in 38.6 GB is unmeasured.
-* **The race's cost and reach.** feral 0.24's `AutoRace` runs
-  `RACE_CANDIDATES = {Amd, MetisND}` one after the other and ranks them on
+* **The race's cost and reach.** feral 0.24's `AutoRace` ran
+  `RACE_CANDIDATES = {Amd, MetisND}` one after the other and ranked them on
   `factor_nnz_estimate`; neither the race nor a candidate checks
   `max_wall_time` (pounce's `factor_deadline` is checked only after the
-  whole analysis).
+  whole analysis). feral 0.25 races {Amd, MetisND, ScotchND, Amf} at
+  n >= 1M and computes MC64 once per race: about 1 007 s on fhnw (feral's
+  measurement) against the 466-476 s below.
   * Time: 466-476 s on fhnw (AMD alone: 318 s; over the cpo3 corpus's 300 s
     limit), 120-130 s on Primal2 (AMD alone: 24 s).
   * `L2CTA3D` (order 14.2M) is **worse** under the race. METIS ran past the

@@ -2415,7 +2415,7 @@ OptionsList.
 | Value       | Strategy                                                                                                                                                                                                                                                  |
 |-------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `auto`      | **Default.** Adaptive dispatcher: picks a concrete method per matrix from cheap pattern features. Branches: very-large-and-sparse (`n > 100 000`, avg degree < 5) → AMD; **everything else → AMF**. It never selects nested dissection: the branch that used to route `n > 10 000` to MetisND now goes to AMF (feral#67, #73). One symbolic pass; right for most models, and wrong for the collocation class below. |
-| `auto_race` | Race-based dispatcher: runs full symbolic factorization on AMD and MetisND (feral ≥ 0.18; AMD, MetisND, ScotchND, KahipND before) and keeps the smallest `factor_nnz`. ~2× a single symbolic pass, paid once per problem (symbolic factorization is cached across numeric refactorizations with the same pattern). It measures fill, not time, and fill has mispredicted the wall-clock winner repeatedly in feral's own measurements, so a pinned method you have timed beats it. |
+| `auto_race` | Race-based dispatcher: runs full symbolic factorization on AMD and MetisND, or on AMD, MetisND, ScotchND and AMF at order ≥ 1 000 000 (feral ≥ 0.25), and keeps the smallest `factor_nnz`. ~2× a single symbolic pass (~4× at order ≥ 1M), paid once per problem (symbolic factorization is cached across numeric refactorizations with the same pattern). It measures fill, not time, and fill has mispredicted the wall-clock winner repeatedly in feral's own measurements, so a pinned method you have timed beats it. |
 | `amd`       | Approximate Minimum Degree (Amestoy/Davis/Duff). Pins AMD regardless of problem shape; robust default for IPM workloads. Best for very-large-and-sparse cases that the adaptive dispatcher already routes here.                                            |
 | `amf`       | Approximate Minimum Fill (HAMF4 variant of Amestoy 1999). Strong on small-and-sparse populations (`n ≤ 10 000`); aggregate fill ≈ 0.87× AMD on feral's IPM small-sparse inventory.                                                                          |
 | `metis`     | feral-metis multilevel nested dissection. **Pin it for collocation, optimal-control and PDE-in-time models** (see below). Tends to produce squarer fronts than AMD on banded / nearly-1D structure. |
@@ -2450,13 +2450,17 @@ is set (gh#1249). At that size the default's per-matrix rule picks
 orderings that do not fit: on the Mittelmann LP `fhnw-binschedule1` it
 picks AMF, whose symbolic analysis alone exhausts memory, and on
 `Primal2_1000` it picks AMD, predicting 8.3 GB and 2.5e12 flops per
-factorization against METIS's 2.2 GB and 3.2e11. The race keeps whichever of
-AMD and METIS predicts less fill, which on both is one that fits, at the
-price of analysing each candidate once per pattern (minutes at this size). It is a
-stopgap until FERAL's own default is fixed (jkitchin/feral#246).
+factorization against METIS's 2.2 GB and 3.2e11. The race keeps whichever
+candidate predicts least fill, which on both is one that fits, at the price
+of analysing each candidate once per pattern (minutes at this size). Those
+measurements were taken with FERAL 0.24. FERAL 0.25 fixed its default
+(jkitchin/feral#246: AMF's fill on `fhnw-binschedule1` fell from 1.39e10 to
+1.84e8, and `auto` now picks AMF for very large, sparse KKTs), so this
+stopgap is due to be re-measured and dropped.
 
-The race tries only AMD and METIS (FERAL's `RACE_CANDIDATES`), so SCOTCH,
-which predicts least on `L1_sixm250obs`, is not considered. `max_wall_time`
+Since FERAL 0.25 the race at this size tries AMD, METIS, SCOTCH and AMF,
+which makes it slower: about 1 007 s of analysis on `fhnw-binschedule1`
+against 476 s for AMD and METIS alone (FERAL's measurement). `max_wall_time`
 cannot interrupt a candidate's analysis: on `L2CTA3D` (order 14.2M) the
 METIS candidate ran past a timeout that AMF's analysis met. The pick also
 changes the trajectory of every convex solve this large. Set
@@ -2782,24 +2786,26 @@ once, without another analysis. The note on stderr suggests the two ways
 forward: another `POUNCE_FERAL_ORDERING` (the report prints each one's
 prediction), or a larger budget.
 
-**The predicted peak is FERAL's a-priori figure for the factor, not for the
-process.** It is the factor's allocation plus the high-water mark of the
-contribution blocks, simulated over the elimination tree in postorder with
-each child's block freed once its parent is assembled. It is not a sum over
-the tree, but it can be very large when many big sibling blocks wait for one
-ancestor. Read it as a guide with error in both directions:
+**The predicted peak is FERAL's a-priori figure for the linear solver, not
+for the process.** Since FERAL 0.25 it is the cached analysis, the solver's
+workspace (its permuted copy of the matrix and scratch), and the high-water
+mark of the numeric phase: the stored factor plus the live contribution
+blocks and frontal pool, walked over the elimination tree in the order the
+sequential driver allocates them. On the `Primal2_1000` KKT it predicts
+4.92 GB against 4.86 GB measured under AMF (FERAL's measurement). It is 1.4
+to 2.6 times the figure FERAL 0.24 gave on large KKTs, so a budget that just
+admitted a solve under 0.24 may now refuse it. Read it as a guide:
 
-* **It leaves out everything outside the factor**: the model, presolve, the
-  KKT matrix and the solver's vectors. On `Primal2_1000` and
-  `fhnw-binschedule1` that was 5–6 GB on top of the prediction. Leave
-  headroom: a budget set to the machine's free memory will let through
-  solves that still run out.
+* **It leaves out everything outside the linear solver**: the model,
+  presolve, the KKT matrix pounce hands it and the solver's vectors. On
+  `Primal2_1000` and `fhnw-binschedule1` that was 5–6 GB. Leave headroom: a
+  budget set to the machine's free memory will let through solves that still
+  run out.
 * **Delayed pivots can make the factor larger than predicted**, by moving
   work into larger parent fronts.
-* **It counts contribution blocks square**, the classic assembly scheme
-  FERAL's parallel driver uses. The sequential drivers store them packed,
-  about half the size, and `feral_early_assembly=wide_parents` bounds them
-  further, so for those it overstates.
+* **It models the sequential driver.** FERAL's parallel driver can hold more
+  at once; FERAL bounds that separately (`peak_bytes_parallel`, 1.7–3× the
+  measured peak), and pounce does not check it.
 
 With either variable set, the convex solvers' `max_wall_time`
 (`time_limit`) is also checked between the two phases: a symbolic analysis

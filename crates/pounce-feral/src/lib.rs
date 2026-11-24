@@ -1059,11 +1059,12 @@ pub fn convex_ipm_static_pivoting(
 ///   8.3 GB peak and 2.5e12 flops per factorization. METIS and SCOTCH
 ///   predict 2.2 GB and 3.2e11.
 ///
-/// The race (feral's `RACE_CANDIDATES`: AMD and METIS only) runs each
-/// candidate's ordering prefix once per pattern and keeps the one with the
-/// least predicted fill, so it costs analysis time (minutes at this size)
-/// that the default does not. SCOTCH and AMF are not candidates, and
-/// `max_wall_time` cannot interrupt a candidate: on `L2CTA3D` (order 14.2M)
+/// Those measurements are feral 0.24's. Since 0.25 the race at this order
+/// tries AMD, METIS, SCOTCH and AMF (feral's `race_candidates(n)`): it runs
+/// each candidate's ordering prefix once per pattern and keeps the one with
+/// the least predicted fill, so it costs analysis time that the default does
+/// not, about 1 007 s on `fhnw-binschedule1` against 476 s for the old
+/// two-candidate race. `max_wall_time` cannot interrupt a candidate: on `L2CTA3D` (order 14.2M)
 /// METIS ran past the gh#1250 reviewer's timeout, where AMF had finished
 /// (see `dev-notes/known-limitations.md`). The pick also changes the
 /// trajectory of every solve this large (orderings differ in the inertia
@@ -1071,8 +1072,10 @@ pub fn convex_ipm_static_pivoting(
 /// restores feral's default. The threshold
 /// keeps every model in the repository's corpora below it: the fixture
 /// sweep's largest model is 813 columns and `benchmarks/qp`'s 93 263, so
-/// none of them is affected. Feral's own default is the real fix
-/// (jkitchin/feral#246); this is the stopgap until it ships.
+/// none of them is affected. feral 0.25 shipped the real fix
+/// (jkitchin/feral#246: monotone AMF scoring, which takes AMF's fill on fhnw
+/// from 1.39e10 to 1.84e8, and `Auto` routing very large sparse KKTs to AMF),
+/// so this stopgap is due to be re-measured on these models and dropped.
 pub const CONVEX_AUTO_RACE_MIN_DIM: usize = 1_000_000;
 
 /// Everything POUNCE records about one successful factorization. Shared
