@@ -166,33 +166,20 @@ fn a_passed_deadline_stops_between_the_phases() {
     assert_eq!(solve(&mut plain, n), ESymSolverStatus::Success);
 }
 
-/// The convex backend races the orderings on a KKT of order
-/// `CONVEX_AUTO_RACE_MIN_DIM` or more, and keeps feral's default below it.
-/// A backend reused for a smaller pattern goes back to the default.
+/// gh#1265: the convex backend takes feral's default ordering at every size.
+/// Until feral 0.25 it raced the orderings on a KKT of order >= 1M; feral's
+/// `Auto` now picks what the race did on the models that needed it, faster.
 #[test]
-fn the_convex_backend_races_orderings_on_a_large_kkt() {
-    use pounce_feral::{CONVEX_AUTO_RACE_MIN_DIM, OrderingMethod};
+fn the_convex_backend_keeps_the_default_ordering_on_a_large_kkt() {
+    use pounce_feral::OrderingMethod;
     if std::env::var_os("POUNCE_FERAL_ORDERING").is_some() {
-        return; // an explicit ordering disables the switch by design
+        return;
     }
-    let diag = |n: usize| -> Vec<Index> { (1..=n as Index).collect() };
+    let n = 1_000_000;
+    let diag: Vec<Index> = (1..=n as Index).collect();
     let mut s = FeralSolverInterface::for_convex_ipm(1e-8, 0.0);
-    let small = diag(1000);
-    s.initialize_structure(1000, 1000, &small, &small);
+    s.initialize_structure(n as Index, n as Index, &diag, &diag);
     assert_eq!(s.ordering(), &OrderingMethod::Auto);
-
-    let n = CONVEX_AUTO_RACE_MIN_DIM;
-    let big = diag(n);
-    s.initialize_structure(n as Index, n as Index, &big, &big);
-    assert_eq!(s.ordering(), &OrderingMethod::AutoRace);
-
-    s.initialize_structure(1000, 1000, &small, &small);
-    assert_eq!(s.ordering(), &OrderingMethod::Auto);
-
-    // Only the convex constructor opts in.
-    let mut plain = FeralSolverInterface::with_config(FeralConfig::default());
-    plain.initialize_structure(n as Index, n as Index, &big, &big);
-    assert_eq!(plain.ordering(), &OrderingMethod::Auto);
 }
 
 /// gh#1250 review: an over-budget refusal is terminal for the solve. While it
