@@ -10,6 +10,16 @@ changes.
 ## [Unreleased]
 
 ### Changed
+- **Convex KKTs of order 1 000 000 or more no longer race the orderings
+  (gh#1265).** They take feral's default (`auto`) like every other size. The
+  race was gh#1249's stopgap for feral 0.24's `auto` picking badly at this
+  size; feral 0.25 fixed that. Re-measured under 0.25, `auto` picks the same
+  ordering as the race, with the same prediction, on `fhnw-binschedule1`
+  (149 s of analysis against 394 s) and `Primal2_1000` (5.8 s against 74 s).
+  On `L2CTA3D`, which fits under no ordering, `auto` reports its 427 GB
+  prediction in 71 s, where the race had not finished after 45 minutes.
+  `CONVEX_AUTO_RACE_MIN_DIM` is removed. `feral_ordering=auto_race` still
+  runs the race on request.
 - **FERAL's analysis now enforces pounce's memory budget and wall-clock
   deadline itself (gh#1265).** Both use features new in FERAL 0.25.
   - **Budget.** `POUNCE_FERAL_MAX_FACTOR_BYTES` is handed to FERAL

@@ -2442,31 +2442,6 @@ curvature scale.
 When in doubt: leave `feral_ordering` at the default, with one
 exception.
 
-#### Convex KKTs of a million rows or more race the orderings
-
-On the convex (LP/QP/conic) path, a KKT of order 1 000 000 or more is
-analysed with `auto_race` rather than `auto` unless `POUNCE_FERAL_ORDERING`
-is set (gh#1249). At that size the default's per-matrix rule picks
-orderings that do not fit: on the Mittelmann LP `fhnw-binschedule1` it
-picks AMF, whose symbolic analysis alone exhausts memory, and on
-`Primal2_1000` it picks AMD, predicting 8.3 GB and 2.5e12 flops per
-factorization against METIS's 2.2 GB and 3.2e11. The race keeps whichever
-candidate predicts least fill, which on both is one that fits, at the price
-of analysing each candidate once per pattern (minutes at this size). Those
-measurements were taken with FERAL 0.24. FERAL 0.25 fixed its default
-(jkitchin/feral#246: AMF's fill on `fhnw-binschedule1` fell from 1.39e10 to
-1.84e8, and `auto` now picks AMF for very large, sparse KKTs), so this
-stopgap is due to be re-measured and dropped.
-
-Since FERAL 0.25 the race at this size tries AMD, METIS, SCOTCH and AMF,
-which makes it slower: about 1 007 s of analysis on `fhnw-binschedule1`
-against 476 s for AMD and METIS alone (FERAL's measurement). `max_wall_time`
-cannot interrupt a candidate's analysis: on `L2CTA3D` (order 14.2M) the
-METIS candidate ran past a timeout that AMF's analysis met. The pick also
-changes the trajectory of every convex solve this large. Set
-`POUNCE_FERAL_ORDERING=auto` to keep FERAL's default (`auto` set explicitly
-disables the race), or name the ordering you want.
-
 #### Collocation, optimal-control and PDE-in-time models: set `metis`
 
 A model transcribed on a mesh — direct collocation of an ODE/DAE, a

@@ -16,15 +16,22 @@ merges.
 
 gh#1249 found five Mittelmann LPs (`L1_sixm250obs`, `L1_sixm1000obs`,
 `fhnw-binschedule1`, `Primal2_1000`, `L2CTA3D`) exhausting a 38.6 GB cap inside
-FERAL before the first iteration. The ordering half is fixed: the convex
-backend races the orderings at KKT order >= 1M (`CONVEX_AUTO_RACE_MIN_DIM`),
-because feral's `Auto` picks AMF on fhnw (whose symbolic phase alone passes
-11 GB) and AMD on Primal2 (4x the fill of METIS). That rule belongs in feral
-and is jkitchin/feral#246, which shipped in feral 0.25 (monotone AMF scoring:
-AMF's nnz(L) on fhnw 1.39e10 -> 1.84e8; `Auto` sends n > 100 000 with average
-degree < 5 to AMF). The pounce override is still in place: re-measure fhnw,
-Primal2 and L2CTA3D under feral's `Auto` and drop it. The measurements below
-predate 0.25.
+FERAL before the first iteration. The ordering half is fixed in feral 0.25
+(jkitchin/feral#246: monotone AMF scoring takes AMF's nnz(L) on fhnw from
+1.39e10 to 1.84e8, and `Auto` sends n > 100 000 with average degree < 5 to
+AMF). Pounce's stopgap, racing the orderings on convex KKTs of order >= 1M,
+was dropped in gh#1265 after re-measuring under 0.25 (arm64, single-threaded,
+`POUNCE_FERAL_REPORT_SYMBOLIC=1`):
+
+| model | race | feral `Auto` |
+|---|---|---|
+| `fhnw-binschedule1` | AMF, peak 5.05 GB, 394 s | AMF, same prediction, 149 s |
+| `Primal2_1000` | AMF, peak 7.03 GB, 74 s | AMF, same prediction, 5.8 s |
+| `L2CTA3D` | analysis not done after 45 min | AMF, peak 427 GB, 71 s |
+
+Neither fhnw run finished within 1 800 s (`Auto` reached 25 iterations).
+`L2CTA3D` fits under no ordering on a 64 GB machine. The measurements below
+predate 0.25 and the race's removal.
 
 What is left, measured on a 15 GB / 4-core container with an RSS watchdog,
 on a build based on `913be16` (after gh#1243's duplicate-copy fixes, before
@@ -89,8 +96,7 @@ How to measure (from `benchmarks/lpopt/mps_to_nl.py` output): run with
 `POUNCE_FERAL_REPORT_SYMBOLIC=1` for the prediction, and with
 `POUNCE_FERAL_MAX_FACTOR_BYTES=1` to stop before the numeric factor, which
 isolates the memory spent before it. A fix to the baseline shows as a lower
-RSS at the refusal; a fix in feral#246 shows as the same orderings chosen
-without `CONVEX_AUTO_RACE_MIN_DIM`.
+RSS at the refusal.
 
 ---
 
