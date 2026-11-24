@@ -339,6 +339,9 @@ pub fn check_sampling(
     let nonlinear = |b: &NlBody| match b {
         NlBody::Quad(q) => q.vars.len() <= QUAD_SAMPLE_MAX_VARS,
         NlBody::Tree(e) => affine_expr(e).is_none(),
+        NlBody::Taped(_) => {
+            unreachable!("diagnose reads parsed .nl models, which never drop their trees")
+        }
     };
     if prob.num_obj > 0 && nonlinear(&prob.obj_nonlinear) {
         funcs.push((

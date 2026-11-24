@@ -703,6 +703,10 @@ fn checked_depth(prob: &NlProblem) -> Result<u32, String> {
     let body_depth = |b: &NlBody, memo: &mut std::collections::HashMap<_, _>| match b {
         NlBody::Tree(e) => expr_depth(e, memo),
         NlBody::Quad(q) => q.depth,
+        // Only `build_nl_problem(keep_expressions=False)` makes one, and
+        // this guard runs on parsed models. A taped body has no tree for
+        // anything to recurse into, so it adds no depth either way.
+        NlBody::Taped(_) => 1,
     };
     let depth = prob
         .con_nonlinear

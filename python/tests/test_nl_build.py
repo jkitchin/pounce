@@ -1281,3 +1281,58 @@ def test_con_linear_rejects_boolean_indices(csr):
     x = pounce.NlExpr.vars(2)
     with pytest.raises(TypeError, match="booleans"):
         pounce.build_nl_problem(n=2, objective=x[0], constraints=[0.0], con_linear=csr)
+
+
+# --- keep_expressions=False: free the trees once taped (gh#1261) -----------
+
+
+def _keep_expressions_pair():
+    """The con_linear model built twice: trees kept, and trees dropped."""
+    x = pounce.NlExpr.vars(4)
+    kw = dict(
+        n=4,
+        objective=(x[0] - 1) ** 2 + x[1] * x[3],
+        constraints=[x[2].exp(), 0.0, x[0] * x[1], -1.0, 3.0],
+        con_linear=(
+            [0, 2, 5, 6, 10, 14],
+            [0, 3, 1, 2, 3, 1, 0, 1, 2, 3, 3, 1, 0, 2],
+            [2.0, -1.0, 1.0, -0.5, 3.0, 1.5, 1.0, 1.0, 1.0, 1.0, 0.1, 1.0, -0.7, 1.0],
+        ),
+        g_l=[0.0] * 3 + [-10.0] * 2,
+        g_u=[1.0] * 3 + [10.0] * 2,
+    )
+    return pounce.build_nl_problem(**kw), pounce.build_nl_problem(keep_expressions=False, **kw)
+
+
+def test_keep_expressions_false_evaluates_bit_for_bit():
+    kept, dropped = _keep_expressions_pair()
+    assert (dropped.nnz_jac, dropped.nnz_hess) == (kept.nnz_jac, kept.nnz_hess)
+    for a, b in [
+        (kept.jacobian_structure(), dropped.jacobian_structure()),
+        (kept.hessian_structure(), dropped.hessian_structure()),
+    ]:
+        assert all(np.array_equal(u, v) for u, v in zip(a, b))
+    rng = np.random.default_rng(1261)
+    for _ in range(50):
+        x = rng.uniform(-2, 2, 4)
+        lam = rng.uniform(-1, 1, 5)
+        assert dropped.objective(x) == kept.objective(x)
+        assert np.array_equal(dropped.gradient(x), kept.gradient(x))
+        assert np.array_equal(dropped.constraints(x), kept.constraints(x))
+        assert np.array_equal(dropped.jacobian(x), kept.jacobian(x))
+        assert np.array_equal(_dense_hessian(dropped, x, lam), _dense_hessian(kept, x, lam))
+
+
+def test_keep_expressions_false_solves_identically():
+    kept, dropped = _keep_expressions_pair()
+    (xa, ia), (xb, ib) = pounce.solve_nlp_batch([kept, dropped], parallel=False)
+    assert ia["status_msg"] == ib["status_msg"] == "Solve_Succeeded"
+    assert ia["iter_count"] == ib["iter_count"]
+    assert np.array_equal(xa, xb)
+
+
+def test_keep_expressions_false_variant_still_evaluates():
+    kept, dropped = _keep_expressions_pair()
+    v = dropped.variant(x0=[0.5] * 4)
+    x = np.array([0.3, -0.2, 0.7, 1.1])
+    assert np.array_equal(v.jacobian(x), kept.jacobian(x))

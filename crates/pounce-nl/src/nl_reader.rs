@@ -36,7 +36,9 @@ use crate::nl_quadratic::{
     FactoredQuadratic, Quad2, QuadForm, QuadHessian, is_expanded_quadratic, is_trivially_zero,
     quad_form_readout, recognize_expr, recognize_factored_quadratic,
 };
-use crate::nl_tape::{HybridTape, ScaledExpr, Tape, TapeOp, TapeRef, TapeSet, hybrid_supports};
+use crate::nl_tape::{
+    ColorSeed, HybridTape, ScaledExpr, Tape, TapeOp, TapeRef, TapeSet, hybrid_supports,
+};
 use pounce_common::types::{Index, Number, lower_bound_present, upper_bound_present};
 use pounce_nlp::constant_derivatives::{DerivativeProof, DerivativeProofs};
 use pounce_nlp::quadratic::{QuadraticStructure, SquareTerm};
@@ -291,6 +293,49 @@ pub enum NlBody {
     /// tree was never built; [`NlProblem::con_expr`] rebuilds it on demand,
     /// byte for byte, by re-parsing the same bytes with the same parser.
     Quad(Box<QuadBody>),
+    /// A body whose tree was taped and then let go, by
+    /// [`NlTnlp::drop_expression_trees`] (gh#1261). Only the answers the
+    /// built evaluator still asks of a body are kept — its variable
+    /// support, its affine proof and its quadratic read-out, each computed
+    /// from the tree by the [`NlBody::Tree`] arm itself before it was
+    /// dropped — so every [`NlBody`] accessor answers exactly as it did.
+    ///
+    /// The tree is **not** recoverable: nothing was kept to rebuild it from.
+    /// [`NlProblem::con_expr`] / [`NlProblem::obj_expr`] panic on one, and
+    /// building an [`NlTnlp`] from a problem holding one is refused, rather
+    /// than either reading a missing tree as "this row is linear".
+    Taped(Box<TapedBody>),
+}
+
+/// What [`NlBody::Taped`] keeps of a tree it no longer holds: the
+/// [`NlBody::Tree`] arm's answer to every accessor, cached.
+#[derive(Debug, Clone)]
+pub struct TapedBody {
+    /// [`collect_vars`] of the tree, ascending and deduplicated.
+    pub vars: Box<[u32]>,
+    /// [`NlBody::provably_affine`] of the tree.
+    pub affine: Option<bool>,
+    /// [`NlBody::analyze_quadratic_full`] of the tree. `None` for nearly
+    /// every taped body — one the recognizer reaches would usually have
+    /// been given a constant-structure form instead of a tape.
+    pub quad_form: Option<Box<QuadForm>>,
+    /// [`NlBody::quad_terms_dropped`] of the tree.
+    pub quad_terms_dropped: bool,
+}
+
+impl TapedBody {
+    /// Every answer `tree` gives, asked through the accessors themselves so
+    /// the cache cannot drift from them.
+    fn of(tree: &NlBody) -> Self {
+        let mut vars = BTreeSet::new();
+        tree.collect_vars(&mut vars);
+        TapedBody {
+            vars: vars.into_iter().map(|v| v as u32).collect(),
+            affine: tree.provably_affine(),
+            quad_form: tree.analyze_quadratic_full().map(Box::new),
+            quad_terms_dropped: tree.quad_terms_dropped(),
+        }
+    }
 }
 
 /// A body the parser recognized as an already-expanded quadratic.
@@ -331,24 +376,27 @@ impl NlBody {
     pub fn is_trivially_zero(&self) -> bool {
         match self {
             NlBody::Tree(e) => matches!(e, Expr::Const(c) if *c == 0.0),
-            NlBody::Quad(_) => false,
+            // `drop_expression_trees` leaves a trivially-zero tree in place,
+            // so a taped body is never one.
+            NlBody::Quad(_) | NlBody::Taped(_) => false,
         }
     }
 
     /// The recognized degree-2 form, when the parser produced one.
     pub fn quad(&self) -> Option<&Quad2> {
         match self {
-            NlBody::Tree(_) => None,
+            NlBody::Tree(_) | NlBody::Taped(_) => None,
             NlBody::Quad(q) => Some(&q.form),
         }
     }
 
     /// The tree, when there is one resident. `None` for a recognized body —
-    /// use [`NlProblem::con_expr`] / [`NlProblem::obj_expr`] to rebuild it.
+    /// use [`NlProblem::con_expr`] / [`NlProblem::obj_expr`] to rebuild it —
+    /// and for a [`NlBody::Taped`] one, which cannot be rebuilt at all.
     pub fn tree(&self) -> Option<&Expr> {
         match self {
             NlBody::Tree(e) => Some(e),
-            NlBody::Quad(_) => None,
+            NlBody::Quad(_) | NlBody::Taped(_) => None,
         }
     }
 
@@ -405,6 +453,7 @@ impl NlBody {
                 (!form.lost_terms()).then(|| quad_form_readout(&form))
             }
             NlBody::Quad(q) => (!q.form.lost_terms()).then(|| quad_form_readout(&q.form)),
+            NlBody::Taped(t) => t.quad_form.as_deref().cloned(),
         }
     }
 
@@ -421,6 +470,7 @@ impl NlBody {
         match self {
             NlBody::Tree(e) => recognize_expr(e).is_some_and(|f| f.lost_terms()),
             NlBody::Quad(q) => q.form.lost_terms(),
+            NlBody::Taped(t) => t.quad_terms_dropped,
         }
     }
 
@@ -483,6 +533,10 @@ impl NlBody {
                 (!form.lost_terms()).then(|| quad_form_readout(&form))
             }
             NlBody::Quad(q) => (!q.form.lost_terms()).then(|| quad_form_readout(&q.form)),
+            // Only `NlTnlp`'s build asks this, to decide between a
+            // constant-structure form and a tape, and it refuses a problem
+            // holding a taped body before it gets here.
+            NlBody::Taped(_) => None,
         }
     }
 
@@ -551,7 +605,8 @@ impl NlBody {
                 }
                 recognize_factored_quadratic(e)
             }
-            NlBody::Quad(_) => None,
+            // See `admitted_quad_form`.
+            NlBody::Quad(_) | NlBody::Taped(_) => None,
         }
     }
 
@@ -611,6 +666,7 @@ impl NlBody {
                 affine_from_form(&recognize_expr(e)?)
             }
             NlBody::Quad(q) => affine_from_form(&q.form),
+            NlBody::Taped(t) => t.affine,
         }
     }
 
@@ -619,6 +675,25 @@ impl NlBody {
         match self {
             NlBody::Tree(e) => collect_vars(e, out),
             NlBody::Quad(q) => out.extend(q.vars.iter().map(|&v| v as usize)),
+            NlBody::Taped(t) => out.extend(t.vars.iter().map(|&v| v as usize)),
+        }
+    }
+
+    /// Replace a resident tree by its [`NlBody::Taped`] summary, freeing
+    /// the tree (gh#1261). A no-op on a recognized body, which holds no
+    /// tree, and on a trivially-zero one, whose tree is a single `Const`
+    /// and cheaper than the summary.
+    ///
+    /// Returns the tree, so a caller tearing down a deep one can drop it on
+    /// a stack sized for it (pounce#472).
+    pub fn forget_tree(&mut self) -> Option<Expr> {
+        if !matches!(self, NlBody::Tree(_)) || self.is_trivially_zero() {
+            return None;
+        }
+        let taped = NlBody::Taped(Box::new(TapedBody::of(self)));
+        match std::mem::replace(self, taped) {
+            NlBody::Tree(e) => Some(e),
+            _ => unreachable!("matched a tree above"),
         }
     }
 }
@@ -994,7 +1069,8 @@ impl NlProblem {
     ///
     /// # Panics
     ///
-    /// Panics if `k >= m`, or if re-parsing a recognized body fails — the
+    /// Panics if `k >= m`, if the body is [`NlBody::Taped`] (its tree was
+    /// freed and cannot be rebuilt), or if re-parsing a recognized body fails — the
     /// latter cannot happen for a problem this crate produced (the bytes
     /// parsed once already, by this code) and means the `NlProblem` was
     /// assembled by hand with a `src` that does not match its bodies.
@@ -1015,6 +1091,11 @@ impl NlProblem {
                         .unwrap_or_else(|e| panic!("re-parsing a recognized {what} body: {e}")),
                 )
             }
+            NlBody::Taped(_) => panic!(
+                "{what} body has no expression tree: the problem was built with \
+                 keep_expressions=False (NlTnlp::drop_expression_trees), which frees \
+                 the trees once they are taped"
+            ),
         }
     }
 }
@@ -1749,7 +1830,7 @@ fn keep_recognized_source(src: &Arc<String>, obj: &mut NlBody, cons: &mut [NlBod
         .chain(cons.iter())
         .filter_map(|b| match b {
             NlBody::Quad(q) => Some(q.src.len() + 1),
-            NlBody::Tree(_) => None,
+            NlBody::Tree(_) | NlBody::Taped(_) => None,
         })
         .sum();
     if kept > src.len() / 2 {
@@ -4005,13 +4086,6 @@ pub struct NlTnlp {
     /// Per-row sorted variable indices for the constraint Jacobian, packed.
     jac_cols: JacCols,
     jac_nnz: usize,
-    /// Per-color seed vector: `seeds[c][k] = 1.0` iff variable `k`
-    /// is in color `c`, else `0.0`. Each color is a set of
-    /// variables whose Hessian columns have pairwise-disjoint
-    /// nonzero rows; one directional H·s product per color
-    /// recovers all those columns simultaneously. Dense for
-    /// O(1) lookup in the per-op forward tangent.
-    seeds: Vec<Vec<f64>>,
     /// Per-color decoding table: for each `(row, hess_idx)` entry,
     /// scatter `compressed_c[row] -> values[hess_idx]` after the
     /// per-color directional product.
@@ -4844,7 +4918,7 @@ fn select_peeled_cols(
 /// shared design parameter — puts a nonzero in *every* column at that
 /// row, so every pair of columns conflicts and the greedy walk hands out
 /// `n` colors for a Hessian that may have only ~3n nonzeros. Since
-/// `NlTnlp` holds `n_colors × n` dense `seeds` and `compressed` arrays,
+/// `NlTnlp` holds an `n_colors × n` dense `compressed` array,
 /// that turns into O(n²) memory (6.4 GB at n = 20,000) and O(n²) work
 /// per `eval_h`, on a problem whose Hessian is perfectly sparse.
 ///
@@ -5013,14 +5087,8 @@ fn build_color_tables(
     };
     let (var_color, n_colors, peeled) = greedy_hessian_coloring(n, color_input, peel_veto);
 
-    // Per-color seed vectors (dense for O(1) Var lookup in
-    // `Tape::hessian_directional`).
-    let mut seeds: Vec<Vec<f64>> = vec![vec![0.0; n]; n_colors];
-    for (k, &c) in var_color.iter().enumerate() {
-        if c != u32::MAX {
-            seeds[c as usize][k] = 1.0;
-        }
-    }
+    // No per-color seed vectors: color `c`'s seed is the indicator of
+    // `var_color[k] == c`, read in place through `ColorSeed` (gh#1261).
 
     // Per-color decoding table. For each lower-tri pair (i, j)
     // with i >= j, the entry belongs to column j's color: after
@@ -5170,7 +5238,6 @@ fn build_color_tables(
             .filter(|(_, p)| **p)
             .map(|(j, _)| j as u32)
             .collect(),
-        seeds,
         decoding,
         hess_color_index: HessColorIndex::build(n_colors, con_tapes, &con_tape_colors),
         obj_tape_colors,
@@ -5264,7 +5331,6 @@ struct ColorTables {
     /// Columns given a singleton color and dropped from the conflict
     /// structure. Small by construction (`MAX_PEELED_COLS`).
     peeled_cols: Vec<u32>,
-    seeds: Vec<Vec<f64>>,
     decoding: Vec<Vec<ColorWrite>>,
     obj_tape_colors: Vec<Vec<u32>>,
     con_tape_colors: TapeColors,
@@ -5428,6 +5494,46 @@ impl NlTnlp {
         self.con_hybrid.is_some()
     }
 
+    /// Free every expression tree the problem keeps once it is taped
+    /// (gh#1261), for a frontend that only evaluates.
+    ///
+    /// The built evaluator never walks a tree: values and derivatives come
+    /// from the tapes and the constant-structure forms. What it does still
+    /// ask of a body — its variable support for the linearity queries and
+    /// the Jacobian structure, its affine proof for `derivative_proofs`,
+    /// its quadratic read-out for curvature scaling — is cached on the
+    /// [`NlBody::Taped`] that replaces each tree, by the tree arm's own
+    /// accessors, so every TNLP answer and every value is unchanged.
+    ///
+    /// What goes is everything that wants the tree itself:
+    /// [`NlProblem::con_expr`] / [`NlProblem::obj_expr`] panic, the
+    /// [`ExpressionProvider`](pounce_nlp::expression_provider::ExpressionProvider)
+    /// that presolve's FBBT reads panics, and rebuilding an `NlTnlp` from
+    /// [`Self::problem`] is refused. Those are loud on purpose: a missing
+    /// tree read as "this row is linear" would be a silent wrong answer.
+    ///
+    /// Measured on discopt#2293's rows this was the largest single item in
+    /// a nonlinear row's footprint, 544–700 B in 14 small allocations.
+    ///
+    /// Returns the trees, so a caller holding deep ones can drop them on a
+    /// stack sized for them (pounce#472); dropping the `Vec` frees them.
+    #[must_use = "the trees are freed when the returned Vec is dropped"]
+    pub fn drop_expression_trees(&mut self) -> Vec<Expr> {
+        let prob = &mut self.prob;
+        std::iter::once(&mut prob.obj_nonlinear)
+            .chain(prob.con_nonlinear.iter_mut())
+            .filter_map(NlBody::forget_tree)
+            .collect()
+    }
+
+    /// Whether [`Self::drop_expression_trees`] has run on this problem —
+    /// i.e. whether any body is [`NlBody::Taped`].
+    pub fn expression_trees_dropped(&self) -> bool {
+        std::iter::once(&self.prob.obj_nonlinear)
+            .chain(self.prob.con_nonlinear.iter())
+            .any(|b| matches!(b, NlBody::Taped(_)))
+    }
+
     /// [`Self::try_new`] with the constant-structure fast path (gh #588, Q4)
     /// explicitly on or off.
     ///
@@ -5473,6 +5579,18 @@ impl NlTnlp {
     /// [`Self::try_new_with_quadratic`], with the shared-CSE hybrid
     /// constraint tape kept as `hybrid` says.
     fn build(prob: NlProblem, use_quadratic: bool, hybrid: HybridPolicy) -> Result<Self, String> {
+        // Every tape is built from a tree, so a problem whose trees were
+        // dropped cannot be taped again. Refused here, by name, rather than
+        // panicking in `con_expr` halfway through the build (gh#1261).
+        if std::iter::once(&prob.obj_nonlinear)
+            .chain(prob.con_nonlinear.iter())
+            .any(|b| matches!(b, NlBody::Taped(_)))
+        {
+            return Err("this problem's expression trees were dropped \
+                        (keep_expressions=False), so it cannot be taped again; \
+                        rebuild it from its expressions instead"
+                .to_string());
+        }
         // Resolve any AMPL imported (external) functions. Walk every
         // nonlinear expression to collect the funcall ids actually
         // referenced; load the libraries named in $AMPLFUNC and bind
@@ -5863,7 +5981,6 @@ impl NlTnlp {
             var_color,
             n_colors,
             peeled_cols,
-            seeds,
             decoding,
             obj_tape_colors,
             con_tape_colors,
@@ -5990,7 +6107,6 @@ impl NlTnlp {
             h_jcol,
             jac_cols,
             jac_nnz,
-            seeds,
             decoding,
             obj_tape_colors,
             con_tape_colors,
@@ -6149,7 +6265,6 @@ impl NlTnlp {
             var_color,
             n_colors,
             peeled_cols,
-            seeds,
             decoding,
             obj_tape_colors,
             con_tape_colors,
@@ -6166,7 +6281,6 @@ impl NlTnlp {
         );
         self.var_color = var_color;
         self.peeled_cols = peeled_cols;
-        self.seeds = seeds;
         self.decoding = decoding;
         self.obj_tape_colors = obj_tape_colors;
         self.con_tape_colors = con_tape_colors;
@@ -6991,7 +7105,7 @@ impl NlTnlp {
         use rayon::prelude::*;
         let Self {
             compressed,
-            seeds,
+            var_color,
             con_tapes,
             hess_color_index: idx,
             vals_scratch,
@@ -7004,7 +7118,10 @@ impl NlTnlp {
             || HessScratch::new(max_tape_n),
             |sc, (c, out)| {
                 let (rows, tapes) = idx.con_pairs(c);
-                let seed = &seeds[c];
+                let seed = &ColorSeed {
+                    var_color,
+                    color: c as u32,
+                };
                 let HessScratch {
                     vals,
                     dot,
@@ -7561,7 +7678,10 @@ impl TNLP for NlTnlp {
                         for &c in &self.obj_tape_colors[ti] {
                             t.hessian_directional(
                                 &self.vals_scratch,
-                                &self.seeds[c as usize],
+                                &ColorSeed {
+                                    var_color: &self.var_color,
+                                    color: c,
+                                },
                                 obj_seed,
                                 &mut self.compressed[c as usize],
                                 &mut self.dot_scratch,
@@ -7627,7 +7747,10 @@ impl TNLP for NlTnlp {
                             {
                                 continue;
                             }
-                            let seed = &self.seeds[c];
+                            let seed = &ColorSeed {
+                                var_color: &self.var_color,
+                                color: c as u32,
+                            };
                             let out = &mut self.compressed[c];
                             let creach = &hess_color_reach
                                 [hess_color_reach_off[c]..hess_color_reach_off[c + 1]];
@@ -7685,7 +7808,10 @@ impl TNLP for NlTnlp {
                                 for &c in self.con_tape_colors.of(gt) {
                                     t.hessian_directional(
                                         &self.vals_scratch,
-                                        &self.seeds[c as usize],
+                                        &ColorSeed {
+                                            var_color: &self.var_color,
+                                            color: c,
+                                        },
                                         w,
                                         &mut self.compressed[c as usize],
                                         &mut self.dot_scratch,
@@ -9225,9 +9351,9 @@ J0 2
             "a dense column that costs no accuracy must stay peeled"
         );
         assert!(
-            t.seeds.len() <= 4,
+            t.compressed.len() <= 4,
             "peeling should keep the color count at O(1), got {}",
-            t.seeds.len()
+            t.compressed.len()
         );
     }
 
@@ -9457,7 +9583,8 @@ J0 2
 
     /// A single dense Hessian row must not blow the coloring up to one
     /// color per variable. It used to: every column shares row 0, so no
-    /// two columns could be colored alike, and `seeds` / `compressed`
+    /// two columns could be colored alike, and `seeds` (since removed,
+    /// gh#1261) / `compressed`
     /// — both `n_colors × n` dense — became O(n²) memory and O(n²) work
     /// per `eval_h` on a Hessian holding only ~2n nonzeros.
     #[test]
@@ -9469,11 +9596,10 @@ J0 2
         // for j >= 1 from the coupling term.
         assert_eq!(t.h_irow.len(), 2 * n - 1);
         assert!(
-            t.seeds.len() <= 4,
+            t.compressed.len() <= 4,
             "one dense row should cost one extra color, not n; got {} colors for n={n}",
-            t.seeds.len()
+            t.compressed.len()
         );
-        assert_eq!(t.seeds.len(), t.compressed.len());
     }
 
     /// Peeling changes *which* directional product recovers an entry, so

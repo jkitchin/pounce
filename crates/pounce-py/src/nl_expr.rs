@@ -1502,6 +1502,14 @@ fn csr_linear(
 /// nodes it would otherwise build for them (discopt#2293 measured a
 /// three-term linear row at ~590 B in the problem plus ~490 B of transient
 /// `NlExpr` DAG this way, against ~250 B with the terms passed here).
+///
+/// `keep_expressions=False` frees the expression trees once they are taped
+/// (gh#1261), for a frontend that only evaluates. Values, derivatives,
+/// sparsity and every solver query are unchanged — what the evaluator still
+/// asks of a row is cached when its tree goes — but nothing can read a tree
+/// back afterwards: a rebuild from the problem is refused. On discopt#2293's
+/// nonlinear rows the trees were the largest single item, 544–700 B a row in
+/// 14 small allocations.
 #[pyfunction]
 #[pyo3(signature = (
     n,
@@ -1517,6 +1525,7 @@ fn csr_linear(
     var_names=None,
     con_names=None,
     con_linear=None,
+    keep_expressions=true,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn build_nl_problem(
@@ -1533,6 +1542,7 @@ pub fn build_nl_problem(
     var_names: Option<Vec<String>>,
     con_names: Option<Vec<String>>,
     con_linear: Option<&Bound<'_, PyAny>>,
+    keep_expressions: bool,
 ) -> PyResult<PyNlProblem> {
     let objective = coerce(objective, "build_nl_problem: objective")?;
     let (constraints, con_depth) = match constraints {
@@ -1586,11 +1596,18 @@ pub fn build_nl_problem(
         if let Some(lin) = con_linear {
             prob.con_linear = lin;
         }
-        NlTnlp::try_new(prob)
+        let mut tnlp = NlTnlp::try_new(prob)?;
+        if !keep_expressions {
+            // Dropped here, on the deep stack, like the build's own walks.
+            drop(tnlp.drop_expression_trees());
+        }
+        Ok::<_, String>(tnlp)
     })
     .map_err(|e| PyValueError::new_err(format!("build_nl_problem: {e}")))?;
-    // The problem keeps the expression trees it taped, so it inherits
-    // their depth for its own copies and teardown.
+    // A problem that keeps the expression trees it taped inherits their
+    // depth for its own copies and teardown. One that dropped them holds at
+    // most a trivially-zero `Const` per body, depth 1.
+    let depth = if keep_expressions { depth } else { 1 };
     PyNlProblem::from_tnlp(tnlp, "build_nl_problem", depth)
 }
 
@@ -2066,6 +2083,198 @@ mod tests {
         let roots = roots(&rows);
         let refs: Vec<&Expr> = roots.iter().collect();
         assert!(assemble(n, materialize_model(&refs), true).has_shared_cse_tape());
+    }
+
+    /// `build_nl_problem`'s assembly of `objective` and `rows`, through
+    /// `materialize_model` and with the rows marked a frontend DAG.
+    fn assemble_model(n: usize, objective: &PyNlExpr, rows: &[PyNlExpr]) -> NlTnlp {
+        let obj = objective.operand().expr;
+        let roots = roots(rows);
+        let refs: Vec<&Expr> = std::iter::once(&obj).chain(roots.iter()).collect();
+        let mut built = materialize_model(&refs).into_iter();
+        let objective = built.next().unwrap();
+        let constraints: Vec<Expr> = built.collect();
+        let m = constraints.len();
+        let mut prob = NlProblem::from_expressions(NlProblemParts {
+            minimize: true,
+            objective,
+            obj_constant: 0.0,
+            constraints,
+            x_l: vec![-1e19; n],
+            x_u: vec![1e19; n],
+            x0: vec![0.3; n],
+            g_l: vec![-1e19; m],
+            g_u: vec![1e19; m],
+            var_names: vec![],
+            con_names: vec![],
+        })
+        .unwrap();
+        prob.frontend_dag = true;
+        NlTnlp::try_new(prob).unwrap()
+    }
+
+    /// One row per answer a [`NlBody::Taped`] caches, each on the branch
+    /// that is not the common one: an affine tree (`Some(true)`, with a
+    /// quadratic read-out), a bilinear one (`Some(false)`), a transcendental
+    /// one (`None`, no read-out), a row whose quadratic fold lost a term
+    /// (`quad_terms_dropped`), and a trivially-zero row, which keeps its
+    /// tree. The objective is nonlinear in a variable no row is.
+    fn taped_branch_rows() -> (usize, PyNlExpr, Vec<PyNlExpr>) {
+        let affine = {
+            let a = binary(BinOp::Mul, num(2.0), v(0).operand()).unwrap();
+            binary(BinOp::Add, a.operand(), v(1).operand()).unwrap()
+        };
+        let bilinear = binary(BinOp::Mul, v(0).operand(), v(1).operand()).unwrap();
+        let transcendental = {
+            let e = unary(UnaryOp::Exp, v(2).operand()).unwrap();
+            binary(BinOp::Mul, e.operand(), v(1).operand()).unwrap()
+        };
+        let lost = {
+            // 2⁵³·x₃² + x₃² − 2⁵³·x₃²: `fl(2⁵³ + 1)` absorbs the middle term.
+            let big = 9_007_199_254_740_992.0;
+            let sq = |c: Number| {
+                let s = binary(BinOp::Mul, v(3).operand(), v(3).operand()).unwrap();
+                binary(BinOp::Mul, num(c), s.operand()).unwrap()
+            };
+            let a = binary(BinOp::Add, sq(big).operand(), sq(1.0).operand()).unwrap();
+            binary(BinOp::Sub, a.operand(), sq(big).operand()).unwrap()
+        };
+        let zero = PyNlExpr::leaf(Expr::Const(0.0));
+        let objective = {
+            let s = unary(UnaryOp::Sin, v(4).operand()).unwrap();
+            binary(BinOp::Add, s.operand(), bilinear.operand()).unwrap()
+        };
+        (
+            5,
+            objective,
+            vec![affine, bilinear, transcendental, lost, zero],
+        )
+    }
+
+    /// Everything a solve asks of the problem's bodies rather than of its
+    /// tapes, as one comparable value.
+    fn body_queries(t: &mut NlTnlp) -> String {
+        use pounce_nlp::tnlp::{Linearity, TNLP};
+        let info = t.get_nlp_info().unwrap();
+        let (n, m) = (info.n as usize, info.m as usize);
+        let mut cl = vec![Linearity::Linear; m];
+        let mut vl = vec![Linearity::Linear; n];
+        let mut ol = vec![Linearity::Linear; n];
+        assert!(t.get_constraints_linearity(&mut cl));
+        assert!(t.get_variables_linearity(&mut vl));
+        assert!(t.get_objective_variables_linearity(&mut ol));
+        let k = t.get_number_of_nonlinear_variables() as usize;
+        let mut list = vec![0; k];
+        assert!(t.get_list_of_nonlinear_variables(&mut list));
+        let proofs = t.derivative_proofs();
+        let prob = t.problem();
+        format!(
+            "{cl:?}\n{vl:?}\n{ol:?}\n{list:?}\n{proofs:?}\n{:?}\n{:?}\n{:?}",
+            pounce_nl::nl_reader::constraint_jacobian_sparsity(prob),
+            pounce_nl::nl_scaling::quad_row_coefs(prob),
+            pounce_nl::nl_scaling::curvature_scaling(prob),
+        )
+    }
+
+    /// `keep_expressions=False` (gh#1261): freeing the trees changes no
+    /// value, no derivative, no structure and no answer the solver asks of
+    /// a body, and leaves no way to read a tree back or re-tape.
+    ///
+    /// The models reach every branch of the cache: the kinetics, deep (above
+    /// both hybrid gates) and spine-shape rows the stored-row test uses, the
+    /// one-row-per-branch model above, and an all-quadratic model, the only
+    /// shape on which `curvature_scaling` answers at all.
+    #[test]
+    fn dropping_the_trees_changes_no_answer() {
+        let (n, objective, rows) = taped_branch_rows();
+        let quadratic = {
+            let sq = |i: usize| binary(BinOp::Mul, v(i).operand(), v(i).operand()).unwrap();
+            let obj = binary(BinOp::Add, sq(0).operand(), sq(1).operand()).unwrap();
+            let row = binary(BinOp::Mul, v(0).operand(), v(1).operand()).unwrap();
+            (2, obj, vec![row, sq(1)])
+        };
+        let zero = PyNlExpr::leaf(Expr::Const(0.0));
+        let models = [
+            ("kinetics", kinetics_rows(4)),
+            ("deep", deep_shared_rows()),
+            ("spine", spine_shape_rows()),
+        ]
+        .into_iter()
+        .map(|(w, (n, rows))| (w, n, zero.clone(), rows))
+        .chain([
+            ("branches", n, objective, rows),
+            ("quadratic", quadratic.0, quadratic.1, quadratic.2),
+        ]);
+        let mut seen = (false, false, false, false, false);
+        for (what, n, objective, rows) in models {
+            let mut kept = assemble_model(n, &objective, &rows);
+            let mut dropped = assemble_model(n, &objective, &rows);
+            let trees = dropped.drop_expression_trees();
+            assert!(!trees.is_empty(), "{what}: some tree was dropped");
+            drop(trees);
+            assert!(dropped.expression_trees_dropped(), "{what}");
+            assert!(!kept.expression_trees_dropped(), "{what}");
+
+            for b in std::iter::once(&dropped.problem().obj_nonlinear)
+                .chain(dropped.problem().con_nonlinear.iter())
+            {
+                match b {
+                    NlBody::Taped(t) => {
+                        seen.0 |= t.affine == Some(true);
+                        seen.1 |= t.affine == Some(false);
+                        seen.2 |= t.affine.is_none();
+                        seen.3 |= t.quad_terms_dropped;
+                        seen.4 |= t.quad_form.is_some();
+                    }
+                    NlBody::Tree(e) => assert!(
+                        matches!(e, Expr::Const(c) if *c == 0.0),
+                        "{what}: only a trivially-zero tree is kept, got {e:?}"
+                    ),
+                    NlBody::Quad(_) => unreachable!("no parsed bodies here"),
+                }
+            }
+
+            assert_evaluate_alike(&mut dropped, &mut kept, &format!("{what}: dropped vs kept"));
+            {
+                use pounce_nlp::tnlp::TNLP;
+                let bits = |v: &[Number]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                let x: Vec<Number> = (0..n).map(|j| 0.4 + 0.07 * j as Number).collect();
+                let f = |t: &mut NlTnlp| {
+                    let mut g = vec![0.0; n];
+                    assert!(t.eval_grad_f(&x, true, &mut g));
+                    (t.eval_f(&x, true).unwrap().to_bits(), bits(&g))
+                };
+                assert_eq!(f(&mut dropped), f(&mut kept), "{what}: objective");
+            }
+            assert_eq!(
+                body_queries(&mut dropped),
+                body_queries(&mut kept),
+                "{what}: body queries"
+            );
+
+            // Loud, not silent: a re-tape is refused, and a copy (the batch
+            // path's `clone_tnlp`, `variant`) still evaluates.
+            let err = NlTnlp::try_new(dropped.problem().clone()).err().unwrap();
+            assert!(err.contains("keep_expressions=False"), "{what}: {err}");
+            let mut copy = dropped.variant(&Default::default()).unwrap();
+            assert_evaluate_alike(&mut copy, &mut kept, &format!("{what}: variant"));
+        }
+        assert_eq!(
+            seen,
+            (true, true, true, true, true),
+            "the fixtures reach every cached branch: (affine, curved, unknown, \
+             lost a term, has a read-out)"
+        );
+    }
+
+    /// The panic a consumer of a dropped tree gets says why.
+    #[test]
+    #[should_panic(expected = "keep_expressions=False")]
+    fn reading_a_dropped_tree_panics_by_name() {
+        let (n, objective, rows) = taped_branch_rows();
+        let mut t = assemble_model(n, &objective, &rows);
+        drop(t.drop_expression_trees());
+        let _ = t.problem().con_expr(2);
     }
 
     /// Every `Arc` a stored row reaches, by address.
