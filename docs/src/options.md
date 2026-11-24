@@ -2742,15 +2742,16 @@ FERAL runs its symbolic analysis and its numeric factorization in one call,
 and the factor's size (`factor_nnz` on the `linear_solve` span) is recorded
 only after the factorization succeeds. A KKT whose factor does not fit in
 memory therefore reports nothing before the process is killed. Two
-environment variables run the symbolic analysis on its own first, before the
-numeric factor, for each new sparsity pattern (gh#1249). They are
+environment variables expose FERAL's symbolic analysis: its prediction of the
+factor's size, logged or enforced before the numeric factor starts, for each
+new sparsity pattern (gh#1249). They are
 environment-only by design for now: diagnostics for large models, not
 options an `.opt` file, Python or `pounce-rs` can set.
 
 | Variable | Value | Effect |
 |---|---|---|
 | `POUNCE_FERAL_REPORT_SYMBOLIC` | `1`/`on`/`true`/`yes` | Logs, at `info` on `pounce::linsol` (shown by default), one line as the analysis starts and one when it ends: the ordering it resolved to, the predicted `nnz(L)`, the factor and contribution-block bytes and their sum (the predicted peak), the largest front, and the time the analysis took. A run killed after only the first line died in the symbolic phase; one killed after the second died in the numeric factor, whose predicted size the second line gives. |
-| `POUNCE_FERAL_MAX_FACTOR_BYTES` | bytes, e.g. `3e10` | Refuses a factorization whose predicted peak exceeds this many bytes, with a warning naming the ordering and the prediction, instead of running into an out-of-memory kill. Logs nothing more unless `POUNCE_FERAL_REPORT_SYMBOLIC` is also set. |
+| `POUNCE_FERAL_MAX_FACTOR_BYTES` | bytes, e.g. `3e10` | Refuses a factorization whose predicted memory exceeds this many bytes, with a warning naming the ordering and the prediction, instead of running into an out-of-memory kill. FERAL checks it inside its own analysis (FERAL ≥ 0.25, gh#1265), so it costs no extra pass. Logs nothing more unless `POUNCE_FERAL_REPORT_SYMBOLIC` is also set. |
 
 **A refusal ends the solve.** It reports `Insufficient_Memory`, on the convex
 and the NLP path alike. Nothing else that would factor gets a turn: not the
@@ -2780,21 +2781,35 @@ admitted a solve under 0.24 may now refuse it. Read it as a guide:
   work into larger parent fronts.
 * **It models the sequential driver.** FERAL's parallel driver can hold more
   at once; FERAL bounds that separately (`peak_bytes_parallel`, 1.7–3× the
-  measured peak), and pounce does not check it.
+  measured peak). When only that bound is over budget, FERAL runs the
+  factorization on the sequential driver instead of refusing: same factor,
+  less speed.
 
-With either variable set, the convex solvers' `max_wall_time`
-(`time_limit`) is also checked between the two phases: a symbolic analysis
-that ran past the deadline does not start the numeric factor, and the solve
-ends with `TimeLimit`.
+**FERAL checks the budget twice in one analysis.** First on the factor alone,
+from the cheap ordering and column-count prefix, *before* the supernodal
+finish allocates anything that scales with the factor; then on the full
+peak, before any numeric work. The early check is what stops a model like
+`L1_sixm1000obs`, whose analysis jumps from 19 to 52 GB inside FERAL's
+`finish_and_copy`: a budget below its factor now refuses before that jump.
+The refusal names the check that fired, and after the early one the figure
+it gives is the factor alone, a lower bound on the peak. In an ordering race
+an arm over budget is skipped, not refused, as long as another arm fits.
 
-**The price is a second symbolic pass per pattern**, because feral's solver
-cannot take an analysis computed outside it. On the gh#1249 models that is
-5–130 s per pattern, and up to 480 s for an ordering race. The factor itself
-is unchanged. Both variables are off by default, and neither interrupts a
-phase partway: a symbolic analysis that on its own exhausts memory or time
-still does so. That was observed on `L1_sixm1000obs`, whose analysis jumps
-from 19 to 52 GB inside FERAL's `finish_and_copy` before any prediction
-exists, and on `L2CTA3D`, whose analysis peaks near 25 GB.
+**The convex solvers' `max_wall_time` (`time_limit`) reaches FERAL's
+symbolic analysis**, whether or not either variable is set (gh#1265). The
+analysis polls it at safe points inside the ordering, the matching, the
+column counts, between ordering-race arms and in the finish, and stops once
+it has passed; the solve ends with `TimeLimit`. A numeric factorization
+already under way is not interrupted, and neither is the refactorization of
+a pattern whose analysis is already done.
+
+**`POUNCE_FERAL_REPORT_SYMBOLIC` costs a second symbolic pass per pattern**,
+because feral's solver cannot take an analysis computed outside it. On the
+gh#1249 models that is 5–130 s per pattern, and up to 480 s for an ordering
+race. The factor itself is unchanged. `POUNCE_FERAL_MAX_FACTOR_BYTES` alone
+costs nothing extra. Both are off by default. The budget cannot help with
+memory the analysis spends before its first check: `L2CTA3D`'s analysis
+peaks near 25 GB.
 
 ### Debug and diagnostic gates
 

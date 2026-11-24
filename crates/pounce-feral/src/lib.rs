@@ -26,7 +26,9 @@ pub mod schur;
 pub use schur::FeralSchurSolver;
 
 use feral::symbolic::SupernodeParams;
-use feral::{CscMatrix, FactorStats, FactorStatus, NumericParams, RefineOptions, Solver};
+use feral::{
+    CscMatrix, FactorStats, FactorStatus, FeralError, NumericParams, RefineOptions, Solver,
+};
 
 /// Re-export so option-aware callers can construct a
 /// [`FeralConfig`] without taking a direct dependency on `feral`.
@@ -186,16 +188,18 @@ pub struct FeralSolverInterface {
     sink: Option<Arc<Mutex<LinearSolverSummary>>>,
 
     /// gh#1249: the symbolic pre-analysis ([`crate::preanalysis`]). `None`
-    /// when neither [`FeralConfig::report_symbolic`] nor
-    /// [`FeralConfig::max_factor_bytes`] asks for it.
+    /// unless [`FeralConfig::report_symbolic`] asks for it.
     preanalysis: Option<Preanalysis>,
+
+    /// [`FeralConfig::max_factor_bytes`], also handed to the solver
+    /// (`Solver::with_max_factor_bytes`). Kept to know whether a latched
+    /// [`budget_refusal`] governs this backend.
+    max_factor_bytes: Option<u64>,
 }
 
 /// Configuration and per-pattern state of the gh#1249 pre-analysis.
 struct Preanalysis {
     params: SupernodeParams,
-    report: bool,
-    max_factor_bytes: Option<u64>,
     state: PreanalysisState,
     last: Option<SymbolicReport>,
 }
@@ -206,9 +210,6 @@ enum PreanalysisState {
     Pending,
     /// Analysed; the factorization goes ahead.
     Done,
-    /// Analysed and over the byte budget: every factorization of this
-    /// pattern is refused until `initialize_structure` sets a new one.
-    Refused,
 }
 
 /// Construction-time configuration for [`FeralSolverInterface`].
@@ -755,10 +756,12 @@ pub struct FeralConfig {
     /// Environment: `POUNCE_FERAL_REPORT_SYMBOLIC`.
     pub report_symbolic: bool,
     /// Refuse a factorization FERAL predicts will need more than this many
-    /// bytes at its peak (`factor_bytes + peak_contrib_bytes`, from the
-    /// symbolic analysis), reporting `FatalError` with a message instead of
-    /// running into an out-of-memory kill (gh#1249). Setting it turns the
-    /// pre-analysis of [`Self::report_symbolic`] on, without the log lines.
+    /// bytes at its peak (`WorkEstimate::peak_bytes`, from the symbolic
+    /// analysis), reporting `FatalError` with a message instead of running
+    /// into an out-of-memory kill (gh#1249). FERAL checks it inside its own
+    /// analysis (`Solver::with_max_factor_bytes`, gh#1265), so it costs no
+    /// second symbolic pass; an ordering race skips arms over budget, and a
+    /// parallel factor whose larger peak is over budget runs sequentially.
     /// `None` (the default) never refuses. Environment:
     /// `POUNCE_FERAL_MAX_FACTOR_BYTES` (scientific notation accepted,
     /// e.g. `3e10`).
@@ -1110,6 +1113,12 @@ pub(crate) fn supernode_params(cfg: &FeralConfig) -> SupernodeParams {
     }
 }
 
+/// [`FeralConfig::max_factor_bytes`] as FERAL takes it.
+fn solver_budget(cfg: &FeralConfig) -> Option<usize> {
+    cfg.max_factor_bytes
+        .map(|b| usize::try_from(b).unwrap_or(usize::MAX))
+}
+
 /// Build a configured `feral::Solver` from a [`FeralConfig`]. Extracted from
 /// [`FeralSolverInterface::with_config`] so the Schur backend
 /// ([`crate::schur::FeralSchurSolver`]) configures its per-block solvers
@@ -1322,15 +1331,22 @@ impl FeralSolverInterface {
     /// `feral_cascade_break` option is left unset. See
     /// [`FeralConfig::cascade_break`] for the tri-state semantics.
     pub fn with_config(cfg: FeralConfig) -> Self {
-        let solver = configure_solver(&cfg);
-        let preanalysis =
-            (cfg.report_symbolic || cfg.max_factor_bytes.is_some()).then(|| Preanalysis {
-                params: supernode_params(&cfg),
-                report: cfg.report_symbolic,
-                max_factor_bytes: cfg.max_factor_bytes,
-                state: PreanalysisState::Pending,
-                last: None,
-            });
+        // gh#1265: FERAL enforces the budget inside its own analysis. Only the
+        // monolithic backend takes it: the Schur and block backends have no
+        // refusal path to latch it on.
+        let solver = configure_solver(&cfg).with_max_factor_bytes(solver_budget(&cfg));
+        // The pre-analysis carries the budget too, so with both set it is
+        // refused at the same point as the solver's own analysis — FERAL's
+        // `"factor"` check comes before the supernodal finish, whose memory
+        // is what a budget most needs to stop (gh#1249's `L1_sixm1000obs`).
+        let preanalysis = cfg.report_symbolic.then(|| Preanalysis {
+            params: SupernodeParams {
+                max_factor_bytes: solver_budget(&cfg),
+                ..supernode_params(&cfg)
+            },
+            state: PreanalysisState::Pending,
+            last: None,
+        });
         Self {
             solver,
             initialized: false,
@@ -1361,6 +1377,7 @@ impl FeralSolverInterface {
             },
             sink: None,
             preanalysis,
+            max_factor_bytes: cfg.max_factor_bytes,
         }
     }
 
@@ -1377,26 +1394,13 @@ impl FeralSolverInterface {
 
     /// Run the gh#1249 pre-analysis if the current pattern needs one.
     /// `Some(status)` stops the factorization with that status.
-    fn run_preanalysis(&mut self) -> Option<ESymSolverStatus> {
+    fn run_preanalysis(
+        &mut self,
+        interrupt: Option<&feral::Interrupt>,
+    ) -> Option<ESymSolverStatus> {
         let pre = self.preanalysis.as_mut()?;
-        match pre.state {
-            PreanalysisState::Done => return None,
-            PreanalysisState::Refused => return Some(ESymSolverStatus::FatalError),
-            PreanalysisState::Pending => {}
-        }
-        // A refusal earlier in this solve is terminal for all of it: refuse
-        // this pattern too, without paying for its analysis.
-        if pre.max_factor_bytes.is_some() {
-            if let Some(r) = preanalysis::budget_refusal() {
-                tracing::debug!(
-                    target: "pounce::linsol",
-                    dim = self.dim, peak_bytes = r.peak_bytes, budget = r.budget,
-                    "FERAL factorization refused: an earlier factorization in this solve \
-                     was over max_factor_bytes"
-                );
-                pre.state = PreanalysisState::Refused;
-                return Some(ESymSolverStatus::FatalError);
-            }
+        if pre.state == PreanalysisState::Done {
+            return None;
         }
         let matrix = self.matrix.as_ref()?;
         // A non-finite value is rejected by `factor` itself, with its own
@@ -1404,34 +1408,58 @@ impl FeralSolverInterface {
         if has_non_finite(&matrix.values) {
             return None;
         }
-        let (report, verdict) = preanalysis::preanalyze(
-            matrix,
-            &pre.params,
-            &self.ordering,
-            pre.report,
-            pre.max_factor_bytes,
-        );
+        pre.params.interrupt = interrupt.cloned();
+        let (report, verdict) = preanalysis::preanalyze(matrix, &pre.params, &self.ordering, true);
         pre.last = report;
         match verdict {
             preanalysis::Verdict::Proceed | preanalysis::Verdict::AnalysisFailed => {
                 pre.state = PreanalysisState::Done;
                 None
             }
-            preanalysis::Verdict::OverBudget { peak_bytes, budget } => {
-                preanalysis::latch_budget_refusal(preanalysis::BudgetRefusal {
-                    peak_bytes,
-                    budget,
-                });
-                pre.state = PreanalysisState::Refused;
-                Some(ESymSolverStatus::FatalError)
-            }
-            // Not latched: the analysis is known, and a later call (in a
-            // later deadline scope) factors without repeating it.
+            // The analysis is known, and a later call (in a later deadline
+            // scope) factors without repeating it.
             preanalysis::Verdict::DeadlinePassed => {
                 pre.state = PreanalysisState::Done;
                 Some(ESymSolverStatus::FatalError)
             }
+            // Nothing was learned: a later call analyses again.
+            preanalysis::Verdict::Interrupted => Some(ESymSolverStatus::FatalError),
+            preanalysis::Verdict::OverBudget {
+                predicted_bytes,
+                budget_bytes,
+                stage,
+            } => {
+                self.latch_refusal(predicted_bytes, budget_bytes, stage);
+                Some(ESymSolverStatus::FatalError)
+            }
         }
+    }
+
+    /// gh#1249: latch and report an over-budget refusal from FERAL's own
+    /// analysis (gh#1265).
+    fn latch_refusal(&self, predicted_bytes: usize, budget_bytes: usize, stage: &'static str) {
+        let what = if stage == "factor" {
+            "a factor alone of"
+        } else {
+            "a peak of"
+        };
+        tracing::warn!(
+            target: "pounce::linsol",
+            predicted_bytes, budget_bytes, stage, dim = self.dim,
+            ordering = %ordering_label(&self.ordering),
+            "FERAL factorization refused: the {} ordering predicts {what} {}, over the \
+             max_factor_bytes budget of {}. A different feral_ordering may need less \
+             (POUNCE_FERAL_REPORT_SYMBOLIC=1 prints the prediction); raise \
+             POUNCE_FERAL_MAX_FACTOR_BYTES to try anyway",
+            ordering_label(&self.ordering),
+            preanalysis::human_bytes(predicted_bytes),
+            preanalysis::human_bytes(budget_bytes),
+        );
+        preanalysis::latch_budget_refusal(preanalysis::BudgetRefusal {
+            peak_bytes: predicted_bytes,
+            budget: budget_bytes as u64,
+            stage,
+        });
     }
 
     /// Install a shared summary sink. The interface updates the sink
@@ -1603,11 +1631,30 @@ impl FeralSolverInterface {
         if !self.refresh_matrix() {
             return ESymSolverStatus::FatalError;
         }
-        // gh#1249: FERAL's prediction for a new pattern, before the numeric
-        // factor (off unless `report_symbolic` / `max_factor_bytes` is set).
-        if let Some(status) = self.run_preanalysis() {
+        // gh#1249: a budget refusal earlier in this solve is terminal for all
+        // of it: refuse this pattern too, without paying for its analysis.
+        if self.max_factor_bytes.is_some()
+            && let Some(r) = preanalysis::budget_refusal()
+        {
+            tracing::debug!(
+                target: "pounce::linsol",
+                dim = self.dim, peak_bytes = r.peak_bytes, budget = r.budget,
+                "FERAL factorization refused: an earlier factorization in this solve \
+                 was over max_factor_bytes"
+            );
+            return ESymSolverStatus::FatalError;
+        }
+        // gh#1265: the wall-clock deadline in force stops FERAL's symbolic
+        // analysis at its next safe point. A deadline is absolute, so it is
+        // installed afresh on every call; a cached analysis (same pattern) is
+        // reused without consulting it, and the numeric phase never does.
+        let interrupt = preanalysis::current_factor_deadline().map(feral::Interrupt::at);
+        // gh#1249: FERAL's prediction for a new pattern, logged before the
+        // numeric factor (off unless `report_symbolic` is set).
+        if let Some(status) = self.run_preanalysis(interrupt.as_ref()) {
             return status;
         }
+        self.solver.set_interrupt(interrupt);
         let matrix = self.matrix.as_ref().expect("refresh_matrix stored one");
 
         let t0 = std::time::Instant::now();
@@ -1781,6 +1828,22 @@ impl FeralSolverInterface {
             }
             FactorStatus::WrongInertia { .. } => {
                 // Should not occur — we passed `None` for check_inertia.
+                ESymSolverStatus::FatalError
+            }
+            FactorStatus::FatalError(FeralError::MemoryBudgetExceeded {
+                predicted_bytes,
+                budget_bytes,
+                stage,
+            }) => {
+                self.latch_refusal(predicted_bytes, budget_bytes, stage);
+                ESymSolverStatus::FatalError
+            }
+            FactorStatus::FatalError(FeralError::Interrupted { stage }) => {
+                tracing::info!(
+                    target: "pounce::linsol",
+                    dim = self.dim,
+                    "FERAL symbolic analysis interrupted ({stage}): the wall-clock deadline passed"
+                );
                 ESymSolverStatus::FatalError
             }
             FactorStatus::FatalError(_) => ESymSolverStatus::FatalError,

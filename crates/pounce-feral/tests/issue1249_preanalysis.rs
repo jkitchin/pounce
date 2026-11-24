@@ -3,9 +3,10 @@
 //! The pre-analysis is only worth anything if it predicts the analysis the
 //! solver goes on to compute, so the first test holds the two to equality on
 //! every field FERAL's `WorkEstimate` feeds the factorization record. The
-//! rest pin the three things the prediction can do to a factorization:
-//! nothing (off, or under budget), refuse it (over budget, latched for the
-//! pattern), and stop it between the phases (deadline).
+//! rest pin the three things that can happen to a factorization: nothing
+//! (off, or under budget), a refusal (over budget, latched for the solve),
+//! and a stop on the deadline (between the phases with the pre-analysis on,
+//! inside FERAL's analysis without it — gh#1265).
 
 use pounce_common::types::Index;
 use pounce_feral::{FeralConfig, FeralSolverInterface, factor_deadline};
@@ -118,11 +119,11 @@ fn over_budget_is_refused_for_the_whole_pattern() {
         ..FeralConfig::default()
     });
     assert_eq!(solve(&mut s, n), ESymSolverStatus::FatalError);
-    let rep = s
-        .symbolic_report()
-        .expect("a refusal still reports")
-        .clone();
-    assert!(rep.work.peak_bytes > 50_000);
+    // gh#1265: FERAL refuses inside its own analysis; no pre-analysis ran.
+    assert!(s.symbolic_report().is_none(), "no second symbolic pass");
+    let r = pounce_feral::budget_refusal().expect("the refusal is latched");
+    assert_eq!(r.budget, 50_000);
+    assert!(r.peak_bytes > 50_000);
     assert!(s.summary().last_nnz_l.is_none(), "no numeric factor ran");
     // Latched: a retry on the same pattern (e.g. after a perturbation) does
     // not go on into the factor the budget refused.
@@ -143,27 +144,89 @@ fn a_generous_budget_changes_nothing() {
         ..FeralConfig::default()
     });
     assert_eq!(solve(&mut s, 400), ESymSolverStatus::Success);
-    assert!(s.symbolic_report().is_some());
+    assert!(pounce_feral::budget_refusal().is_none());
+    assert!(s.summary().last_nnz_l.is_some());
 }
 
+/// gh#1265: the refusal is FERAL's own check, on the same peak the
+/// pre-analysis reports — the two must agree, or a reported peak under the
+/// budget could be refused (or the reverse). With both on, the pre-analysis
+/// carries the budget and is refused itself, so it reports nothing.
 #[test]
-fn a_passed_deadline_stops_between_the_phases() {
+fn the_refusal_is_on_the_reported_peak() {
     let n = 400;
-    let mut s = FeralSolverInterface::with_config(reporting());
-    {
-        let _g = factor_deadline(Some(std::time::Instant::now()));
-        assert_eq!(solve(&mut s, n), ESymSolverStatus::FatalError);
-    }
-    assert!(s.symbolic_report().is_some(), "the analysis was reported");
-    assert!(s.summary().last_nnz_l.is_none(), "no numeric factor ran");
-    // Outside the scope the same pattern factors, without a second analysis.
-    assert_eq!(resolve_again(&mut s, n), ESymSolverStatus::Success);
+    let mut reported = FeralSolverInterface::with_config(reporting());
+    assert_eq!(solve(&mut reported, n), ESymSolverStatus::Success);
+    let peak = reported.symbolic_report().unwrap().work.peak_bytes;
 
-    // Without the pre-analysis the deadline scope has no effect here: the
-    // convex drivers check their own deadline before each factorization.
-    let mut plain = FeralSolverInterface::with_config(FeralConfig::default());
+    for report_symbolic in [true, false] {
+        pounce_feral::clear_budget_refusal();
+        let mut s = FeralSolverInterface::with_config(FeralConfig {
+            report_symbolic,
+            max_factor_bytes: Some(50_000),
+            ..FeralConfig::default()
+        });
+        assert_eq!(solve(&mut s, n), ESymSolverStatus::FatalError);
+        assert!(s.symbolic_report().is_none());
+        assert!(s.summary().last_nnz_l.is_none(), "no numeric factor ran");
+        let r = pounce_feral::budget_refusal().expect("refused");
+        assert_eq!(r.stage, "peak", "the factor alone fits in 50 KB");
+        assert_eq!(r.peak_bytes, peak, "report_symbolic = {report_symbolic}");
+    }
+    pounce_feral::clear_budget_refusal();
+}
+
+/// FERAL's cheap `"factor"` check refuses before the supernodal finish when
+/// the factor alone is over budget. The refusal then carries that lower bound.
+#[test]
+fn a_factor_over_budget_is_refused_early() {
+    pounce_feral::clear_budget_refusal();
+    let mut s = FeralSolverInterface::with_config(FeralConfig {
+        max_factor_bytes: Some(1_000),
+        ..FeralConfig::default()
+    });
+    assert_eq!(solve(&mut s, 400), ESymSolverStatus::FatalError);
+    let r = pounce_feral::budget_refusal().expect("refused");
+    assert_eq!(r.stage, "factor");
+    assert!(r.peak_bytes > 1_000);
+    pounce_feral::clear_budget_refusal();
+}
+
+/// gh#1265: the deadline reaches FERAL as an `Interrupt`, so it stops the
+/// symbolic analysis itself — with the pre-analysis on (its pass is
+/// interrupted) and without it (the solver's own is). An interrupted analysis
+/// is not cached: outside the scope the same pattern is analysed and factors.
+#[test]
+fn a_passed_deadline_stops_the_analysis() {
+    let n = 400;
+    for report in [true, false] {
+        let mut s = FeralSolverInterface::with_config(FeralConfig {
+            report_symbolic: report,
+            ..FeralConfig::default()
+        });
+        {
+            let _g = factor_deadline(Some(std::time::Instant::now()));
+            assert_eq!(solve(&mut s, n), ESymSolverStatus::FatalError, "{report}");
+        }
+        assert!(s.symbolic_report().is_none(), "nothing was analysed");
+        assert!(s.summary().last_nnz_l.is_none(), "no numeric factor ran");
+        assert_eq!(resolve_again(&mut s, n), ESymSolverStatus::Success);
+        assert_eq!(s.symbolic_report().is_some(), report);
+        assert!(s.summary().last_nnz_l.is_some());
+    }
+}
+
+/// A deadline that passes after the pattern's analysis is cached does not
+/// stop its refactorizations: FERAL reuses a cached analysis without
+/// consulting the interrupt, and the numeric phase never polls it. The convex
+/// drivers check their own deadline between iterations.
+#[test]
+fn a_cached_analysis_is_not_interrupted() {
+    let n = 400;
+    let mut s = FeralSolverInterface::with_config(FeralConfig::default());
+    assert_eq!(solve(&mut s, n), ESymSolverStatus::Success);
     let _g = factor_deadline(Some(std::time::Instant::now()));
-    assert_eq!(solve(&mut plain, n), ESymSolverStatus::Success);
+    assert_eq!(resolve_again(&mut s, n), ESymSolverStatus::Success);
 }
 
 /// gh#1265: the convex backend takes feral's default ordering at every size.

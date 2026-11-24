@@ -87,8 +87,10 @@ gh#1248's `.nl` reader changes, so the baseline below may now be lower):
     pending at once. Whether that is real is unverified.
 
   The symbolic phase's own memory on these two (`finish_and_copy`,
-  `compute_static_row_indices`) is FERAL's to fix; the pre-analysis cannot
-  protect against it, because no prediction exists until the phase ends.
+  `compute_static_row_indices`) is FERAL's to fix. Since gh#1265 a budget
+  under the predicted factor refuses before `finish_and_copy` (FERAL's
+  `"factor"` check, feral 0.25); memory spent before that check is still
+  unprotected.
 
 How to measure (from `benchmarks/lpopt/mps_to_nl.py` output): run with
 `POUNCE_FERAL_REPORT_SYMBOLIC=1` for the prediction, and with
