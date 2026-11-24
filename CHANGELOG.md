@@ -9,6 +9,26 @@ changes.
 
 ## [Unreleased]
 
+### Changed
+- **FERAL's analysis now enforces pounce's memory budget and wall-clock
+  deadline itself (gh#1265).** Both use features new in FERAL 0.25.
+  - **Budget.** `POUNCE_FERAL_MAX_FACTOR_BYTES` is handed to FERAL
+    (`Solver::with_max_factor_bytes`). It no longer costs a second symbolic
+    pass per pattern. FERAL refuses on the factor alone before the supernodal
+    finish, which is where `L1_sixm1000obs` jumped from 19 to 52 GB. In an
+    ordering race it skips arms over budget, and it runs the sequential
+    driver when only the parallel driver's peak is over. A refusal still
+    ends the solve with `Insufficient_Memory`; `BudgetRefusal` gains a
+    `stage` field naming the check that fired.
+  - **Deadline.** The convex solvers' `max_wall_time` reaches FERAL's symbolic
+    analysis as an `Interrupt`, with or without the gh#1249 variables, and
+    stops it at its next safe point. Before, it was checked only between the
+    phases and only with a variable set, so a long ordering or race ran to
+    completion past the deadline. A numeric factor already under way still
+    runs to completion.
+  - `POUNCE_FERAL_REPORT_SYMBOLIC` still runs its own pass, now under the
+    same budget and deadline.
+
 ### Fixed
 - **Convex presolve no longer keeps a full copy of the problem per fixpoint
   layer (gh#1246). This improves presolve memory; it does not close the

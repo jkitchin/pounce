@@ -13,18 +13,13 @@
 //! The pre-analysis runs [`feral::symbolic::symbolic_factorize_with_method`]
 //! with the same ordering, preprocessing and values the solver will use, and
 //! reads FERAL's [`WorkEstimate`] off the result before any numeric work.
-//! What it does with that is up to the caller's [`crate::FeralConfig`]:
-//!
-//! * `report_symbolic` logs it: one line when the analysis starts, one with
-//!   the prediction when it ends. A run killed with only the first line logged
-//!   died in the symbolic phase; one killed after the second died in the
-//!   numeric factor, whose predicted size the second line gives.
-//! * `max_factor_bytes` refuses the factorization when the predicted peak
-//!   (FERAL's `WorkEstimate::peak_bytes`) exceeds it, with a clear message
-//!   instead of a kill by the operating system.
-//! * Between the two phases it checks the [`factor_deadline`] in force, so a
-//!   symbolic phase that used up the wall-clock budget does not go on into a
-//!   numeric factor nothing will wait for.
+//! It runs only for `report_symbolic` ([`crate::FeralConfig`]), and logs: one
+//! line when the analysis starts, one with the prediction when it ends. A run
+//! killed with only the first line logged died in the symbolic phase; one
+//! killed after the second died in the numeric factor, whose predicted size the
+//! second line gives. Between the two phases it checks the [`factor_deadline`]
+//! in force, so a symbolic phase that used up the wall-clock budget does not go
+//! on into a numeric factor nothing will wait for.
 //!
 //! The cost: feral's `Solver` has no way to adopt an analysis computed
 //! outside it, so with the pre-analysis on, the symbolic phase runs twice
@@ -32,6 +27,14 @@
 //! off by default for that reason. It never changes the factor: the solver's
 //! own analysis is untouched, and the pre-analysis result is dropped once
 //! read.
+//!
+//! The two other things gh#1249 needed no longer go through here (gh#1265).
+//! The byte budget (`max_factor_bytes`) is FERAL's own
+//! (`Solver::with_max_factor_bytes`, feral >= 0.25), checked inside the
+//! solver's single analysis, and a refusal is latched here
+//! ([`budget_refusal`]). The [`factor_deadline`] reaches FERAL as a
+//! `feral::Interrupt`, which stops an analysis — this one or the solver's —
+//! at its next safe point instead of only between the phases.
 
 use std::cell::Cell;
 use std::time::Instant;
@@ -50,16 +53,22 @@ thread_local! {
     static BUDGET_REFUSAL: Cell<Option<BudgetRefusal>> = const { Cell::new(None) };
 }
 
-/// A factorization refused because FERAL predicted a peak above
-/// `max_factor_bytes` (gh#1249).
+/// A factorization refused because FERAL predicted more memory than
+/// `max_factor_bytes` allows (gh#1249).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudgetRefusal {
     /// The predicted peak, FERAL's `WorkEstimate::peak_bytes`: the cached
     /// analysis, the solver's workspace and the numeric phase's high-water
     /// (feral >= 0.25; before that, `factor_bytes + peak_contrib_bytes`).
+    ///
+    /// When [`Self::stage`] is `"factor"`, FERAL refused on the factor's own
+    /// bytes before computing the full peak, and this is that lower bound.
     pub peak_bytes: usize,
     /// The budget it exceeded.
     pub budget: u64,
+    /// Which of FERAL's checks fired: `"factor"` (the factor alone is over)
+    /// or `"peak"` (the full predicted peak is).
+    pub stage: &'static str,
 }
 
 /// The over-budget refusal latched on this thread since the last
@@ -103,9 +112,11 @@ impl Drop for FactorDeadline {
     }
 }
 
-/// Make the FERAL pre-analysis on this thread stop between the symbolic and
-/// numeric phases once `deadline` has passed, until the returned guard is
-/// dropped. A deadline passes this way, not as an argument, because the factor
+/// Make FERAL factorizations on this thread stop once `deadline` has passed,
+/// until the returned guard is dropped: the symbolic analysis at its next safe
+/// point (a `feral::Interrupt`, gh#1265), and with the pre-analysis on, the
+/// numeric factor before it starts. A factorization already in its numeric
+/// phase runs to completion. A deadline passes this way, not as an argument, because the factor
 /// is reached through `SparseSymLinearSolverInterface::factor`, whose
 /// signature every backend shares.
 ///
@@ -119,6 +130,11 @@ pub fn factor_deadline(deadline: Option<Instant>) -> FactorDeadline {
     };
     FACTOR_DEADLINE.with(|d| d.set(eff));
     FactorDeadline { prev }
+}
+
+/// The [`factor_deadline`] in force on this thread, if any.
+pub(crate) fn current_factor_deadline() -> Option<Instant> {
+    FACTOR_DEADLINE.with(Cell::get)
 }
 
 /// Whether the [`factor_deadline`] in force on this thread has passed.
@@ -150,10 +166,19 @@ pub struct SymbolicReport {
 pub enum Verdict {
     /// Go on to the numeric factor.
     Proceed,
-    /// The predicted peak exceeds `max_factor_bytes`.
-    OverBudget { peak_bytes: usize, budget: u64 },
-    /// The [`factor_deadline`] passed during the symbolic analysis.
+    /// The [`factor_deadline`] passed during the symbolic analysis, which
+    /// completed.
     DeadlinePassed,
+    /// The [`factor_deadline`] interrupted the symbolic analysis; nothing
+    /// was learned about the pattern.
+    Interrupted,
+    /// FERAL refused the analysis on the `max_factor_bytes` budget in
+    /// `params` (gh#1265), at `stage` (`"factor"` or `"peak"`).
+    OverBudget {
+        predicted_bytes: usize,
+        budget_bytes: usize,
+        stage: &'static str,
+    },
     /// The symbolic analysis itself failed; the numeric factor would fail
     /// the same way and reports it.
     AnalysisFailed,
@@ -191,7 +216,6 @@ pub(crate) fn preanalyze(
     params: &SupernodeParams,
     ordering: &OrderingMethod,
     report: bool,
-    max_factor_bytes: Option<u64>,
 ) -> (Option<SymbolicReport>, Verdict) {
     let n = matrix.n;
     let nnz_a = matrix.row_idx.len();
@@ -210,6 +234,27 @@ pub(crate) fn preanalyze(
     let t0 = Instant::now();
     let sym = match symbolic_factorize_with_method(matrix, params, ordering.clone()) {
         Ok(sym) => sym,
+        Err(feral::FeralError::Interrupted { stage }) => {
+            tracing::info!(
+                target: "pounce::linsol",
+                "FERAL symbolic analysis interrupted ({stage}): the wall-clock deadline passed"
+            );
+            return (None, Verdict::Interrupted);
+        }
+        Err(feral::FeralError::MemoryBudgetExceeded {
+            predicted_bytes,
+            budget_bytes,
+            stage,
+        }) => {
+            return (
+                None,
+                Verdict::OverBudget {
+                    predicted_bytes,
+                    budget_bytes,
+                    stage,
+                },
+            );
+        }
         Err(e) => {
             tracing::warn!(
                 target: "pounce::linsol",
@@ -266,33 +311,6 @@ pub(crate) fn preanalyze(
             w.max_front_rows,
             w.n_supernodes,
             w.factor_flops,
-        );
-    }
-    if let Some(budget) = max_factor_bytes
-        && w.peak_bytes as u128 > budget as u128
-    {
-        tracing::warn!(
-            target: "pounce::linsol",
-            peak_bytes = w.peak_bytes,
-            budget,
-            ordering = %rep.ordering,
-            "FERAL factorization refused: the {} ordering predicts a peak of {} \
-             (factor {}, numeric phase {}, nnz(L) = {}), over the \
-             max_factor_bytes budget of {}. A different feral_ordering may need \
-             less; raise POUNCE_FERAL_MAX_FACTOR_BYTES to try anyway",
-            rep.ordering,
-            human_bytes(w.peak_bytes),
-            human_bytes(w.factor_stored_bytes),
-            human_bytes(w.numeric_peak_bytes),
-            w.factor_nnz,
-            human_bytes(budget.min(usize::MAX as u64) as usize),
-        );
-        return (
-            Some(rep.clone()),
-            Verdict::OverBudget {
-                peak_bytes: w.peak_bytes,
-                budget,
-            },
         );
     }
     if factor_deadline_passed() {
