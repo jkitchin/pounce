@@ -20,7 +20,7 @@
 //!   died in the symbolic phase; one killed after the second died in the
 //!   numeric factor, whose predicted size the second line gives.
 //! * `max_factor_bytes` refuses the factorization when the predicted peak
-//!   (`factor_bytes + peak_contrib_bytes`) exceeds it, with a clear message
+//!   (FERAL's `WorkEstimate::peak_bytes`) exceeds it, with a clear message
 //!   instead of a kill by the operating system.
 //! * Between the two phases it checks the [`factor_deadline`] in force, so a
 //!   symbolic phase that used up the wall-clock budget does not go on into a
@@ -54,7 +54,9 @@ thread_local! {
 /// `max_factor_bytes` (gh#1249).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudgetRefusal {
-    /// The predicted peak, `factor_bytes + peak_contrib_bytes`.
+    /// The predicted peak, FERAL's `WorkEstimate::peak_bytes`: the cached
+    /// analysis, the solver's workspace and the numeric phase's high-water
+    /// (feral >= 0.25; before that, `factor_bytes + peak_contrib_bytes`).
     pub peak_bytes: usize,
     /// The budget it exceeded.
     pub budget: u64,
@@ -239,20 +241,27 @@ pub(crate) fn preanalyze(
             factor_nnz = w.factor_nnz,
             factor_alloc_nnz = w.factor_alloc_nnz,
             factor_bytes = w.factor_bytes,
+            factor_stored_bytes = w.factor_stored_bytes,
             peak_contrib_bytes = w.peak_contrib_bytes,
+            analysis_bytes = w.analysis_bytes,
+            workspace_bytes = w.workspace_bytes,
+            numeric_peak_bytes = w.numeric_peak_bytes,
             peak_bytes = w.peak_bytes,
             max_front_rows = w.max_front_rows,
             n_supernodes = w.n_supernodes,
             factor_flops = w.factor_flops,
             "FERAL symbolic analysis done in {symbolic_secs:.2} s: ordering = {} ({}), \
-             predicted nnz(L) = {} (allocated {}), factor {} + contribution blocks {} = \
-             peak {}, largest front {} rows, {} supernodes, {:.3e} flops",
+             predicted nnz(L) = {} (allocated {}), factor {}, numeric phase {} + \
+             analysis {} + workspace {} = peak {}, largest front {} rows, \
+             {} supernodes, {:.3e} flops",
             rep.ordering,
             rep.preprocess,
             w.factor_nnz,
             w.factor_alloc_nnz,
-            human_bytes(w.factor_bytes),
-            human_bytes(w.peak_contrib_bytes),
+            human_bytes(w.factor_stored_bytes),
+            human_bytes(w.numeric_peak_bytes),
+            human_bytes(w.analysis_bytes),
+            human_bytes(w.workspace_bytes),
             human_bytes(w.peak_bytes),
             w.max_front_rows,
             w.n_supernodes,
@@ -268,13 +277,13 @@ pub(crate) fn preanalyze(
             budget,
             ordering = %rep.ordering,
             "FERAL factorization refused: the {} ordering predicts a peak of {} \
-             (factor {} + contribution blocks {}, nnz(L) = {}), over the \
+             (factor {}, numeric phase {}, nnz(L) = {}), over the \
              max_factor_bytes budget of {}. A different feral_ordering may need \
              less; raise POUNCE_FERAL_MAX_FACTOR_BYTES to try anyway",
             rep.ordering,
             human_bytes(w.peak_bytes),
-            human_bytes(w.factor_bytes),
-            human_bytes(w.peak_contrib_bytes),
+            human_bytes(w.factor_stored_bytes),
+            human_bytes(w.numeric_peak_bytes),
             w.factor_nnz,
             human_bytes(budget.min(usize::MAX as u64) as usize),
         );

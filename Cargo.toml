@@ -347,13 +347,30 @@ pounce-cinterface = { path = "crates/pounce-cinterface", version = "0.18.0" }
 # workspace tests pass. The gain is in large refactorizations; on deb7,
 # qpnstair and gh#1176's 1547-variable column wall time is unchanged.
 #
-# 0.24.0 is the current pin. If you ever need to develop against an unreleased
+# 0.25.0 (feral#246, #248, #249) changes three things pounce can see:
+# - `Auto` sends a matrix with n > 100 000 and average degree < 5 to AMF
+#   instead of AMD;
+# - `AutoRace` races {Amd, MetisND, ScotchND, Amf} at n >= 1 000 000, not
+#   just {Amd, MetisND};
+# - `WorkEstimate::peak_bytes` now models what `Solver::factor` really holds
+#   (analysis + workspace + a walk of the numeric phase), 1.4-2.6x more than
+#   0.24's `factor_bytes + peak_contrib_bytes` on large KKTs.
+# It also adds `Interrupt`, `max_factor_bytes` and a monotone AMF score
+# quantization (bit-identical while scores stay below 2^31). The new
+# `SupernodeParams` fields need no change here: every literal uses
+# `..Default::default()`. Measured against 0.24.0 on arm64: the fixture sweep
+# moves 0 of 304 fixture-legs, both legs, and `pounce-feral`'s tests pass once
+# `over_budget_is_refused_for_the_whole_pattern` takes the larger peak into
+# account. Every fixture is far below n = 100 000, so none reaches the routing
+# or race changes.
+#
+# 0.25.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.24.0" }
+feral = { version = "0.25.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.
