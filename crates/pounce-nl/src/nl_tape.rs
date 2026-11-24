@@ -756,10 +756,10 @@ impl Tape {
 
     /// [`TapeRef::hessian_directional`] on this tape.
     #[inline]
-    pub fn hessian_directional(
+    pub fn hessian_directional<S: DirSeed + ?Sized>(
         &self,
         vals: &[f64],
-        seed: &[f64],
+        seed: &S,
         weight: f64,
         out: &mut [f64],
         dot: &mut [f64],
@@ -1444,10 +1444,10 @@ impl TapeRef<'_> {
     /// directional pass recovers a whole color group of columns.
     ///
     /// [`forward_into`]: Tape::forward_into
-    pub fn hessian_directional(
+    pub fn hessian_directional<S: DirSeed + ?Sized>(
         &self,
         vals: &[f64],
-        seed: &[f64],
+        seed: &S,
         weight: f64,
         out: &mut [f64],
         dot: &mut [f64],
@@ -1469,7 +1469,7 @@ impl TapeRef<'_> {
         for i in 0..n {
             dot[i] = match &self.ops[i] {
                 TapeOp::Const(_) => 0.0,
-                TapeOp::Var(k) => seed[*k as usize],
+                TapeOp::Var(k) => seed.at(*k as usize),
                 TapeOp::Add(a, b) => dot[*a as usize] + dot[*b as usize],
                 TapeOp::Sub(a, b) => dot[*a as usize] - dot[*b as usize],
                 TapeOp::Mul(a, b) => {
@@ -3198,10 +3198,10 @@ impl HybridTape {
     /// therefore always correct, just not always cheap — walking the
     /// whole prelude once per color is `n_colors × |prelude|` work
     /// against the `|prelude|` the op-ratio gate assumes.
-    pub fn prelude_tangent(
+    pub fn prelude_tangent<S: DirSeed + ?Sized>(
         &self,
         prelude_vals: &[f64],
-        seed: &[f64],
+        seed: &S,
         reach: &[u32],
         prelude_dot: &mut [f64],
     ) {
@@ -3240,12 +3240,12 @@ impl HybridTape {
     /// [`prelude_reverse_directional`]: HybridTape::prelude_reverse_directional
     /// [`forward_summand`]: HybridTape::forward_summand
     #[allow(clippy::too_many_arguments)]
-    pub fn hessian_summand_directional(
+    pub fn hessian_summand_directional<S: DirSeed + ?Sized>(
         &self,
         s: &Summand,
         local_vals: &[f64],
         prelude_dot: &[f64],
-        seed: &[f64],
+        seed: &S,
         weight: f64,
         out: &mut [f64],
         local_dot: &mut [f64],
@@ -4303,6 +4303,64 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
     }
 }
 
+/// The direction a directional Hessian pass is taken along, read one
+/// variable at a time — the only way any sweep in this file reads a seed
+/// is `seed.at(k)` at a `Var(k)` op.
+///
+/// A dense `[f64]` is the general case (`hessian_vector_products`, the
+/// tests). [`ColorSeed`] is the Hessian coloring's: a color's seed is the
+/// 0/1 indicator of the variables in that color, which `var_color` already
+/// says, so `eval_h` no longer stores an `n`-length `f64` vector per color
+/// to say it again (gh#1261 — 8·`n_colors` bytes a variable, about 96 B a
+/// row on discopt#2293's 13-color model). It answers exactly `1.0` or
+/// `0.0`, the same two bit patterns the dense vector held, so every
+/// directional product is bit-identical.
+pub trait DirSeed: Sync {
+    /// The seed's entry for variable `k`.
+    fn at(&self, k: usize) -> f64;
+}
+
+impl DirSeed for [f64] {
+    #[inline]
+    fn at(&self, k: usize) -> f64 {
+        self[k]
+    }
+}
+
+impl<const N: usize> DirSeed for [f64; N] {
+    #[inline]
+    fn at(&self, k: usize) -> f64 {
+        self[k]
+    }
+}
+
+impl DirSeed for Vec<f64> {
+    #[inline]
+    fn at(&self, k: usize) -> f64 {
+        self[k]
+    }
+}
+
+/// The seed of one Hessian color: `1.0` for each variable `k` with
+/// `var_color[k] == color`, `0.0` for every other (including the
+/// `u32::MAX` "needs no pass" columns, which no color equals).
+#[derive(Clone, Copy, Debug)]
+pub struct ColorSeed<'a> {
+    pub var_color: &'a [u32],
+    pub color: u32,
+}
+
+impl DirSeed for ColorSeed<'_> {
+    #[inline]
+    fn at(&self, k: usize) -> f64 {
+        if self.var_color[k] == self.color {
+            1.0
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Directional forward-tangent step: [`fwd_tan_step`] with a dense
 /// seed vector instead of a single seed variable. The per-op chain
 /// rule is identical (and identical to the inline arms of
@@ -4311,10 +4369,16 @@ fn rev_step(op: &TapeOp, i: usize, vals: &[f64], adj: &mut [f64], a: f64, grad: 
 /// rather than testing `k == seed_var` — which is what lets one pass
 /// carry a whole Hessian color.
 #[inline]
-fn fwd_dir_step(op: &TapeOp, seed: &[f64], vals: &[f64], dot: &[f64], i: usize) -> f64 {
+fn fwd_dir_step<S: DirSeed + ?Sized>(
+    op: &TapeOp,
+    seed: &S,
+    vals: &[f64],
+    dot: &[f64],
+    i: usize,
+) -> f64 {
     match op {
         TapeOp::Const(_) => 0.0,
-        TapeOp::Var(k) => seed[*k as usize],
+        TapeOp::Var(k) => seed.at(*k as usize),
         TapeOp::Add(a, b) => dot[*a as usize] + dot[*b as usize],
         TapeOp::Sub(a, b) => dot[*a as usize] - dot[*b as usize],
         TapeOp::Mul(a, b) => {

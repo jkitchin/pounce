@@ -386,6 +386,16 @@ p = pounce.build_nl_problem(
 # row 0: exp(x2) + 2 x0      row 1: x1 - 0.5 x2
 ```
 
+**Evaluate-only problems.** By default the problem keeps each row's
+expression tree after taping it. `keep_expressions=False` frees the trees
+once they are taped. Values, derivatives, sparsity and solves are
+bit-identical, because what the solver still asks of a row (its variables,
+whether it is affine, its quadratic form) is recorded when the tree goes.
+Nothing can read a tree back afterwards, and the problem cannot be re-taped.
+Measured on a discretized kinetics model, the trees were the largest single
+item of a nonlinear row, 544–700 B in 14 small allocations
+([gh#1261](https://github.com/jkitchin/pounce/issues/1261)).
+
 Bounds default to unbounded (`±1e19`, the `.nl` sentinel) and `x0` to
 zeros. `minimize=False` maximizes; as with a parsed `maximize` model, the
 returned objective/gradient/Hessian are negated so that minimizing them

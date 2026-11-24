@@ -593,6 +593,9 @@ pub fn check_domains(prob: &NlProblem, opts: &DiagnoseOptions, report: &mut Repo
                 skipped_quad += 1;
                 None
             }
+            NlBody::Taped(_) => {
+                unreachable!("diagnose reads parsed .nl models, which never drop their trees")
+            }
         };
         if walker.opaque {
             opaque_rows += 1;

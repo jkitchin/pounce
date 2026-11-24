@@ -119,6 +119,9 @@ pub fn affine_row(prob: &NlProblem, k: usize) -> Option<AffineRow> {
     let mut row = match &prob.con_nonlinear[k] {
         NlBody::Quad(_) => return None,
         NlBody::Tree(e) => affine_expr(e)?,
+        NlBody::Taped(_) => {
+            unreachable!("diagnose reads parsed .nl models, which never drop their trees")
+        }
     };
     for &(j, a) in &prob.con_linear[k] {
         *row.coefs.entry(j).or_insert(0.0) += a;
@@ -467,6 +470,9 @@ pub fn check_incidence(prob: &NlProblem, report: &mut Report) {
                 }
                 None => collect_vars(e, &mut obj_nl),
             },
+            NlBody::Taped(_) => {
+                unreachable!("diagnose reads parsed .nl models, which never drop their trees")
+            }
         }
         for &(j, c) in &prob.obj_linear {
             *obj_lin.entry(j).or_insert(0.0) += c;

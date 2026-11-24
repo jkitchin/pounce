@@ -35,6 +35,27 @@ changes.
     input exactly.
 
 ### Added
+- **`build_nl_problem(..., keep_expressions=False)` frees each row's
+  expression tree once it is taped (gh#1261).** For a frontend that only
+  evaluates, such as discopt.
+  - **Unchanged.** Values, derivatives, sparsity and solves are
+    bit-identical. What the solver still asks of a row (its variables,
+    whether it is affine, its quadratic form) is recorded when the tree goes.
+  - **Gone.** Nothing can read a tree back, and the problem cannot be
+    re-taped; both fail with an error naming the option.
+  - **Measured.** On rows shaped like discopt#2293's reproducer, linear parts
+    via `con_linear`, the problem's heap goes ~1190 → ~790 B/row.
+  - **Default.** `True`, so nothing changes for existing callers.
+  - **Rust API.** `pounce_nl::nl_reader::NlBody` gains a variant,
+    `NlBody::Taped(Box<TapedBody>)`, so an exhaustive `match` on `NlBody`
+    outside this repository stops compiling until it says how to handle a
+    body whose tree was freed. That is deliberate, as with `NlBody::Quad`:
+    reading a missing tree as "this row is linear" would be a silent wrong
+    answer.
+- **The NLP Hessian coloring no longer stores a dense seed vector per color
+  (gh#1261).** The seed is read from the variable's color instead. That is
+  8 bytes per variable per color, about 96 B/row at 13 colors (computed, not
+  measured). Every Hessian value is bit-identical. On by default.
 - **Convex presolve substitutes implied-free columns out of equality rows
   (gh#1246, finding 3).**
   - **The rule.** A column in an equality row is implied free when the row,
