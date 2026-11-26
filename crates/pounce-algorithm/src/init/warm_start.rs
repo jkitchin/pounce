@@ -156,6 +156,17 @@ const MU_ESCALATION_TRIGGER: Number = 10.0;
 /// a primal point that is feasible to `1e-9`.
 const SEED_REJECTION_TRIGGER: Number = 10.0;
 
+/// How close to its push floor a slack has to sit to count as *pushed*
+/// rather than measured, for [`seed_is_incoherent`] (gh#1269).
+///
+/// [`push_floors`] returns `bound_push · max(1, |b|)`, which is the floor
+/// itself or, when `bound_frac · span` is the binding term, an upper
+/// bound on it, so a pushed slack reads at most `1×` it up to round-off
+/// (measured `0.99999997×` on gh#1269's repro). Two leaves room for that
+/// round-off and for `slack_move`, and costs nothing: an entry this close
+/// to its bound is an active bound whatever put it there.
+const PUSHED_SLACK_SLOP: Number = 2.0;
+
 /// Largest slack the gh#988 slack-closing move may close, measured as the
 /// primal move that repairs it — `sl / ‖∇d_j‖∞` — and as a multiple of
 /// `max(1, ‖x‖∞)` (gh#988 review; gh#1000 I.25 for the units). Closing a
@@ -216,6 +227,12 @@ pub enum BlockVerdict {
     /// slacks alone and are filled whichever way the caller seeded.
     /// See [`any_dual_seeded`].
     Unseeded,
+    /// `warm_start_recentering=none`: the caller seeded this block and
+    /// it was used as supplied (modulo the clamps), but nothing measured
+    /// it, so it was neither accepted nor refused on its merits. Before
+    /// gh#1269 this case read `Absent`, which said the seeds had been
+    /// dropped when they were the very ones the solve started from.
+    Used,
 }
 
 /// What the warm-start initializer accepted, reconstructed, or
@@ -369,7 +386,8 @@ impl IterateInitializer for WarmStartIterateInitializer {
         // measurement move mu.
         let bound_fill_only = !dual_info && self.opts.recentering == WarmStartRecentering::Residual;
         let mu_hat = if dual_info {
-            let (seed, unseeded) = recenter_from_residuals(data, cq, &self.opts, true, &mut diag);
+            let (seed, unseeded) =
+                recenter_from_residuals(data, cq, nlp, &self.opts, true, &mut diag);
             reconstruct_eq_duals(data, cq, nlp, aug_solver, &self.opts, &mut diag);
             // The split below reads `y`; running it against a `y` this
             // same pass just derived *from* the provisional `z` is
@@ -389,7 +407,8 @@ impl IterateInitializer for WarmStartIterateInitializer {
             }
             Some(seed.mu_hat)
         } else if bound_fill_only {
-            let (seed, _unseeded) = recenter_from_residuals(data, cq, &self.opts, false, &mut diag);
+            let (seed, _unseeded) =
+                recenter_from_residuals(data, cq, nlp, &self.opts, false, &mut diag);
             // Left alone deliberately: with no `y` and no `z` supplied,
             // a least-squares `y` would be the cold path's estimate
             // wearing the warm path's barrier, which is the case gh#606
@@ -411,6 +430,14 @@ impl IterateInitializer for WarmStartIterateInitializer {
         // never cleared the trigger, and became load bearing the
         // moment gh#622 gave those blocks an honest one.
         let mu_may_move = dual_info;
+
+        // gh#1269: the kill switch measures nothing, but it still has to
+        // say what it did with the blocks — `Absent` there read as "your
+        // seeds were dropped" on a solve that started from exactly them.
+        // Read before the clamp below, which floors every unseeded entry
+        // into something that looks seeded.
+        let legacy_seeding =
+            (self.opts.recentering == WarmStartRecentering::None).then(|| seeded_blocks(data));
 
         {
             // Rebuild `curr` with clamped multipliers. Components are
@@ -453,6 +480,23 @@ impl IterateInitializer for WarmStartIterateInitializer {
                 clone_clamped(&curr.v_u, z_floor, cap, z_nan),
             );
             borrow.set_curr(new_curr);
+        }
+
+        if let Some(seeding) = legacy_seeding {
+            // Report-only: the verdicts and the residuals of the point
+            // the solve actually starts from. Nothing below reads them,
+            // so the kill switch's trajectory is unchanged.
+            let verdict = |dims: bool, seeded: bool| match (dims, seeded) {
+                (false, _) => BlockVerdict::Absent,
+                (true, true) => BlockVerdict::Used,
+                (true, false) => BlockVerdict::Unseeded,
+            };
+            diag.bound_duals = verdict(seeding.bound_dims, seeding.bound_seeded);
+            diag.eq_duals = verdict(seeding.eq_dims, seeding.eq_seeded);
+            let cq_ref = cq.borrow();
+            diag.primal_residual = cq_ref.curr_primal_infeasibility_max();
+            diag.dual_residual = cq_ref.curr_dual_infeasibility_max();
+            diag.complementarity = cq_ref.curr_avrg_compl();
         }
 
         // `warm_start_target_mu` is an explicit instruction and still
@@ -524,6 +568,7 @@ impl WarmStartDiagnostics {
 fn recenter_from_residuals(
     data: &IpoptDataHandle,
     cq: &IpoptCqHandle,
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
     opts: &WarmStartOptions,
     seed_implies_barrier: bool,
     diag: &mut WarmStartDiagnostics,
@@ -572,6 +617,17 @@ fn recenter_from_residuals(
     ];
     drop(cq_ref);
     let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
+    // The push floor each slack is held at, packed in the same order as
+    // the slack it pairs with (gh#1269). See [`push_floors`].
+    let floors = {
+        let nlp_ref = nlp.borrow();
+        [
+            push_floors(nlp_ref.x_l(), opts.bound_push),
+            push_floors(nlp_ref.x_u(), opts.bound_push),
+            push_floors(nlp_ref.d_l(), opts.slack_bound_push),
+            push_floors(nlp_ref.d_u(), opts.slack_bound_push),
+        ]
+    };
 
     // gh#618's test asks whether the point's infeasibility outruns the
     // barrier the *seed* implies. A seed that carried no multipliers
@@ -611,7 +667,8 @@ fn recenter_from_residuals(
         // whether it can have come from a solve of this problem at this
         // primal point. A block that fails takes the pre-gh#606
         // constant fill wholesale and is not used as an input again.
-        if seed_is_incoherent(&vals, &sl, mu_hat, inf_pr) {
+        let floor = floors[i].as_deref().filter(|f| f.len() == sl.len());
+        if seed_is_incoherent(&vals, &sl, floor, mu_hat, inf_pr) {
             let fill = opts.mult_bound_push.max(0.0);
             for v in vals.iter_mut() {
                 *v = fill;
@@ -786,10 +843,33 @@ fn slack_is_swamped(slack: Number, swamping: Number) -> bool {
 /// Unseeded entries (`0` exactly, or NaN) are excluded — they are what
 /// the reconstruction is *for*, and pairing a zero multiplier against
 /// its slack would drag every average to zero.
-fn seed_is_incoherent(vals: &[Number], sl: &[Number], mu_hat: Number, inf_pr: Number) -> bool {
+///
+/// So are entries whose slack sits at the warm-start push floor
+/// (`floor`, per entry; see [`push_floors`]), and for the opposite
+/// reason: that slack was not measured, it was *set*. A converged point
+/// leaves an active bound at slack `μ / z`, far below the floor, and
+/// [`seed_from_nlp`] pushes it out to the floor before anything here
+/// runs, so `z · s` at that entry reads `z · floor` whatever the seed's
+/// quality. At an exact restart that is the true multiplier times the
+/// push, routinely orders above the converged μ, and it is what refused
+/// gh#1269's exact seeds: `z_U = 66.7` (scaled) against a pushed slack of
+/// `1e-9` read `6.7e-8` beside `μ̂ = 1e-9`, the block took the constant
+/// fill, and the restart started at `inf_du = 66.7` and cost 4 iterations
+/// against 1. Complementarity says nothing about the size of an active
+/// bound's multiplier — any `z ≥ 0` is consistent with a zero slack —
+/// so these entries are not evidence either way. What stays tested is
+/// every entry whose slack the point really determines, which is where
+/// gh#617's corruption shows: a `z` of `1e2` at an inactive bound.
+fn seed_is_incoherent(
+    vals: &[Number],
+    sl: &[Number],
+    floor: Option<&[Number]>,
+    mu_hat: Number,
+    inf_pr: Number,
+) -> bool {
     let mut acc = 0.0;
     let mut n = 0usize;
-    for (v, s) in vals.iter().zip(sl.iter()) {
+    for (k, (v, s)) in vals.iter().zip(sl.iter()).enumerate() {
         if v.is_nan() || *v == 0.0 {
             continue;
         }
@@ -798,6 +878,9 @@ fn seed_is_incoherent(vals: &[Number], sl: &[Number], mu_hat: Number, inf_pr: Nu
             return true;
         }
         if !s.is_finite() || *s <= 0.0 {
+            continue;
+        }
+        if floor.is_some_and(|f| *s <= PUSHED_SLACK_SLOP * f[k]) {
             continue;
         }
         acc += v.abs() * *s;
@@ -1403,6 +1486,22 @@ fn final_mu(
     }
 }
 
+/// The slack [`seed_from_nlp`]'s push holds each bound's entry at, at
+/// least: `push · max(1, |b|)` for every entry of the packed bound vector
+/// `b` (gh#1269). The push itself also caps the move at
+/// `frac · (upper − lower)` on a two-sided bound, which can only make
+/// the true floor smaller; [`PUSHED_SLACK_SLOP`] is written against this
+/// larger value so a frac-limited push still counts as pushed. `None`
+/// for a layout [`flatten`] does not model.
+fn push_floors(bounds: &dyn Vector, push: Number) -> Option<Vec<Number>> {
+    if bounds.dim() == 0 {
+        return Some(Vec::new());
+    }
+    let push = push.max(0.0);
+    let vals = flatten(bounds)?;
+    Some(vals.iter().map(|b| push * b.abs().max(1.0)).collect())
+}
+
 /// Clamp a candidate μ into the band a warm start may use, and reject
 /// non-finite candidates outright.
 fn safe_mu(mu: Number) -> Number {
@@ -1818,23 +1917,47 @@ mod tests {
 /// paired with the warm path's barrier, and it measured worse than the
 /// constants it replaced.
 fn any_dual_seeded(data: &IpoptDataHandle) -> bool {
+    let s = seeded_blocks(data);
+    s.eq_seeded || s.bound_seeded
+}
+
+/// Which multiplier blocks the caller seeded, and which exist at all.
+/// Same seeding test as [`any_dual_seeded`], split by kind.
+struct Seeding {
+    eq_dims: bool,
+    eq_seeded: bool,
+    bound_dims: bool,
+    bound_seeded: bool,
+}
+
+fn seeded_blocks(data: &IpoptDataHandle) -> Seeding {
+    let mut out = Seeding {
+        eq_dims: false,
+        eq_seeded: false,
+        bound_dims: false,
+        bound_seeded: false,
+    };
     let Some(curr) = data.borrow().curr.clone() else {
-        return false;
+        return out;
     };
     for y in [&curr.y_c, &curr.y_d] {
-        if y.dim() > 0 && !is_identically_zero(y) {
-            return true;
+        if y.dim() > 0 {
+            out.eq_dims = true;
+            if !is_identically_zero(y) {
+                out.eq_seeded = true;
+            }
         }
     }
     for z in [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u] {
         if z.dim() == 0 {
             continue;
         }
+        out.bound_dims = true;
         if let Some(vals) = flatten(&**z) {
             if vals.iter().any(|v| v.is_finite() && *v > 0.0) {
-                return true;
+                out.bound_seeded = true;
             }
         }
     }
-    false
+    out
 }

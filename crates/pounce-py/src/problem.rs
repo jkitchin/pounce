@@ -1883,6 +1883,7 @@ fn verdict_name(v: BlockVerdict) -> &'static str {
         BlockVerdict::Discarded => "discarded",
         BlockVerdict::Unseeded => "unseeded",
         BlockVerdict::Rejected => "rejected",
+        BlockVerdict::Used => "used",
     }
 }
 

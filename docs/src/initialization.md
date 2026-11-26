@@ -511,7 +511,12 @@ carries that at the order of its own barrier, and a point that misses
 feasibility by `inf_pr` may carry it at that order too. A block reading
 ten times above **both** cannot have come from a solve of this problem,
 so it takes the pre-#606 constant fill and stops being an input to
-anything. The equality block gets the matching test — a `y` whose
+anything. Entries whose slack sits at the warm-start push floor are left
+out of that average (#1269): the push set that slack, so `z · s` there is
+the multiplier times the push, and complementarity says nothing about how
+large an active bound's multiplier may be. Counting them used to refuse
+the exact multipliers of an exact restart whenever an active bound
+carried a multiplier above `mu_init / bound_push`. The equality block gets the matching test — a `y` whose
 stationarity residual dwarfs `∇f` and the multipliers *you* supplied is
 not this point's `y` — and while the block itself is left where you put
 it (there is no constant to fall back to), the split no longer runs off
@@ -550,6 +555,12 @@ info2["warm_start"]
 so a model can refuse the blocks you seeded and still reconstruct the
 slack-bound blocks nobody can seed, and the two counters keep that
 legible.
+
+Under `warm_start_recentering="none"` nothing is measured or refused, so a
+block you seeded reads `used` (taken as supplied, modulo the clamps) and
+one you left out reads `unseeded`; `absent` always means the model has no
+such block. The residual fields still describe the point the solve starts
+from (#1269).
 
 From Rust it is `IpoptApplication::warm_start_diagnostics()`. At
 `print_level=5` the iteration line carries `wz` (bound multipliers
