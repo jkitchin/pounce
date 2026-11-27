@@ -516,10 +516,13 @@ the point off that bound) are left out of that average (#1269): `z · s`
 there is the multiplier times the push, and complementarity says nothing
 about how large an active bound's multiplier may be. Counting them used to
 refuse the exact multipliers of an exact restart whenever the block's
-average `z · push` exceeded ten times `mu_init`. The same entries are left
-out of the complementarity that decides whether to raise μ, so a large
-active-bound multiplier does not restart a solved problem at a loose
-barrier. Which entries count is read from what the push did, not from how
+average `z · push` exceeded ten times `mu_init`. Those entries do still
+count in the complementarity that decides whether to raise μ: a very large
+kept active-bound multiplier can lift μ, by at most
+`warm_start_mult_init_max · bound_push` per entry. Excluding them there
+too was tried and rejected, because it changed the starting barrier of
+every warm start the push touched and cost answer quality on the MPCC
+corpus. Which entries count is read from what the push did, not from how
 small the slack is, so inactive bounds in a tight box are still checked,
 and the re-optimize path, which pushes nothing, skips nothing. A negative
 bound multiplier is refused wherever it sits. The equality block gets the matching test — a `y` whose

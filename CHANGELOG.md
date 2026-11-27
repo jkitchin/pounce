@@ -16,12 +16,14 @@ changes.
   `z · bound_push` exceeded ten times `mu_init`. The restart then started
   from the wrong dual point and could take longer than one with
   `recentering="none"`. On the issue's model the recipe restart goes from
-  4 iterations to 2 (the same as `recentering="none"`), with `info["warm_start"]["bound_duals"]` reading
+  4 iterations to 1, with `info["warm_start"]["bound_duals"]` reading
   `accepted` instead of `rejected`. Multipliers at bounds the warm-start
   push did not move are still checked for corruption as before, and a
-  negative bound multiplier is now refused wherever it sits. Pushed
-  entries also no longer raise the starting barrier, so a large
-  active-bound multiplier does not restart a solved problem loose.
+  negative bound multiplier is now refused wherever it sits. A very large
+  active-bound multiplier, now kept, can raise the starting barrier a
+  little (at most `warm_start_mult_init_max · bound_push`, 1e-3 under
+  `pounce.WarmStart`'s pushes), which costs an iteration or so rather
+  than a cold restart.
 - **`warm_start_recentering="none"` reports the seeds it used (gh#1269).**
   `info["warm_start"]` said `eq_duals: absent, bound_duals: absent` and
   even though the solve started from those seeds. A seeded block now reads

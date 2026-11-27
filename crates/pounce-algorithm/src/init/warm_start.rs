@@ -501,7 +501,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
         if self.opts.target_mu > 0.0 {
             data.borrow_mut().curr_mu = self.opts.target_mu;
         } else if mu_hat.is_some() {
-            let mu = final_mu(data, cq, &mut diag, mu_may_move, &pushed);
+            let mu = final_mu(data, cq, &mut diag, mu_may_move);
             data.borrow_mut().curr_mu = mu;
         }
 
@@ -1447,22 +1447,11 @@ fn reconstruct_eq_duals(
 /// — but they describe *this initializer's own fill*, so they do not
 /// get to reroute the solve. See the `mu_may_move` note at the call
 /// site (gh#622).
-///
-/// What the escalation reads is the complementarity of the entries the
-/// point determined. An entry whose slack the push set carries `z · push`,
-/// and at an exact restart with a large active-bound multiplier that alone
-/// would read as a stale point and lift μ toward [`MU_CEILING`], restarting
-/// a solved problem at a cold barrier (gh#1269 review). Those entries are
-/// left out of the escalation measure; `diag.complementarity` still reports
-/// the whole iterate's `avrg_compl`, since that is the point the solve
-/// starts from. With nothing pushed the two are the same number and the
-/// path is unchanged.
 fn final_mu(
     data: &IpoptDataHandle,
     cq: &IpoptCqHandle,
     diag: &mut WarmStartDiagnostics,
     may_move: bool,
-    pushed: &PushedMask,
 ) -> Number {
     let (compl, inf_du) = {
         let cq_ref = cq.borrow();
@@ -1475,11 +1464,6 @@ fn final_mu(
     // Recorded but deliberately not fed into μ — see above. It is the
     // number that says whether the reconstruction worked.
     diag.dual_residual = inf_du;
-    let compl = if may_move && pushed.any() {
-        unpushed_avrg_compl(data, cq, pushed).unwrap_or(compl)
-    } else {
-        compl
-    };
 
     let mu_in = data.borrow().curr_mu;
     // A non-finite or non-positive barrier is not a setting, it is a
@@ -1500,50 +1484,6 @@ fn final_mu(
     } else {
         mu_in
     }
-}
-
-/// `avrg_compl` over the bound entries whose slack the push did not set
-/// (gh#1269): `Σ z_i s_i / n` over exactly those entries, the same formula
-/// `curr_avrg_compl` applies to all of them. `None` when a block's layout
-/// cannot be read, so the caller falls back to the whole-iterate value;
-/// `Some(0)` when every entry was pushed, which escalates nothing.
-fn unpushed_avrg_compl(
-    data: &IpoptDataHandle,
-    cq: &IpoptCqHandle,
-    pushed: &PushedMask,
-) -> Option<Number> {
-    let curr = data.borrow().curr.clone()?;
-    let slacks = {
-        let cq_ref = cq.borrow();
-        [
-            cq_ref.curr_slack_x_l(),
-            cq_ref.curr_slack_x_u(),
-            cq_ref.curr_slack_s_l(),
-            cq_ref.curr_slack_s_u(),
-        ]
-    };
-    let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
-    let mut acc = 0.0;
-    let mut n = 0usize;
-    for (i, (z, slack)) in blocks.iter().zip(slacks.iter()).enumerate() {
-        if z.dim() == 0 {
-            continue;
-        }
-        let zv = flatten(&***z)?;
-        let sv = flatten(&**slack)?;
-        if zv.len() != sv.len() {
-            return None;
-        }
-        let mask = pushed.block(i, zv.len());
-        for (k, (zk, sk)) in zv.iter().zip(sv.iter()).enumerate() {
-            if mask.is_some_and(|m| m[k]) {
-                continue;
-            }
-            acc += zk * sk;
-            n += 1;
-        }
-    }
-    Some(if n == 0 { 0.0 } else { acc / n as Number })
 }
 
 /// Clamp a candidate μ into the band a warm start may use, and reject
@@ -1768,10 +1708,6 @@ impl PushedMask {
     fn block(&self, i: usize, len: usize) -> Option<&[bool]> {
         let m = &self.blocks[i];
         (m.len() == len && len > 0).then_some(m.as_slice())
-    }
-
-    fn any(&self) -> bool {
-        self.blocks.iter().any(|b| b.iter().any(|&p| p))
     }
 }
 

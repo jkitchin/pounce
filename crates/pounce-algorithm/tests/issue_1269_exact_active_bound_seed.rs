@@ -23,9 +23,9 @@
 //! not move (must still be refused) — including a tight box with the
 //! default pushes, where a slack-size window would have excused the whole
 //! box. The review of the first version added three more: a negative
-//! active-bound multiplier, a pushed multiplier large enough to drag μ to
-//! the ceiling, and a pushed multiplier large enough to vouch for a
-//! corrupted `y`.
+//! active-bound multiplier, a pushed multiplier large enough to lift μ
+//! (bounded by the multiplier cap), and a pushed multiplier large enough to
+//! vouch for a corrupted `y`.
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::init::warm_start::{BlockVerdict, WarmStartDiagnostics};
@@ -413,14 +413,22 @@ fn a_negative_active_bound_multiplier_is_refused() {
     assert_eq!(diag.bound_duals, BlockVerdict::Rejected);
 }
 
-/// Review item: a kept block with a large active-bound multiplier must not
-/// lift μ through `avrg_compl`. Unscaled, `z_U` is `2e9`, the order the
-/// issue's NMPC model reports; `warm_start_mult_init_max` caps it at `1e6`,
-/// so `z_U · push` is `1e-3` and the iterate's `avrg_compl` is `2.5e-4`.
-/// Read at face value that is a stale-point measurement five orders above
-/// `mu_init`, and escalates μ to it.
+/// A kept block with a large active-bound multiplier lifts μ, and the lift
+/// is bounded. Unscaled, `z_U` is `2e9`, the order the issue's NMPC model
+/// reports; `warm_start_mult_init_max` caps it at `1e6`, so `z_U · push` is
+/// `1e-3` and `avrg_compl` reads `2.5e-4`, which the escalation adopts.
+///
+/// Deliberately *not* excluded from the escalation measure. An earlier
+/// version of this PR did exclude pushed entries, and that changed the
+/// starting barrier of every warm start the push touched, not only the
+/// blocks gh#1269 is about: on `benchmarks/mpcc` it turned nine
+/// `Solve_Succeeded` cells on the `scholtes_then_ncp` route into
+/// `Solved_To_Acceptable_Level`, one with a worse objective. A bounded,
+/// slower restart on this fixture is the less surprising cost. What this
+/// pins is that the cost stays bounded: the cap keeps μ orders below the
+/// cold ceiling, and the solve still succeeds with the block kept.
 #[test]
-fn a_large_pushed_multiplier_does_not_restart_at_a_cold_barrier() {
+fn a_large_pushed_multiplier_lifts_mu_only_within_the_multiplier_cap() {
     fn big() -> ActiveBound {
         ActiveBound::with(1e9, [2.0, 2.0], 2.0, [-10.0, 0.0], [0.5, 10.0])
     }
@@ -440,18 +448,19 @@ fn a_large_pushed_multiplier_does_not_restart_at_a_cold_barrier() {
     );
     assert!(matches!(status, ApplicationReturnStatus::SolveSucceeded));
     assert_ne!(diag.bound_duals, BlockVerdict::Rejected);
+    // `mult_init_max · push` per entry is the most a pushed entry can add.
+    let bound = 1e6 * 1e-9;
     assert!(
-        diag.complementarity > 1e3 * diag.mu_in,
-        "the fixture must carry a large pushed z*s, got {:e}",
-        diag.complementarity
+        diag.mu_out <= bound,
+        "mu must stay within what the capped multipliers imply: {:e} > {:e}",
+        diag.mu_out,
+        bound
     );
     assert!(
-        diag.mu_out <= 10.0 * diag.mu_in,
-        "a pushed z*s must not escalate mu: {:e} -> {:e}",
-        diag.mu_in,
-        diag.mu_out
+        iters <= it_none + 2,
+        "the bounded lift may cost an iteration or two, not a cold solve: \
+         residual={iters} none={it_none}"
     );
-    assert!(iters <= it_none, "residual={iters} none={it_none}");
 }
 
 /// Review item: an unjudged (pushed) multiplier must not set the scale the
