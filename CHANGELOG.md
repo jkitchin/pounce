@@ -12,19 +12,22 @@ changes.
 ### Fixed
 - **A warm start from an exact solution keeps its bound multipliers
   (gh#1269).** `WarmStart.from_info` followed by `solve(warm_start=ws)`
-  refused the exact multipliers of any active bound whose multiplier was
-  large next to `mu_init / bound_push`. The restart then started from the
-  wrong dual point and could take longer than one with
+  refused a block's exact multipliers whenever its active bounds' average
+  `z · bound_push` exceeded ten times `mu_init`. The restart then started
+  from the wrong dual point and could take longer than one with
   `recentering="none"`. On the issue's model the recipe restart goes from
-  4 iterations to 1, with `info["warm_start"]["bound_duals"]` reading
-  `accepted` instead of `rejected`. Multipliers at inactive bounds are
-  still checked for corruption as before.
+  4 iterations to 2 (the same as `recentering="none"`), with `info["warm_start"]["bound_duals"]` reading
+  `accepted` instead of `rejected`. Multipliers at bounds the warm-start
+  push did not move are still checked for corruption as before, and a
+  negative bound multiplier is now refused wherever it sits. Pushed
+  entries also no longer raise the starting barrier, so a large
+  active-bound multiplier does not restart a solved problem loose.
 - **`warm_start_recentering="none"` reports the seeds it used (gh#1269).**
   `info["warm_start"]` said `eq_duals: absent, bound_duals: absent` and
-  `dual_residual: nan` even though the solve started from those seeds. A
-  seeded block now reads `used`, an unseeded one `unseeded`, and the
-  residual fields describe the starting point. `absent` now only means the
-  model has no such block. Rust callers matching on `BlockVerdict`
+  even though the solve started from those seeds. A seeded block now reads
+  `used`, an unseeded one `unseeded`, and `absent` only means the model has
+  no such block. The residual fields stay NaN ("not measured"), so `none`
+  makes no extra model evaluations. Rust callers matching on `BlockVerdict`
   exhaustively need an arm for the new `BlockVerdict::Used`.
 
 ## [0.19.0] - 2026-11-24

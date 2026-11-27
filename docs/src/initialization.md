@@ -511,12 +511,18 @@ carries that at the order of its own barrier, and a point that misses
 feasibility by `inf_pr` may carry it at that order too. A block reading
 ten times above **both** cannot have come from a solve of this problem,
 so it takes the pre-#606 constant fill and stops being an input to
-anything. Entries whose slack sits at the warm-start push floor are left
-out of that average (#1269): the push set that slack, so `z · s` there is
-the multiplier times the push, and complementarity says nothing about how
-large an active bound's multiplier may be. Counting them used to refuse
-the exact multipliers of an exact restart whenever an active bound
-carried a multiplier above `mu_init / bound_push`. The equality block gets the matching test — a `y` whose
+anything. Entries whose slack the warm-start push *set* (the push moved
+the point off that bound) are left out of that average (#1269): `z · s`
+there is the multiplier times the push, and complementarity says nothing
+about how large an active bound's multiplier may be. Counting them used to
+refuse the exact multipliers of an exact restart whenever the block's
+average `z · push` exceeded ten times `mu_init`. The same entries are left
+out of the complementarity that decides whether to raise μ, so a large
+active-bound multiplier does not restart a solved problem at a loose
+barrier. Which entries count is read from what the push did, not from how
+small the slack is, so inactive bounds in a tight box are still checked,
+and the re-optimize path, which pushes nothing, skips nothing. A negative
+bound multiplier is refused wherever it sits. The equality block gets the matching test — a `y` whose
 stationarity residual dwarfs `∇f` and the multipliers *you* supplied is
 not this point's `y` — and while the block itself is left where you put
 it (there is no constant to fall back to), the split no longer runs off
@@ -559,8 +565,9 @@ legible.
 Under `warm_start_recentering="none"` nothing is measured or refused, so a
 block you seeded reads `used` (taken as supplied, modulo the clamps) and
 one you left out reads `unseeded`; `absent` always means the model has no
-such block. The residual fields still describe the point the solve starts
-from (#1269).
+such block (#1269). The residual fields are NaN, meaning "not measured":
+measuring them would cost model evaluations that `none` exists not to
+make.
 
 From Rust it is `IpoptApplication::warm_start_diagnostics()`. At
 `print_level=5` the iteration line carries `wz` (bound multipliers

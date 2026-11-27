@@ -156,17 +156,6 @@ const MU_ESCALATION_TRIGGER: Number = 10.0;
 /// a primal point that is feasible to `1e-9`.
 const SEED_REJECTION_TRIGGER: Number = 10.0;
 
-/// How close to its push floor a slack has to sit to count as *pushed*
-/// rather than measured, for [`seed_is_incoherent`] (gh#1269).
-///
-/// [`push_floors`] returns `bound_push · max(1, |b|)`, which is the floor
-/// itself or, when `bound_frac · span` is the binding term, an upper
-/// bound on it, so a pushed slack reads at most `1×` it up to round-off
-/// (measured `0.99999997×` on gh#1269's repro). Two leaves room for that
-/// round-off and for `slack_move`, and costs nothing: an entry this close
-/// to its bound is an active bound whatever put it there.
-const PUSHED_SLACK_SLOP: Number = 2.0;
-
 /// Largest slack the gh#988 slack-closing move may close, measured as the
 /// primal move that repairs it — `sl / ‖∇d_j‖∞` — and as a multiple of
 /// `max(1, ‖x‖∞)` (gh#988 review; gh#1000 I.25 for the units). Closing a
@@ -352,9 +341,17 @@ impl IterateInitializer for WarmStartIterateInitializer {
             }
         };
 
-        if needs_seed_from_nlp && !seed_from_nlp(data, nlp, &self.opts) {
-            return false;
-        }
+        // Which slacks the warm-start push *set* rather than the point
+        // determined (gh#1269). Empty on the re-optimize path, which pushes
+        // nothing, so nothing there is excused from the measurements below.
+        let pushed = if needs_seed_from_nlp {
+            match seed_from_nlp(data, nlp, &self.opts) {
+                Some(mask) => mask,
+                None => return false,
+            }
+        } else {
+            PushedMask::default()
+        };
 
         let mut diag = WarmStartDiagnostics {
             mu_in: data.borrow().curr_mu,
@@ -387,7 +384,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
         let bound_fill_only = !dual_info && self.opts.recentering == WarmStartRecentering::Residual;
         let mu_hat = if dual_info {
             let (seed, unseeded) =
-                recenter_from_residuals(data, cq, nlp, &self.opts, true, &mut diag);
+                recenter_from_residuals(data, cq, &pushed, &self.opts, true, &mut diag);
             reconstruct_eq_duals(data, cq, nlp, aug_solver, &self.opts, &mut diag);
             // The split below reads `y`; running it against a `y` this
             // same pass just derived *from* the provisional `z` is
@@ -408,7 +405,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
             Some(seed.mu_hat)
         } else if bound_fill_only {
             let (seed, _unseeded) =
-                recenter_from_residuals(data, cq, nlp, &self.opts, false, &mut diag);
+                recenter_from_residuals(data, cq, &pushed, &self.opts, false, &mut diag);
             // Left alone deliberately: with no `y` and no `z` supplied,
             // a least-squares `y` would be the cold path's estimate
             // wearing the warm path's barrier, which is the case gh#606
@@ -483,9 +480,8 @@ impl IterateInitializer for WarmStartIterateInitializer {
         }
 
         if let Some(seeding) = legacy_seeding {
-            // Report-only: the verdicts and the residuals of the point
-            // the solve actually starts from. Nothing below reads them,
-            // so the kill switch's trajectory is unchanged.
+            // Report-only: nothing below reads the verdicts, and they are
+            // computed from the seeds already in hand, with no evaluation.
             let verdict = |dims: bool, seeded: bool| match (dims, seeded) {
                 (false, _) => BlockVerdict::Absent,
                 (true, true) => BlockVerdict::Used,
@@ -493,10 +489,10 @@ impl IterateInitializer for WarmStartIterateInitializer {
             };
             diag.bound_duals = verdict(seeding.bound_dims, seeding.bound_seeded);
             diag.eq_duals = verdict(seeding.eq_dims, seeding.eq_seeded);
-            let cq_ref = cq.borrow();
-            diag.primal_residual = cq_ref.curr_primal_infeasibility_max();
-            diag.dual_residual = cq_ref.curr_dual_infeasibility_max();
-            diag.complementarity = cq_ref.curr_avrg_compl();
+            // The residual fields stay NaN, meaning "not measured": they
+            // would cost a round of model evaluations the kill switch
+            // never made before, and `none` exists to reproduce the
+            // pre-gh#606 solve exactly (gh#1269 review).
         }
 
         // `warm_start_target_mu` is an explicit instruction and still
@@ -505,7 +501,7 @@ impl IterateInitializer for WarmStartIterateInitializer {
         if self.opts.target_mu > 0.0 {
             data.borrow_mut().curr_mu = self.opts.target_mu;
         } else if mu_hat.is_some() {
-            let mu = final_mu(data, cq, &mut diag, mu_may_move);
+            let mu = final_mu(data, cq, &mut diag, mu_may_move, &pushed);
             data.borrow_mut().curr_mu = mu;
         }
 
@@ -568,7 +564,7 @@ impl WarmStartDiagnostics {
 fn recenter_from_residuals(
     data: &IpoptDataHandle,
     cq: &IpoptCqHandle,
-    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    pushed: &PushedMask,
     opts: &WarmStartOptions,
     seed_implies_barrier: bool,
     diag: &mut WarmStartDiagnostics,
@@ -617,17 +613,6 @@ fn recenter_from_residuals(
     ];
     drop(cq_ref);
     let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
-    // The push floor each slack is held at, packed in the same order as
-    // the slack it pairs with (gh#1269). See [`push_floors`].
-    let floors = {
-        let nlp_ref = nlp.borrow();
-        [
-            push_floors(nlp_ref.x_l(), opts.bound_push),
-            push_floors(nlp_ref.x_u(), opts.bound_push),
-            push_floors(nlp_ref.d_l(), opts.slack_bound_push),
-            push_floors(nlp_ref.d_u(), opts.slack_bound_push),
-        ]
-    };
 
     // gh#618's test asks whether the point's infeasibility outruns the
     // barrier the *seed* implies. A seed that carried no multipliers
@@ -667,8 +652,8 @@ fn recenter_from_residuals(
         // whether it can have come from a solve of this problem at this
         // primal point. A block that fails takes the pre-gh#606
         // constant fill wholesale and is not used as an input again.
-        let floor = floors[i].as_deref().filter(|f| f.len() == sl.len());
-        if seed_is_incoherent(&vals, &sl, floor, mu_hat, inf_pr) {
+        let skip = pushed.block(i, sl.len());
+        if seed_is_incoherent(&vals, &sl, skip, mu_hat, inf_pr) {
             let fill = opts.mult_bound_push.max(0.0);
             for v in vals.iter_mut() {
                 *v = fill;
@@ -687,7 +672,13 @@ fn recenter_from_residuals(
         let mut mask = vec![false; vals.len()];
         for (k, (v, s)) in vals.iter_mut().zip(sl.iter()).enumerate() {
             if !(v.is_nan() || *v == 0.0) {
-                if v.is_finite() {
+                // Only entries the coherence test actually measured may
+                // set the scale `eq_seed_is_incoherent` judges `y` by: an
+                // entry at a pushed slack was let through unjudged, and
+                // letting its size vouch for `y` would launder a corrupted
+                // `y` past that test (gh#1269 review).
+                let unjudged = skip.is_some_and(|m| m[k]);
+                if v.is_finite() && !unjudged {
                     seeded_z_amax = seeded_z_amax.max(v.abs());
                 }
                 continue;
@@ -844,13 +835,12 @@ fn slack_is_swamped(slack: Number, swamping: Number) -> bool {
 /// the reconstruction is *for*, and pairing a zero multiplier against
 /// its slack would drag every average to zero.
 ///
-/// So are entries whose slack sits at the warm-start push floor
-/// (`floor`, per entry; see [`push_floors`]), and for the opposite
-/// reason: that slack was not measured, it was *set*. A converged point
-/// leaves an active bound at slack `μ / z`, far below the floor, and
-/// [`seed_from_nlp`] pushes it out to the floor before anything here
-/// runs, so `z · s` at that entry reads `z · floor` whatever the seed's
-/// quality. At an exact restart that is the true multiplier times the
+/// So are entries whose slack [`seed_from_nlp`]'s push *set* (`skip`, per
+/// entry; see [`PushedMask`]), and for the opposite reason: that slack was
+/// not measured. A converged point leaves an active bound at slack `μ / z`,
+/// far below the push, and the push moves it out to the push distance
+/// before anything here runs, so `z · s` at that entry reads `z · push`
+/// whatever the seed's quality. At an exact restart that is the true multiplier times the
 /// push, routinely orders above the converged μ, and it is what refused
 /// gh#1269's exact seeds: `z_U = 66.7` (scaled) against a pushed slack of
 /// `1e-9` read `6.7e-8` beside `μ̂ = 1e-9`, the block took the constant
@@ -860,10 +850,19 @@ fn slack_is_swamped(slack: Number, swamping: Number) -> bool {
 /// so these entries are not evidence either way. What stays tested is
 /// every entry whose slack the point really determines, which is where
 /// gh#617's corruption shows: a `z` of `1e2` at an inactive bound.
+///
+/// The skip is by what the push did, not by how small the slack is: a
+/// slack-size window wide enough to cover the push also covers whole boxes
+/// whose `bound_frac` term binds, and would excuse inactive bounds there
+/// (gh#1269 review). The re-optimize path pushes nothing and skips nothing.
+///
+/// A strictly negative entry is refused before any skip: no barrier
+/// multiplier can be negative, so the sign alone settles it, at an active
+/// bound as anywhere else.
 fn seed_is_incoherent(
     vals: &[Number],
     sl: &[Number],
-    floor: Option<&[Number]>,
+    skip: Option<&[bool]>,
     mu_hat: Number,
     inf_pr: Number,
 ) -> bool {
@@ -873,14 +872,15 @@ fn seed_is_incoherent(
         if v.is_nan() || *v == 0.0 {
             continue;
         }
-        if !v.is_finite() {
-            // An infinite seed is incoherent with any point at all.
+        if !v.is_finite() || *v < 0.0 {
+            // An infinite or negative seed is incoherent with any point
+            // at all.
             return true;
         }
         if !s.is_finite() || *s <= 0.0 {
             continue;
         }
-        if floor.is_some_and(|f| *s <= PUSHED_SLACK_SLOP * f[k]) {
+        if skip.is_some_and(|m| m[k]) {
             continue;
         }
         acc += v.abs() * *s;
@@ -1447,11 +1447,22 @@ fn reconstruct_eq_duals(
 /// — but they describe *this initializer's own fill*, so they do not
 /// get to reroute the solve. See the `mu_may_move` note at the call
 /// site (gh#622).
+///
+/// What the escalation reads is the complementarity of the entries the
+/// point determined. An entry whose slack the push set carries `z · push`,
+/// and at an exact restart with a large active-bound multiplier that alone
+/// would read as a stale point and lift μ toward [`MU_CEILING`], restarting
+/// a solved problem at a cold barrier (gh#1269 review). Those entries are
+/// left out of the escalation measure; `diag.complementarity` still reports
+/// the whole iterate's `avrg_compl`, since that is the point the solve
+/// starts from. With nothing pushed the two are the same number and the
+/// path is unchanged.
 fn final_mu(
     data: &IpoptDataHandle,
     cq: &IpoptCqHandle,
     diag: &mut WarmStartDiagnostics,
     may_move: bool,
+    pushed: &PushedMask,
 ) -> Number {
     let (compl, inf_du) = {
         let cq_ref = cq.borrow();
@@ -1464,6 +1475,11 @@ fn final_mu(
     // Recorded but deliberately not fed into μ — see above. It is the
     // number that says whether the reconstruction worked.
     diag.dual_residual = inf_du;
+    let compl = if may_move && pushed.any() {
+        unpushed_avrg_compl(data, cq, pushed).unwrap_or(compl)
+    } else {
+        compl
+    };
 
     let mu_in = data.borrow().curr_mu;
     // A non-finite or non-positive barrier is not a setting, it is a
@@ -1486,20 +1502,48 @@ fn final_mu(
     }
 }
 
-/// The slack [`seed_from_nlp`]'s push holds each bound's entry at, at
-/// least: `push · max(1, |b|)` for every entry of the packed bound vector
-/// `b` (gh#1269). The push itself also caps the move at
-/// `frac · (upper − lower)` on a two-sided bound, which can only make
-/// the true floor smaller; [`PUSHED_SLACK_SLOP`] is written against this
-/// larger value so a frac-limited push still counts as pushed. `None`
-/// for a layout [`flatten`] does not model.
-fn push_floors(bounds: &dyn Vector, push: Number) -> Option<Vec<Number>> {
-    if bounds.dim() == 0 {
-        return Some(Vec::new());
+/// `avrg_compl` over the bound entries whose slack the push did not set
+/// (gh#1269): `Σ z_i s_i / n` over exactly those entries, the same formula
+/// `curr_avrg_compl` applies to all of them. `None` when a block's layout
+/// cannot be read, so the caller falls back to the whole-iterate value;
+/// `Some(0)` when every entry was pushed, which escalates nothing.
+fn unpushed_avrg_compl(
+    data: &IpoptDataHandle,
+    cq: &IpoptCqHandle,
+    pushed: &PushedMask,
+) -> Option<Number> {
+    let curr = data.borrow().curr.clone()?;
+    let slacks = {
+        let cq_ref = cq.borrow();
+        [
+            cq_ref.curr_slack_x_l(),
+            cq_ref.curr_slack_x_u(),
+            cq_ref.curr_slack_s_l(),
+            cq_ref.curr_slack_s_u(),
+        ]
+    };
+    let blocks = [&curr.z_l, &curr.z_u, &curr.v_l, &curr.v_u];
+    let mut acc = 0.0;
+    let mut n = 0usize;
+    for (i, (z, slack)) in blocks.iter().zip(slacks.iter()).enumerate() {
+        if z.dim() == 0 {
+            continue;
+        }
+        let zv = flatten(&***z)?;
+        let sv = flatten(&**slack)?;
+        if zv.len() != sv.len() {
+            return None;
+        }
+        let mask = pushed.block(i, zv.len());
+        for (k, (zk, sk)) in zv.iter().zip(sv.iter()).enumerate() {
+            if mask.is_some_and(|m| m[k]) {
+                continue;
+            }
+            acc += zk * sk;
+            n += 1;
+        }
     }
-    let push = push.max(0.0);
-    let vals = flatten(bounds)?;
-    Some(vals.iter().map(|b| push * b.abs().max(1.0)).collect())
+    Some(if n == 0 { 0.0 } else { acc / n as Number })
 }
 
 /// Clamp a candidate μ into the band a warm start may use, and reject
@@ -1590,9 +1634,9 @@ fn seed_from_nlp(
     data: &IpoptDataHandle,
     nlp: &Rc<RefCell<dyn IpoptNlp>>,
     opts: &WarmStartOptions,
-) -> bool {
+) -> Option<PushedMask> {
     if !nlp.borrow_mut().prepare_warm_start() {
-        return false;
+        return None;
     }
     let (n_x, n_s, n_yc, n_yd, n_zl, n_zu, n_vl, n_vu) = {
         let borrow = data.borrow();
@@ -1611,6 +1655,7 @@ fn seed_from_nlp(
 
     let mut x = DenseVectorSpace::new(n_x).make_new_dense();
     nlp.borrow_mut().get_starting_x(&mut x);
+    let x_before = flatten(&x);
     {
         let nlp_ref = nlp.borrow();
         push_x_into_interior(
@@ -1626,6 +1671,7 @@ fn seed_from_nlp(
 
     let mut s = DenseVectorSpace::new(n_s).make_new_dense();
     nlp.borrow_mut().eval_d(&x, &mut s);
+    let s_before = flatten(&s);
     {
         let nlp_ref = nlp.borrow();
         push_x_into_interior(
@@ -1638,6 +1684,24 @@ fn seed_from_nlp(
             opts.slack_bound_frac,
         );
     }
+    let pushed = {
+        let nlp_ref = nlp.borrow();
+        let (z_l, z_u) = pushed_sides(
+            x_before.as_deref(),
+            flatten(&x).as_deref(),
+            &*nlp_ref.px_l(),
+            &*nlp_ref.px_u(),
+        );
+        let (v_l, v_u) = pushed_sides(
+            s_before.as_deref(),
+            flatten(&s).as_deref(),
+            &*nlp_ref.pd_l(),
+            &*nlp_ref.pd_u(),
+        );
+        PushedMask {
+            blocks: [z_l, z_u, v_l, v_u],
+        }
+    };
 
     let mut y_c = DenseVectorSpace::new(n_yc).make_new_dense();
     let mut y_d = DenseVectorSpace::new(n_yd).make_new_dense();
@@ -1682,7 +1746,64 @@ fn seed_from_nlp(
         Rc::new(v_u),
     );
     data.borrow_mut().set_curr(iv);
-    true
+    Some(pushed)
+}
+
+/// Per bound entry, packed in the order of the slack it pairs with
+/// (`z_L`, `z_U`, `v_L`, `v_U`): `true` where [`seed_from_nlp`]'s push
+/// moved the point off that bound, so the slack there is the push distance
+/// rather than anything the supplied point determined (gh#1269).
+///
+/// Recorded from what the push actually did — the point before against
+/// the point after — so it is exact whichever of `bound_push · max(1,|b|)`
+/// and `bound_frac · span` bound the move, and empty on the re-optimize
+/// path, which pushes nothing. An empty block excuses nothing.
+#[derive(Debug, Clone, Default)]
+struct PushedMask {
+    blocks: [Vec<bool>; 4],
+}
+
+impl PushedMask {
+    /// Block `i`'s mask, when it describes a block of `len` entries.
+    fn block(&self, i: usize, len: usize) -> Option<&[bool]> {
+        let m = &self.blocks[i];
+        (m.len() == len && len > 0).then_some(m.as_slice())
+    }
+
+    fn any(&self) -> bool {
+        self.blocks.iter().any(|b| b.iter().any(|&p| p))
+    }
+}
+
+/// Which packed lower / upper entries the push moved the point off: up off
+/// a lower bound, down off an upper one. Empty masks for a selection matrix
+/// this module cannot read the positions of, which excuses nothing.
+fn pushed_sides(
+    before: Option<&[Number]>,
+    after: Option<&[Number]>,
+    p_l: &dyn pounce_linalg::Matrix,
+    p_u: &dyn pounce_linalg::Matrix,
+) -> (Vec<bool>, Vec<bool>) {
+    use pounce_linalg::expansion_matrix::ExpansionMatrix;
+    let (Some(before), Some(after)) = (before, after) else {
+        return (Vec::new(), Vec::new());
+    };
+    if before.len() != after.len() {
+        return (Vec::new(), Vec::new());
+    }
+    let side = |p: &dyn pounce_linalg::Matrix, moved: fn(Number, Number) -> bool| {
+        let Some(em) = p.as_any().downcast_ref::<ExpansionMatrix>() else {
+            return Vec::new();
+        };
+        em.expanded_pos_indices()
+            .iter()
+            .map(|&i| {
+                let i = i as usize;
+                i < after.len() && moved(before[i], after[i])
+            })
+            .collect()
+    };
+    (side(p_l, |b, a| a > b), side(p_u, |b, a| a < b))
 }
 
 fn is_initialized(v: &Rc<dyn Vector>) -> bool {

@@ -72,5 +72,5 @@ def test_recentering_none_reports_used_seeds():
     assert report["recentering_disabled"]
     assert report["bound_duals"] == "used", report
     assert report["eq_duals"] == "used", report
-    assert np.isfinite(report["dual_residual"])
-    assert report["dual_residual"] < 1e-6
+    # Not measured under the kill switch: no extra model evaluations.
+    assert np.isnan(report["dual_residual"])
