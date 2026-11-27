@@ -452,8 +452,10 @@ fn recentering_none_leaves_every_block_alone() {
     let (_, _, diag) = warm_solve(&seed, Seeded::Nothing, "none", None);
     let diag = diag.expect("diagnostics");
     assert!(diag.recentering_disabled);
-    assert_eq!(diag.bound_duals, BlockVerdict::Absent);
-    assert_eq!(diag.eq_duals, BlockVerdict::Absent);
+    // Nothing was seeded, and the blocks exist: `Unseeded`, not `Absent`,
+    // which is reserved for a block of dimension zero (gh#1269).
+    assert_eq!(diag.bound_duals, BlockVerdict::Unseeded);
+    assert_eq!(diag.eq_duals, BlockVerdict::Unseeded);
     assert_eq!(diag.bound_duals_reconstructed, 0);
     assert_eq!(
         diag.mu_in, diag.mu_out,
