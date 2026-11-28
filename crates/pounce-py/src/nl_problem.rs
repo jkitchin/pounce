@@ -60,7 +60,11 @@ use crate::nl_expr::{INLINE_DEPTH, MAX_DEPTH, expr_depth, on_deep_stack, on_work
 //
 // Concurrency is still the GIL's: every `&self` method below borrows
 // `tnlp` and evaluates without releasing the GIL, so the `RefCell`
-// borrows of two threads can never overlap. Any future method that wants
+// borrows of two threads can never overlap. For the same reason the
+// evaluation walks are pinned serial (`NlTnlp::set_serial_eval`, gh#1271):
+// waiting on the Rayon pool while holding the GIL deadlocks against any pool
+// worker that is itself waiting for the GIL, e.g. a `solve_nlp_batch`
+// callback. Any future method that wants
 // to release the GIL around an evaluation must first take the `NlTnlp`
 // out of the `RefCell` (as `clone_tnlp` does for the batch path) rather
 // than hold a borrow across the release.
@@ -612,6 +616,13 @@ impl PyNlProblem {
             .iter()
             .map(|c| (c.row, c.var, c.flags))
             .collect();
+        // Every evaluator below runs with the GIL held and the `RefCell`
+        // borrowed, so it must never wait on the global Rayon pool: a
+        // callback batch (`solve_nlp_batch`) runs its instances on that pool
+        // and each callback waits for the GIL, which deadlocks against a
+        // parallel walk started here (gh#1271). The serial walk is
+        // bit-identical; `clone_tnlp` releases the flag for native batches.
+        tnlp.set_serial_eval(true);
         Ok(PyNlProblem {
             tnlp: RefCell::new(tnlp),
             n,
@@ -640,7 +651,11 @@ impl PyNlProblem {
         let tnlp: &NlTnlp = &held;
         // The clone copies the `Expr` trees along with the tapes, so it
         // recurses once per level of nesting (pounce#472).
-        on_deep_stack(self.expr_depth, move || tnlp.clone())
+        let mut clone = on_deep_stack(self.expr_depth, move || tnlp.clone());
+        // The clone is solved natively on a pool worker with the GIL
+        // released, so it gets the parallel walks back (gh#1271).
+        clone.set_serial_eval(false);
+        clone
     }
 
     /// The number of `.nl` complementarity rows, for the batch path to

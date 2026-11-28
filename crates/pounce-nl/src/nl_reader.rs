@@ -4168,6 +4168,17 @@ pub struct NlTnlp {
     /// in — computing them costs a pass over every stored Hessian entry
     /// and nothing else reads them.
     curvature_scaling: Option<crate::nl_scaling::CurvatureScaling>,
+    /// Forces the serial walk in `eval_g`, `eval_jac_g` and `eval_h`, over
+    /// both the size gates and `POUNCE_NL_PARALLEL_EVAL` (gh#1271). Set by a
+    /// caller that evaluates while holding a lock some Rayon worker may be
+    /// waiting on: Python's `NlProblem` holds the GIL for the whole
+    /// evaluation, and a callback batch (`solve_nlp_batch`) runs on the same
+    /// global pool with every callback waiting for the GIL, so a parallel
+    /// walk there deadlocks. `false` by default, and the batch path's clones
+    /// reset it, so native solves keep the parallel walks. The two walks give
+    /// bit-identical values, so this changes speed, never answers.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    serial_eval: bool,
 }
 
 // ---------------------------------------------------------------------
@@ -5475,6 +5486,17 @@ fn fold_frontend_linear_row(
 }
 
 impl NlTnlp {
+    /// Force (`true`) or release (`false`) the serial evaluation walks; see
+    /// the `serial_eval` field (gh#1271). Values are unchanged either way.
+    pub fn set_serial_eval(&mut self, serial: bool) {
+        self.serial_eval = serial;
+    }
+
+    /// Whether [`Self::set_serial_eval`] has forced the serial walks.
+    pub fn serial_eval(&self) -> bool {
+        self.serial_eval
+    }
+
     /// Build the TNLP, panicking if AMPL external-function resolution fails.
     ///
     /// Kept for the many infallible call sites (tests) that operate on `.nl`
@@ -6144,6 +6166,7 @@ impl NlTnlp {
             compressed,
             hvp_live: Vec::new(),
             curvature_scaling: None,
+            serial_eval: false,
         };
         me.veto_ill_conditioned_peels();
         Ok(me)
@@ -6945,6 +6968,9 @@ impl NlTnlp {
     /// otherwise hide the small end of the curve.
     #[cfg(not(target_arch = "wasm32"))]
     fn hess_flat_parallel(&self) -> bool {
+        if self.serial_eval {
+            return false;
+        }
         // More than one color is a hard requirement, not a heuristic: with one
         // color there is one task and the inversion is pure overhead.
         let multi_color = self.compressed.len() > 1;
@@ -6980,6 +7006,9 @@ impl NlTnlp {
     /// `POUNCE_NL_PARALLEL_EVAL` with the other two walks.
     #[cfg(not(target_arch = "wasm32"))]
     fn eval_g_parallel(&self) -> bool {
+        if self.serial_eval {
+            return false;
+        }
         let big = self.prob.m >= Self::EVAL_G_PAR_MIN_ROWS;
         match std::env::var("POUNCE_NL_PARALLEL_EVAL").as_deref() {
             Ok("0") | Ok("no") | Ok("false") => false,
@@ -6992,6 +7021,9 @@ impl NlTnlp {
     /// Shares `POUNCE_NL_PARALLEL_EVAL` with the Hessian.
     #[cfg(not(target_arch = "wasm32"))]
     fn jac_flat_parallel(&self) -> bool {
+        if self.serial_eval {
+            return false;
+        }
         let big = self.jac_nnz >= Self::JAC_PAR_MIN_NNZ;
         match std::env::var("POUNCE_NL_PARALLEL_EVAL").as_deref() {
             Ok("0") | Ok("no") | Ok("false") => false,
@@ -8014,6 +8046,53 @@ pub fn load_nl_as_tnlp(path: &Path) -> Result<Rc<RefCell<dyn TNLP>>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// gh#1271: `set_serial_eval(true)` closes all three parallel gates on a
+    /// model large enough to open every one of them, and `Clone` carries the
+    /// flag, so the Python batch path's `clone_tnlp` must reset it (it does).
+    /// The env override is not touched here: it is process-wide and would
+    /// race the other tests in this binary; the flag is checked before it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn serial_eval_closes_every_parallel_gate() {
+        use super::{BinOp, Expr, NlProblem, NlProblemParts, NlTnlp};
+        let rows = 5000;
+        let n = rows + 2;
+        let v = |i: usize| Expr::Var(i);
+        let mul = |a: Expr, b: Expr| Expr::Binary(BinOp::Mul, Box::new(a), Box::new(b));
+        let constraints: Vec<Expr> = (0..rows)
+            .map(|i| mul(mul(v(i), v(i + 1)), v(i + 2)))
+            .collect();
+        let prob = NlProblem::from_expressions(NlProblemParts {
+            minimize: true,
+            objective: Expr::Var(0),
+            obj_constant: 0.0,
+            constraints,
+            x_l: vec![-5.0; n],
+            x_u: vec![5.0; n],
+            x0: vec![0.5; n],
+            g_l: vec![-1.0; rows],
+            g_u: vec![1.0; rows],
+            var_names: Vec::new(),
+            con_names: Vec::new(),
+        })
+        .expect("model builds");
+        let mut t = NlTnlp::new(prob);
+        let gates = |t: &NlTnlp| {
+            std::env::var("POUNCE_NL_PARALLEL_EVAL").is_ok()
+                || (t.hess_flat_parallel() && t.eval_g_parallel() && t.jac_flat_parallel())
+        };
+        assert!(!t.serial_eval());
+        assert!(
+            gates(&t),
+            "model must open every gate for this test to mean anything"
+        );
+        t.set_serial_eval(true);
+        assert!(!t.hess_flat_parallel() && !t.eval_g_parallel() && !t.jac_flat_parallel());
+        assert!(t.clone().serial_eval(), "Clone carries the flag");
+        t.set_serial_eval(false);
+        assert!(gates(&t));
+    }
+
     /// `.nl` text for `min sum_i exp(x_i) + x_i^2` whose sum is a left-deep
     /// chain of `2n - 1` binary `o0`, wrapped in `wraps` pairs of unary `o16`
     /// (negation, an even count so the value is unchanged). The `o0` chain is
