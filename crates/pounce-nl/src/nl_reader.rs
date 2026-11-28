@@ -4177,7 +4177,6 @@ pub struct NlTnlp {
     /// walk there deadlocks. `false` by default, and the batch path's clones
     /// reset it, so native solves keep the parallel walks. The two walks give
     /// bit-identical values, so this changes speed, never answers.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     serial_eval: bool,
 }
 

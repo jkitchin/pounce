@@ -620,7 +620,12 @@ with ThreadPoolExecutor(max_workers=8) as pool:
 
 The evaluators do not release the GIL, so concurrent calls serialize
 rather than overlap — the win is memory (one copy of the tapes) and the
-absence of thread-affinity ceremony, not parallel throughput. For actual
+absence of thread-affinity ceremony, not parallel throughput. For the same
+reason each call evaluates on the calling thread alone, never on the thread
+pool, however large the model: a call that held the GIL while waiting on the
+pool would deadlock against a `solve_nlp_batch` callback waiting for the GIL
+(gh#1271). Calling an `NlProblem` from inside such a callback is therefore
+safe. For actual
 parallelism across instances, use
 [`solve_nlp_batch`](#batched-nlp-solving-solve_nlp_batch), which releases
 the GIL and runs the whole batch on a Rayon pool.

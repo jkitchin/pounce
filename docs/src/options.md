@@ -2678,6 +2678,12 @@ Since both settings compute identical values, these are levers for measurement
 parallelism bug, not correctness switches. Models built for the browser
 (`wasm32`) always take the serial walks.
 
+Neither does an `NlProblem` evaluated from Python (`p.constraints`,
+`p.jacobian`, `p.hessian`), whatever this variable says: those calls hold the
+GIL, and waiting on the thread pool while holding it deadlocks against a
+`solve_nlp_batch` callback waiting for the GIL (gh#1271). Solving
+`NlProblem`s with `solve_nlp_batch` still takes the parallel walks.
+
 One path is not parallel yet: the shared-CSE arm, which forwards one prelude
 for the whole constraint block (models whose rows share large common
 subexpressions). It is not slower than before — it simply has not been split.

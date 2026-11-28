@@ -10,6 +10,20 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **`solve_nlp_batch` no longer deadlocks when its callbacks evaluate a
+  large `NlProblem` (gh#1271).** `NlProblem.constraints`, `jacobian` and
+  `hessian` hold the GIL while they evaluate, and on a model above the
+  parallel-walk size thresholds they waited on the same thread pool that a
+  callback batch runs on, where every callback waits for the GIL. The run
+  then hung with no CPU in use: from a callback evaluating its own tape
+  with three or more pool threads, or from any Python thread evaluating a
+  tape while a callback batch was running, even with one pool thread.
+  Sharing one `NlProblem` across the batch's callbacks could also raise
+  `RefCell already borrowed`. These Python methods now always take the
+  serial walk, which gives identical values; `POUNCE_NL_PARALLEL_EVAL=1` no
+  longer overrides that. Native `solve_nlp_batch` over `NlProblem`s, which
+  releases the GIL, still evaluates in parallel. The
+  `POUNCE_NL_PARALLEL_EVAL=0` workaround is no longer needed.
 - **A warm start from an exact solution keeps its bound multipliers
   (gh#1269).** `WarmStart.from_info` followed by `solve(warm_start=ws)`
   refused a block's exact multipliers whenever its active bounds' average
